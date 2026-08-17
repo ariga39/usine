@@ -31,6 +31,14 @@ if (model !== expectedModel) {
     `${process.env.USINE_CODEX_ROLE} expected model ${expectedModel}, received ${model ?? "none"}`,
   );
 }
+const profileIndex = args.findIndex((arg) => arg === "--profile" || arg === "-p");
+const profile = profileIndex >= 0 ? args[profileIndex + 1] : undefined;
+if (process.env.USINE_CODEX_ROLE === "implementer" && profile !== "usine-implementer") {
+  throw new Error(`implementer expected profile usine-implementer, received ${profile ?? "none"}`);
+}
+if (process.env.USINE_CODEX_ROLE === "reviewer" && profile !== undefined) {
+  throw new Error(`reviewer must remain fresh without implementer profile, received ${profile}`);
+}
 
 if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (prompt.includes("Hang forever")) {

@@ -65,6 +65,7 @@ interface WorkflowInput {
   stateDirectory: string;
   deadlineEpochMs: number;
   implementerModel: string;
+  implementerProfile: string;
   reviewerModel: string;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
@@ -344,6 +345,8 @@ async function runImplementer(
     "exec",
     "--model",
     input.implementerModel,
+    "--profile",
+    input.implementerProfile,
     "--json",
     "--output-schema",
     schemaPath,
@@ -810,6 +813,7 @@ export async function admitTask(
     stateDirectory,
     deadlineEpochMs,
     implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
+    implementerProfile: process.env.USINE_IMPLEMENTER_PROFILE ?? "usine-implementer",
     reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",

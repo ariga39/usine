@@ -15,6 +15,7 @@ USINE_GITHUB_INSTALLATION_ID=... \
 USINE_GITHUB_APP_SLUG=... \
 USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
 USINE_IMPLEMENTER_MODEL=gpt-5.6-luna \
+USINE_IMPLEMENTER_PROFILE=usine-implementer \
 USINE_REVIEWER_MODEL=gpt-5.6-sol \
 node dist/cli.mjs run /path/to/committed-task-contract.json
 ```
