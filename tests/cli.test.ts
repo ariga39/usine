@@ -157,6 +157,40 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "waits for a structured Herdr observation after an early settled prompt",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-observation-"));
+      const taskId = `herdr-observation-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const herdrLog = join(directory, "herdr.jsonl");
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "early-settle",
+          USINE_HERDR_LOG: herdrLog,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      const events = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.filter((event) => event.type === "read")).toHaveLength(2);
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
     "finalizes a proposal without running repository hooks with coordinator credentials",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-candidate-hooks-"));
