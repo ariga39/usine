@@ -59,8 +59,16 @@ if (args[0] === "pane" && args[1] === "split") {
 } else if (args[0] === "agent" && args[1] === "start") {
   const addDirIndex = args.indexOf("--add-dir");
   const configIndex = args.indexOf("--config");
-  if (addDirIndex < 0 || args[addDirIndex + 1] !== process.env.USINE_EXPECTED_OBSERVATION_DIR)
+  const sandboxIndex = args.indexOf("--sandbox");
+  const reviewer = sandboxIndex >= 0 && args[sandboxIndex + 1] === "read-only";
+  if (reviewer) {
+    if (addDirIndex >= 0) throw new Error("fake Herdr reviewer received a writable root");
+  } else if (
+    addDirIndex < 0 ||
+    args[addDirIndex + 1] !== process.env.USINE_EXPECTED_OBSERVATION_DIR
+  ) {
     throw new Error("fake Herdr start is missing the exact observation directory");
+  }
   if (configIndex < 0 || args[configIndex + 1] !== "shell_environment_policy.inherit=core")
     throw new Error("fake Herdr start is missing the core shell environment policy");
   if (process.env.USINE_HERDR_MODE === "start-fail") {
@@ -107,7 +115,9 @@ if (args[0] === "pane" && args[1] === "split") {
       ".fake-herdr-agent.json",
       JSON.stringify({
         args: args.slice(8),
-        observationDir: args[addDirIndex + 1],
+        agentName: args[2],
+        reviewer,
+        observationDir: reviewer ? null : args[addDirIndex + 1],
         environment: persistentEnvironment,
       }),
     );
@@ -116,24 +126,32 @@ if (args[0] === "pane" && args[1] === "split") {
   const state = JSON.parse(await readFile(".fake-herdr-agent.json", "utf8"));
   await record({ command: args, type: "prompt" });
   const prompt = args[3];
-  const outputPath = prompt.match(/to (\/[^;]+); this file is coordinator evidence/)?.[1];
-  if (!outputPath) throw new Error("fake Herdr prompt is missing coordinator output path");
-  if (state.observationDir !== outputPath.slice(0, outputPath.lastIndexOf("/")))
-    throw new Error("fake Herdr did not grant the observation directory");
-  if (["early-settle", "blocked"].includes(process.env.USINE_HERDR_MODE)) {
-    await writeFile(
-      ".fake-herdr-agent.json",
-      JSON.stringify({ ...state, earlySettle: true, outputPath, prompt, readCount: 0 }),
-    );
+  if (state.reviewer) {
+    await writeFile(".fake-herdr-agent.json", JSON.stringify({ ...state, prompt, readCount: 0 }));
   } else {
-    const codex = process.env.USINE_CODEX_BIN.endsWith(".mjs")
-      ? [process.execPath, process.env.USINE_CODEX_BIN]
-      : [process.env.USINE_CODEX_BIN];
-    await execa(codex[0], [...codex.slice(1), ...state.args, "--json", "-o", outputPath, prompt], {
-      cwd: process.cwd(),
-      env: { ...process.env, ...state.environment },
-    });
-    await rm(".fake-herdr-agent.json", { force: true });
+    const outputPath = prompt.match(/to (\/[^;]+); this file is coordinator evidence/)?.[1];
+    if (!outputPath) throw new Error("fake Herdr prompt is missing coordinator output path");
+    if (state.observationDir !== outputPath.slice(0, outputPath.lastIndexOf("/")))
+      throw new Error("fake Herdr did not grant the observation directory");
+    if (["early-settle", "blocked"].includes(process.env.USINE_HERDR_MODE)) {
+      await writeFile(
+        ".fake-herdr-agent.json",
+        JSON.stringify({ ...state, earlySettle: true, outputPath, prompt, readCount: 0 }),
+      );
+    } else {
+      const codex = process.env.USINE_CODEX_BIN.endsWith(".mjs")
+        ? [process.execPath, process.env.USINE_CODEX_BIN]
+        : [process.env.USINE_CODEX_BIN];
+      await execa(
+        codex[0],
+        [...codex.slice(1), ...state.args, "--json", "-o", outputPath, prompt],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, ...state.environment },
+        },
+      );
+      await rm(".fake-herdr-agent.json", { force: true });
+    }
   }
 } else if (args[0] === "agent" && args[1] === "get") {
   await record({ command: args, type: "get" });
@@ -143,9 +161,31 @@ if (args[0] === "pane" && args[1] === "split") {
   );
 } else if (args[0] === "agent" && args[1] === "read") {
   await record({ command: args, type: "read" });
-  let settled = true;
-  if (process.env.USINE_HERDR_MODE === "early-settle") {
-    const state = JSON.parse(await readFile(".fake-herdr-agent.json", "utf8"));
+  const state =
+    process.env.USINE_CODEX_ROLE === "reviewer" || process.env.USINE_HERDR_MODE === "early-settle"
+      ? JSON.parse(await readFile(".fake-herdr-agent.json", "utf8"))
+      : null;
+  if (state?.reviewer) {
+    let settled = true;
+    if (process.env.USINE_HERDR_MODE === "early-settle" && state.readCount === 0) {
+      await writeFile(".fake-herdr-agent.json", JSON.stringify({ ...state, readCount: 1 }));
+      settled = false;
+    }
+    if (settled) {
+      const sha = (await execa("git", ["rev-parse", "HEAD"])).stdout;
+      const changesRequested =
+        state.prompt.includes("address review findings") && state.agentName.endsWith("-1");
+      process.stdout.write(
+        `• USINE_REVIEW_VERDICT=${JSON.stringify({
+          sha,
+          verdict: changesRequested ? "changes_requested" : "approved",
+          summary: "Fixture review",
+          findings: changesRequested ? ["Add the reviewed fix."] : [],
+        })}\n`,
+      );
+    }
+  } else if (process.env.USINE_HERDR_MODE === "early-settle") {
+    let settled = true;
     if (state.readCount === 0) {
       await writeFile(".fake-herdr-agent.json", JSON.stringify({ ...state, readCount: 1 }));
       settled = false;
@@ -160,8 +200,11 @@ if (args[0] === "pane" && args[1] === "split") {
       );
       await rm(".fake-herdr-agent.json", { force: true });
     }
+    if (settled)
+      process.stdout.write('{"type":"thread.started","thread_id":"fake-herdr-session"}\n');
+  } else {
+    process.stdout.write('{"type":"thread.started","thread_id":"fake-herdr-session"}\n');
   }
-  if (settled) process.stdout.write('{"type":"thread.started","thread_id":"fake-herdr-session"}\n');
 } else if (args[0] === "pane" && args[1] === "close") {
   await record({ command: args, type: "close" });
   await rm(".fake-herdr-agent.json", { force: true });

@@ -108,6 +108,8 @@ const reviewerOutputSchema = z.object({
   findings: z.array(z.string()),
 });
 
+const reviewerVerdictPrefix = ["USINE_REVIEW_", "VERDICT="].join("");
+
 const implementerJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -115,21 +117,6 @@ const implementerJsonSchema = {
   properties: {
     status: { type: "string", enum: ["proposed", "blocked"] },
     summary: { type: "string" },
-  },
-};
-
-const reviewerJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["sha", "verdict", "summary", "findings"],
-  properties: {
-    sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-    verdict: {
-      type: "string",
-      enum: ["approved", "changes_requested", "inconclusive"],
-    },
-    summary: { type: "string" },
-    findings: { type: "array", items: { type: "string" } },
   },
 };
 
@@ -169,6 +156,37 @@ function herdrErrorCode(stderr: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseReviewerTranscript(stdout: string, sha: string): ReviewResult | null {
+  const markerPositions: number[] = [];
+  let searchFrom = 0;
+  while (true) {
+    const markerPosition = stdout.indexOf(reviewerVerdictPrefix, searchFrom);
+    if (markerPosition < 0) break;
+    markerPositions.push(markerPosition);
+    searchFrom = markerPosition + reviewerVerdictPrefix.length;
+  }
+  if (markerPositions.length === 0) return null;
+  if (markerPositions.length !== 1)
+    throw new Error("review transcript must contain exactly one verdict sentinel");
+
+  const markerPosition = markerPositions[0];
+  if (markerPosition === undefined) throw new Error("review transcript has no verdict sentinel");
+  const lineEnd = stdout.indexOf("\n", markerPosition);
+  const payload = stdout
+    .slice(markerPosition + reviewerVerdictPrefix.length, lineEnd < 0 ? undefined : lineEnd)
+    .trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (error) {
+    throw new Error("review transcript verdict sentinel is malformed", { cause: error });
+  }
+  const review = reviewerOutputSchema.safeParse(parsed);
+  if (!review.success) throw new Error("review transcript verdict sentinel is invalid");
+  if (review.data.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
+  return review.data;
 }
 
 async function startHerdrAgent<T extends { exitCode?: number | null; stderr: unknown }>(
@@ -767,15 +785,6 @@ async function runReviewer(
   cycle: number,
 ): Promise<ReviewResult> {
   return withDisposableWorktree(input, `review-${sha}`, sha, async (path) => {
-    const schemaPath = resolve(input.stateDirectory, "schemas", "reviewer.json");
-    const outputPath = resolve(
-      input.stateDirectory,
-      "observations",
-      `${input.contract.id}-reviewer-${cycle}.json`,
-    );
-    await mkdir(dirname(schemaPath), { recursive: true });
-    await mkdir(dirname(outputPath), { recursive: true });
-    await writeFile(schemaPath, JSON.stringify(reviewerJsonSchema));
     const prompt = [
       "Role: reviewer.",
       "The frozen Task Contract is the complete private Issue authority projection for this review.",
@@ -786,19 +795,15 @@ async function runReviewer(
       `Check evidence: ${JSON.stringify(check)}`,
       "Return an explicit exact-SHA verdict. Process success alone is not approval.",
       "Do not use or request implementer chat; review only the frozen contract, candidate, and check evidence.",
-      `Before settling, atomically write the exact JSON object {"sha":"${sha}","verdict":"approved|changes_requested|inconclusive","summary":"...","findings":[]} to ${outputPath}; this file is coordinator evidence and must exist even though interactive Herdr mode has no exec structured-output flags.`,
+      'Before settling, emit exactly one transcript line whose prefix is formed by joining the literal fragments "USINE_REVIEW_" and "VERDICT="; append one compact JSON object with the exact candidate SHA, verdict, summary, and findings.',
     ].join("\n");
     const herdrBinary = process.env.USINE_HERDR_BIN ?? "herdr";
-    const observationDirectory = dirname(outputPath);
     const runHerdr = async (args: string[], timeoutMs?: number) =>
       (() => {
         const invocation = codexCommand(herdrBinary, args);
         return execa(invocation.executable, invocation.args, {
           cwd: path,
-          env: {
-            ...herdrEnvironment("reviewer"),
-            USINE_EXPECTED_OBSERVATION_DIR: observationDirectory,
-          },
+          env: herdrEnvironment("reviewer"),
           extendEnv: false,
           reject: false,
           timeout: timeoutMs ?? operationTimeout(input),
@@ -853,8 +858,6 @@ async function runReviewer(
         "-C",
         path,
         "--no-alt-screen",
-        "--add-dir",
-        observationDirectory,
         "--config",
         "shell_environment_policy.inherit=core",
         "--config",
@@ -874,7 +877,6 @@ async function runReviewer(
       ]);
       if (processTimedOut(prompted)) throw new ElapsedBudgetError();
       if (prompted.exitCode !== 0) throw new Error(`herdr agent prompt failed: ${prompted.stderr}`);
-      let review: z.infer<typeof reviewerOutputSchema>;
       while (true) {
         const observed = await runHerdr([
           "agent",
@@ -887,19 +889,10 @@ async function runReviewer(
         ]);
         if (processTimedOut(observed)) throw new ElapsedBudgetError();
         if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
-        try {
-          review = reviewerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
-          break;
-        } catch (error) {
-          if (
-            !(
-              typeof error === "object" &&
-              error !== null &&
-              "code" in error &&
-              error.code === "ENOENT"
-            )
-          )
-            throw error;
+        const review = parseReviewerTranscript(String(observed.stdout), sha);
+        if (review) {
+          await closePane();
+          return review;
         }
         const lifecycle = await runHerdr(["agent", "get", agentName]);
         if (processTimedOut(lifecycle)) throw new ElapsedBudgetError();
@@ -922,9 +915,6 @@ async function runReviewer(
           setTimeout(resolveDelay, Math.min(50, operationTimeout(input, 50))),
         );
       }
-      if (review.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
-      await closePane();
-      return review;
     } catch (error) {
       await closePane();
       throw error;

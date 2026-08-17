@@ -702,6 +702,7 @@ describe("usine run", () => {
           "service_tier=default",
         ]),
       );
+      expect(reviewerStart?.command).not.toContain("--add-dir");
       expect(herdrEvents.filter((event) => event.type === "prompt")).toHaveLength(3);
       expect(herdrEvents.some((event) => event.type === "wait")).toBe(false);
       const splits = herdrEvents.filter((event) => event.type === "split");
