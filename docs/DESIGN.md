@@ -69,7 +69,7 @@ credential-scoped GitHub delivery
 reviewed PR + explicit approval attestation
 ```
 
-这张图描述选定的最小目标，不是已经实现的能力声明。当前仓库没有运行时代码或纵切证据；DBOS + Drizzle 恢复、Codex structured subprocess、workspace fence/sandbox、GitHub effect reconciliation 和 exact-SHA gate 仍需由下一项实现 Issue 用一条真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
+这张图描述选定的最小目标，不是已经实现全部能力的声明。当前仓库已实现 runtime，fake-backed CLI seam 已覆盖 candidate→check→review→exact-SHA gate 全路径；live evidence 目前部分覆盖 candidate、check 和 reviewer execution，但 reviewed-PR/GitHub delivery 仍未证实。DBOS + Drizzle 恢复、Codex structured subprocess、workspace fence/sandbox 和 GitHub effect reconciliation 仍需继续用真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
