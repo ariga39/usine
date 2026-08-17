@@ -203,6 +203,22 @@ if (reviewerExtractor) {
 }
 
 if (reviewerExtractor) {
+  const directoryIndex = args.findIndex((arg) => arg === "-C");
+  const extractorDirectory = args[directoryIndex + 1];
+  if (!args.includes("--skip-git-repo-check")) {
+    throw new Error("reviewer extractor must skip Codex repository discovery");
+  }
+  const directories = [process.cwd(), extractorDirectory].filter(
+    (directory) => typeof directory === "string",
+  );
+  for (const directory of directories) {
+    try {
+      await execa("git", ["-C", directory, "rev-parse", "--show-toplevel"]);
+      throw new Error("reviewer extractor must run outside the candidate checkout");
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("must run outside")) throw error;
+    }
+  }
   const marker = "USINE_REVIEW_VERDICT=";
   const markerIndex = prompt.indexOf(marker);
   if (markerIndex < 0) throw new Error("extractor prompt is missing reviewer transcript");

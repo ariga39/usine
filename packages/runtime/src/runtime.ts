@@ -173,7 +173,6 @@ function herdrErrorCode(stderr: unknown): string | undefined {
 
 async function extractReviewerVerdict(
   input: WorkflowInput,
-  path: string,
   transcript: string,
   sha: string,
   cycle: number,
@@ -199,6 +198,7 @@ async function extractReviewerVerdict(
   await rm(outputPath, { force: true });
   const invocation = codexCommand(process.env.USINE_CODEX_BIN ?? "codex", [
     "exec",
+    "--skip-git-repo-check",
     "--model",
     input.extractorModel,
     "--json",
@@ -209,7 +209,7 @@ async function extractReviewerVerdict(
     "--sandbox",
     "read-only",
     "-C",
-    path,
+    input.stateDirectory,
     "--config",
     "model_reasoning_effort=low",
     "--config",
@@ -217,7 +217,7 @@ async function extractReviewerVerdict(
     prompt,
   ]);
   const processResult = await execa(invocation.executable, invocation.args, {
-    cwd: path,
+    cwd: input.stateDirectory,
     env: { ...workerEnvironment("reviewer"), USINE_CODEX_EXTRACTOR: "1" },
     extendEnv: false,
     reject: false,
@@ -943,7 +943,7 @@ async function runReviewer(
         const transcript = String(observed.stdout);
         if (transcript.replaceAll(/\r?\n/g, "").includes("USINE_REVIEW_VERDICT=")) {
           try {
-            const review = await extractReviewerVerdict(input, path, transcript, sha, cycle);
+            const review = await extractReviewerVerdict(input, transcript, sha, cycle);
             await closePane();
             return review;
           } catch (error) {
