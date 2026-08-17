@@ -199,7 +199,7 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
-    "delivers one checked and independently approved immutable candidate",
+    "recovers one early-stopping implementer and delivers its approved candidate",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-delivery-"));
       const repository = join(directory, "repository");
@@ -223,7 +223,7 @@ describe("usine run", () => {
           id: taskId,
           repository: { path: repository, owner: "example", name: taskId },
           baseSha,
-          instructions: "Create delivered.txt.",
+          instructions: "Stop once, then create delivered.txt.",
           acceptance: ["node check.mjs passes."],
           nonGoals: [],
           projectCheck: { command: "node check.mjs", timeoutMs: 10_000 },
@@ -267,6 +267,7 @@ describe("usine run", () => {
         check: { status: "passed" },
         review: { verdict: "approved" },
         delivery: { effect: "recorded" },
+        evidence: { implementerActivations: 2 },
       });
       expect(result.candidateSha).toMatch(/^[0-9a-f]{40}$/);
       expect(result.check.sha).toBe(result.candidateSha);
@@ -336,7 +337,6 @@ describe("usine run", () => {
           USINE_CODEX_BIN: fakeCodex,
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
-          USINE_FAKE_REVIEW_SEQUENCE_FILE: join(stateDirectory, "review-sequence"),
           USINE_STATE_DIR: stateDirectory,
         },
         reject: false,

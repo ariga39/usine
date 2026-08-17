@@ -74,6 +74,10 @@ interface ImplementerResult {
   observation: { summary: string; sessionId: string | null; stdout: string; stderr: string };
 }
 
+type ImplementerAttempt =
+  | { status: "succeeded"; implementation: ImplementerResult }
+  | { status: "failed"; reason: string };
+
 type UsineDatabase = NodePgDatabase<{
   repositoryLeases: typeof repositoryLeases;
   taskRuns: typeof taskRuns;
@@ -119,11 +123,31 @@ const reviewerJsonSchema = {
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
 
 function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { ...process.env, USINE_CODEX_ROLE: role };
-  for (const key of Object.keys(environment)) {
-    if (key === "GH_TOKEN" || key === "GITHUB_TOKEN" || key.startsWith("USINE_GITHUB_")) {
-      delete environment[key];
-    }
+  const environment: NodeJS.ProcessEnv = { USINE_CODEX_ROLE: role };
+  for (const key of [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TERM",
+    "COLORTERM",
+    "CODEX_HOME",
+    "XDG_CONFIG_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+  ]) {
+    if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
   return environment;
 }
@@ -258,6 +282,8 @@ async function runImplementer(
   previousSha: string,
 ): Promise<ImplementerResult> {
   const workspace = await ensureWorktree(input);
+  await execa("git", ["-C", workspace, "reset", "--hard", previousSha]);
+  await execa("git", ["-C", workspace, "clean", "-fd"]);
   const schemaPath = resolve(input.stateDirectory, "schemas", "implementer.json");
   const outputPath = resolve(
     input.stateDirectory,
@@ -294,6 +320,7 @@ async function runImplementer(
   const processResult = await execa(invocation.executable, invocation.args, {
     cwd: workspace,
     env: workerEnvironment("implementer"),
+    extendEnv: false,
     reject: false,
     timeout: input.contract.budget.maxElapsedMs,
   });
@@ -324,6 +351,22 @@ async function runImplementer(
       stderr: processResult.stderr,
     },
   };
+}
+
+async function attemptImplementer(
+  input: WorkflowInput,
+  activation: number,
+  findings: string[],
+  previousSha: string,
+): Promise<ImplementerAttempt> {
+  try {
+    return {
+      status: "succeeded",
+      implementation: await runImplementer(input, activation, findings, previousSha),
+    };
+  } catch (error) {
+    return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function withDisposableWorktree<T>(
@@ -409,6 +452,7 @@ async function runReviewer(
     const processResult = await execa(invocation.executable, invocation.args, {
       cwd: path,
       env: workerEnvironment("reviewer"),
+      extendEnv: false,
       reject: false,
       timeout: input.contract.budget.maxElapsedMs,
     });
@@ -728,11 +772,36 @@ export async function admitTask(
       let findings: string[] = [];
       let previousSha = input.contract.baseSha;
       for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
-        const activation = result.evidence.implementerActivations + 1;
-        const implementation = await DBOS.runStep(
-          () => runImplementer(input, activation, findings, previousSha),
-          { name: `implementer-${activation}` },
-        );
+        let implementation: ImplementerResult | null = null;
+        while (implementation === null) {
+          const activation = result.evidence.implementerActivations + 1;
+          if (activation > input.contract.budget.maxImplementerActivations) {
+            return saveResult({
+              ...result,
+              state: "blocked",
+              blocker: "implementer activation budget exhausted",
+            });
+          }
+          result = await saveResult({
+            ...result,
+            evidence: { ...result.evidence, implementerActivations: activation },
+          });
+          const attempt = await DBOS.runStep(
+            () => attemptImplementer(input, activation, findings, previousSha),
+            { name: `implementer-${activation}` },
+          );
+          if (attempt.status === "failed") {
+            if (activation >= input.contract.budget.maxImplementerActivations) {
+              return saveResult({
+                ...result,
+                state: "blocked",
+                blocker: `implementer failed after ${activation} activation(s): ${attempt.reason}`,
+              });
+            }
+            continue;
+          }
+          implementation = attempt.implementation;
+        }
         result = await saveResult({
           ...result,
           state: "candidate",
@@ -741,7 +810,6 @@ export async function admitTask(
           review: null,
           delivery: null,
           blocker: null,
-          evidence: { ...result.evidence, implementerActivations: activation },
         });
         const check = await DBOS.runStep(() => runCheck(input, implementation.candidateSha), {
           name: `check-${cycle}`,
@@ -795,7 +863,7 @@ export async function admitTask(
         });
         if (
           cycle >= input.contract.budget.maxReviewCycles ||
-          activation >= input.contract.budget.maxImplementerActivations
+          result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
         ) {
           return saveResult({
             ...result,

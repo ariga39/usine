@@ -7,8 +7,27 @@ const args = process.argv.slice(2);
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
 if (!outputPath) throw new Error("missing structured output path");
+for (const key of [
+  "USINE_DATABASE_URL",
+  "USINE_STATE_DIR",
+  "USINE_TEST_SECRET",
+  "USINE_GITHUB_TEST_TOKEN",
+  "USINE_GITHUB_PRIVATE_KEY_PATH",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+]) {
+  if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
+}
+const prompt = args.at(-1) ?? "";
 
 if (process.env.USINE_CODEX_ROLE === "implementer") {
+  if (prompt.includes("Stop once") && outputPath.includes("implementer-1")) {
+    await writeFile(
+      outputPath,
+      JSON.stringify({ status: "blocked", summary: "Stopped early once" }),
+    );
+    process.exit(0);
+  }
   let content = "implemented\n";
   try {
     await readFile("delivered.txt", "utf8");
@@ -30,19 +49,9 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
   const sha = (await execa("git", ["rev-parse", "HEAD"])).stdout;
   let verdict = "approved";
   let findings = [];
-  const sequenceFile = process.env.USINE_FAKE_REVIEW_SEQUENCE_FILE;
-  if (sequenceFile) {
-    let reviewCount = 0;
-    try {
-      reviewCount = Number(await readFile(sequenceFile, "utf8"));
-    } catch {
-      // Missing means this is the first review.
-    }
-    await writeFile(sequenceFile, String(reviewCount + 1));
-    if (reviewCount === 0) {
-      verdict = "changes_requested";
-      findings = ["Add the reviewed fix."];
-    }
+  if (prompt.includes("address review findings") && outputPath.includes("reviewer-1")) {
+    verdict = "changes_requested";
+    findings = ["Add the reviewed fix."];
   }
   await writeFile(
     outputPath,
