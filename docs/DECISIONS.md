@@ -26,6 +26,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-014 | GitHub Issue → branch/worktree → PR 是开发 Usine 自身的唯一任务流；主编排者最多并排两个独立 implementation PR | 让 Git 成为恢复、所有权和 integration 基础，并把并排开发变成真实工作树隔离。 |
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
+| D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计 | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；审计只阻止扩张，不暂停安全的有效工作。 |
 
 ## 已确定的依赖方向
 

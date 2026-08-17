@@ -144,6 +144,27 @@ Review 要求高于实现，但 review 本身也必须有 scope 和成本预算�
 - clean-room 方向审查按触发条件运行，而不是按每个 PR 运行：canonical design 大改、连续三个 PR 没有推进用户可见纵切、出现第二套权威文档、或主编排者经历多次 compact 后无法解释当前路线。
 - 多模型审查不是投票。只有不同模型提供了真正独立的 failure lens 时才花费额外 quota；限额本身是系统约束，不以“再找一个 agent”掩盖。
 
+### 独立方向审计 checkpoint
+
+以下 checkpoint 必须完成一次 clean-room 方向审计：
+
+1. 新的 canonical design 在标记 ready/merge 前；
+2. 第一条完整的 task → implementation → checks → independent review → reviewed PR 纵切完成后，在增加通用架构、容量或自动 merge 权限前；
+3. 增加第二种 runtime/forge、分布式 runner、扩大 worker/delivery 权限，或把主编排开发并发提高到两个以上之前；
+4. 提前触发条件出现时：连续三个 PR 没有推进用户可见 outcome、canonical authority 冲突、重复 compact 后路线无法解释，或实现再次被底层基础设施/测试矩阵吞噬。
+
+Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续扩大架构、权限或容量，直到方向 blocker 被处理。
+
+审计程序：
+
+1. 主编排者在临时 clean-room 目录准备有界 evidence packet：四份 canonical 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
+2. 审计者必须是未参与当前设计/实现的 fresh session。设计方向审计默认只看 packet；若需要验证“代码确实这样工作”的 claim，再提供 exact SHA 的只读 checkout，而不是作者 worktree。
+3. Prompt 固定要求检查：目标是否被 proxy goal 替代、哪些复杂度可以删除、library 是否被重复实现、开发是否真实可并排、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。
+4. 报告输出 `continue`、`correct_before_expansion` 或 `stop_and_redesign`，并把 finding 区分为 direction blocker、current-PR defect 和 later concern。
+5. 主编排者必须把 direction blocker 映射到当前 PR 修订、一个新 Issue 或用户 decision。完成后最多做一次 focused delta audit；later concern 不得无限延长当前 checkpoint。
+
+Self-review、普通 code review、更多测试或一份主编排者总结都不能代替该 checkpoint。默认只用一个匹配能力的独立审计者；只有高风险分歧无法裁决时才增加第二视角，避免审计本身成为 quota 黑洞。
+
 ## 8. 文档生命周期
 
 不复制旧任务树和旧实现报告。本仓库从零开始，历史 clean-room archive 保存在仓库外，只用于追溯，不参与 agent 默认 context。

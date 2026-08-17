@@ -40,6 +40,14 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - When blocked, exhaust safe in-scope diagnostics and alternatives, then record the exact blocker and required decision. Do not label difficult, slow, or partially complete work as blocked.
 - Use Codex `/goal` for work expected to span turns or run unattended. The goal must name one objective, its non-goals, evidence of progress, and a verifiable stopping condition. `/goal` reinforces persistence; it does not replace the Issue, canonical documents, Git state, or these rules.
 
+## Independent direction audits
+
+- The primary orchestrator may self-review a diff, but it may not certify its own overall direction. Mandatory direction checkpoints require a fresh agent/session that did not author or implement the work.
+- Run a clean-room direction audit before accepting a new canonical design, after the first complete end-to-end autonomous delivery loop before scaling/generalizing it, and before materially expanding authority, runtime/forge count, distribution, or development concurrency.
+- Also trigger an early audit when three consecutive PRs fail to advance a user-visible vertical outcome, canonical authorities conflict, repeated compaction makes the route unclear, or implementation repeatedly grows low-level infrastructure instead of product behavior.
+- The audit must use a bounded evidence packet and must not inherit author chat or the historical task archive. Code claims may be checked in a read-only checkout. Details and budget are defined in `docs/DEVELOPMENT.md`.
+- A direction audit blocks expansion, not useful work on an already-safe path. Resolve blocking findings or record an explicit user decision before crossing the checkpoint; summaries and ordinary PR review cannot waive it.
+
 ## Drift stop rule
 
 Stop and re-read the canonical documents before continuing when any of these occurs:
