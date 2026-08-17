@@ -4,8 +4,6 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
-import { createOpenAI } from "@ai-sdk/openai";
-import { generateText, Output } from "ai";
 import { and, eq } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -19,6 +17,12 @@ import {
   herdrErrorCode,
   workerEnvironment,
 } from "@usine/agent-runtime";
+import {
+  configuredExtractorBaseUrl,
+  ElapsedBudgetError,
+  extractReviewerVerdict,
+} from "@usine/review-extractor";
+import type { ReviewerVerdict } from "@usine/review-extractor";
 import type { TaskContract } from "./contract.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
 
@@ -31,12 +35,7 @@ interface CheckResult {
   stderr: string;
 }
 
-interface ReviewResult {
-  sha: string;
-  verdict: "approved" | "changes_requested" | "inconclusive";
-  summary: string;
-  findings: string[];
-}
+type ReviewResult = ReviewerVerdict;
 
 interface DeliveryResult {
   sha: string;
@@ -95,12 +94,6 @@ type ImplementerAttempt =
   | { status: "succeeded"; implementation: ImplementerResult }
   | { status: "failed"; reason: string; budgetExhausted: boolean };
 
-class ElapsedBudgetError extends Error {
-  constructor() {
-    super("elapsed budget exhausted");
-  }
-}
-
 type UsineDatabase = NodePgDatabase<{
   repositoryLeases: typeof repositoryLeases;
   taskRuns: typeof taskRuns;
@@ -110,15 +103,6 @@ const implementerOutputSchema = z.object({
   status: z.enum(["proposed", "blocked"]),
   summary: z.string(),
 });
-
-const reviewerOutputSchema = z
-  .object({
-    sha: z.string().regex(/^[0-9a-f]{40}$/),
-    verdict: z.enum(["approved", "changes_requested", "inconclusive"]),
-    summary: z.string(),
-    findings: z.array(z.string()),
-  })
-  .strict();
 
 const implementerJsonSchema = {
   type: "object",
@@ -151,55 +135,11 @@ function operationTimeout(input: WorkflowInput, maximum = Number.POSITIVE_INFINI
   return Math.max(1, Math.min(remaining, maximum));
 }
 
-function configuredExtractorBaseUrl(): string {
-  return (
-    process.env.USINE_EXTRACTOR_BASE_URL ??
-    process.env.OPENAI_BASE_URL ??
-    "https://api.openai.com/v1"
-  );
-}
-
 function processTimedOut(error: unknown): boolean {
   return (
     error instanceof ElapsedBudgetError ||
     (typeof error === "object" && error !== null && "timedOut" in error && error.timedOut === true)
   );
-}
-
-async function extractReviewerVerdict(
-  input: WorkflowInput,
-  transcript: string,
-  sha: string,
-): Promise<ReviewResult> {
-  const systemMessage = [
-    "Extract exactly one reviewer verdict from this rendered Herdr transcript.",
-    "The transcript may contain terminal hard wrapping. Reconstruct the verdict only from the transcript.",
-    "If the verdict is missing, truncated, ambiguous, or malformed, return verdict inconclusive.",
-    "Return only the schema-constrained JSON object described by the response format.",
-  ].join("\n");
-  const apiKey = process.env.USINE_EXTRACTOR_API_KEY ?? process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("review verdict extractor credentials are not configured");
-  const abortSignal = AbortSignal.timeout(operationTimeout(input));
-  try {
-    const openai = createOpenAI({
-      baseURL: input.extractorBaseUrl,
-      apiKey,
-    });
-    const { output } = await generateText({
-      model: openai.chat(input.extractorModel),
-      system: systemMessage,
-      prompt: transcript,
-      output: Output.object({ schema: reviewerOutputSchema }),
-      maxRetries: 0,
-      abortSignal,
-    });
-    if (output.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
-    return output;
-  } catch (error) {
-    if (abortSignal.aborted || Date.now() >= input.deadlineEpochMs - 100)
-      throw new ElapsedBudgetError();
-    throw new Error("review verdict extractor request failed", { cause: error });
-  }
 }
 
 async function startHerdrAgent<T extends { exitCode?: number | null; stderr: unknown }>(

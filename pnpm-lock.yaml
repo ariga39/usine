@@ -55,11 +55,30 @@ importers:
         specifier: latest
         version: 7.0.2
 
-  packages/runtime:
+  packages/review-extractor:
     dependencies:
       '@ai-sdk/openai':
         specifier: ^4.0.42
         version: 4.0.42(zod@4.4.3)
+      ai:
+        specifier: ^7.0.66
+        version: 7.0.66(zod@4.4.3)
+      zod:
+        specifier: latest
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: latest
+        version: 26.2.0
+      tsdown:
+        specifier: latest
+        version: 0.22.14(tsx@4.23.12)(typescript@7.0.2)
+      typescript:
+        specifier: latest
+        version: 7.0.2
+
+  packages/runtime:
+    dependencies:
       '@dbos-inc/dbos-sdk':
         specifier: latest
         version: 4.25.14
@@ -69,9 +88,9 @@ importers:
       '@usine/agent-runtime':
         specifier: workspace:*
         version: link:../agent-runtime
-      ai:
-        specifier: ^7.0.66
-        version: 7.0.66(zod@4.4.3)
+      '@usine/review-extractor':
+        specifier: workspace:*
+        version: link:../review-extractor
       drizzle-orm:
         specifier: latest
         version: 0.45.2(@types/pg@8.21.0)(pg@8.23.0)

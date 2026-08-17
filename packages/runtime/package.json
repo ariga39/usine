@@ -19,11 +19,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^4.0.42",
     "@dbos-inc/dbos-sdk": "latest",
     "@dbos-inc/drizzle-datasource": "latest",
     "@usine/agent-runtime": "workspace:*",
-    "ai": "^7.0.66",
+    "@usine/review-extractor": "workspace:*",
     "drizzle-orm": "latest",
     "execa": "latest",
     "octokit": "latest",
