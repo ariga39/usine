@@ -69,6 +69,7 @@ interface WorkflowInput {
   implementerModel: string;
   implementerProfile: string;
   reviewerModel: string;
+  extractorModel: string;
   reviewerReasoningEffort: string;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
@@ -101,14 +102,14 @@ const implementerOutputSchema = z.object({
   summary: z.string(),
 });
 
-const reviewerOutputSchema = z.object({
-  sha: z.string().regex(/^[0-9a-f]{40}$/),
-  verdict: z.enum(["approved", "changes_requested", "inconclusive"]),
-  summary: z.string(),
-  findings: z.array(z.string()),
-});
-
-const reviewerVerdictPrefix = ["USINE_REVIEW_", "VERDICT="].join("");
+const reviewerOutputSchema = z
+  .object({
+    sha: z.string().regex(/^[0-9a-f]{40}$/),
+    verdict: z.enum(["approved", "changes_requested", "inconclusive"]),
+    summary: z.string(),
+    findings: z.array(z.string()),
+  })
+  .strict();
 
 const implementerJsonSchema = {
   type: "object",
@@ -117,6 +118,18 @@ const implementerJsonSchema = {
   properties: {
     status: { type: "string", enum: ["proposed", "blocked"] },
     summary: { type: "string" },
+  },
+};
+
+const reviewerJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sha", "verdict", "summary", "findings"],
+  properties: {
+    sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+    verdict: { type: "string", enum: ["approved", "changes_requested", "inconclusive"] },
+    summary: { type: "string" },
+    findings: { type: "array", items: { type: "string" } },
   },
 };
 
@@ -158,33 +171,71 @@ function herdrErrorCode(stderr: unknown): string | undefined {
   }
 }
 
-function parseReviewerTranscript(stdout: string, sha: string): ReviewResult | null {
-  const markerPositions: number[] = [];
-  let searchFrom = 0;
-  while (true) {
-    const markerPosition = stdout.indexOf(reviewerVerdictPrefix, searchFrom);
-    if (markerPosition < 0) break;
-    markerPositions.push(markerPosition);
-    searchFrom = markerPosition + reviewerVerdictPrefix.length;
-  }
-  if (markerPositions.length === 0) return null;
-  if (markerPositions.length !== 1)
-    throw new Error("review transcript must contain exactly one verdict sentinel");
+async function extractReviewerVerdict(
+  input: WorkflowInput,
+  path: string,
+  transcript: string,
+  sha: string,
+  cycle: number,
+): Promise<ReviewResult> {
+  const schemaPath = resolve(input.stateDirectory, "schemas", "reviewer.json");
+  const outputPath = resolve(
+    input.stateDirectory,
+    "observations",
+    `${input.contract.id}-reviewer-${cycle}.json`,
+  );
+  await mkdir(dirname(schemaPath), { recursive: true });
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(schemaPath, JSON.stringify(reviewerJsonSchema));
 
-  const markerPosition = markerPositions[0];
-  if (markerPosition === undefined) throw new Error("review transcript has no verdict sentinel");
-  const lineEnd = stdout.indexOf("\n", markerPosition);
-  const payload = stdout
-    .slice(markerPosition + reviewerVerdictPrefix.length, lineEnd < 0 ? undefined : lineEnd)
-    .trim();
-  let parsed: unknown;
+  const prompt = [
+    "Extract exactly one reviewer verdict from this rendered Herdr transcript.",
+    "The transcript may contain terminal hard wrapping. Reconstruct the verdict only from the transcript.",
+    "If the verdict is missing, truncated, ambiguous, or malformed, return verdict inconclusive.",
+    "Return only the schema-constrained JSON object.",
+    "Rendered reviewer transcript:",
+    transcript,
+  ].join("\n");
+  await rm(outputPath, { force: true });
+  const invocation = codexCommand(process.env.USINE_CODEX_BIN ?? "codex", [
+    "exec",
+    "--model",
+    input.extractorModel,
+    "--json",
+    "--output-schema",
+    schemaPath,
+    "-o",
+    outputPath,
+    "--sandbox",
+    "read-only",
+    "-C",
+    path,
+    "--config",
+    "model_reasoning_effort=low",
+    "--config",
+    "service_tier=default",
+    prompt,
+  ]);
+  const processResult = await execa(invocation.executable, invocation.args, {
+    cwd: path,
+    env: { ...workerEnvironment("reviewer"), USINE_CODEX_EXTRACTOR: "1" },
+    extendEnv: false,
+    reject: false,
+    timeout: operationTimeout(input),
+  });
+  if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100)
+    throw new ElapsedBudgetError();
+  if (processResult.exitCode !== 0)
+    throw new Error(`review verdict extractor failed: ${processResult.stderr}`);
+
+  let extracted: unknown;
   try {
-    parsed = JSON.parse(payload);
+    extracted = JSON.parse(await readFile(outputPath, "utf8"));
   } catch (error) {
-    throw new Error("review transcript verdict sentinel is malformed", { cause: error });
+    throw new Error("review verdict extractor produced no valid JSON", { cause: error });
   }
-  const review = reviewerOutputSchema.safeParse(parsed);
-  if (!review.success) throw new Error("review transcript verdict sentinel is invalid");
+  const review = reviewerOutputSchema.safeParse(extracted);
+  if (!review.success) throw new Error("review verdict extractor returned invalid schema");
   if (review.data.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
   return review.data;
 }
@@ -889,10 +940,22 @@ async function runReviewer(
         ]);
         if (processTimedOut(observed)) throw new ElapsedBudgetError();
         if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
-        const review = parseReviewerTranscript(String(observed.stdout), sha);
-        if (review) {
-          await closePane();
-          return review;
+        const transcript = String(observed.stdout);
+        if (transcript.replaceAll(/\r?\n/g, "").includes("USINE_REVIEW_VERDICT=")) {
+          try {
+            const review = await extractReviewerVerdict(input, path, transcript, sha, cycle);
+            await closePane();
+            return review;
+          } catch (error) {
+            await closePane();
+            if (processTimedOut(error)) throw error;
+            return {
+              sha,
+              verdict: "inconclusive",
+              summary: error instanceof Error ? error.message : String(error),
+              findings: [],
+            };
+          }
         }
         const lifecycle = await runHerdr(["agent", "get", agentName]);
         if (processTimedOut(lifecycle)) throw new ElapsedBudgetError();
@@ -1199,6 +1262,7 @@ export async function admitTask(
     implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
     implementerProfile: process.env.USINE_IMPLEMENTER_PROFILE ?? "usine-implementer",
     reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
+    extractorModel: process.env.USINE_EXTRACTOR_MODEL ?? "gpt-5.6-luna",
     reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",

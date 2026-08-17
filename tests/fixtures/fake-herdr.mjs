@@ -175,13 +175,15 @@ if (args[0] === "pane" && args[1] === "split") {
       const sha = (await execa("git", ["rev-parse", "HEAD"])).stdout;
       const changesRequested =
         state.prompt.includes("address review findings") && state.agentName.endsWith("-1");
+      const verdict = JSON.stringify({
+        sha,
+        verdict: changesRequested ? "changes_requested" : "approved",
+        summary: "Fixture review",
+        findings: changesRequested ? ["Add the reviewed fix."] : [],
+      });
+      const shaBreak = verdict.indexOf(sha) + 20;
       process.stdout.write(
-        `• USINE_REVIEW_VERDICT=${JSON.stringify({
-          sha,
-          verdict: changesRequested ? "changes_requested" : "approved",
-          summary: "Fixture review",
-          findings: changesRequested ? ["Add the reviewed fix."] : [],
-        })}\n`,
+        `• USINE_REVIEW_VERDICT=${verdict.slice(0, shaBreak)}\n${verdict.slice(shaBreak)}\n`,
       );
     }
   } else if (process.env.USINE_HERDR_MODE === "early-settle") {
