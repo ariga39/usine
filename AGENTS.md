@@ -27,7 +27,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 
 - No implementation work without a GitHub Issue, an isolated branch/worktree, and an explicit PR-sized outcome. The empty-repository bootstrap commit is the sole exception.
 - One completed task produces one PR, but a product milestone may span many tasks/PRs. Each Issue must authorize the smallest independently useful, testable, and revertible outcome; never interpret “complete vertical” as a requirement for one large PR.
-- At most two implementation tasks may be active under one orchestrator. They must have independent ownership and non-overlapping writable surfaces; otherwise serialize them.
+- The current checkpoint remains serial: only one implementation task may be active under one orchestrator. After representative executable code task plus induced live coordinator restart recovery evidence, at most two implementation tasks may be active; they must have independent ownership and non-overlapping writable surfaces; otherwise serialize them.
 - Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file and must name `first_merge_checkpoint` plus its evidence. Command-line prompts only point to that file. `.tasks/` is never design authority.
 - Use test-first development for stable contracts, invariants, and bug reproductions. For uncertain integrations, establish the thinnest observable vertical behavior first and add tests around the behavior; do not pre-specify internals through hundreds of seam tests.
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.

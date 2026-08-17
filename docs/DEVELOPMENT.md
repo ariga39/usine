@@ -58,9 +58,9 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ## 3. 有界并排开发
 
-主编排者初期最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
+当前 checkpoint active 时，主编排者只运行串行 implementation。完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR；这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
 
-在第一条完整 user-visible 纵切进入 main、共享 seam 仍未由代码固定之前，实施必须串行。两项上限只是允许并排的 fence，不是当前已经具备并行开发能力的声明。
+在完成 representative executable code task 与 induced live coordinator restart recovery 之前，实施必须串行。两项上限只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备并行开发能力的声明。
 
 只有满足以下条件才并排：
 

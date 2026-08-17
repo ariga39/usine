@@ -1,7 +1,7 @@
 ---
 status: current
 design_version: 0.1
-updated: 2026-08-17
+updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
 
@@ -69,11 +69,15 @@ credential-scoped GitHub delivery
 reviewed PR + explicit approval attestation
 ```
 
-这张图描述选定的最小目标，不是已经实现全部能力的声明。当前仓库已实现 runtime，fake-backed CLI seam 已覆盖 candidate→check→review→exact-SHA gate 全路径；live evidence 目前部分覆盖 candidate、check 和 reviewer execution，但 reviewed-PR/GitHub delivery 仍未证实。DBOS + Drizzle 恢复、Codex runtime subprocess、workspace fence/sandbox、coordinator-owned bounded extraction 和 GitHub effect reconciliation 仍需继续用真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
+这张图描述选定的最小目标，不是已经实现全部能力的声明。Issue #12 / PR #38 的第一次 live self-hosted reviewed delivery 已验证一条单 writer 纵切：一个 Task、一个 repository、Herdr Luna implementation、project check、fresh Sol reviewer 的 exact-SHA approval、协调器通过 AI SDK 对 rendered transcript 做的 bounded extraction、一个 GitHub App PR 及其 exact-SHA attestation，以及 exact-SHA merged delivery。仍未验证的是 representative executable code task，以及 live coordinator restart recovery；因此 DBOS + PostgreSQL 的决定性 live recovery 价值仍须通过 induced restart 证明。
+
+Rendered-transcript extraction 目前是把 reviewer 输出接入协调器的 bounded compatibility bridge，而不是新的 authority boundary。若再次出现 slow/inconclusive extraction、需要 provider-specific branching、另一个普通任务仍需修复这条基础设施，或 manual-free restart recovery 失败，这条 bridge 即被证伪并须重新评估。
+
+clean-room classification 为 `correct_before_expansion`：可以继续 bounded useful single-writer tasks，但在 representative executable code task 加上 induced live coordinator restart recovery 之前，不扩大 concurrency、authority、runtime/forge count、distribution、generalized architecture 或 automatic-merge product authority。第一条纵切和当前 continuation 仍只运行一个 Task、一个 repository 和一个 writer。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
-Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确的 next owner。系统借此保留 Raft 体验中“有序激发”的优点，并在首条纵切稳定后允许不同项目 lane 并行。
+Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确的 next owner。系统借此保留 Raft 体验中“有序激发”的优点；只有 representative executable code task 和 induced live coordinator restart recovery 都有证据后，才允许不同项目 lane 并行。
 
 ## 4. 权威与状态
 
@@ -110,7 +114,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-第一条完整纵切串行运行一个 Task。它稳定后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
+第一条完整纵切和当前 continuation 串行运行一个 Task。代表性 executable code task 与 induced live coordinator restart recovery 都有证据后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -170,4 +174,4 @@ Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析�
 
 首条纵切只记录能回答核心优化目标的事实：是否形成 accepted outcome、human activation、端到端时间、成本、返修次数和 blocker。观察到具体瓶颈后再增加诊断指标，不预建通用 metrics surface，也不设置 10、30、50、100、300 之间的人工阶段门。
 
-首条纵切稳定后，提高容量的默认顺序是增加互不冲突的项目 lane，而不是增加单个 task 内的 agent 发言者。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。
+在 representative executable code task 与 induced live coordinator restart recovery 都得到证据后，提高容量的默认顺序是增加互不冲突的项目 lane，而不是增加单个 task 内的 agent 发言者。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。

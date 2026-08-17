@@ -1,6 +1,6 @@
 ---
 status: current
-updated: 2026-08-17
+updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
 
@@ -17,20 +17,22 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并使用 DBOS 官方 Drizzle datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现，同时保留轻量、显式的 TypeScript schema。 |
 | D-006 | V0 只有 Codex runtime adapter；每个 implementation Issue 由新 Herdr pane/agent 通过 `-p usine-implementer` 启动（GPT-5.6 Luna high、default tier、no fast），合并 checkpoint 后释放且不得跨 Issue 复用；fresh semantic review 使用 Sol，bounded research 可用 Terra；仅在 Herdr 本身不可用时直接 `codex exec -p usine-implementer` | 交互式 Herdr 生命周期在实际运行中比一次性 exec/subagent 更稳定；fresh-per-Issue 防止旧 context 污染。 |
 | D-007 | Implementer activation 初期通过 Herdr CLI 管理 fresh Codex pane/session；fresh reviewer 通过新建 Herdr pane/agent 运行显式配置的 Sol/low/default、read-only candidate checkout 并产出 rendered transcript evidence；协调器随后使用 `ai` + `@ai-sdk/openai` 的成熟 provider，构造 `createOpenAI({ baseURL, apiKey }).chat(model)` 并以 structured output 对 transcript 做有界 extraction。API key 只留在 coordinator，worker/reviewer/check 环境不携带；协调器执行严格 schema 与 exact-SHA 校验，LLM prose、provider/process success 都不能授予 authority。轻量 transform 不通过 Herdr、Codex 或 OpenCode agent runtime，除非确实需要 repository、tool 或 session 能力；仅 implementer 在 Herdr 不可用时允许 direct `codex exec -p usine-implementer` fallback | Issue #18 的薄纵切观察到 Herdr-managed Luna lifecycle 能产生可观察 workspace progress；Issue #12/28 的 live evidence 显示 Sol noninteractive review 会耗尽预算，因此 reviewer 采用同样可观察的 Herdr lifecycle；Issue #34/36 的 live evidence 显示 rendered transcript 需要独立的 coordinator-owned bounded extraction，而成熟 provider 已覆盖 HTTP、response envelope、JSON decoding 与 schema parsing，不应再维护自定义 HTTP adapter。ACP 只有在稳定协议能显著改善 session resume、streaming 或 capability negotiation 时才进入。 |
-| D-008 | 第一条纵切串行；稳定后每 repository 一个 writer，并发只跨 repository | 先证明一条真实 delivery loop，再按天然项目边界扩容，避免用并发基础设施替代用户 outcome。 |
+| D-008 | 当前 checkpoint active 时第一条纵切和 continuation 串行；完成 representative executable code task 与 induced live coordinator restart recovery 后，才允许每 repository 一个 writer，并发只跨 repository | 先证明一条真实 delivery loop，再按天然项目边界扩容，避免用并发基础设施替代用户 outcome。 |
 | D-009 | Candidate、checks、review verdict 和投影出的 attestation 全部绑定 immutable exact SHA | 防止 stale evidence 和“agent 说完成了”成为交付依据。 |
 | D-010 | Reviewer 必须 fresh、可读取完整 codebase，并提交 explicit verdict；exact-SHA `approved` verdict 是 semantic approval，review run 完成与批准是两个事实 | 保留独立判断；delivery executor 只能投影 verdict，不能制造批准。需要 GitHub 原生 approval 时使用不同于 PR author/delivery identity 的 reviewer capability。 |
 | D-011 | GitHub 是当前 forge/delivery surface；使用 Octokit + GitHub App 短期 installation token | 现有 private repos 已安装 App；不再把凭据和 API 轮换手写到每个 agent。 |
 | D-012 | 第一项产品行为终止于带 exact-SHA semantic approval attestation 的 reviewed PR；自动 merge 位于同一 exact-head gate 后的后续 authority adapter | 先证明完整 review delivery；平台原生 approval 是仓库 ruleset 要求的额外事实，不得与 Usine verdict 混为一谈。 |
 | D-013 | Codex sandbox/host permissions 是默认 isolation；worker 无 delivery credential | 在 macOS/Linux 上先使用已存在能力，容器不是默认前置。 |
-| D-014 | GitHub Issue → branch/worktree → small PR 是开发 Usine 自身的唯一任务流；小 commit 尽早 push/开 draft PR，gate 通过后 orchestrator 自动 merge 并继续；第一条纵切串行，之后最多并排两个独立 implementation PR | 让 Git 成为恢复、可见性、所有权和 integration 基础，同时避免用户成为 review/merge/continue 队列。只有 main 上已有稳定 seam 和不重叠 writable surface 时才并排。 |
+| D-014 | GitHub Issue → branch/worktree → small PR 是开发 Usine 自身的唯一任务流；小 commit 尽早 push/开 draft PR，gate 通过后 orchestrator 自动 merge 并继续；当前 checkpoint active 时第一条纵切和 continuation 串行，完成 representative executable code task 与 induced live coordinator restart recovery 后才允许最多并排两个独立 implementation PR | 让 Git 成为恢复、可见性、所有权和 integration 基础，同时避免用户成为 review/merge/continue 队列。只有 main 上已有稳定 seam 和不重叠 writable surface 时才并排。 |
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
 | D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计 | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；审计只阻止扩张，不暂停安全的有效工作。 |
 | D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。DBOS runtime 必须使用 tsdown unbundle 模式，不把 workflow 打成 bundle。 |
 | D-019 | Product milestone 可以跨多个 PR；每个 implementation Issue 必须定义并优先交付 `first_merge_checkpoint`，即最小独立有用、可测、可回滚的 outcome | 防止把“完整纵切”误解为一次大 PR。Checkpoint 绿后先 merge；后续 failure mode/相邻 seam 进入新 Issue，review 不得用 milestone 终态扩大当前 acceptance。 |
 
-这些条目是当前实施选择与必须验证的 invariant，不是集成能力已经成立的证据。下一项实现 Issue 必须用一个 Task、一个 repository、一个 writer 的真实薄纵切验证 DBOS + Drizzle recovery、Codex runtime subprocess、coordinator-owned bounded extraction、workspace isolation/fence、exact-SHA checks/review 和 GitHub App delivery；在此之前不得据此扩展 package、lane、runtime 或 forge。
+这些条目是当前实施选择与必须验证的 invariant。Issue #12 / PR #38 已验证一条 live self-hosted reviewed delivery：一个 Task、一个 repository/writer、Herdr Luna implementation、project check、fresh Sol exact-SHA approval、AI SDK transcript extraction、一个 GitHub App PR/attestation，以及 exact-SHA merged delivery。它尚未验证 representative executable code task 或 live coordinator restart recovery；DBOS + PostgreSQL 仍是选定路线，但其决定性 live recovery 价值要到 induced restart 才能证明。
+
+clean-room classification 为 `correct_before_expansion`：继续 bounded useful single-writer tasks；在 representative executable code task 加上 induced live coordinator restart recovery 之前，不扩大 concurrency、authority、runtime/forge count、distribution、generalized architecture 或 automatic-merge product authority。Rendered-transcript extraction 是 bounded compatibility bridge；renewed slow/inconclusive extraction、provider-specific branching、另一个普通任务需要基础设施修复，或 manual-free restart recovery 失败，都会证伪当前 bridge 并触发重新评估。
 
 ## 已确定的依赖方向
 
