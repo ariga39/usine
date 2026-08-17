@@ -46,6 +46,12 @@ interface TaskResult {
   delivery: DeliveryResult | null;
   blocker: string | null;
   writer: { repository: string; generation: number };
+  evidence: {
+    workflowId: string;
+    implementerActivations: number;
+    reviewCycles: number;
+    changesRequestedBatches: number;
+  };
 }
 
 interface WorkflowInput {
@@ -198,13 +204,18 @@ function sessionIdFromJsonl(stdout: string): string | null {
   return null;
 }
 
-async function runImplementer(input: WorkflowInput): Promise<ImplementerResult> {
+async function runImplementer(
+  input: WorkflowInput,
+  activation: number,
+  findings: string[],
+  previousSha: string,
+): Promise<ImplementerResult> {
   const workspace = await ensureWorktree(input);
   const schemaPath = resolve(input.stateDirectory, "schemas", "implementer.json");
   const outputPath = resolve(
     input.stateDirectory,
     "observations",
-    `${input.contract.id}-implementer.json`,
+    `${input.contract.id}-implementer-${activation}.json`,
   );
   await mkdir(dirname(schemaPath), { recursive: true });
   await mkdir(dirname(outputPath), { recursive: true });
@@ -216,6 +227,7 @@ async function runImplementer(input: WorkflowInput): Promise<ImplementerResult> 
     `Instructions: ${input.contract.instructions}`,
     `Acceptance: ${input.contract.acceptance.join("; ")}`,
     `Non-goals: ${input.contract.nonGoals.join("; ")}`,
+    ...(findings.length > 0 ? [`Aggregated review findings: ${findings.join("; ")}`] : []),
   ].join("\n");
   const binary = process.env.USINE_CODEX_BIN ?? "codex";
   const invocation = codexCommand(binary, [
@@ -246,8 +258,8 @@ async function runImplementer(input: WorkflowInput): Promise<ImplementerResult> 
   const status = await execa("git", ["-C", workspace, "status", "--porcelain"]);
   if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
   const candidateSha = (await execa("git", ["-C", workspace, "rev-parse", "HEAD"])).stdout;
-  if (candidateSha === input.contract.baseSha)
-    throw new Error("implementer did not create a candidate commit");
+  if (candidateSha === previousSha)
+    throw new Error("implementer did not create a new candidate commit");
   await execa("git", [
     "-C",
     workspace,
@@ -289,7 +301,7 @@ async function withDisposableWorktree<T>(
 }
 
 async function runCheck(input: WorkflowInput, sha: string): Promise<CheckResult> {
-  return withDisposableWorktree(input, "check-1", sha, async (path) => {
+  return withDisposableWorktree(input, `check-${sha}`, sha, async (path) => {
     const result = await execa("sh", ["-lc", input.contract.projectCheck.command], {
       cwd: path,
       env: workerEnvironment("implementer"),
@@ -311,13 +323,14 @@ async function runReviewer(
   input: WorkflowInput,
   sha: string,
   check: CheckResult,
+  cycle: number,
 ): Promise<ReviewResult> {
-  return withDisposableWorktree(input, "review-1", sha, async (path) => {
+  return withDisposableWorktree(input, `review-${sha}`, sha, async (path) => {
     const schemaPath = resolve(input.stateDirectory, "schemas", "reviewer.json");
     const outputPath = resolve(
       input.stateDirectory,
       "observations",
-      `${input.contract.id}-reviewer.json`,
+      `${input.contract.id}-reviewer-${cycle}.json`,
     );
     await mkdir(dirname(schemaPath), { recursive: true });
     await mkdir(dirname(outputPath), { recursive: true });
@@ -444,6 +457,12 @@ export async function admitTask(
         delivery: null,
         blocker: null,
         writer: { repository, generation: lease.generation },
+        evidence: {
+          workflowId: contract.id,
+          implementerActivations: 0,
+          reviewCycles: 0,
+          changesRequestedBatches: 0,
+        },
       };
       await dataSource.client.insert(taskRuns).values({
         taskId: contract.id,
@@ -472,41 +491,76 @@ export async function admitTask(
     async (): Promise<TaskResult> => {
       let result = await admit();
       if (input.stopAfterAdmitted) return result;
-
-      const implementation = await DBOS.runStep(() => runImplementer(input), {
-        name: "implementer-1",
-      });
-      result = await saveResult({
-        ...result,
-        state: "candidate",
-        candidateSha: implementation.candidateSha,
-      });
-      const check = await DBOS.runStep(() => runCheck(input, implementation.candidateSha), {
-        name: "check-1",
-      });
-      result = await saveResult({ ...result, state: "checked", check });
-      if (check.status !== "passed") {
-        return saveResult({ ...result, state: "blocked", blocker: "project check failed" });
-      }
-      const review = await DBOS.runStep(
-        () => runReviewer(input, implementation.candidateSha, check),
-        { name: "review-1" },
-      );
-      result = await saveResult({ ...result, state: "reviewed", review });
-      if (review.verdict !== "approved") {
-        return saveResult({
+      let findings: string[] = [];
+      let previousSha = input.contract.baseSha;
+      for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
+        const activation = result.evidence.implementerActivations + 1;
+        const implementation = await DBOS.runStep(
+          () => runImplementer(input, activation, findings, previousSha),
+          { name: `implementer-${activation}` },
+        );
+        result = await saveResult({
           ...result,
-          state: "blocked",
-          blocker: `review ${review.verdict}: ${review.summary}`,
+          state: "candidate",
+          candidateSha: implementation.candidateSha,
+          check: null,
+          review: null,
+          delivery: null,
+          blocker: null,
+          evidence: { ...result.evidence, implementerActivations: activation },
         });
+        const check = await DBOS.runStep(() => runCheck(input, implementation.candidateSha), {
+          name: `check-${cycle}`,
+        });
+        result = await saveResult({ ...result, state: "checked", check });
+        if (check.status !== "passed") {
+          return saveResult({ ...result, state: "blocked", blocker: "project check failed" });
+        }
+        const review = await DBOS.runStep(
+          () => runReviewer(input, implementation.candidateSha, check, cycle),
+          { name: `review-${cycle}` },
+        );
+        result = await saveResult({
+          ...result,
+          state: "reviewed",
+          review,
+          evidence: { ...result.evidence, reviewCycles: cycle },
+        });
+        if (review.verdict === "approved") {
+          const delivery = await DBOS.runStep(
+            () => recordDelivery(input, implementation.candidateSha),
+            { name: "delivery" },
+          );
+          return saveResult({ ...result, state: "reviewed_pr", delivery });
+        }
+        if (review.verdict === "inconclusive") {
+          return saveResult({
+            ...result,
+            state: "blocked",
+            blocker: `review inconclusive: ${review.summary}`,
+          });
+        }
+        result = await saveResult({
+          ...result,
+          evidence: {
+            ...result.evidence,
+            changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
+          },
+        });
+        if (
+          cycle >= input.contract.budget.maxReviewCycles ||
+          activation >= input.contract.budget.maxImplementerActivations
+        ) {
+          return saveResult({
+            ...result,
+            state: "blocked",
+            blocker: "review changes requested after recovery budget was exhausted",
+          });
+        }
+        findings = review.findings;
+        previousSha = implementation.candidateSha;
       }
-      const delivery = await DBOS.runStep(
-        () => recordDelivery(input, implementation.candidateSha),
-        {
-          name: "delivery",
-        },
-      );
-      return saveResult({ ...result, state: "reviewed_pr", delivery });
+      return saveResult({ ...result, state: "blocked", blocker: "review budget exhausted" });
     },
     { name: "firstDeliveryWorkflow" },
   );
