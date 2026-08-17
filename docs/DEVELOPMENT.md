@@ -47,14 +47,14 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 
 除空仓库 root commit 外，不在 main 直接开发。
 
-1. 创建一个有明确 outcome、scope、non-goals 和 acceptance 的 GitHub Issue。
+1. 创建一个有明确 outcome、scope、non-goals、acceptance 和 `first_merge_checkpoint` 的 GitHub Issue。Outcome 必须是最小可独立使用、验证和回滚的行为；更大的 product milestone 通过后续串行 Issue/PR 继续，不得成为一次大 PR 的理由。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
 3. 每个 branch 只实现一个 Issue。实现 agent 只写该任务声明的 surfaces。
 4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。
 5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
 6. scoped review/fix 在同一 PR 收敛；checks 与 fresh semantic verdict 通过后由 orchestrator 自动 merge，并继续下一项已授权 Issue，不等待用户监督。
 
-GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、验收与停止条件；它被 gitignore，不积累成第二套任务系统。
+GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、验收、`first_merge_checkpoint` 证据与停止条件；它被 gitignore，不积累成第二套任务系统。
 
 ## 3. 有界并排开发
 
@@ -112,11 +112,14 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 默认选择最小可合并 PR，而不是把一条路线的所有后续能力塞进一次“大而全”交付。若一个 diff 已经包含多个可独立验证、可独立回滚的 outcome，应拆成串行小 Issue/PR；不要用 stacked-PR 管理本身制造新的协调负担。
 
+`first_merge_checkpoint` 是确定性切分点：一旦它的 scoped tests/checks 通过，必须先 commit、push、开 PR、focused review 和 merge；later recovery mode、相邻 adapter 或更完整 product milestone 进入下一 Issue。Reviewer 只能用当前 Issue acceptance 和 canonical invariant 阻塞该 PR；不使当前 claim 失真的 concern 必须另开 Issue，不能延长当前 branch。
+
 出现以下情况时停止扩张，先提交 decision note 或缩小方案：
 
 - 为当前 Issue 新增第二种 runtime、forge、database 或 sandbox adapter；
 - 创建没有当前生产 caller 的通用 interface；
 - 测试数量增长，但 Issue 的端到端状态没有前进；
+- first merge checkpoint 已 green，但代码仍只在本地或 reviewer 正按最终 milestone 扩大当前 PR；
 - reviewer 要求证明部署威胁模型之外的敌对环境；
 - 一个修复引入新的 task tree 才能解释它；
 - agent 连续长时间 reasoning 而没有 tool call、diff、测试结果或其他可验证进展。
