@@ -167,7 +167,7 @@ Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续
 
 1. 主编排者在临时 clean-room 目录准备有界 evidence packet：四份 canonical 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
 2. 审计者必须是未参与当前设计/实现的 fresh session。设计方向审计默认只看 packet；若需要验证“代码确实这样工作”的 claim，再提供 exact SHA 的只读 checkout，而不是作者 worktree。
-3. Prompt 固定要求检查：目标是否被 proxy goal 替代、哪些复杂度可以删除、library 是否被重复实现、开发是否真实可并排、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。
+3. Prompt 固定要求主动挑战所选机制：如果今天只从用户 outcome 出发是否仍会选择同一路线、最便宜的可信替代方案是什么、哪些复杂度可以删除、是否重复实现了 library、开发是否真实可并排、什么证据会证伪当前路线、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。审计可以跨越当前 Issue non-goals，报告 deletion、replacement、`correct_before_expansion` 或 `stop_and_redesign` 建议。
 4. 报告输出 `continue`、`correct_before_expansion` 或 `stop_and_redesign`，并把 finding 区分为 direction blocker、current-PR defect 和 later concern。
 5. 主编排者必须把 direction blocker 映射到当前 PR 修订、一个新 Issue 或用户 decision。完成后最多做一次 focused delta audit；later concern 不得无限延长当前 checkpoint。
 

@@ -4,11 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import { describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.url));
 const fakeCodexPath = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 const fakeHerdrPath = fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url));
+const failClosedExtractorCases = [
+  "extractor-provider-error",
+  "extractor-invalid-schema",
+  "extractor-stale-sha",
+] as const;
 
 interface FakeHerdrEvent {
   command: string[];
@@ -52,6 +57,95 @@ function currentTaskHerdrEvents(events: FakeHerdrEvent[], taskId: string): FakeH
     return false;
   });
 }
+
+const extractorRequests: Array<{
+  body: Record<string, unknown>;
+  authorization: string | undefined;
+  contentType: string | undefined;
+  method: string | undefined;
+  url: string | undefined;
+}> = [];
+let extractor: ReturnType<typeof createServer> | undefined;
+
+beforeAll(async () => {
+  if (!process.env.USINE_TEST_DATABASE_URL) return;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    extractorRequests.push({
+      body,
+      authorization: request.headers.authorization,
+      contentType: request.headers["content-type"],
+      method: request.method,
+      url: request.url,
+    });
+    if (body.model === "extractor-provider-error") {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "provider unavailable" } }));
+      return;
+    }
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const userMessage = messages.find(
+      (message): message is { role: string; content: string } =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as { role?: unknown }).role === "user" &&
+        typeof (message as { content?: unknown }).content === "string",
+    );
+    const transcript = userMessage?.content ?? "";
+    const marker = "USINE_REVIEW_VERDICT=";
+    const markerIndex = transcript.indexOf(marker);
+    const shaBreak = transcript.match(/"sha":"([0-9a-f]{20})\n([0-9a-f]{20})"/);
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "unexpected extractor route" } }));
+      return;
+    }
+    if (markerIndex < 0 || !shaBreak) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "missing transcript" } }));
+      return;
+    }
+    const renderedPayload = transcript.slice(markerIndex + marker.length).trim();
+    const verdict = JSON.parse(
+      renderedPayload.replace(shaBreak[0], `"sha":"${shaBreak[1]}${shaBreak[2]}"`),
+    );
+    if (body.model === "extractor-invalid-schema") delete verdict.summary;
+    if (body.model === "extractor-stale-sha") verdict.sha = "0".repeat(40);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: JSON.stringify(verdict) },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+    );
+  });
+  extractor = server;
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("extractor did not listen");
+  process.env.USINE_EXTRACTOR_API_KEY = "extractor-secret";
+  process.env.USINE_EXTRACTOR_BASE_URL = `http://127.0.0.1:${address.port}/v1/`;
+});
+
+afterAll(async () => {
+  const server = extractor;
+  if (!process.env.USINE_TEST_DATABASE_URL || !server || !server.listening) return;
+  delete process.env.USINE_EXTRACTOR_API_KEY;
+  delete process.env.USINE_EXTRACTOR_BASE_URL;
+  await new Promise<void>((resolveClose, rejectClose) =>
+    server.close((error) => (error ? rejectClose(error) : resolveClose())),
+  );
+});
 
 async function createFallbackFixture(directory: string, taskId: string, maxElapsedMs = 60_000) {
   const repository = join(directory, "repository");
@@ -928,13 +1022,14 @@ describe("usine run", () => {
       await execa("git", ["add", "task.json"], { cwd: repository });
       await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
       const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
-
+      const extractorRequestStart = extractorRequests.length;
       const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodex,
           USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
+          USINE_EXTRACTOR_MODEL: "cheap-extractor",
           USINE_STATE_DIR: stateDirectory,
         },
         reject: false,
@@ -954,9 +1049,74 @@ describe("usine run", () => {
       expect(result.review).toMatchObject({ sha: result.candidateSha, verdict: "approved" });
       expect(result.delivery.sha).toBe(result.candidateSha);
       expect(
-        (await execa("git", ["show", `${result.candidateSha}:delivered.txt`], { cwd: repository }))
-          .stdout,
+        (
+          await execa("git", ["show", `${result.candidateSha}:delivered.txt`], {
+            cwd: repository,
+          })
+        ).stdout,
       ).toContain("review-fixed");
+      const requests = extractorRequests.slice(extractorRequestStart);
+      expect(requests).toHaveLength(2);
+      for (const { body, authorization, contentType, method, url } of requests) {
+        expect(method).toBe("POST");
+        expect(url).toBe("/v1/chat/completions");
+        expect(authorization).toBe("Bearer extractor-secret");
+        expect(contentType).toContain("application/json");
+        expect(Object.keys(body)).toEqual(
+          expect.arrayContaining(["messages", "model", "response_format"]),
+        );
+        expect(body.model).toBe("cheap-extractor");
+        expect(body.response_format).toMatchObject({
+          type: "json_schema",
+          json_schema: expect.objectContaining({ strict: true }),
+        });
+        expect(body).not.toHaveProperty("sha");
+        expect(body.messages).toHaveLength(2);
+        expect(body.messages).toEqual([
+          expect.objectContaining({ role: "system" }),
+          expect.objectContaining({ role: "user" }),
+        ]);
+        const messages = body.messages as Array<{ content: string }>;
+        expect(messages[0]!.content).toContain("Extract exactly one reviewer verdict");
+        expect(messages[1]!.content).toContain("USINE_REVIEW_VERDICT=");
+        expect(messages[1]!.content).not.toContain(`Candidate SHA: ${result.candidateSha}`);
+      }
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "fails closed without delivery for extractor failures",
+    async () => {
+      for (const extractorModel of failClosedExtractorCases) {
+        const directory = await mkdtemp(join(tmpdir(), `usine-extractor-${extractorModel}-`));
+        const taskId = `${extractorModel}-${Date.now()}`;
+        const fixture = await createFallbackFixture(directory, taskId);
+        const deliveryCounter = join(directory, "delivery.json");
+        const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+          env: {
+            USINE_CODEX_BIN: fakeCodexPath,
+            USINE_HERDR_BIN: fakeHerdrPath,
+            USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+            USINE_DELIVERY_MODE: "record",
+            USINE_EXTRACTOR_MODEL: extractorModel,
+            USINE_RECORD_DELIVERY_COUNTER: deliveryCounter,
+            USINE_STATE_DIR: fixture.stateDirectory,
+          },
+          reject: false,
+        });
+
+        expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+        const result = JSON.parse(run.stdout);
+        expect(result).toMatchObject({
+          state: "blocked",
+          candidateSha: expect.any(String),
+          review: { verdict: "inconclusive" },
+          delivery: null,
+        });
+        expect(result.blocker).toContain("review inconclusive");
+        await expect(readFile(deliveryCounter, "utf8")).rejects.toThrow();
+      }
     },
     30_000,
   );

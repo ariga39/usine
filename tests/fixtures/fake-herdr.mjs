@@ -19,6 +19,8 @@ if (args[0] === "pane" && args[1] === "split") {
   const persistentEnvironment = {
     USINE_DATABASE_URL: "server-secret-database",
     USINE_GITHUB_TEST_TOKEN: "server-secret-github",
+    USINE_EXTRACTOR_API_KEY: "server-secret-extractor",
+    OPENAI_API_KEY: "server-secret-openai",
   };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--env") {
