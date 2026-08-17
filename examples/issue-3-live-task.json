@@ -1,0 +1,40 @@
+{
+  "id": "issue-3-live-self-host",
+  "repository": {
+    "path": "/Users/kagami/dev/usine/.worktrees/issue-3",
+    "owner": "ariga39",
+    "name": "usine"
+  },
+  "baseSha": "eff81651a582a4dd4a94c24c090ebadd2050b1fe",
+  "instructions": "Preserve this committed Task Contract in the candidate by running `mkdir -p examples && git show agent/3-first-delivery-loop:examples/issue-3-live-task.json > examples/issue-3-live-task.json`. Then create docs/FIRST_VERTICAL.md with the exact heading `# First live vertical` and a sentence stating that the file was created by Usine's self-hosted Issue #3 characterization. Do not modify implementation code or canonical design. Commit both files and leave the worktree clean.",
+  "acceptance": [
+    "examples/issue-3-live-task.json is present in the candidate",
+    "docs/FIRST_VERTICAL.md contains the self-hosted Issue #3 characterization statement"
+  ],
+  "nonGoals": [
+    "implementation refactoring",
+    "new runtime behavior",
+    "canonical design changes",
+    "automatic merge behavior"
+  ],
+  "projectCheck": {
+    "command": "test -f examples/issue-3-live-task.json && test -f docs/FIRST_VERTICAL.md && grep -Fq \"self-hosted Issue #3 characterization\" docs/FIRST_VERTICAL.md",
+    "timeoutMs": 30000
+  },
+  "budget": {
+    "maxImplementerActivations": 2,
+    "maxReviewCycles": 2,
+    "maxElapsedMs": 900000
+  },
+  "authorization": {
+    "source": "https://github.com/ariga39/usine/issues/3",
+    "delivery": true
+  },
+  "delivery": {
+    "baseBranch": "main",
+    "branch": "agent/3-first-delivery-loop",
+    "issue": 3,
+    "title": "Deliver the first autonomous reviewed-PR vertical",
+    "body": "Implements the first serial `usine run <task-contract>` delivery vertical with durable admission, one writer, exact-SHA checks and fresh review, bounded recovery, and GitHub App delivery.\n\nMachine evidence before the live run: format/lint/typecheck/build passed; PostgreSQL public-seam suite passed 10/10."
+  }
+}
