@@ -1,0 +1,42 @@
+{
+  "name": "usine",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "usine": "dist/cli.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "db:generate": "drizzle-kit generate",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dbos-inc/dbos-sdk": "latest",
+    "@dbos-inc/drizzle-datasource": "latest",
+    "drizzle-orm": "latest",
+    "execa": "latest",
+    "octokit": "latest",
+    "pg": "latest",
+    "pino": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/pg": "latest",
+    "drizzle-kit": "latest",
+    "oxfmt": "latest",
+    "oxlint": "latest",
+    "tsdown": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  },
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "packageManager": "pnpm@11.22.0"
+}
