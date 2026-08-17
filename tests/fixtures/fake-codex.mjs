@@ -35,6 +35,8 @@ for (const key of [
   "USINE_GITHUB_PRIVATE_KEY_PATH",
   "GH_TOKEN",
   "GITHUB_TOKEN",
+  "USINE_EXTRACTOR_API_KEY",
+  "OPENAI_API_KEY",
 ]) {
   if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
 }

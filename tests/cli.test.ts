@@ -9,6 +9,11 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.url));
 const fakeCodexPath = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 const fakeHerdrPath = fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url));
+const failClosedExtractorCases = [
+  "extractor-provider-error",
+  "extractor-invalid-schema",
+  "extractor-stale-sha",
+] as const;
 
 interface FakeHerdrEvent {
   command: string[];
@@ -75,6 +80,11 @@ beforeAll(async () => {
       method: request.method,
       url: request.url,
     });
+    if (body.model === "extractor-provider-error") {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "provider unavailable" } }));
+      return;
+    }
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const userMessage = messages.find(
       (message): message is { role: string; content: string } =>
@@ -101,6 +111,8 @@ beforeAll(async () => {
     const verdict = JSON.parse(
       renderedPayload.replace(shaBreak[0], `"sha":"${shaBreak[1]}${shaBreak[2]}"`),
     );
+    if (body.model === "extractor-invalid-schema") delete verdict.summary;
+    if (body.model === "extractor-stale-sha") verdict.sha = "0".repeat(40);
     response.writeHead(200, { "content-type": "application/json" });
     response.end(
       JSON.stringify({
@@ -1068,6 +1080,42 @@ describe("usine run", () => {
         expect(messages[0]!.content).toContain("Extract exactly one reviewer verdict");
         expect(messages[1]!.content).toContain("USINE_REVIEW_VERDICT=");
         expect(messages[1]!.content).not.toContain(`Candidate SHA: ${result.candidateSha}`);
+      }
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "fails closed without delivery for extractor failures",
+    async () => {
+      for (const extractorModel of failClosedExtractorCases) {
+        const directory = await mkdtemp(join(tmpdir(), `usine-extractor-${extractorModel}-`));
+        const taskId = `${extractorModel}-${Date.now()}`;
+        const fixture = await createFallbackFixture(directory, taskId);
+        const deliveryCounter = join(directory, "delivery.json");
+        const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+          env: {
+            USINE_CODEX_BIN: fakeCodexPath,
+            USINE_HERDR_BIN: fakeHerdrPath,
+            USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+            USINE_DELIVERY_MODE: "record",
+            USINE_EXTRACTOR_MODEL: extractorModel,
+            USINE_RECORD_DELIVERY_COUNTER: deliveryCounter,
+            USINE_STATE_DIR: fixture.stateDirectory,
+          },
+          reject: false,
+        });
+
+        expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+        const result = JSON.parse(run.stdout);
+        expect(result).toMatchObject({
+          state: "blocked",
+          candidateSha: expect.any(String),
+          review: { verdict: "inconclusive" },
+          delivery: null,
+        });
+        expect(result.blocker).toContain("review inconclusive");
+        await expect(readFile(deliveryCounter, "utf8")).rejects.toThrow();
       }
     },
     30_000,

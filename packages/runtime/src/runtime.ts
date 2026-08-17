@@ -551,6 +551,8 @@ async function runImplementer(
     "USINE_GITHUB_PRIVATE_KEY_PATH",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    "USINE_EXTRACTOR_API_KEY",
+    "OPENAI_API_KEY",
   ];
   const paneResult = await runHerdr([
     "pane",
@@ -833,6 +835,8 @@ async function runReviewer(
       "USINE_GITHUB_PRIVATE_KEY_PATH",
       "GH_TOKEN",
       "GITHUB_TOKEN",
+      "USINE_EXTRACTOR_API_KEY",
+      "OPENAI_API_KEY",
     ];
     const paneResult = await runHerdr([
       "pane",
