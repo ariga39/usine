@@ -29,18 +29,18 @@ function currentTaskHerdrEvents(events: FakeHerdrEvent[], taskId: string): FakeH
   const panes = new Set(
     splits.map((event) => event.pane).filter((pane): pane is string => typeof pane === "string"),
   );
-  const starts = events.filter((event) => {
+  const startAttempts = events.filter((event) => {
     const pane = herdrOption(event, "--pane");
-    return event.type === "start" && pane !== undefined && panes.has(pane);
+    return ["start", "busy"].includes(event.type) && pane !== undefined && panes.has(pane);
   });
   const agents = new Set(
-    starts
+    startAttempts
       .map((event) => event.command[2])
       .filter((agent): agent is string => typeof agent === "string"),
   );
   return events.filter((event) => {
     if (event.type === "split") return splits.includes(event);
-    if (event.type === "start") return starts.includes(event);
+    if (["start", "busy"].includes(event.type)) return startAttempts.includes(event);
     if (event.type === "close") {
       const pane = event.command[2];
       return pane !== undefined && panes.has(pane);
@@ -140,6 +140,85 @@ describe("usine run", () => {
       ).rejects.toThrow();
     },
     30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "retries a busy Herdr pane start within the same delivery cycle",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-pane-busy-"));
+      const taskId = `herdr-pane-busy-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const herdrLog = join(directory, "herdr.jsonl");
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "busy-once",
+          USINE_HERDR_LOG: herdrLog,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+        evidence: { implementerActivations: 1, reviewCycles: 1 },
+      });
+      expect(result.check.sha).toBe(result.candidateSha);
+      expect(result.review.sha).toBe(result.candidateSha);
+      expect(result.delivery.sha).toBe(result.candidateSha);
+
+      const events = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const taskEvents = currentTaskHerdrEvents(events, taskId);
+      expect(taskEvents.filter((event) => event.type === "busy")).toHaveLength(1);
+      expect(taskEvents.filter((event) => event.type === "start")).toHaveLength(2);
+      expect(taskEvents.filter((event) => event.type === "close")).toHaveLength(2);
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "does not retry a non-busy Herdr agent start error",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-start-failure-"));
+      const taskId = `herdr-start-failure-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const herdrLog = join(directory, "herdr.jsonl");
+      const startedAt = Date.now();
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "start-fail",
+          USINE_HERDR_LOG: herdrLog,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({ state: "blocked", candidateSha: null });
+      expect(result.blocker).toContain("herdr agent start failed");
+      expect(Date.now() - startedAt).toBeLessThan(4_000);
+      const events = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.filter((event) => event.type === "start")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "close")).toHaveLength(1);
+    },
+    10_000,
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
