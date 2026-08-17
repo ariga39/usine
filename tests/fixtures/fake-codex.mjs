@@ -22,6 +22,15 @@ for (const key of [
   if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
 }
 const prompt = args.at(-1) ?? "";
+const modelIndex = args.findIndex((arg) => arg === "--model" || arg === "-m");
+const model = args[modelIndex + 1];
+const expectedModel =
+  process.env.USINE_CODEX_ROLE === "implementer" ? "gpt-5.6-luna" : "gpt-5.6-sol";
+if (model !== expectedModel) {
+  throw new Error(
+    `${process.env.USINE_CODEX_ROLE} expected model ${expectedModel}, received ${model ?? "none"}`,
+  );
+}
 
 if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (prompt.includes("Hang forever")) {

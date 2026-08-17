@@ -64,6 +64,8 @@ interface WorkflowInput {
   repositoryIdentity: string;
   stateDirectory: string;
   deadlineEpochMs: number;
+  implementerModel: string;
+  reviewerModel: string;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
   crashAfterActivation: boolean;
@@ -340,6 +342,8 @@ async function runImplementer(
   const binary = process.env.USINE_CODEX_BIN ?? "codex";
   const invocation = codexCommand(binary, [
     "exec",
+    "--model",
+    input.implementerModel,
     "--json",
     "--output-schema",
     schemaPath,
@@ -491,6 +495,8 @@ async function runReviewer(
     const binary = process.env.USINE_CODEX_BIN ?? "codex";
     const invocation = codexCommand(binary, [
       "exec",
+      "--model",
+      input.reviewerModel,
       "--ephemeral",
       "--json",
       "--output-schema",
@@ -803,6 +809,8 @@ export async function admitTask(
     repositoryIdentity,
     stateDirectory,
     deadlineEpochMs,
+    implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
+    reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",
     crashAfterActivation: process.env.USINE_CRASH_AFTER === "activation",
