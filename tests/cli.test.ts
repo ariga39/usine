@@ -444,7 +444,7 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
-    "pushes with a lease and creates or probes one PR and approval attestation",
+    "recovers ambiguous PR and attestation responses without duplicate effects",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-github-"));
       const repository = join(directory, "repository");
@@ -497,9 +497,14 @@ describe("usine run", () => {
       let attestationCreates = 0;
       let prExists = false;
       let remoteSha: string | null = null;
-      let activeCliPid: number | undefined;
       let failureStage: "pr" | "attestation" | null = "pr";
-      const comments: Array<{ id: number; body: string; html_url: string }> = [];
+      const comments: Array<{
+        id: number;
+        body: string;
+        html_url: string;
+        performed_via_github_app: { slug: string };
+        user: { type: string };
+      }> = [];
       const api = createServer(async (request, response) => {
         const url = new URL(request.url ?? "/", "http://localhost");
         const send = (status: number, value: unknown) => {
@@ -515,7 +520,14 @@ describe("usine run", () => {
           send(
             200,
             prExists
-              ? [{ number: 7, html_url: "http://fixture/pr/7", head: { sha: remoteSha } }]
+              ? [
+                  {
+                    number: 7,
+                    html_url: "http://fixture/pr/7",
+                    state: "open",
+                    head: { sha: remoteSha },
+                  },
+                ]
               : [],
           );
         } else if (request.method === "POST" && url.pathname.endsWith("/pulls")) {
@@ -524,8 +536,8 @@ describe("usine run", () => {
           remoteSha = (
             await execa("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/${branch}`])
           ).stdout;
-          if (failureStage === "pr" && activeCliPid) {
-            process.kill(activeCliPid, "SIGKILL");
+          if (failureStage === "pr") {
+            failureStage = "attestation";
             response.destroy();
             return;
           }
@@ -535,7 +547,18 @@ describe("usine run", () => {
             head: { sha: remoteSha },
           });
         } else if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) {
-          send(200, comments);
+          const foreign = remoteSha
+            ? [
+                {
+                  id: 54,
+                  body: `<!-- usine-approval:${taskId}:${remoteSha} -->\nforeign body`,
+                  html_url: "http://fixture/pr/7#comment-54",
+                  performed_via_github_app: { slug: "foreign-app" },
+                  user: { type: "Bot" },
+                },
+              ]
+            : [];
+          send(200, [...foreign, ...comments]);
         } else if (request.method === "POST" && url.pathname.endsWith("/issues/7/comments")) {
           let body = "";
           request.on("data", (chunk) => (body += String(chunk)));
@@ -546,10 +569,12 @@ describe("usine run", () => {
               id: 99,
               body: parsed.body,
               html_url: "http://fixture/pr/7#comment-99",
+              performed_via_github_app: { slug: "usine-test-app" },
+              user: { type: "Bot" },
             };
             comments.push(comment);
-            if (failureStage === "attestation" && activeCliPid) {
-              process.kill(activeCliPid, "SIGKILL");
+            if (failureStage === "attestation") {
+              failureStage = null;
               response.destroy();
               return;
             }
@@ -570,33 +595,16 @@ describe("usine run", () => {
         USINE_DELIVERY_MODE: "github",
         USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
         USINE_GITHUB_GIT_URL: bareRemote,
+        USINE_GITHUB_APP_SLUG: "usine-test-app",
         USINE_GITHUB_TEST_TOKEN: "test-token",
         USINE_STATE_DIR: stateDirectory,
       };
       try {
-        const firstRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
+        const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
           env,
           reject: false,
         });
-        activeCliPid = firstRun.pid;
-        const interruptedPr = await firstRun;
-        failureStage = "attestation";
-        const secondRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
-          env,
-          reject: false,
-        });
-        activeCliPid = secondRun.pid;
-        const interruptedAttestation = await secondRun;
-        failureStage = null;
-        const thirdRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
-          env,
-          reject: false,
-        });
-        activeCliPid = thirdRun.pid;
-        const run = await thirdRun;
 
-        expect(interruptedPr.signal).toBe("SIGKILL");
-        expect(interruptedAttestation.signal).toBe("SIGKILL");
         expect(run.exitCode).toBe(0);
         const result = JSON.parse(run.stdout);
         expect(result).toMatchObject({
@@ -625,7 +633,7 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
-    "quarantines an open delivery PR whose head is not the candidate",
+    "quarantines a closed matching PR instead of creating another",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-pr-conflict-"));
       const repository = join(directory, "repository");
@@ -670,7 +678,7 @@ describe("usine run", () => {
       await execa("git", ["add", "task.json"], { cwd: repository });
       await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
       let prCreates = 0;
-      const api = createServer((request, response) => {
+      const api = createServer(async (request, response) => {
         const url = new URL(request.url ?? "/", "http://localhost");
         const send = (status: number, value: unknown) => {
           response.writeHead(status, { "content-type": "application/json" });
@@ -679,8 +687,23 @@ describe("usine run", () => {
         if (request.method === "GET" && url.pathname.includes("/git/ref/heads/")) {
           send(404, { message: "Not Found" });
         } else if (request.method === "GET" && url.pathname.endsWith("/pulls")) {
+          const candidate = (
+            await execa("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/${branch}`])
+          ).stdout;
           send(200, [
-            { number: 6, html_url: "http://fixture/pr/6", head: { sha: "f".repeat(40) } },
+            {
+              number: 6,
+              html_url: "http://fixture/pr/6",
+              state: "closed",
+              merged_at: null,
+              head: { sha: candidate },
+            },
+            {
+              number: 5,
+              html_url: "http://fixture/pr/5",
+              state: "open",
+              head: { sha: "f".repeat(40) },
+            },
           ]);
         } else if (request.method === "POST" && url.pathname.endsWith("/pulls")) {
           prCreates += 1;
@@ -700,13 +723,14 @@ describe("usine run", () => {
             USINE_DELIVERY_MODE: "github",
             USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
             USINE_GITHUB_GIT_URL: bareRemote,
+            USINE_GITHUB_APP_SLUG: "usine-test-app",
             USINE_GITHUB_TEST_TOKEN: "test-token",
             USINE_STATE_DIR: join(directory, "state"),
           },
           reject: false,
         });
         expect(result.exitCode).toBe(1);
-        expect(result.stderr).toContain("delivery quarantined");
+        expect(result.stderr).toContain("closed delivery PR");
         expect(prCreates).toBe(0);
       } finally {
         await new Promise<void>((resolveClose, rejectClose) =>

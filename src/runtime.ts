@@ -501,14 +501,24 @@ function httpStatus(error: unknown): number | undefined {
     : undefined;
 }
 
-async function githubClient(): Promise<{ octokit: InstanceType<typeof Octokit>; token: string }> {
+async function githubClient(): Promise<{
+  octokit: InstanceType<typeof Octokit>;
+  token: string;
+  appSlug: string;
+}> {
   const testToken = process.env.USINE_GITHUB_TEST_TOKEN;
   const apiUrl = process.env.USINE_GITHUB_API_URL;
+  const appSlug = process.env.USINE_GITHUB_APP_SLUG;
+  if (!appSlug) throw new Error("USINE_GITHUB_APP_SLUG is required");
   if (testToken) {
     if (!apiUrl || !/^http:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(apiUrl)) {
       throw new Error("USINE_GITHUB_TEST_TOKEN is restricted to a loopback API URL");
     }
-    return { octokit: new Octokit({ auth: testToken, baseUrl: apiUrl }), token: testToken };
+    return {
+      octokit: new Octokit({ auth: testToken, baseUrl: apiUrl }),
+      token: testToken,
+      appSlug,
+    };
   }
 
   const appId = process.env.USINE_GITHUB_APP_ID;
@@ -526,7 +536,23 @@ async function githubClient(): Promise<{ octokit: InstanceType<typeof Octokit>; 
   if (typeof authentication.token !== "string") {
     throw new Error("GitHub App did not produce an installation token");
   }
-  return { octokit, token: authentication.token };
+  return { octokit, token: authentication.token, appSlug };
+}
+
+function approvalAttestationBody(
+  input: WorkflowInput,
+  sha: string,
+  check: CheckResult,
+  review: ReviewResult,
+): string {
+  return [
+    `<!-- usine-approval:${input.contract.id}:${sha} -->`,
+    "Usine exact-SHA semantic approval attestation",
+    `- Candidate: \`${sha}\``,
+    `- Project check: \`${check.command}\` (${check.status})`,
+    `- Fresh reviewer verdict: \`${review.verdict}\``,
+    `- Review summary: ${review.summary}`,
+  ].join("\n");
 }
 
 async function githubDelivery(
@@ -537,7 +563,7 @@ async function githubDelivery(
 ): Promise<DeliveryResult> {
   const { owner, name: repo } = input.contract.repository;
   const { branch, baseBranch } = input.contract.delivery;
-  const { octokit, token } = await githubClient();
+  const { octokit, token, appSlug } = await githubClient();
   let expectedHead: string | null = null;
   try {
     const reference = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
@@ -573,10 +599,15 @@ async function githubDelivery(
     repo,
     head: `${owner}:${branch}`,
     base: baseBranch,
-    state: "open",
+    state: "all",
     per_page: 100,
   });
   const existingPullRequest = pullRequests.data.find((pullRequest) => pullRequest.head.sha === sha);
+  if (existingPullRequest && existingPullRequest.state !== "open") {
+    throw new Error(
+      `closed delivery PR #${existingPullRequest.number} already targets candidate ${sha}; delivery quarantined`,
+    );
+  }
   if (!existingPullRequest && pullRequests.data.length > 0) {
     const conflicting = pullRequests.data[0];
     throw new Error(
@@ -594,16 +625,26 @@ async function githubDelivery(
         title: input.contract.delivery.title,
         body: `${input.contract.delivery.body}\n\nCloses #${input.contract.delivery.issue}`,
         draft: false,
+        request: { retries: 0 },
       })
     ).data;
-  const marker = `<!-- usine-approval:${input.contract.id}:${sha} -->`;
+  const expectedAttestationBody = approvalAttestationBody(input, sha, check, review);
   const comments = await octokit.paginate(octokit.rest.issues.listComments, {
     owner,
     repo,
     issue_number: pullRequest.number,
     per_page: 100,
   });
-  const existingAttestation = comments.find((comment) => comment.body?.includes(marker));
+  const existingAttestation = comments.find((comment) => {
+    const identity = comment as typeof comment & {
+      performed_via_github_app?: { slug?: string } | null;
+    };
+    return (
+      comment.body === expectedAttestationBody &&
+      identity.performed_via_github_app?.slug === appSlug &&
+      comment.user?.type === "Bot"
+    );
+  });
   const attestation =
     existingAttestation ??
     (
@@ -611,14 +652,8 @@ async function githubDelivery(
         owner,
         repo,
         issue_number: pullRequest.number,
-        body: [
-          marker,
-          "Usine exact-SHA semantic approval attestation",
-          `- Candidate: \`${sha}\``,
-          `- Project check: \`${check.command}\` (${check.status})`,
-          `- Fresh reviewer verdict: \`${review.verdict}\``,
-          `- Review summary: ${review.summary}`,
-        ].join("\n"),
+        body: expectedAttestationBody,
+        request: { retries: 0 },
       })
     ).data;
   return {
@@ -636,9 +671,20 @@ async function deliver(
   check: CheckResult,
   review: ReviewResult,
 ): Promise<DeliveryResult> {
-  return process.env.USINE_DELIVERY_MODE === "record"
-    ? recordDelivery(input, sha)
-    : githubDelivery(input, sha, check, review);
+  if (process.env.USINE_DELIVERY_MODE === "record") return recordDelivery(input, sha);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await githubDelivery(input, sha, check, review);
+    } catch (error) {
+      lastError = error;
+      const status = httpStatus(error);
+      const retryable = status === undefined || status === 408 || status === 429 || status >= 500;
+      if (!retryable || attempt === 3 || Date.now() + 50 >= input.deadlineEpochMs) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+  }
+  throw lastError;
 }
 
 async function crashOnce(input: WorkflowInput, stage: "admitted" | "delivery"): Promise<boolean> {

@@ -12,6 +12,7 @@ pnpm build
 USINE_DATABASE_URL=postgresql://... \
 USINE_GITHUB_APP_ID=... \
 USINE_GITHUB_INSTALLATION_ID=... \
+USINE_GITHUB_APP_SLUG=... \
 USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
 node dist/cli.mjs run /path/to/committed-task-contract.json
 ```
