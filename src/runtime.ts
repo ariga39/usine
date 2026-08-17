@@ -51,6 +51,7 @@ interface TaskResult {
     implementerActivations: number;
     reviewCycles: number;
     changesRequestedBatches: number;
+    restartRecoveries: number;
   };
 }
 
@@ -60,6 +61,7 @@ interface WorkflowInput {
   repository: string;
   stateDirectory: string;
   stopAfterAdmitted: boolean;
+  crashAfterDelivery: boolean;
 }
 
 interface ImplementerResult {
@@ -382,13 +384,41 @@ async function recordDelivery(input: WorkflowInput, sha: string): Promise<Delive
   if (process.env.USINE_DELIVERY_MODE !== "record") {
     throw new Error("GitHub delivery is not configured");
   }
-  return {
+  const delivery: DeliveryResult = {
     sha,
     effect: "recorded",
     prNumber: input.contract.delivery.issue,
     url: `record://${input.contract.repository.owner}/${input.contract.repository.name}/pull/${input.contract.delivery.issue}`,
     attestationId: `${input.contract.id}:${sha}`,
   };
+  const counterPath = process.env.USINE_RECORD_DELIVERY_COUNTER;
+  if (counterPath) {
+    try {
+      const existing = JSON.parse(await readFile(counterPath, "utf8")) as {
+        count: number;
+        delivery: DeliveryResult;
+      };
+      if (existing.delivery.sha === sha) return existing.delivery;
+    } catch {
+      // A missing or incomplete record means the effect has not been confirmed.
+    }
+    await mkdir(dirname(counterPath), { recursive: true });
+    await writeFile(counterPath, JSON.stringify({ count: 1, delivery }));
+  }
+  return delivery;
+}
+
+async function crashOnceAfterDelivery(input: WorkflowInput): Promise<boolean> {
+  const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-delivery-crash`);
+  try {
+    await readFile(marker, "utf8");
+    return true;
+  } catch {
+    await mkdir(dirname(marker), { recursive: true });
+    await writeFile(marker, "crash injected after checkpointed delivery\n");
+    process.kill(process.pid, "SIGKILL");
+    return new Promise<boolean>(() => undefined);
+  }
 }
 
 async function writeResultArtifact(stateDirectory: string, result: TaskResult): Promise<void> {
@@ -414,6 +444,7 @@ export async function admitTask(
     repository,
     stateDirectory,
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
+    crashAfterDelivery: process.env.USINE_CRASH_AFTER === "delivery",
   };
 
   const dataSource = new DrizzleDataSource<UsineDatabase>(
@@ -462,6 +493,7 @@ export async function admitTask(
           implementerActivations: 0,
           reviewCycles: 0,
           changesRequestedBatches: 0,
+          restartRecoveries: 0,
         },
       };
       await dataSource.client.insert(taskRuns).values({
@@ -531,6 +563,18 @@ export async function admitTask(
             () => recordDelivery(input, implementation.candidateSha),
             { name: "delivery" },
           );
+          if (input.crashAfterDelivery) {
+            const recovered = await DBOS.runStep(() => crashOnceAfterDelivery(input), {
+              name: "crash-after-delivery",
+            });
+            result = {
+              ...result,
+              evidence: {
+                ...result.evidence,
+                restartRecoveries: result.evidence.restartRecoveries + (recovered ? 1 : 0),
+              },
+            };
+          }
           return saveResult({ ...result, state: "reviewed_pr", delivery });
         }
         if (review.verdict === "inconclusive") {

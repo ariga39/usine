@@ -265,4 +265,84 @@ describe("usine run", () => {
     },
     30_000,
   );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "recovers after a coordinator crash without duplicating writer or delivery",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-restart-"));
+      const repository = join(directory, "repository");
+      const stateDirectory = join(directory, "state");
+      const deliveryCounter = join(directory, "delivery.json");
+      await mkdir(repository);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(
+        join(repository, "check.mjs"),
+        'import { access } from "node:fs/promises"; await access("delivered.txt");\n',
+      );
+      await execa("git", ["add", "check.mjs"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `restart-${Date.now()}`;
+      const contractPath = join(repository, "task.json");
+      await writeFile(
+        contractPath,
+        JSON.stringify({
+          id: taskId,
+          repository: { path: repository, owner: "example", name: "fixture" },
+          baseSha,
+          instructions: "Create delivered.txt.",
+          acceptance: ["node check.mjs passes."],
+          nonGoals: [],
+          projectCheck: { command: "node check.mjs", timeoutMs: 10_000 },
+          budget: {
+            maxImplementerActivations: 2,
+            maxReviewCycles: 2,
+            maxElapsedMs: 60_000,
+          },
+          authorization: { source: "test issue", delivery: true },
+          delivery: {
+            baseBranch: "main",
+            branch: `agent/${taskId}`,
+            issue: 3,
+            title: "Fixture restart delivery",
+            body: "Fixture restart delivery body",
+          },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+      const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
+      const env = {
+        USINE_CODEX_BIN: fakeCodex,
+        USINE_CRASH_AFTER: "delivery",
+        USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+        USINE_DELIVERY_MODE: "record",
+        USINE_RECORD_DELIVERY_COUNTER: deliveryCounter,
+        USINE_STATE_DIR: stateDirectory,
+      };
+
+      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+      const recovered = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+
+      expect(interrupted.signal).toBe("SIGKILL");
+      expect(recovered.exitCode).toBe(0);
+      expect(JSON.parse(recovered.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        writer: { generation: 1 },
+        evidence: { restartRecoveries: 1 },
+      });
+      expect(JSON.parse(await readFile(deliveryCounter, "utf8"))).toMatchObject({
+        count: 1,
+      });
+    },
+    30_000,
+  );
 });
