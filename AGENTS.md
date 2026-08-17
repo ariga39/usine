@@ -20,6 +20,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - The deterministic coordinator owns authority and lifecycle state. LLMs perform bounded semantic work; their prose, exit status, and hooks are evidence, never completion authority.
 - Preserve one active writer per repository, isolated writable workspaces, immutable candidate SHAs, independent exact-SHA review, and credential separation.
 - Prefer mature libraries and platform primitives. Custom infrastructure requires evidence that an existing dependency cannot satisfy the need.
+- Lightweight bounded semantic transforms (classification, extraction, normalization, and short summaries) call a configured schema-constrained OpenAI-compatible API directly; do not route them through Herdr, Codex, or OpenCode agent runtimes unless repository, tool, or session capabilities are actually required.
 - Add architecture only when a current requirement crosses an existing boundary. Deferred ideas re-enter through an observed trigger and a new decision, not speculative placeholders.
 
 ## Development guardrails
@@ -55,7 +56,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - The primary orchestrator may self-review a diff, but it may not certify its own overall direction. Mandatory direction checkpoints require a fresh agent/session that did not author or implement the work.
 - Run a clean-room direction audit before accepting a new canonical design, after the first complete end-to-end autonomous delivery loop before scaling/generalizing it, and before materially expanding authority, runtime/forge count, distribution, or development concurrency.
 - Also trigger an early audit when three consecutive PRs fail to advance a user-visible vertical outcome, canonical authorities conflict, repeated compaction makes the route unclear, or implementation repeatedly grows low-level infrastructure instead of product behavior.
-- The audit must use a bounded evidence packet and must not inherit author chat or the historical task archive. Code claims may be checked in a read-only checkout. Details and budget are defined in `docs/DEVELOPMENT.md`.
+- The audit must use a bounded evidence packet and must not inherit author chat or the historical task archive. It must actively challenge the selected mechanism and may cross current Issue non-goals to recommend deletion, replacement, `correct_before_expansion`, or `stop_and_redesign`. Code claims may be checked in a read-only checkout. Details and budget are defined in `docs/DEVELOPMENT.md`.
 - A direction audit blocks expansion, not useful work on an already-safe path. Resolve blocking findings or record an explicit user decision before crossing the checkpoint; summaries and ordinary PR review cannot waive it.
 
 ## Drift stop rule

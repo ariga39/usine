@@ -4,6 +4,8 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
+import { createOpenAI } from "@ai-sdk/openai";
+import { generateText, Output } from "ai";
 import { and, eq } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -70,6 +72,7 @@ interface WorkflowInput {
   implementerProfile: string;
   reviewerModel: string;
   extractorModel: string;
+  extractorBaseUrl: string;
   reviewerReasoningEffort: string;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
@@ -121,18 +124,6 @@ const implementerJsonSchema = {
   },
 };
 
-const reviewerJsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["sha", "verdict", "summary", "findings"],
-  properties: {
-    sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-    verdict: { type: "string", enum: ["approved", "changes_requested", "inconclusive"] },
-    summary: { type: "string" },
-    findings: { type: "array", items: { type: "string" } },
-  },
-};
-
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
 const coordinatorRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const canonicalDocumentPaths = [
@@ -152,6 +143,14 @@ function operationTimeout(input: WorkflowInput, maximum = Number.POSITIVE_INFINI
   const remaining = input.deadlineEpochMs - Date.now() - 150;
   if (remaining <= 0) throw new ElapsedBudgetError();
   return Math.max(1, Math.min(remaining, maximum));
+}
+
+function configuredExtractorBaseUrl(): string {
+  return (
+    process.env.USINE_EXTRACTOR_BASE_URL ??
+    process.env.OPENAI_BASE_URL ??
+    "https://api.openai.com/v1"
+  );
 }
 
 function processTimedOut(error: unknown): boolean {
@@ -175,69 +174,36 @@ async function extractReviewerVerdict(
   input: WorkflowInput,
   transcript: string,
   sha: string,
-  cycle: number,
 ): Promise<ReviewResult> {
-  const schemaPath = resolve(input.stateDirectory, "schemas", "reviewer.json");
-  const outputPath = resolve(
-    input.stateDirectory,
-    "observations",
-    `${input.contract.id}-reviewer-${cycle}.json`,
-  );
-  await mkdir(dirname(schemaPath), { recursive: true });
-  await mkdir(dirname(outputPath), { recursive: true });
-  await writeFile(schemaPath, JSON.stringify(reviewerJsonSchema));
-
-  const prompt = [
+  const systemMessage = [
     "Extract exactly one reviewer verdict from this rendered Herdr transcript.",
     "The transcript may contain terminal hard wrapping. Reconstruct the verdict only from the transcript.",
     "If the verdict is missing, truncated, ambiguous, or malformed, return verdict inconclusive.",
-    "Return only the schema-constrained JSON object.",
-    "Rendered reviewer transcript:",
-    transcript,
+    "Return only the schema-constrained JSON object described by the response format.",
   ].join("\n");
-  await rm(outputPath, { force: true });
-  const invocation = codexCommand(process.env.USINE_CODEX_BIN ?? "codex", [
-    "exec",
-    "--skip-git-repo-check",
-    "--model",
-    input.extractorModel,
-    "--json",
-    "--output-schema",
-    schemaPath,
-    "-o",
-    outputPath,
-    "--sandbox",
-    "read-only",
-    "-C",
-    input.stateDirectory,
-    "--config",
-    "model_reasoning_effort=low",
-    "--config",
-    "service_tier=default",
-    prompt,
-  ]);
-  const processResult = await execa(invocation.executable, invocation.args, {
-    cwd: input.stateDirectory,
-    env: { ...workerEnvironment("reviewer"), USINE_CODEX_EXTRACTOR: "1" },
-    extendEnv: false,
-    reject: false,
-    timeout: operationTimeout(input),
-  });
-  if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100)
-    throw new ElapsedBudgetError();
-  if (processResult.exitCode !== 0)
-    throw new Error(`review verdict extractor failed: ${processResult.stderr}`);
-
-  let extracted: unknown;
+  const apiKey = process.env.USINE_EXTRACTOR_API_KEY ?? process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("review verdict extractor credentials are not configured");
+  const abortSignal = AbortSignal.timeout(operationTimeout(input));
   try {
-    extracted = JSON.parse(await readFile(outputPath, "utf8"));
+    const openai = createOpenAI({
+      baseURL: input.extractorBaseUrl,
+      apiKey,
+    });
+    const { output } = await generateText({
+      model: openai.chat(input.extractorModel),
+      system: systemMessage,
+      prompt: transcript,
+      output: Output.object({ schema: reviewerOutputSchema }),
+      maxRetries: 0,
+      abortSignal,
+    });
+    if (output.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
+    return output;
   } catch (error) {
-    throw new Error("review verdict extractor produced no valid JSON", { cause: error });
+    if (abortSignal.aborted || Date.now() >= input.deadlineEpochMs - 100)
+      throw new ElapsedBudgetError();
+    throw new Error("review verdict extractor request failed", { cause: error });
   }
-  const review = reviewerOutputSchema.safeParse(extracted);
-  if (!review.success) throw new Error("review verdict extractor returned invalid schema");
-  if (review.data.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
-  return review.data;
 }
 
 async function startHerdrAgent<T extends { exitCode?: number | null; stderr: unknown }>(
@@ -943,7 +909,7 @@ async function runReviewer(
         const transcript = String(observed.stdout);
         if (transcript.replaceAll(/\r?\n/g, "").includes("USINE_REVIEW_VERDICT=")) {
           try {
-            const review = await extractReviewerVerdict(input, transcript, sha, cycle);
+            const review = await extractReviewerVerdict(input, transcript, sha);
             await closePane();
             return review;
           } catch (error) {
@@ -1263,6 +1229,7 @@ export async function admitTask(
     implementerProfile: process.env.USINE_IMPLEMENTER_PROFILE ?? "usine-implementer",
     reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
     extractorModel: process.env.USINE_EXTRACTOR_MODEL ?? "gpt-5.6-luna",
+    extractorBaseUrl: configuredExtractorBaseUrl(),
     reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",

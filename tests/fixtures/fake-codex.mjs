@@ -15,6 +15,9 @@ const reviewerExtractor =
   process.env.USINE_CODEX_ROLE === "reviewer" &&
   args[0] === "exec" &&
   process.env.USINE_CODEX_EXTRACTOR === "1";
+if (reviewerExtractor) {
+  throw new Error("reviewer verdict extraction must not invoke the Codex subprocess");
+}
 if (process.env.USINE_CODEX_ROLE === "reviewer" && args[0] === "exec" && !reviewerExtractor) {
   throw new Error("reviewer must not use direct codex exec");
 }
@@ -161,19 +164,7 @@ if (process.env.USINE_CODEX_ROLE === "implementer" && profile !== "usine-impleme
 if (process.env.USINE_CODEX_ROLE === "reviewer" && profile !== undefined) {
   throw new Error(`reviewer must remain fresh without implementer profile, received ${profile}`);
 }
-if (reviewerExtractor) {
-  const configValues = args.flatMap((arg, index) => (arg === "--config" ? [args[index + 1]] : []));
-  if (!configValues.includes("model_reasoning_effort=low")) {
-    throw new Error("reviewer extractor must set model_reasoning_effort=low explicitly");
-  }
-  if (!configValues.includes("service_tier=default")) {
-    throw new Error("reviewer extractor must set service_tier=default explicitly");
-  }
-  const sandboxIndex = args.findIndex((arg) => arg === "--sandbox");
-  if (sandboxIndex < 0 || args[sandboxIndex + 1] !== "read-only") {
-    throw new Error("reviewer extractor must use a read-only sandbox");
-  }
-} else if (process.env.USINE_CODEX_ROLE === "reviewer") {
+if (process.env.USINE_CODEX_ROLE === "reviewer") {
   const configValues = args.flatMap((arg, index) => (arg === "--config" ? [args[index + 1]] : []));
   const expectedReasoningEffort = process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low";
   if (!configValues.includes(`model_reasoning_effort=${expectedReasoningEffort}`)) {
@@ -202,37 +193,7 @@ if (reviewerExtractor) {
   }
 }
 
-if (reviewerExtractor) {
-  const directoryIndex = args.findIndex((arg) => arg === "-C");
-  const extractorDirectory = args[directoryIndex + 1];
-  if (!args.includes("--skip-git-repo-check")) {
-    throw new Error("reviewer extractor must skip Codex repository discovery");
-  }
-  const directories = [process.cwd(), extractorDirectory].filter(
-    (directory) => typeof directory === "string",
-  );
-  for (const directory of directories) {
-    try {
-      await execa("git", ["-C", directory, "rev-parse", "--show-toplevel"]);
-      throw new Error("reviewer extractor must run outside the candidate checkout");
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("must run outside")) throw error;
-    }
-  }
-  const marker = "USINE_REVIEW_VERDICT=";
-  const markerIndex = prompt.indexOf(marker);
-  if (markerIndex < 0) throw new Error("extractor prompt is missing reviewer transcript");
-  const renderedPayload = prompt.slice(markerIndex + marker.length).trim();
-  const shaBreak = renderedPayload.match(/"sha":"([0-9a-f]{20})\n([0-9a-f]{20})"/);
-  if (!shaBreak) throw new Error("extractor fixture did not receive the observed SHA hard wrap");
-  const review = JSON.parse(
-    renderedPayload.replace(shaBreak[0], `"sha":"${shaBreak[1]}${shaBreak[2]}"`),
-  );
-  await writeFile(outputPath, JSON.stringify(review));
-  process.stdout.write(
-    `${JSON.stringify({ type: "thread.started", thread_id: "fixture-extractor" })}\n`,
-  );
-} else if (process.env.USINE_CODEX_ROLE === "implementer") {
+if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (prompt.includes("Hang forever")) {
     setInterval(() => undefined, 1_000);
     await new Promise(() => undefined);

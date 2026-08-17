@@ -69,7 +69,7 @@ credential-scoped GitHub delivery
 reviewed PR + explicit approval attestation
 ```
 
-这张图描述选定的最小目标，不是已经实现全部能力的声明。当前仓库已实现 runtime，fake-backed CLI seam 已覆盖 candidate→check→review→exact-SHA gate 全路径；live evidence 目前部分覆盖 candidate、check 和 reviewer execution，但 reviewed-PR/GitHub delivery 仍未证实。DBOS + Drizzle 恢复、Codex structured subprocess、workspace fence/sandbox 和 GitHub effect reconciliation 仍需继续用真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
+这张图描述选定的最小目标，不是已经实现全部能力的声明。当前仓库已实现 runtime，fake-backed CLI seam 已覆盖 candidate→check→review→exact-SHA gate 全路径；live evidence 目前部分覆盖 candidate、check 和 reviewer execution，但 reviewed-PR/GitHub delivery 仍未证实。DBOS + Drizzle 恢复、Codex runtime subprocess、workspace fence/sandbox、coordinator-owned bounded extraction 和 GitHub effect reconciliation 仍需继续用真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
@@ -81,7 +81,7 @@ Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有
 
 顶层不需要 LLM 界面，也不存在永久 Chief Agent。协调器是普通 TypeScript 程序；DBOS 提供 durable workflow、queue、timer、checkpoint 和 restart recovery。协调器只做机械且可审计的决定：admit、lease、activate、wait、retry、invalidate stale evidence、reduce gates 和 publish effects。
 
-V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及出现冲突时的有界诊断。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
+V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及出现冲突时的有界诊断。轻量的 transcript extraction、classification、normalization 和 short summary 由协调器通过成熟的 `ai` + `@ai-sdk/openai` provider 直接调用配置的 schema-constrained OpenAI-compatible API；除非确实需要 repository、tool 或 session 能力，不通过 Herdr、Codex 或 OpenCode agent runtime。协调器仍负责输入投影、schema 校验、exact-SHA 校验和 lifecycle authority。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
 
 正常推进由持久化事件触发；一个 DBOS scheduled reconciler 定期扫描 nonterminal lane，作为丢事件、agent 静默退出和外部 effect 未回报时的零模型后备。它只重新观察事实并恢复一个明确 next action，不广播唤醒多个角色，也不重复授予 write generation。这就是系统的“定期激发”：保证 liveness，但不制造对话风暴。
 
@@ -156,7 +156,7 @@ Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activ
 - PostgreSQL + Drizzle ORM/Drizzle Kit，并使用 DBOS 官方 Drizzle datasource：领域模型、查询、durable transaction 与 code-first SQL migration；
 - Zod：外部 JSON/schema 边界；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
-- Execa：Codex、Git 和项目命令的有界 subprocess；
+- Execa：Codex runtime、Git 和项目命令的有界 subprocess；`ai` + `@ai-sdk/openai`：协调器拥有的 schema-constrained 轻量语义 transform；
 - Pino：结构化日志；
 - Vitest：公共行为测试，Testcontainers 仅用于必要的真实 PostgreSQL integration；
 - tsdown：所有 workspace package 的 TypeScript build；DBOS runtime package 使用 `unbundle: true`，不 bundle workflow；
