@@ -151,16 +151,18 @@ Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activ
 默认依赖选择：
 
 - DBOS TypeScript SDK：workflow、queue、timer、deduplication 和 restart recovery；
-- PostgreSQL + Prisma ORM/Prisma Migrate，并优先使用 DBOS 官方 Prisma datasource：领域模型、查询、事务与迁移；
+- PostgreSQL + Drizzle ORM/Drizzle Kit，并使用 DBOS 官方 Drizzle datasource：领域模型、查询、durable transaction 与 code-first SQL migration；
 - Zod：外部 JSON/schema 边界；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
 - Execa：Codex、Git 和项目命令的有界 subprocess；
 - Pino：结构化日志；
-- Vitest：公共行为测试，Testcontainers 仅用于必要的真实 PostgreSQL integration。
+- Vitest：公共行为测试，Testcontainers 仅用于必要的真实 PostgreSQL integration；
+- tsdown：所有 workspace package 的 TypeScript build；DBOS runtime package 使用 `unbundle: true`，不 bundle workflow；
+- oxlint + oxfmt：仓库唯一的 lint 与 format 工具；TypeScript `--noEmit` 独立负责 typecheck。
 
 Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析结构化结果；不实现 Git object plumbing。原始 SQL 只允许用于 ORM 无法表达且有实际性能/一致性证据的局部语句，并必须在 PR 中说明原因。不得再用手写 trigger/catalog fingerprint 模拟 ORM、migration engine 或 DBOS 已提供的能力。
 
-官方能力依据：DBOS 已提供可恢复 workflow 和带并发控制的 durable queue；DBOS 也提供 Prisma datasource。Prisma 提供类型安全 client 与 migration system；Octokit 可代管 GitHub App JWT 和 installation token 生命周期。
+官方能力依据：DBOS 已提供可恢复 workflow、带并发控制的 durable queue 和 Drizzle datasource；Drizzle Kit 提供 schema-derived SQL migration；Octokit 可代管 GitHub App JWT 和 installation token 生命周期。DBOS workflow 依赖 runtime registry，不能被常规 bundler 合并；tsdown 因而只以 unbundle 模式编译 DBOS runtime 的逐模块输出。
 
 ## 9. 衡量与扩大
 

@@ -14,7 +14,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-002 | 顶层是确定性 coordinator，不是永久 Lead LLM | 有序激发、恢复、权限和 gate 必须可审计；LLM 只做 bounded semantic work。 |
 | D-003 | TypeScript、Node 24、pnpm monorepo | 与 Codex/DBOS/Octokit 生态一致；monorepo 便于建立明确 module ownership 和并排 worktree。 |
 | D-004 | 使用 DBOS TypeScript SDK + PostgreSQL 提供 durable workflow、queue、timer 和 restart recovery | 不再手写 scheduler、outbox、retry loop 或 SQLite 恢复系统。 |
-| D-005 | 领域数据默认使用 Prisma ORM + Prisma Migrate，并优先使用 DBOS Prisma datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现。 |
+| D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并使用 DBOS 官方 Drizzle datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现，同时保留轻量、显式的 TypeScript schema。 |
 | D-006 | V0 只有 Codex runtime adapter；默认 implementation width 使用 DeepSeek V4 Flash，无法使用时选择 Luna；高杠杆 spec/诊断/review 可使用 Sol/Terra/Luna | 统一 runtime seam，保留已有订阅经济性，不让 provider 接入阻塞 coordinator。 |
 | D-007 | Codex adapter 初期通过受控 subprocess + structured output 接入 | Node subprocess/Execa 是最小稳定边界；ACP 只有在稳定协议能显著改善 session resume、streaming 或 capability negotiation 时才进入。 |
 | D-008 | 初期每 repository 一个 writer，跨 repository 并发 | 符合个人多项目工作形态，先消除最昂贵的冲突和 communication overhead。 |
@@ -27,17 +27,20 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
 | D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计 | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；审计只阻止扩张，不暂停安全的有效工作。 |
+| D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。DBOS runtime 必须使用 tsdown unbundle 模式，不把 workflow 打成 bundle。 |
 
 ## 已确定的依赖方向
 
-Domain policy 不 import DBOS、Prisma、Git、GitHub、subprocess 或 HTTP implementation。Composition root 把成熟库组合到少量 adapter；这条 inward dependency 规则不意味着每个 adapter 都必须成为独立 package。
+Domain policy 不 import DBOS、Drizzle、Git、GitHub、subprocess 或 HTTP implementation。Composition root 把成熟库组合到少量 adapter；这条 inward dependency 规则不意味着每个 adapter 都必须成为独立 package。
 
 当前默认依赖的官方能力依据：
 
 - [DBOS TypeScript programming guide](https://docs.dbos.dev/typescript/programming-guide)：workflow step checkpoint 与 crash recovery；
 - [DBOS queues](https://docs.dbos.dev/typescript/reference/queues)：durable enqueue、并发和 rate control；
-- [DBOS transactions and datasources](https://docs.dbos.dev/typescript/tutorials/transaction-tutorial)：Prisma datasource 等现成 integration；
-- [Prisma ORM](https://www.prisma.io/docs/orm)：类型安全 client、declarative model 和 migration system；
+- [DBOS transactions and datasources](https://docs.dbos.dev/typescript/tutorials/transaction-tutorial)：官方 Drizzle datasource 与 durable transaction integration；
+- [Drizzle ORM and Kit](https://orm.drizzle.team/docs/kit-overview)：类型安全 schema、query 与 code-first SQL migration；
+- [tsdown](https://tsdown.dev/guide/)：TypeScript build 与 bundleless compilation；
+- [Oxlint](https://oxc.rs/docs/guide/usage/linter.html) 与 [Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html)：lint 与 format；
 - [GitHub App authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app)：App JWT 和 installation token；
 - [Octokit](https://github.com/octokit/octokit.js#readme)：App installation authentication strategy 与 API client。
 
