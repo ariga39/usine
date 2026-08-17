@@ -38,6 +38,7 @@ jobs:
         uses: anomalyco/opencode/github@d4ad650f738aaa986cee5879c581bd4834277577
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TOKEN: ${{ github.token }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           OPENCODE_BASE_URL: ${{ secrets.OPENCODE_BASE_URL }}
           OPENCODE_CONFIG_CONTENT: |
