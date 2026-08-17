@@ -15,7 +15,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-003 | TypeScript、Node 24、pnpm monorepo | 与 Codex/DBOS/Octokit 生态一致；monorepo 便于建立明确 module ownership 和并排 worktree。 |
 | D-004 | 使用 DBOS TypeScript SDK + PostgreSQL 提供 durable workflow、queue、timer 和 restart recovery | 不再手写 scheduler、outbox、retry loop 或 SQLite 恢复系统。 |
 | D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并使用 DBOS 官方 Drizzle datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现，同时保留轻量、显式的 TypeScript schema。 |
-| D-006 | V0 只有 Codex runtime adapter；implementation 默认使用 fresh `usine-implementer` profile（GPT-5.6 Luna low、default tier、no fast），fresh semantic review 使用 Sol，bounded research 可使用 Terra；仅在 profile file/path 不可用时 Herdr 才作显式 Luna fallback | 用 role policy 保持实现速度和 review 独立性；只有 task-local evidence 证明必要时才提高 reasoning。authentication、permission 或 model failure 不得绕过 profile，也不得静默使用默认模型或 fast。 |
+| D-006 | V0 只有 Codex runtime adapter；每个 implementation Issue 由新 Herdr pane/agent 通过 `-p usine-implementer` 启动（GPT-5.6 Luna low、default tier、no fast），合并 checkpoint 后释放且不得跨 Issue 复用；fresh semantic review 使用 Sol，bounded research 可用 Terra；仅在 Herdr 本身不可用时直接 `codex exec -p usine-implementer` | 交互式 Herdr 生命周期在实际运行中比一次性 exec/subagent 更稳定；fresh-per-Issue 防止旧 context 污染。只有 task-local evidence 证明必要时才提高 reasoning，且不得静默使用默认模型或 fast。 |
 | D-007 | Codex adapter 初期通过受控 subprocess + structured output 接入 | Node subprocess/Execa 是待薄纵切验证的最小边界；ACP 只有在稳定协议能显著改善 session resume、streaming 或 capability negotiation 时才进入。 |
 | D-008 | 第一条纵切串行；稳定后每 repository 一个 writer，并发只跨 repository | 先证明一条真实 delivery loop，再按天然项目边界扩容，避免用并发基础设施替代用户 outcome。 |
 | D-009 | Candidate、checks、review verdict 和投影出的 attestation 全部绑定 immutable exact SHA | 防止 stale evidence 和“agent 说完成了”成为交付依据。 |
