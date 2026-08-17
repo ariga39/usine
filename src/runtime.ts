@@ -7,6 +7,7 @@ import { and, eq } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { execa } from "execa";
+import { App, Octokit } from "octokit";
 import { Pool } from "pg";
 import { z } from "zod";
 import type { TaskContract } from "./contract.js";
@@ -381,9 +382,6 @@ async function runReviewer(
 }
 
 async function recordDelivery(input: WorkflowInput, sha: string): Promise<DeliveryResult> {
-  if (process.env.USINE_DELIVERY_MODE !== "record") {
-    throw new Error("GitHub delivery is not configured");
-  }
   const delivery: DeliveryResult = {
     sha,
     effect: "recorded",
@@ -406,6 +404,146 @@ async function recordDelivery(input: WorkflowInput, sha: string): Promise<Delive
     await writeFile(counterPath, JSON.stringify({ count: 1, delivery }));
   }
   return delivery;
+}
+
+function httpStatus(error: unknown): number | undefined {
+  return typeof error === "object" && error !== null && "status" in error
+    ? Number((error as { status: unknown }).status)
+    : undefined;
+}
+
+async function githubClient(): Promise<{ octokit: InstanceType<typeof Octokit>; token: string }> {
+  const testToken = process.env.USINE_GITHUB_TEST_TOKEN;
+  const apiUrl = process.env.USINE_GITHUB_API_URL;
+  if (testToken) {
+    if (!apiUrl || !/^http:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(apiUrl)) {
+      throw new Error("USINE_GITHUB_TEST_TOKEN is restricted to a loopback API URL");
+    }
+    return { octokit: new Octokit({ auth: testToken, baseUrl: apiUrl }), token: testToken };
+  }
+
+  const appId = process.env.USINE_GITHUB_APP_ID;
+  const installationId = Number(process.env.USINE_GITHUB_INSTALLATION_ID);
+  const privateKeyPath = process.env.USINE_GITHUB_PRIVATE_KEY_PATH;
+  if (!appId || !Number.isSafeInteger(installationId) || !privateKeyPath) {
+    throw new Error(
+      "USINE_GITHUB_APP_ID, USINE_GITHUB_INSTALLATION_ID, and USINE_GITHUB_PRIVATE_KEY_PATH are required",
+    );
+  }
+  const privateKey = await readFile(privateKeyPath, "utf8");
+  const app = new App({ appId, privateKey });
+  const octokit = await app.getInstallationOctokit(installationId);
+  const authentication = (await octokit.auth({ type: "installation" })) as { token?: unknown };
+  if (typeof authentication.token !== "string") {
+    throw new Error("GitHub App did not produce an installation token");
+  }
+  return { octokit, token: authentication.token };
+}
+
+async function githubDelivery(
+  input: WorkflowInput,
+  sha: string,
+  check: CheckResult,
+  review: ReviewResult,
+): Promise<DeliveryResult> {
+  const { owner, name: repo } = input.contract.repository;
+  const { branch, baseBranch } = input.contract.delivery;
+  const { octokit, token } = await githubClient();
+  let expectedHead: string | null = null;
+  try {
+    const reference = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    expectedHead = reference.data.object.sha;
+  } catch (error) {
+    if (httpStatus(error) !== 404) throw error;
+  }
+
+  if (expectedHead !== sha) {
+    const gitUrl = process.env.USINE_GITHUB_GIT_URL ?? `https://github.com/${owner}/${repo}.git`;
+    const environment: NodeJS.ProcessEnv = { ...process.env };
+    if (gitUrl.startsWith("https://github.com/")) {
+      environment.GIT_CONFIG_COUNT = "1";
+      environment.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+      environment.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+    }
+    await execa(
+      "git",
+      [
+        "-C",
+        input.repository,
+        "push",
+        `--force-with-lease=refs/heads/${branch}:${expectedHead ?? ""}`,
+        gitUrl,
+        `${sha}:refs/heads/${branch}`,
+      ],
+      { env: environment },
+    );
+  }
+
+  const pullRequests = await octokit.rest.pulls.list({
+    owner,
+    repo,
+    head: `${owner}:${branch}`,
+    base: baseBranch,
+    state: "open",
+    per_page: 100,
+  });
+  const existingPullRequest = pullRequests.data.find((pullRequest) => pullRequest.head.sha === sha);
+  const pullRequest =
+    existingPullRequest ??
+    (
+      await octokit.rest.pulls.create({
+        owner,
+        repo,
+        head: branch,
+        base: baseBranch,
+        title: input.contract.delivery.title,
+        body: `${input.contract.delivery.body}\n\nCloses #${input.contract.delivery.issue}`,
+        draft: false,
+      })
+    ).data;
+  const marker = `<!-- usine-approval:${input.contract.id}:${sha} -->`;
+  const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+    owner,
+    repo,
+    issue_number: pullRequest.number,
+    per_page: 100,
+  });
+  const existingAttestation = comments.find((comment) => comment.body?.includes(marker));
+  const attestation =
+    existingAttestation ??
+    (
+      await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: pullRequest.number,
+        body: [
+          marker,
+          "Usine exact-SHA semantic approval attestation",
+          `- Candidate: \`${sha}\``,
+          `- Project check: \`${check.command}\` (${check.status})`,
+          `- Fresh reviewer verdict: \`${review.verdict}\``,
+          `- Review summary: ${review.summary}`,
+        ].join("\n"),
+      })
+    ).data;
+  return {
+    sha,
+    effect: "github",
+    prNumber: pullRequest.number,
+    url: pullRequest.html_url,
+    attestationId: String(attestation.id),
+  };
+}
+
+async function deliver(
+  input: WorkflowInput,
+  sha: string,
+  check: CheckResult,
+  review: ReviewResult,
+): Promise<DeliveryResult> {
+  return process.env.USINE_DELIVERY_MODE === "record"
+    ? recordDelivery(input, sha)
+    : githubDelivery(input, sha, check, review);
 }
 
 async function crashOnceAfterDelivery(input: WorkflowInput): Promise<boolean> {
@@ -560,7 +698,7 @@ export async function admitTask(
         });
         if (review.verdict === "approved") {
           const delivery = await DBOS.runStep(
-            () => recordDelivery(input, implementation.candidateSha),
+            () => deliver(input, implementation.candidateSha, check, review),
             { name: "delivery" },
           );
           if (input.crashAfterDelivery) {

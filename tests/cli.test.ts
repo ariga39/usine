@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -342,6 +343,187 @@ describe("usine run", () => {
       expect(JSON.parse(await readFile(deliveryCounter, "utf8"))).toMatchObject({
         count: 1,
       });
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "pushes with a lease and creates or probes one PR and approval attestation",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-github-"));
+      const repository = join(directory, "repository");
+      const bareRemote = join(directory, "remote.git");
+      const stateDirectory = join(directory, "state");
+      await mkdir(repository);
+      await execa("git", ["init", "--bare", bareRemote]);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(
+        join(repository, "check.mjs"),
+        'import { access } from "node:fs/promises"; await access("delivered.txt");\n',
+      );
+      await execa("git", ["add", "check.mjs"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `github-${Date.now()}`;
+      const branch = `agent/${taskId}`;
+      const contractPath = join(repository, "task.json");
+      await writeFile(
+        contractPath,
+        JSON.stringify({
+          id: taskId,
+          repository: { path: repository, owner: "example", name: "fixture" },
+          baseSha,
+          instructions: "Create delivered.txt.",
+          acceptance: ["node check.mjs passes."],
+          nonGoals: [],
+          projectCheck: { command: "node check.mjs", timeoutMs: 10_000 },
+          budget: {
+            maxImplementerActivations: 2,
+            maxReviewCycles: 2,
+            maxElapsedMs: 60_000,
+          },
+          authorization: { source: "test issue", delivery: true },
+          delivery: {
+            baseBranch: "main",
+            branch,
+            issue: 3,
+            title: "Fixture GitHub delivery",
+            body: "Fixture GitHub delivery body",
+          },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+
+      let prCreates = 0;
+      let attestationCreates = 0;
+      let prExists = false;
+      let remoteSha: string | null = null;
+      let activeCliPid: number | undefined;
+      let failureStage: "pr" | "attestation" | null = "pr";
+      const comments: Array<{ id: number; body: string; html_url: string }> = [];
+      const api = createServer(async (request, response) => {
+        const url = new URL(request.url ?? "/", "http://localhost");
+        const send = (status: number, value: unknown) => {
+          response.writeHead(status, { "content-type": "application/json" });
+          response.end(JSON.stringify(value));
+        };
+        if (request.method === "GET" && url.pathname.includes("/git/ref/heads/")) {
+          send(
+            remoteSha ? 200 : 404,
+            remoteSha ? { object: { sha: remoteSha } } : { message: "Not Found" },
+          );
+        } else if (request.method === "GET" && url.pathname.endsWith("/pulls")) {
+          send(
+            200,
+            prExists
+              ? [{ number: 7, html_url: "http://fixture/pr/7", head: { sha: remoteSha } }]
+              : [],
+          );
+        } else if (request.method === "POST" && url.pathname.endsWith("/pulls")) {
+          prCreates += 1;
+          prExists = true;
+          remoteSha = (
+            await execa("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/${branch}`])
+          ).stdout;
+          if (failureStage === "pr" && activeCliPid) {
+            process.kill(activeCliPid, "SIGKILL");
+            response.destroy();
+            return;
+          }
+          send(201, {
+            number: 7,
+            html_url: "http://fixture/pr/7",
+            head: { sha: remoteSha },
+          });
+        } else if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) {
+          send(200, comments);
+        } else if (request.method === "POST" && url.pathname.endsWith("/issues/7/comments")) {
+          let body = "";
+          request.on("data", (chunk) => (body += String(chunk)));
+          request.on("end", () => {
+            attestationCreates += 1;
+            const parsed = JSON.parse(body) as { body: string };
+            const comment = {
+              id: 99,
+              body: parsed.body,
+              html_url: "http://fixture/pr/7#comment-99",
+            };
+            comments.push(comment);
+            if (failureStage === "attestation" && activeCliPid) {
+              process.kill(activeCliPid, "SIGKILL");
+              response.destroy();
+              return;
+            }
+            send(201, comment);
+          });
+        } else {
+          send(404, { message: `Unhandled ${request.method} ${url.pathname}` });
+        }
+      });
+      await new Promise<void>((resolveListen) => api.listen(0, "127.0.0.1", resolveListen));
+      const address = api.address();
+      if (!address || typeof address === "string")
+        throw new Error("fake GitHub API did not listen");
+      const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
+      const env = {
+        USINE_CODEX_BIN: fakeCodex,
+        USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+        USINE_DELIVERY_MODE: "github",
+        USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
+        USINE_GITHUB_GIT_URL: bareRemote,
+        USINE_GITHUB_TEST_TOKEN: "test-token",
+        USINE_STATE_DIR: stateDirectory,
+      };
+      try {
+        const firstRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
+          env,
+          reject: false,
+        });
+        activeCliPid = firstRun.pid;
+        const interruptedPr = await firstRun;
+        failureStage = "attestation";
+        const secondRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
+          env,
+          reject: false,
+        });
+        activeCliPid = secondRun.pid;
+        const interruptedAttestation = await secondRun;
+        failureStage = null;
+        const thirdRun = execa("node", ["dist/cli.mjs", "run", contractPath], {
+          env,
+          reject: false,
+        });
+        activeCliPid = thirdRun.pid;
+        const run = await thirdRun;
+
+        expect(interruptedPr.signal).toBe("SIGKILL");
+        expect(interruptedAttestation.signal).toBe("SIGKILL");
+        expect(run.exitCode).toBe(0);
+        const result = JSON.parse(run.stdout);
+        expect(result).toMatchObject({
+          state: "reviewed_pr",
+          delivery: {
+            effect: "github",
+            prNumber: 7,
+            url: "http://fixture/pr/7",
+            attestationId: "99",
+          },
+        });
+        expect(
+          (await execa("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/${branch}`]))
+            .stdout,
+        ).toBe(result.candidateSha);
+        expect(prCreates).toBe(1);
+        expect(attestationCreates).toBe(1);
+        expect(comments[0]?.body).toContain(result.candidateSha);
+      } finally {
+        await new Promise<void>((resolveClose, rejectClose) =>
+          api.close((error) => (error ? rejectClose(error) : resolveClose())),
+        );
+      }
     },
     30_000,
   );
