@@ -22,6 +22,50 @@ for (const key of [
   if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
 }
 const prompt = args.at(-1) ?? "";
+if (process.env.USINE_CODEX_ROLE === "implementer") {
+  if (!prompt.includes("Frozen Task Contract JSON:")) {
+    throw new Error("implementer prompt is missing the frozen Task Contract JSON");
+  }
+  const contractLine = prompt
+    .split("\n")
+    .find((line) => line.startsWith("Frozen Task Contract JSON: "));
+  const contract = JSON.parse(contractLine.slice("Frozen Task Contract JSON: ".length));
+  if (
+    !contract.authorization?.source ||
+    !prompt.includes(`Authorization source: ${contract.authorization.source}`)
+  ) {
+    throw new Error("implementer prompt is missing the authorization source");
+  }
+  const currentSha = (await execa("git", ["rev-parse", "HEAD"])).stdout;
+  if (
+    !prompt.includes(`Base SHA: ${contract.baseSha}`) ||
+    !prompt.includes(`Current SHA: ${currentSha}`)
+  ) {
+    throw new Error("implementer prompt is missing exact Git facts");
+  }
+  if (
+    !prompt.includes("credential-separated projection of active private Issue/PR/thread authority")
+  ) {
+    throw new Error("implementer prompt is missing coordinator authority statement");
+  }
+  if (
+    !prompt.includes("do not access GitHub") ||
+    !prompt.includes("do not wait for user input") ||
+    !prompt.includes("missing GitHub credentials are not a blocker")
+  ) {
+    throw new Error("implementer prompt is missing the no-GitHub instruction");
+  }
+  if (!prompt.includes("Make the first observable in-scope action promptly")) {
+    throw new Error("implementer prompt is missing prompt-action guidance");
+  }
+  if (
+    contract.instructions.includes("address review findings") &&
+    outputPath.includes("implementer-2") &&
+    !prompt.includes("Add the reviewed fix.")
+  ) {
+    throw new Error("implementer prompt is missing unresolved findings");
+  }
+}
 const modelIndex = args.findIndex((arg) => arg === "--model" || arg === "-m");
 const model = args[modelIndex + 1];
 const expectedModel =
