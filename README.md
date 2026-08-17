@@ -17,7 +17,7 @@ USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
 USINE_IMPLEMENTER_MODEL=gpt-5.6-luna \
 USINE_IMPLEMENTER_PROFILE=usine-implementer \
 USINE_REVIEWER_MODEL=gpt-5.6-sol \
-node dist/cli.mjs run /path/to/committed-task-contract.json
+node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
 ```
 
 首条纵切只面向受信任的私有仓库。项目检查使用最小显式环境并在 disposable checkout 中运行，但当前仍共享 host 的网络与文件系统权限；更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex sandbox 不足时进入。

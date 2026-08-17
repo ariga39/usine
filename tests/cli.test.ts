@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { describe, expect, test } from "vitest";
 
-const cliPath = fileURLToPath(new URL("../dist/cli.mjs", import.meta.url));
+const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.url));
 
 describe("usine run", () => {
   test("rejects a contract before starting work when required authority is missing", async () => {
@@ -14,7 +14,7 @@ describe("usine run", () => {
     const contractPath = join(directory, "task.json");
     await writeFile(contractPath, JSON.stringify({ id: "../task-without-authority" }));
 
-    const result = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+    const result = await execa("node", [cliPath, "run", contractPath], {
       reject: false,
     });
 
@@ -152,7 +152,7 @@ describe("usine run", () => {
         USINE_STATE_DIR: stateDirectory,
       };
 
-      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const interrupted = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
@@ -162,7 +162,7 @@ describe("usine run", () => {
       await writeFile(contractPath, JSON.stringify(contract));
       await execa("git", ["add", "task.json"], { cwd: repository });
       await execa("git", ["commit", "-m", "mutate admitted task"], { cwd: repository });
-      const mutated = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const mutated = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
@@ -188,7 +188,7 @@ describe("usine run", () => {
       );
       await execa("git", ["add", "task.json"], { cwd: secondRepository });
       await execa("git", ["commit", "-m", "authorize competing task"], { cwd: secondRepository });
-      const competing = await execa("node", ["dist/cli.mjs", "run", secondContractPath], {
+      const competing = await execa("node", [cliPath, "run", secondContractPath], {
         env: { ...env, USINE_CRASH_AFTER: undefined },
         reject: false,
       });
@@ -248,7 +248,7 @@ describe("usine run", () => {
         .stdout;
       const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 
-      const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodex,
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
@@ -324,7 +324,7 @@ describe("usine run", () => {
       await execa("git", ["add", "task.json"], { cwd: repository });
       await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
       const startedAt = Date.now();
-      const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
@@ -392,14 +392,14 @@ describe("usine run", () => {
         USINE_DELIVERY_MODE: "record",
         USINE_STATE_DIR: stateDirectory,
       };
-      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const interrupted = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
       expect(interrupted.signal).toBe("SIGKILL");
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
 
-      const recovered = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const recovered = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
@@ -469,7 +469,7 @@ describe("usine run", () => {
       await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
       const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 
-      const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodex,
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
@@ -557,11 +557,11 @@ describe("usine run", () => {
         USINE_STATE_DIR: stateDirectory,
       };
 
-      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const interrupted = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
-      const recovered = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const recovered = await execa("node", [cliPath, "run", contractPath], {
         env,
         reject: false,
       });
@@ -737,7 +737,7 @@ describe("usine run", () => {
         USINE_STATE_DIR: stateDirectory,
       };
       try {
-        const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        const run = await execa("node", [cliPath, "run", contractPath], {
           env,
           reject: false,
         });
@@ -853,7 +853,7 @@ describe("usine run", () => {
       const address = api.address();
       if (!address || typeof address === "string") throw new Error("fake API did not listen");
       try {
-        const result = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        const result = await execa("node", [cliPath, "run", contractPath], {
           env: {
             USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
             USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,

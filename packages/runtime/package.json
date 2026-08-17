@@ -1,0 +1,37 @@
+{
+  "name": "@usine/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/runtime.ts",
+      "import": "./dist/runtime.mjs"
+    },
+    "./contract": {
+      "types": "./src/contract.ts",
+      "import": "./dist/contract.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "db:generate": "drizzle-kit generate",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dbos-inc/dbos-sdk": "latest",
+    "@dbos-inc/drizzle-datasource": "latest",
+    "drizzle-orm": "latest",
+    "execa": "latest",
+    "octokit": "latest",
+    "pg": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/pg": "latest",
+    "drizzle-kit": "latest",
+    "tsdown": "latest",
+    "typescript": "latest"
+  }
+}

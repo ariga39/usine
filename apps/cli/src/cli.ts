@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { contractIssues, taskContractSchema } from "./contract.js";
-import { admitTask } from "./runtime.js";
+import { contractIssues, taskContractSchema } from "@usine/runtime/contract";
+import { admitTask } from "@usine/runtime";
 
 async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
