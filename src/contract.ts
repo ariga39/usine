@@ -4,7 +4,12 @@ const sha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit 
 
 export const taskContractSchema = z
   .object({
-    id: z.string().min(1),
+    id: z
+      .string()
+      .regex(
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
+        "must be a safe durable identifier of at most 128 characters",
+      ),
     repository: z.object({
       path: z.string().min(1),
       owner: z.string().min(1),

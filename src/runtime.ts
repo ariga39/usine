@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
 import { and, eq } from "drizzle-orm";
@@ -112,12 +113,33 @@ const reviewerJsonSchema = {
   },
 };
 
+const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
+
 function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { ...process.env, USINE_CODEX_ROLE: role };
   for (const key of Object.keys(environment)) {
     if (key === "GH_TOKEN" || key === "GITHUB_TOKEN" || key.startsWith("USINE_GITHUB_")) {
       delete environment[key];
     }
+  }
+  return environment;
+}
+
+function projectCheckEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { CI: "true" };
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+  ]) {
+    if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
   return environment;
 }
@@ -151,7 +173,7 @@ async function verifyCommittedContract(
 async function applyMigrations(databaseUrl: string): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl });
   try {
-    await migrate(drizzle(pool), { migrationsFolder: resolve("drizzle") });
+    await migrate(drizzle(pool), { migrationsFolder: migrationsDirectory });
   } finally {
     await pool.end();
   }
@@ -305,9 +327,10 @@ async function withDisposableWorktree<T>(
 
 async function runCheck(input: WorkflowInput, sha: string): Promise<CheckResult> {
   return withDisposableWorktree(input, `check-${sha}`, sha, async (path) => {
-    const result = await execa("sh", ["-lc", input.contract.projectCheck.command], {
+    const result = await execa("sh", ["-c", input.contract.projectCheck.command], {
       cwd: path,
-      env: workerEnvironment("implementer"),
+      env: projectCheckEnvironment(),
+      extendEnv: false,
       reject: false,
       timeout: input.contract.projectCheck.timeoutMs,
     });
@@ -488,6 +511,12 @@ async function githubDelivery(
     per_page: 100,
   });
   const existingPullRequest = pullRequests.data.find((pullRequest) => pullRequest.head.sha === sha);
+  if (!existingPullRequest && pullRequests.data.length > 0) {
+    const conflicting = pullRequests.data[0];
+    throw new Error(
+      `open delivery PR #${conflicting?.number ?? "unknown"} has head ${conflicting?.head.sha ?? "unknown"}, not candidate ${sha}; delivery quarantined`,
+    );
+  }
   const pullRequest =
     existingPullRequest ??
     (

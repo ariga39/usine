@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { describe, expect, test } from "vitest";
 
+const cliPath = fileURLToPath(new URL("../dist/cli.mjs", import.meta.url));
+
 describe("usine run", () => {
   test("rejects a contract before starting work when required authority is missing", async () => {
     const directory = await mkdtemp(join(tmpdir(), "usine-contract-"));
     const contractPath = join(directory, "task.json");
-    await writeFile(contractPath, JSON.stringify({ id: "task-without-authority" }));
+    await writeFile(contractPath, JSON.stringify({ id: "../task-without-authority" }));
 
     const result = await execa("node", ["dist/cli.mjs", "run", contractPath], {
       reject: false,
@@ -20,6 +22,7 @@ describe("usine run", () => {
     expect(JSON.parse(result.stderr)).toEqual({
       error: "invalid_task_contract",
       issues: expect.arrayContaining([
+        expect.objectContaining({ path: "id" }),
         expect.objectContaining({ path: "authorization" }),
         expect.objectContaining({ path: "baseSha" }),
       ]),
@@ -76,11 +79,13 @@ describe("usine run", () => {
         USINE_STATE_DIR: stateDirectory,
         USINE_STOP_AFTER: "admitted",
       };
-      const first = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const first = await execa("node", [cliPath, "run", contractPath], {
+        cwd: directory,
         env,
         reject: false,
       });
-      const second = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+      const second = await execa("node", [cliPath, "run", contractPath], {
+        cwd: directory,
         env,
         reject: false,
       });
@@ -115,7 +120,7 @@ describe("usine run", () => {
       await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
       await writeFile(
         join(repository, "check.mjs"),
-        'import { access } from "node:fs/promises"; await access("delivered.txt");\n',
+        'import { access } from "node:fs/promises"; if (process.env.USINE_DATABASE_URL || process.env.USINE_TEST_SECRET) throw new Error("secret leaked to project check"); await access("delivered.txt");\n',
       );
       await execa("git", ["add", "check.mjs"], { cwd: repository });
       await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
@@ -159,6 +164,7 @@ describe("usine run", () => {
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: stateDirectory,
+          USINE_TEST_SECRET: "must-not-leak",
         },
         reject: false,
       });
@@ -519,6 +525,99 @@ describe("usine run", () => {
         expect(prCreates).toBe(1);
         expect(attestationCreates).toBe(1);
         expect(comments[0]?.body).toContain(result.candidateSha);
+      } finally {
+        await new Promise<void>((resolveClose, rejectClose) =>
+          api.close((error) => (error ? rejectClose(error) : resolveClose())),
+        );
+      }
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "quarantines an open delivery PR whose head is not the candidate",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-pr-conflict-"));
+      const repository = join(directory, "repository");
+      const bareRemote = join(directory, "remote.git");
+      await mkdir(repository);
+      await execa("git", ["init", "--bare", bareRemote]);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(join(repository, "README.md"), "fixture\n");
+      await execa("git", ["add", "README.md"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `pr-conflict-${Date.now()}`;
+      const branch = `agent/${taskId}`;
+      const contractPath = join(repository, "task.json");
+      await writeFile(
+        contractPath,
+        JSON.stringify({
+          id: taskId,
+          repository: { path: repository, owner: "example", name: "fixture" },
+          baseSha,
+          instructions: "Create delivered.txt.",
+          acceptance: ["The task is committed."],
+          nonGoals: [],
+          projectCheck: { command: "true", timeoutMs: 10_000 },
+          budget: {
+            maxImplementerActivations: 2,
+            maxReviewCycles: 2,
+            maxElapsedMs: 60_000,
+          },
+          authorization: { source: "test issue", delivery: true },
+          delivery: {
+            baseBranch: "main",
+            branch,
+            issue: 3,
+            title: "Conflicting PR",
+            body: "Conflicting PR body",
+          },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+      let prCreates = 0;
+      const api = createServer((request, response) => {
+        const url = new URL(request.url ?? "/", "http://localhost");
+        const send = (status: number, value: unknown) => {
+          response.writeHead(status, { "content-type": "application/json" });
+          response.end(JSON.stringify(value));
+        };
+        if (request.method === "GET" && url.pathname.includes("/git/ref/heads/")) {
+          send(404, { message: "Not Found" });
+        } else if (request.method === "GET" && url.pathname.endsWith("/pulls")) {
+          send(200, [
+            { number: 6, html_url: "http://fixture/pr/6", head: { sha: "f".repeat(40) } },
+          ]);
+        } else if (request.method === "POST" && url.pathname.endsWith("/pulls")) {
+          prCreates += 1;
+          send(201, { number: 7, html_url: "http://fixture/pr/7" });
+        } else {
+          send(404, { message: `Unhandled ${request.method} ${url.pathname}` });
+        }
+      });
+      await new Promise<void>((resolveListen) => api.listen(0, "127.0.0.1", resolveListen));
+      const address = api.address();
+      if (!address || typeof address === "string") throw new Error("fake API did not listen");
+      try {
+        const result = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+          env: {
+            USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+            USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+            USINE_DELIVERY_MODE: "github",
+            USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
+            USINE_GITHUB_GIT_URL: bareRemote,
+            USINE_GITHUB_TEST_TOKEN: "test-token",
+            USINE_STATE_DIR: join(directory, "state"),
+          },
+          reject: false,
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("delivery quarantined");
+        expect(prCreates).toBe(0);
       } finally {
         await new Promise<void>((resolveClose, rejectClose) =>
           api.close((error) => (error ? rejectClose(error) : resolveClose())),

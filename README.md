@@ -2,7 +2,21 @@
 
 Usine 是一个面向自主软件交付的确定性协调器。它的目标不是让一个 agent 更会写代码，而是让多个项目中的已授权任务在无人持续催促的情况下，有序地经过实现、验证、独立 review 和交付。
 
-当前仓库处于全新设计阶段，尚无可运行实现。历史实现和旧任务分解均不属于本仓库的当前基线。
+当前仓库包含第一条串行交付纵切的可运行实现：`usine run <task-contract.json>` 接收一个已授权且已提交的 Task Contract，通过 PostgreSQL/DBOS 持久化执行，在隔离 Git worktree 中调用 Codex，针对 immutable candidate SHA 运行项目检查和 fresh review，并通过 GitHub App 交付带 exact-SHA approval attestation 的 reviewed PR。它仍是仅面向一个 Task、一个 repository writer 和一个 GitHub forge 的 V0 纵切；历史实现和旧任务分解不属于当前基线。
+
+运行需要 Node 24、pnpm、Git、Codex CLI 和 PostgreSQL。安装依赖并构建后，通过数据库和 GitHub App 环境配置运行 CLI：
+
+```sh
+pnpm install
+pnpm build
+USINE_DATABASE_URL=postgresql://... \
+USINE_GITHUB_APP_ID=... \
+USINE_GITHUB_INSTALLATION_ID=... \
+USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
+node dist/cli.mjs run /path/to/committed-task-contract.json
+```
+
+首条纵切只面向受信任的私有仓库。项目检查使用最小显式环境并在 disposable checkout 中运行，但当前仍共享 host 的网络与文件系统权限；更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex sandbox 不足时进入。
 
 当前权威文档只有：
 

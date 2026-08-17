@@ -22,7 +22,6 @@
     "execa": "latest",
     "octokit": "latest",
     "pg": "latest",
-    "pino": "latest",
     "zod": "latest"
   },
   "devDependencies": {
