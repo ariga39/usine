@@ -10,7 +10,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
     "test": "vitest run",
-    "typecheck": "corepack pnpm --recursive --if-present typecheck"
+    "typecheck": "tsc --noEmit && corepack pnpm --recursive --if-present typecheck"
   },
   "devDependencies": {
     "@types/node": "latest",
