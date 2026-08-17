@@ -7,6 +7,9 @@ const args = process.argv.slice(2);
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
 if (!outputPath) throw new Error("missing structured output path");
+if (args.includes("--sandbox") && args.includes("--approve-for-me")) {
+  throw new Error("--sandbox cannot be combined with --approve-for-me");
+}
 for (const key of [
   "USINE_DATABASE_URL",
   "USINE_STATE_DIR",

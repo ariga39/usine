@@ -347,7 +347,6 @@ async function runImplementer(
     outputPath,
     "--sandbox",
     "workspace-write",
-    "--approve-for-me",
     "-C",
     workspace,
     prompt,
