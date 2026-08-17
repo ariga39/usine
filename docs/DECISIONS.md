@@ -1,6 +1,6 @@
 ---
 status: current
-updated: 2026-08-17
+updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
 
@@ -30,7 +30,9 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。DBOS runtime 必须使用 tsdown unbundle 模式，不把 workflow 打成 bundle。 |
 | D-019 | Product milestone 可以跨多个 PR；每个 implementation Issue 必须定义并优先交付 `first_merge_checkpoint`，即最小独立有用、可测、可回滚的 outcome | 防止把“完整纵切”误解为一次大 PR。Checkpoint 绿后先 merge；后续 failure mode/相邻 seam 进入新 Issue，review 不得用 milestone 终态扩大当前 acceptance。 |
 
-这些条目是当前实施选择与必须验证的 invariant，不是集成能力已经成立的证据。下一项实现 Issue 必须用一个 Task、一个 repository、一个 writer 的真实薄纵切验证 DBOS + Drizzle recovery、Codex runtime subprocess、coordinator-owned bounded extraction、workspace isolation/fence、exact-SHA checks/review 和 GitHub App delivery；在此之前不得据此扩展 package、lane、runtime 或 forge。
+这些条目是当前实施选择与必须验证的 invariant。Issue #12 / PR #38 已验证一条 live self-hosted reviewed delivery：一个 Task、一个 repository/writer、Herdr Luna implementation、project check、fresh Sol exact-SHA approval、AI SDK transcript extraction、一个 GitHub App PR/attestation，以及 exact-SHA merged delivery。它尚未验证 representative executable code task 或 live coordinator restart recovery；DBOS + PostgreSQL 仍是选定路线，但其决定性 live recovery 价值要到 induced restart 才能证明。
+
+clean-room classification 为 `correct_before_expansion`：继续 bounded useful single-writer tasks；在 representative executable code task 加上 induced live coordinator restart recovery 之前，不扩大 concurrency、authority、runtime/forge count、distribution、generalized architecture 或 automatic-merge product authority。Rendered-transcript extraction 是 bounded compatibility bridge；renewed slow/inconclusive extraction、provider-specific branching、另一个普通任务需要基础设施修复，或 manual-free restart recovery 失败，都会证伪当前 bridge 并触发重新评估。
 
 ## 已确定的依赖方向
 
