@@ -11,7 +11,7 @@ issue: https://github.com/ariga39/usine/issues/1
 
 个人开发者可以让 coding agent 完成单个明确任务，但人仍然承担着形成任务、分配任务、催促继续、判断是否完成、安排 review、处理返修和交付的工作。增加 agent 数量后，如果这些协调动作仍由人完成，人会更快成为瓶颈；如果让 agent 通过自由对话互相激活，又容易形成通信风暴、偏离共同目标或无人拥有最终责任。
 
-Usine 要把这段重复协调从人类手中移出。用户与 Requirement Proxy 形成一个足够完整且已授权的目标后，可以离线；系统让多个项目中的有界任务持续、有序地流过实现、验证、独立 review、返修和交付，只在需要新增权限、不可逆决定或真实产品分叉时找人。
+Usine 要把这段重复协调从人类手中移出。V0 由用户或现有项目流程直接提供一个足够完整且已授权的 Task Contract；admission 后用户可以离线，系统让有界任务持续、有序地流过实现、验证、独立 review、返修和交付，只在需要新增权限、不可逆决定或真实产品分叉时找人。Requirement Proxy 和 Planner 属于手工 contract delivery loop 跑通后的 admission 扩展，不是第一项行为的前置角色。
 
 长期 north star 是每天形成 300 个有效、有价值并最终合并的 PR。这个数字是扩展方向，不是第一版的虚假验收指标。系统实际优化：
 
@@ -48,7 +48,7 @@ authorized task contract
         │
         ▼
 deterministic coordinator (DBOS)
-  durable lifecycle + queue + retry + project lane
+  durable lifecycle + retry
         │
         ▼
 isolated Codex implementer workspace
@@ -69,9 +69,11 @@ credential-scoped GitHub delivery
 reviewed PR + explicit approval attestation
 ```
 
-Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review finding 和 approval 都可追溯且不可被聊天静默改写。
+这张图描述选定的最小目标，不是已经实现的能力声明。当前仓库没有运行时代码或纵切证据；DBOS + Drizzle 恢复、Codex structured subprocess、workspace fence/sandbox、GitHub effect reconciliation 和 exact-SHA gate 仍需由下一项实现 Issue 用一条真实的薄纵切做 characterization 和 integration 验证。第一条纵切只运行一个 Task、一个 repository 和一个 writer；project queue/lane 与容量扩展不能成为它的前置工程。
 
-Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确的 next owner。系统借此保留 Raft 体验中“有序激发”的优点，同时让不同项目 lane 并行。
+Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
+
+Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确的 next owner。系统借此保留 Raft 体验中“有序激发”的优点，并在首条纵切稳定后允许不同项目 lane 并行。
 
 ## 4. 权威与状态
 
@@ -79,7 +81,7 @@ Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有
 
 顶层不需要 LLM 界面，也不存在永久 Chief Agent。协调器是普通 TypeScript 程序；DBOS 提供 durable workflow、queue、timer、checkpoint 和 restart recovery。协调器只做机械且可审计的决定：admit、lease、activate、wait、retry、invalidate stale evidence、reduce gates 和 publish effects。
 
-LLM 只承担必须依赖语义判断的有限角色：Requirement Proxy、Planner、Implementer、Reviewer，以及出现冲突时的诊断者。LLM 不直接修改 task lifecycle，也不能用自然语言宣布终态。
+V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及出现冲突时的有界诊断。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
 
 正常推进由持久化事件触发；一个 DBOS scheduled reconciler 定期扫描 nonterminal lane，作为丢事件、agent 静默退出和外部 effect 未回报时的零模型后备。它只重新观察事实并恢复一个明确 next action，不广播唤醒多个角色，也不重复授予 write generation。这就是系统的“定期激发”：保证 liveness，但不制造对话风暴。
 
@@ -89,8 +91,8 @@ LLM 只承担必须依赖语义判断的有限角色：Requirement Proxy、Plann
 - **Run**：一次 agent/process 尝试及其 context、workspace、模型、预算和 observation。
 - **Candidate**：从记录的 base 产生、由 host 验证并冻结的 Git commit SHA。
 - **Check Result**：项目原生命令在该 Candidate 上产生的机器事实。
-- **Review Verdict**：fresh non-author reviewer 对该 Candidate 的 `approved`、`changes_requested` 或 `inconclusive`。
-- **Delivery Effect**：branch、push、PR、approval 和未来 merge 的外部副作用及 probe 结果。
+- **Review Verdict**：fresh non-author reviewer 对该 Candidate 的 `approved`、`changes_requested` 或 `inconclusive`；其中 exact-SHA `approved` 是 Usine 的 semantic approval 事实。
+- **Delivery Effect**：branch、push、PR、review attestation projection 和未来 merge 的外部副作用及 probe 结果。
 
 进程退出、Codex hook、agent 最后一条消息、测试命令 exit 0 和 CI job 正常结束都只是一项 evidence。Task 的终态只能由完整 gate 对同一 SHA 的事实归并得到。
 
@@ -108,7 +110,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-初期的并发分片是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
+第一条完整纵切串行运行一个 Task。它稳定后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -125,11 +127,11 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 Project checks 和 reviewer 是两个独立事实。Reviewer 可以读取完整 codebase、Task Contract、diff 和 check evidence，但不继承 implementer 的辩护性对话。它必须提交结构化 verdict；review process 正常退出但没有合法 verdict 时结果是 `inconclusive`，不是批准。
 
-所有 gate 绑定 exact Candidate SHA。新 commit 自动使旧 check、review 和 approval stale。`changes_requested` 先聚合为一个 finding batch，再激活一次 implementer；不会让每条评论分别激活 agent。重复不收敛按预算进入 blocker/diagnosis，不形成无限 review 风暴。
+所有 gate 绑定 exact Candidate SHA。新 commit 自动使旧 check、review verdict 和 attestation stale。`changes_requested` 先聚合为一个 finding batch，再激活一次 implementer；不会让每条评论分别激活 agent。重复不收敛按预算进入 blocker/diagnosis，不形成无限 review 风暴。
 
-GitHub 是当前 forge 与交付 surface，不是核心 task domain。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据。branch、PR 和 approval 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
+GitHub 是当前 forge 与交付 surface，不是核心 task domain。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
 
-显式 reviewer approval 是必要事实。私有仓库的平台 ruleset 是否强制它不影响 Usine 自己的 gate：Merge Controller 在未来启用自动 merge 时仍会重新读取 live head，并验证 checks、review run 和 approval 都绑定该 head。第一项产品行为停在 reviewed PR；自动 merge 是同一 gate 后面的权限 adapter，不要求重写核心。
+fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。第一项产品行为停在带 exact-SHA approval attestation 的 reviewed PR；未来自动 merge 仍须重新读取 live head，并验证 checks、verdict、attestation 与任何 platform approval 都绑定该 head。
 
 ## 7. Context 模型
 
@@ -145,8 +147,8 @@ Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activ
 - **coordination**：DBOS workflow 与 gate policy；
 - **workspace/runtime**：workspace lease、Codex process 和 observation；
 - **quality**：project checks、review verdict 与 finding aggregation；
-- **delivery**：GitHub App、PR/approval/effect reconciliation；
-- **operations**：配置、日志、kill switch、预算和 digest。
+- **delivery**：GitHub App、PR/attestation/effect reconciliation；
+- **operations**：首条纵切所需的配置、预算/kill switch 和最小可诊断日志。
 
 默认依赖选择：
 
@@ -166,6 +168,6 @@ Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析�
 
 ## 9. 衡量与扩大
 
-系统持续记录：accepted/merged PR、human activation、端到端时间、各模型 token/订阅容量、review/fix 轮数、静默停止恢复、blocked 原因、check 与 reviewer 等待时间。数据用于选择接下来值得解决的瓶颈，不设置 10、30、50、100、300 之间的人工阶段门。
+首条纵切只记录能回答核心优化目标的事实：是否形成 accepted outcome、human activation、端到端时间、成本、返修次数和 blocker。观察到具体瓶颈后再增加诊断指标，不预建通用 metrics surface，也不设置 10、30、50、100、300 之间的人工阶段门。
 
-提高容量的默认顺序是增加互不冲突的项目 lane，而不是增加单个 task 内的 agent 发言者。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。
+首条纵切稳定后，提高容量的默认顺序是增加互不冲突的项目 lane，而不是增加单个 task 内的 agent 发言者。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。

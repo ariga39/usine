@@ -37,19 +37,11 @@ restate current outcome and next observable action
 
 Handoff 放在临时 `.tasks/HANDOFF.md`，只记录：当前 Issue/PR、branch/base/head、已完成的可验证事实、未完成 outcome、blocker、下一条命令或动作。重要决定必须先进入 `DECISIONS.md` 或 Issue，不能只留在 handoff。
 
-### Context window 决策
+### Context 与模型配置边界
 
-截至 2026-08-17，本机 Codex 0.147.0 的 Luna catalog 默认 context window 为 272k，允许的最大值为 872k；OpenAI 对 GPT‑5.6 模型标注的总 context 为 1.05M。更大的 window 能减少 compact 次数，但不能保证关键原则被保留，还会保留更多过期讨论并增加输入成本。
+Context window 和 model catalog 会随客户端、账户和供应商变化，不属于 canonical architecture。主编排者可以在 task-local profile 中选择当前支持且成本可接受的较大 window；implementer 和 reviewer 使用 role-sized context，不继承主编排 thread。具体 model slug、window 数值、订阅容量和 benchmark 结论只进入本地配置或当前 Issue evidence，并在客户端/model 升级后重新验证。
 
-因此：
-
-- 主编排者/设计者使用独立的 `usine-orchestrator` Codex profile，可以把 `model_context_window` 提高到本机 catalog 允许的上限；
-- implementer 和 reviewer 使用默认或更小的 task context，不继承主编排 thread；
-- 不全局提高 window，也不把 window 大小写成产品依赖；
-- 每次 Codex/model 升级重新读取 catalog 后再调整 profile，不硬编码超过当前 `max_context_window` 的值；
-- 大 window 是性能优化，canonical files + Git/Issue bootstrap 才是原则恢复机制。
-
-OpenAI 官方模型指南也建议把 policy 放在一个位置、避免重复 prompt，并跟踪长 session 中不断增长的 context；本协议据此选择“小而权威的文件 + 分角色 context”，而不是反复粘贴同一套规则。
+更大的 window 只是性能优化，可能同时保留更多过期讨论并增加输入成本。原则恢复始终依赖 canonical files + GitHub/Git bootstrap；policy 保持单一来源，不靠重复 prompt 或固定模型参数维持。
 
 ## 2. GitHub Issue → branch/worktree → PR
 
@@ -67,6 +59,8 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 ## 3. 有界并排开发
 
 主编排者初期最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
+
+在第一条完整 user-visible 纵切进入 main、共享 seam 仍未由代码固定之前，实施必须串行。两项上限只是允许并排的 fence，不是当前已经具备并行开发能力的声明。
 
 只有满足以下条件才并排：
 
