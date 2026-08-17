@@ -419,6 +419,7 @@ describe("usine run", () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-budget-"));
       const repository = join(directory, "repository");
       const stateDirectory = join(directory, "state");
+      const herdrLog = join(directory, "herdr.jsonl");
       await mkdir(repository);
       await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
       await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
@@ -457,6 +458,7 @@ describe("usine run", () => {
         env: {
           USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
           USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
+          USINE_HERDR_LOG: herdrLog,
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: stateDirectory,
@@ -469,6 +471,21 @@ describe("usine run", () => {
       expect(result).toMatchObject({ state: "blocked" });
       expect(result.blocker).toContain("elapsed budget exhausted");
       expect(elapsedMs).toBeLessThan(5_000);
+      const herdrEvents = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const taskSplits = herdrEvents.filter(
+        (event) =>
+          event.type === "split" &&
+          event.command.some((argument: string) => argument.includes(taskId)),
+      );
+      expect(taskSplits).toHaveLength(1);
+      const taskPane = taskSplits[0].pane;
+      expect(
+        herdrEvents.filter((event) => event.type === "close" && event.command.includes(taskPane)),
+      ).toHaveLength(1);
       expect(
         JSON.parse(await readFile(join(stateDirectory, "results", `${taskId}.json`), "utf8")),
       ).toEqual(result);

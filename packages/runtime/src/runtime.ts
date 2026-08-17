@@ -207,6 +207,7 @@ function herdrEnvironment(): NodeJS.ProcessEnv {
     "USINE_CODEX_BIN",
     "USINE_HERDR_LOG",
     "USINE_HERDR_MODE",
+    "USINE_EXPECTED_OBSERVATION_DIR",
   ]) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
@@ -411,17 +412,26 @@ async function runImplementer(
   ].join("\n");
   const directBinary = process.env.USINE_CODEX_BIN ?? "codex";
   const herdrBinary = process.env.USINE_HERDR_BIN ?? "herdr";
-  const runHerdr = async (args: string[]) =>
+  const observationDirectory = dirname(outputPath);
+  const runHerdr = async (args: string[], timeoutMs?: number) =>
     (() => {
       const invocation = codexCommand(herdrBinary, args);
       return execa(invocation.executable, invocation.args, {
         cwd: workspace,
-        env: herdrEnvironment(),
+        env: { ...herdrEnvironment(), USINE_EXPECTED_OBSERVATION_DIR: observationDirectory },
         extendEnv: false,
         reject: false,
-        timeout: operationTimeout(input),
+        timeout: timeoutMs ?? operationTimeout(input),
       });
     })();
+  const clearedPaneEnvironment = [
+    "USINE_DATABASE_URL",
+    "USINE_STATE_DIR",
+    "USINE_GITHUB_TEST_TOKEN",
+    "USINE_GITHUB_PRIVATE_KEY_PATH",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+  ];
   const paneResult = await runHerdr([
     "pane",
     "split",
@@ -431,6 +441,9 @@ async function runImplementer(
     "--cwd",
     workspace,
     "--no-focus",
+    ...clearedPaneEnvironment.flatMap((key) => ["--env", `${key}=`]),
+    "--env",
+    "USINE_CODEX_ROLE=implementer",
   ]);
   const herdrUnavailable = paneResult.failed === true && paneResult.code === "ENOENT";
   if (herdrUnavailable) {
@@ -511,6 +524,10 @@ async function runImplementer(
       "-C",
       workspace,
       "--no-alt-screen",
+      "--add-dir",
+      dirname(outputPath),
+      "--config",
+      "shell_environment_policy.inherit=core",
     ]);
     if (started.exitCode !== 0) throw new Error(`herdr agent start failed: ${started.stderr}`);
     const prompted = await runHerdr([
@@ -563,12 +580,12 @@ async function runImplementer(
       },
     };
   } catch (error) {
-    const closed = await runHerdr(["pane", "close", pane]);
+    const closed = await runHerdr(["pane", "close", pane], 1_000);
     if (closed.exitCode !== 0)
       throw new Error(`herdr pane close failed: ${closed.stderr}`, { cause: error });
     throw error;
   }
-  const closed = await runHerdr(["pane", "close", pane]);
+  const closed = await runHerdr(["pane", "close", pane], 1_000);
   if (closed.exitCode !== 0) throw new Error(`herdr pane close failed: ${closed.stderr}`);
   return implementation;
 }
