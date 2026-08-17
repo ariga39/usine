@@ -43,6 +43,18 @@ importers:
         specifier: latest
         version: 7.0.2
 
+  packages/agent-runtime:
+    devDependencies:
+      '@types/node':
+        specifier: latest
+        version: 26.2.0
+      tsdown:
+        specifier: latest
+        version: 0.22.14(tsx@4.23.12)(typescript@7.0.2)
+      typescript:
+        specifier: latest
+        version: 7.0.2
+
   packages/runtime:
     dependencies:
       '@ai-sdk/openai':
@@ -54,6 +66,9 @@ importers:
       '@dbos-inc/drizzle-datasource':
         specifier: latest
         version: 4.25.14(@dbos-inc/dbos-sdk@4.25.14)(drizzle-orm@0.45.2(@types/pg@8.21.0)(pg@8.23.0))
+      '@usine/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       ai:
         specifier: ^7.0.66
         version: 7.0.66(zod@4.4.3)

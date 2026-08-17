@@ -3,4 +3,5 @@ allowBuilds:
 
 packages:
   - apps/cli
+  - packages/agent-runtime
   - packages/runtime
