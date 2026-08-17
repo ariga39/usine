@@ -97,6 +97,36 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (!prompt.includes("Make the first observable in-scope action promptly")) {
     throw new Error("implementer prompt is missing prompt-action guidance");
   }
+  if (!prompt.includes("Canonical corpus already loaded; do not reread before first action.")) {
+    throw new Error("implementer prompt is missing canonical no-reread guidance");
+  }
+  for (const document of [
+    "AGENTS.md",
+    "docs/DESIGN.md",
+    "docs/DEVELOPMENT.md",
+    "docs/DECISIONS.md",
+  ]) {
+    const marker = `Canonical document ${document}:\n`;
+    const endMarker = `\nEnd canonical document ${document}.`;
+    const start = prompt.indexOf(marker);
+    const end = prompt.indexOf(endMarker, start + marker.length);
+    if (start < 0 || end < 0) {
+      throw new Error(`implementer prompt is missing canonical document ${document}`);
+    }
+    const contents = prompt.slice(start + marker.length, end);
+    const expected = await readFile(new URL(`../../${document}`, import.meta.url), "utf8");
+    if (contents !== expected) {
+      throw new Error(`implementer prompt has incomplete canonical document ${document}`);
+    }
+  }
+  if (
+    contract.instructions.includes("respect target rules") &&
+    !prompt.includes(
+      "Target repository rule AGENTS.md (exact base SHA):\nFixture target rule: preserve review evidence.",
+    )
+  ) {
+    throw new Error("implementer prompt is missing exact-base target rules");
+  }
   if (
     contract.instructions.includes("address review findings") &&
     outputPath.includes("implementer-2") &&
