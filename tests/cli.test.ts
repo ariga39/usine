@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +45,7 @@ async function createFallbackFixture(directory: string, taskId: string) {
   );
   await execa("git", ["add", "task.json"], { cwd: repository });
   await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
-  return { repository, stateDirectory, contractPath };
+  return { repository, stateDirectory, contractPath, baseSha };
 }
 
 describe("usine run", () => {
@@ -98,6 +98,100 @@ describe("usine run", () => {
       await expect(
         readFile(join(fixture.stateDirectory, "workspaces", taskId, "delivered.txt"), "utf8"),
       ).rejects.toThrow();
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "finalizes an uncommitted Herdr proposal in the candidate worktree",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-candidate-finalization-"));
+      const taskId = `candidate-finalization-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const sourceHead = (await execa("git", ["rev-parse", "HEAD"], { cwd: fixture.repository }))
+        .stdout;
+
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_HERDR_MODE: "propose-without-commit",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      expect(result.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(result.candidateSha).not.toBe(sourceHead);
+      expect(
+        (
+          await execa(
+            "git",
+            ["merge-base", "--is-ancestor", fixture.baseSha, result.candidateSha],
+            {
+              cwd: fixture.repository,
+              reject: false,
+            },
+          )
+        ).exitCode,
+      ).toBe(0);
+      expect((await execa("git", ["rev-parse", "HEAD"], { cwd: fixture.repository })).stdout).toBe(
+        sourceHead,
+      );
+
+      const workspace = join(fixture.stateDirectory, "workspaces", taskId);
+      expect((await execa("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout).toBe(
+        result.candidateSha,
+      );
+      expect((await execa("git", ["status", "--porcelain"], { cwd: workspace })).stdout).toBe("");
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "finalizes a proposal without running repository hooks with coordinator credentials",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-candidate-hooks-"));
+      const taskId = `candidate-hooks-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const hookDirectory = join(fixture.repository, ".hooks");
+      const hookMarker = join(directory, "pre-commit-invoked");
+      await mkdir(hookDirectory);
+      await writeFile(
+        join(hookDirectory, "pre-commit"),
+        `#!/bin/sh\nprintf '%s:%s\\n' "${process.env.USINE_TEST_DATABASE_URL ?? ""}" "${process.env.USINE_GITHUB_TEST_TOKEN ?? ""}" > "${hookMarker}"\nexit 97\n`,
+      );
+      await chmod(join(hookDirectory, "pre-commit"), 0o755);
+      await execa("git", ["config", "core.hooksPath", hookDirectory], {
+        cwd: fixture.repository,
+      });
+
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_HERDR_MODE: "propose-without-commit",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      await expect(readFile(hookMarker, "utf8")).rejects.toThrow();
     },
     30_000,
   );
