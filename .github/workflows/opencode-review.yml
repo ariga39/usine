@@ -21,27 +21,12 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: opencode-review
 
     steps:
-      - name: Check triggering actor permission
-        env:
-          ACTOR: ${{ github.actor }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          actor_uri="$(jq -rn --arg actor "$ACTOR" '$actor | @uri')"
-          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${actor_uri}/permission" --jq '.permission' 2>/dev/null || true)"
-
-          if [[ "$permission" != "write" && "$permission" != "admin" ]]; then
-            echo "The triggering actor does not have write or admin repository permission."
-            exit 1
-          fi
-
       - name: Check out pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
