@@ -3,6 +3,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
+function requireExactKeys(value, expected, label) {
+  const actual = Object.keys(value ?? {}).toSorted();
+  if (JSON.stringify(actual) !== JSON.stringify(expected.toSorted())) {
+    throw new Error(`${label} is incomplete: ${actual.join(",")}`);
+  }
+}
+
 const args = process.argv.slice(2);
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
@@ -30,6 +37,38 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
     .split("\n")
     .find((line) => line.startsWith("Frozen Task Contract JSON: "));
   const contract = JSON.parse(contractLine.slice("Frozen Task Contract JSON: ".length));
+  requireExactKeys(
+    contract,
+    [
+      "acceptance",
+      "authorization",
+      "baseSha",
+      "budget",
+      "delivery",
+      "id",
+      "instructions",
+      "nonGoals",
+      "projectCheck",
+      "repository",
+    ],
+    "frozen Task Contract",
+  );
+  requireExactKeys(contract.repository, ["name", "owner", "path"], "repository authority");
+  requireExactKeys(contract.projectCheck, ["command", "timeoutMs"], "project check authority");
+  requireExactKeys(
+    contract.budget,
+    ["maxElapsedMs", "maxImplementerActivations", "maxReviewCycles"],
+    "budget authority",
+  );
+  requireExactKeys(contract.authorization, ["delivery", "source"], "authorization");
+  requireExactKeys(
+    contract.delivery,
+    ["baseBranch", "body", "branch", "issue", "title"],
+    "delivery authority",
+  );
+  if (!Array.isArray(contract.acceptance) || !Array.isArray(contract.nonGoals)) {
+    throw new Error("frozen Task Contract is missing acceptance or nonGoals arrays");
+  }
   if (
     !contract.authorization?.source ||
     !prompt.includes(`Authorization source: ${contract.authorization.source}`)
