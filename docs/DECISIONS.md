@@ -28,6 +28,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
 | D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计 | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；审计只阻止扩张，不暂停安全的有效工作。 |
 | D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。DBOS runtime 必须使用 tsdown unbundle 模式，不把 workflow 打成 bundle。 |
+| D-019 | Product milestone 可以跨多个 PR；每个 implementation Issue 必须定义并优先交付 `first_merge_checkpoint`，即最小独立有用、可测、可回滚的 outcome | 防止把“完整纵切”误解为一次大 PR。Checkpoint 绿后先 merge；后续 failure mode/相邻 seam 进入新 Issue，review 不得用 milestone 终态扩大当前 acceptance。 |
 
 这些条目是当前实施选择与必须验证的 invariant，不是集成能力已经成立的证据。下一项实现 Issue 必须用一个 Task、一个 repository、一个 writer 的真实薄纵切验证 DBOS + Drizzle recovery、Codex structured subprocess、workspace isolation/fence、exact-SHA checks/review 和 GitHub App delivery；在此之前不得据此扩展 package、lane、runtime 或 forge。
 

@@ -25,9 +25,9 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 ## Development guardrails
 
 - No implementation work without a GitHub Issue, an isolated branch/worktree, and an explicit PR-sized outcome. The empty-repository bootstrap commit is the sole exception.
-- One completed task produces one PR. Do not combine unrelated work or silently modify another task's files.
+- One completed task produces one PR, but a product milestone may span many tasks/PRs. Each Issue must authorize the smallest independently useful, testable, and revertible outcome; never interpret “complete vertical” as a requirement for one large PR.
 - At most two implementation tasks may be active under one orchestrator. They must have independent ownership and non-overlapping writable surfaces; otherwise serialize them.
-- Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file. Command-line prompts only point to that file. `.tasks/` is never design authority.
+- Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file and must name `first_merge_checkpoint` plus its evidence. Command-line prompts only point to that file. `.tasks/` is never design authority.
 - Use test-first development for stable contracts, invariants, and bug reproductions. For uncertain integrations, establish the thinnest observable vertical behavior first and add tests around the behavior; do not pre-specify internals through hundreds of seam tests.
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.
 - Do not commit secrets, tokens, private keys, generated agent transcripts, local checkpoints, or historical clean-room archives.
@@ -44,6 +44,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 
 - The user is not the routine supervisor. Authorized work does not wait for the user to send `/goal`, “continue,” review, merge, or next-task confirmation. The orchestrator owns continuation and only asks for a genuine product/authority decision, unavailable required input, or an irreversible external choice outside existing scope.
 - Prefer small commits and small PRs that each move one observable outcome. Push and open a draft PR at the first checkable state; keep subsequent fix commits visible. After scoped checks and fresh semantic review pass, merge and continue to the next authorized Issue without a human approval queue.
+- The first merge checkpoint dominates later acceptance. Once its scoped evidence is green, stop implementing adjacent seams or later failure modes, push/merge that checkpoint, and continue the larger milestone through a new Issue. A local green checkpoint without a remote PR is a drift condition, not progress.
 - Process, compliance, planning, and review are tools, not outcomes. They may block early iteration only when they expose a concrete correctness, security/authority, destructive-action, or product-direction risk. Non-blocking concerns become later Issues.
 - User corrections update canonical documents or the active Issue promptly. The user may inspect occasionally and redirect work, but is not required to supervise normal progress.
 - Implementation runs use a fresh `usine-implementer` Codex profile with GPT-5.6 Luna at medium reasoning and `service_tier = "default"`; fast is never enabled. Fresh semantic review uses Sol, and bounded read-only research may use Terra. Only when the implementer profile file/path is unavailable, use Herdr to start a new Codex implementer explicitly on Luna without fast.
@@ -63,6 +64,7 @@ Stop and re-read the canonical documents before continuing when any of these occ
 - work no longer advances the Issue's user-visible outcome;
 - a new package, service, table, abstraction, or generalized interface is proposed without a current caller;
 - review repeatedly expands beyond the changed seam;
+- a first merge checkpoint is green locally but has not been pushed as a remote PR;
 - an agent spends substantial time planning without making an observable change;
 - context has compacted and the current objective cannot be restated from durable artifacts.
 
