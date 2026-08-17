@@ -161,6 +161,32 @@ function processTimedOut(error: unknown): boolean {
   );
 }
 
+function herdrErrorCode(stderr: unknown): string | undefined {
+  if (typeof stderr !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(stderr.trim()) as { error?: { code?: unknown } };
+    return typeof parsed.error?.code === "string" ? parsed.error.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function startHerdrAgent<T extends { exitCode?: number | null; stderr: unknown }>(
+  input: WorkflowInput,
+  runHerdr: (args: string[], timeoutMs?: number) => Promise<T>,
+  args: string[],
+): Promise<T> {
+  while (true) {
+    const started = await runHerdr(args);
+    if (processTimedOut(started)) throw new ElapsedBudgetError();
+    if (started.exitCode === 0 || herdrErrorCode(started.stderr) !== "agent_pane_busy") {
+      return started;
+    }
+    const delay = Math.min(50, operationTimeout(input, 50));
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay));
+  }
+}
+
 async function runGit(input: WorkflowInput, args: string[]): Promise<{ stdout: string }> {
   const result = await execa("git", args, { timeout: operationTimeout(input) });
   return { stdout: String(result.stdout) };
@@ -553,7 +579,7 @@ async function runImplementer(
   const agentName = `usine-impl-${createHash("sha256").update(input.contract.id).digest("hex").slice(0, 12)}-${activation}`;
   let implementation: ImplementerResult;
   try {
-    const started = await runHerdr([
+    const started = await startHerdrAgent(input, runHerdr, [
       "agent",
       "start",
       agentName,
@@ -811,7 +837,7 @@ async function runReviewer(
       if (closed.exitCode !== 0) throw new Error(`herdr pane close failed: ${closed.stderr}`);
     };
     try {
-      const started = await runHerdr([
+      const started = await startHerdrAgent(input, runHerdr, [
         "agent",
         "start",
         agentName,
@@ -836,7 +862,6 @@ async function runReviewer(
         "--config",
         "service_tier=default",
       ]);
-      if (processTimedOut(started)) throw new ElapsedBudgetError();
       if (started.exitCode !== 0) throw new Error(`herdr agent start failed: ${started.stderr}`);
       const prompted = await runHerdr([
         "agent",

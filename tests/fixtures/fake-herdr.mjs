@@ -63,17 +63,55 @@ if (args[0] === "pane" && args[1] === "split") {
     throw new Error("fake Herdr start is missing the exact observation directory");
   if (configIndex < 0 || args[configIndex + 1] !== "shell_environment_policy.inherit=core")
     throw new Error("fake Herdr start is missing the core shell environment policy");
-  const persistentEnvironment = JSON.parse(await readFile(".fake-herdr-server.json", "utf8"));
-  await rm(".fake-herdr-server.json", { force: true });
-  await record({ command: args, type: "start" });
-  await writeFile(
-    ".fake-herdr-agent.json",
-    JSON.stringify({
-      args: args.slice(8),
-      observationDir: args[addDirIndex + 1],
-      environment: persistentEnvironment,
-    }),
-  );
+  if (process.env.USINE_HERDR_MODE === "start-fail") {
+    await record({ command: args, type: "start" });
+    process.stderr.write(JSON.stringify({ error: { code: "agent_start_failed" } }));
+    process.exitCode = 1;
+  } else if (process.env.USINE_HERDR_MODE === "busy-once") {
+    let alreadyBusy = false;
+    if (log) {
+      try {
+        alreadyBusy = (await readFile(log, "utf8"))
+          .split("\n")
+          .filter(Boolean)
+          .some((line) => JSON.parse(line).type === "busy");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    } else {
+      try {
+        await readFile(".fake-herdr-busy-once", "utf8");
+        alreadyBusy = true;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    if (!alreadyBusy) {
+      await record({ command: args, type: "busy" });
+      if (!log) await writeFile(".fake-herdr-busy-once", "busy\n");
+      process.stderr.write(
+        JSON.stringify({ error: { code: "agent_pane_busy", message: "pane is initializing" } }),
+      );
+      process.exitCode = 1;
+    }
+  }
+  if (process.exitCode === 1) {
+    // A failed start leaves the pane server state available for a retry; pane close cleans it up.
+  } else {
+    if (process.env.USINE_HERDR_MODE === "busy-once" && !log)
+      await rm(".fake-herdr-busy-once", { force: true });
+    const persistentEnvironment = JSON.parse(await readFile(".fake-herdr-server.json", "utf8"));
+    await rm(".fake-herdr-server.json", { force: true });
+    await record({ command: args, type: "start" });
+    await writeFile(
+      ".fake-herdr-agent.json",
+      JSON.stringify({
+        args: args.slice(8),
+        observationDir: args[addDirIndex + 1],
+        environment: persistentEnvironment,
+      }),
+    );
+  }
 } else if (args[0] === "agent" && args[1] === "prompt") {
   const state = JSON.parse(await readFile(".fake-herdr-agent.json", "utf8"));
   await record({ command: args, type: "prompt" });
