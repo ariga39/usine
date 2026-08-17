@@ -363,6 +363,38 @@ function sessionIdFromJsonl(stdout: string): string | null {
   return null;
 }
 
+async function finalizeCandidate(
+  input: WorkflowInput,
+  workspace: string,
+  previousSha: string,
+): Promise<string> {
+  const currentSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+  const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
+  let candidateSha = currentSha;
+  if (currentSha === previousSha) {
+    if (status.stdout === "") throw new Error("implementer proposed no workspace changes");
+    await runGit(input, ["-C", workspace, "add", "--all"]);
+    await runGit(input, ["-C", workspace, "commit", "-m", "Implement authorized task"]);
+    candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+    if (candidateSha === previousSha) throw new Error("host did not create a new candidate commit");
+  } else if (status.stdout !== "") {
+    throw new Error("implementer left a committed candidate workspace dirty");
+  }
+
+  await runGit(input, ["-C", workspace, "merge-base", "--is-ancestor", previousSha, candidateSha]);
+  await runGit(input, [
+    "-C",
+    workspace,
+    "merge-base",
+    "--is-ancestor",
+    input.contract.baseSha,
+    candidateSha,
+  ]);
+  const finalStatus = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
+  if (finalStatus.stdout !== "") throw new Error("candidate workspace is dirty");
+  return candidateSha;
+}
+
 async function runImplementer(
   input: WorkflowInput,
   activation: number,
@@ -372,6 +404,9 @@ async function runImplementer(
   const workspace = await ensureWorktree(input);
   await runGit(input, ["-C", workspace, "reset", "--hard", previousSha]);
   await runGit(input, ["-C", workspace, "clean", "-fd"]);
+  const startingSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+  if (startingSha !== previousSha)
+    throw new Error("candidate workspace did not start at prior SHA");
   const schemaPath = resolve(input.stateDirectory, "schemas", "implementer.json");
   const outputPath = resolve(
     input.stateDirectory,
@@ -477,19 +512,7 @@ async function runImplementer(
       throw new Error(`implementer process failed: ${processResult.stderr}`);
     const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
     if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-    const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
-    if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
-    const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
-    if (candidateSha === previousSha)
-      throw new Error("implementer did not create a new candidate commit");
-    await runGit(input, [
-      "-C",
-      workspace,
-      "merge-base",
-      "--is-ancestor",
-      input.contract.baseSha,
-      candidateSha,
-    ]);
+    const candidateSha = await finalizeCandidate(input, workspace, previousSha);
     return {
       candidateSha,
       observation: {
@@ -557,19 +580,7 @@ async function runImplementer(
     };
     const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
     if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-    const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
-    if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
-    const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
-    if (candidateSha === previousSha)
-      throw new Error("implementer did not create a new candidate commit");
-    await runGit(input, [
-      "-C",
-      workspace,
-      "merge-base",
-      "--is-ancestor",
-      input.contract.baseSha,
-      candidateSha,
-    ]);
+    const candidateSha = await finalizeCandidate(input, workspace, previousSha);
     implementation = {
       candidateSha,
       observation: {

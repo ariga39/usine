@@ -173,8 +173,10 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
     // The first activation creates the file.
   }
   await writeFile("delivered.txt", content);
-  await execa("git", ["add", "delivered.txt"]);
-  await execa("git", ["commit", "-m", "Implement authorized task"]);
+  if (process.env.USINE_HERDR_MODE !== "propose-without-commit") {
+    await execa("git", ["add", "delivered.txt"]);
+    await execa("git", ["commit", "-m", "Implement authorized task"]);
+  }
   await writeFile(
     outputPath,
     JSON.stringify({ status: "proposed", summary: "Implemented fixture" }),
