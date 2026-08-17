@@ -10,7 +10,7 @@ const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.ur
 const fakeCodexPath = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 const fakeHerdrPath = fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url));
 
-async function createFallbackFixture(directory: string, taskId: string) {
+async function createFallbackFixture(directory: string, taskId: string, maxElapsedMs = 60_000) {
   const repository = join(directory, "repository");
   const stateDirectory = join(directory, "state");
   await mkdir(repository);
@@ -32,7 +32,7 @@ async function createFallbackFixture(directory: string, taskId: string) {
       acceptance: ["The fixture check passes."],
       nonGoals: [],
       projectCheck: { command: "test -f delivered.txt", timeoutMs: 10_000 },
-      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs },
       authorization: { source: "test issue", delivery: true },
       delivery: {
         baseBranch: "main",
@@ -154,6 +154,78 @@ describe("usine run", () => {
       expect((await execa("git", ["status", "--porcelain"], { cwd: workspace })).stdout).toBe("");
     },
     30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "waits for a structured Herdr observation after an early settled prompt",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-observation-"));
+      const taskId = `herdr-observation-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const herdrLog = join(directory, "herdr.jsonl");
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "early-settle",
+          USINE_HERDR_LOG: herdrLog,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      const events = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.filter((event) => event.type === "read")).toHaveLength(2);
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "fails immediately when Herdr reports a blocked agent without an observation",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-blocked-"));
+      const taskId = `herdr-blocked-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId, 5_000);
+      const herdrLog = join(directory, "herdr.jsonl");
+      const startedAt = Date.now();
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "blocked",
+          USINE_HERDR_LOG: herdrLog,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({
+        state: "blocked",
+        blocker: expect.stringContaining("herdr agent blocked"),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(4_000);
+      const events = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.filter((event) => event.type === "get")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "close")).toHaveLength(1);
+    },
+    10_000,
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(

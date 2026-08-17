@@ -583,22 +583,57 @@ async function runImplementer(
       String(operationTimeout(input)),
     ]);
     if (prompted.exitCode !== 0) throw new Error(`herdr agent prompt failed: ${prompted.stderr}`);
-    const observed = await runHerdr([
-      "agent",
-      "read",
-      agentName,
-      "--source",
-      "recent-unwrapped",
-      "--lines",
-      "200",
-    ]);
-    if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
-    const processResult = {
-      stdout: String(observed.stdout),
-      stderr: String(observed.stderr),
-      exitCode: 0,
-    };
-    const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+    let processResult: { stdout: string; stderr: string; exitCode: number };
+    let output: z.infer<typeof implementerOutputSchema>;
+    while (true) {
+      const observed = await runHerdr([
+        "agent",
+        "read",
+        agentName,
+        "--source",
+        "recent-unwrapped",
+        "--lines",
+        "200",
+      ]);
+      if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
+      processResult = {
+        stdout: String(observed.stdout),
+        stderr: String(observed.stderr),
+        exitCode: 0,
+      };
+      try {
+        output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+        break;
+      } catch (error) {
+        if (
+          !(
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )
+        )
+          throw error;
+      }
+      const lifecycle = await runHerdr(["agent", "get", agentName]);
+      if (lifecycle.exitCode !== 0) throw new Error(`herdr agent get failed: ${lifecycle.stderr}`);
+      let agentStatus: unknown;
+      try {
+        agentStatus = (
+          JSON.parse(String(lifecycle.stdout)) as {
+            result?: { agent?: { agent_status?: unknown } };
+          }
+        ).result?.agent?.agent_status;
+      } catch (error) {
+        throw new Error("herdr agent get returned invalid JSON", { cause: error });
+      }
+      if (agentStatus === "blocked") throw new Error("herdr agent blocked");
+      if (typeof agentStatus !== "string")
+        throw new Error("herdr agent get returned no lifecycle state");
+      await new Promise<void>((resolveDelay) =>
+        setTimeout(resolveDelay, Math.min(50, operationTimeout(input, 50))),
+      );
+    }
     if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
     const candidateSha = await finalizeCandidate(input, workspace, previousSha);
     implementation = {
