@@ -1,0 +1,21 @@
+{
+  "name": "@usine/cli",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "usine": "dist/cli.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@usine/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsdown": "latest",
+    "typescript": "latest"
+  }
+}

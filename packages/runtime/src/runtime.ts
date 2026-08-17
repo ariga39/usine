@@ -133,7 +133,7 @@ const reviewerJsonSchema = {
 };
 
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
-const coordinatorRoot = fileURLToPath(new URL("../", import.meta.url));
+const coordinatorRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const canonicalDocumentPaths = [
   "AGENTS.md",
   "docs/DESIGN.md",
