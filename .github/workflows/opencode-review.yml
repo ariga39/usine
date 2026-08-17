@@ -1,0 +1,79 @@
+name: OpenCode review
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: opencode-review
+
+    steps:
+      - name: Check triggering actor permission
+        env:
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          actor_uri="$(jq -rn --arg actor "$ACTOR" '$actor | @uri')"
+          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${actor_uri}/permission" --jq '.permission' 2>/dev/null || true)"
+
+          if [[ "$permission" != "write" && "$permission" != "admin" ]]; then
+            echo "The triggering actor does not have write or admin repository permission."
+            exit 1
+          fi
+
+      - name: Check out pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run advisory OpenCode review
+        uses: anomalyco/opencode/github@d4ad650f738aaa986cee5879c581bd4834277577
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_BASE_URL: ${{ secrets.OPENCODE_BASE_URL }}
+          OPENCODE_CONFIG_CONTENT: |
+            {
+              "provider": {
+                "opencode-go": {
+                  "options": {
+                    "baseURL": "{env:OPENCODE_BASE_URL}",
+                    "apiKey": "{env:OPENCODE_API_KEY}",
+                    "timeout": 600000,
+                    "chunkTimeout": 30000
+                  }
+                }
+              }
+            }
+        with:
+          model: opencode-go/deepseek-v4-flash
+          share: false
+          use_github_token: true
+          prompt: |
+            Act as a senior maintainer reviewing this pull request. Report only actionable,
+            high-confidence correctness, security, concurrency, data-loss, or requirement
+            problems. Inspect relevant surrounding code and tests before deciding. Cap findings
+            at five. Omit style-only, nit, and speculative findings. Say explicitly when no
+            blocking issue is found. Never modify files, commit, or push.
