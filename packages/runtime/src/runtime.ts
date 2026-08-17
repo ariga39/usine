@@ -69,6 +69,7 @@ interface WorkflowInput {
   implementerModel: string;
   implementerProfile: string;
   reviewerModel: string;
+  reviewerReasoningEffort: string;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
   crashAfterActivation: boolean;
@@ -748,6 +749,8 @@ async function runReviewer(
     await writeFile(schemaPath, JSON.stringify(reviewerJsonSchema));
     const prompt = [
       "Role: reviewer.",
+      "The frozen Task Contract is the complete private Issue authority projection for this review.",
+      "GitHub access is neither available nor required: do not access GitHub, do not wait for user input, and missing GitHub credentials are not a blocker.",
       "Independently review this exact candidate against the authorized contract.",
       `Candidate SHA: ${sha}`,
       `Contract: ${JSON.stringify(input.contract)}`,
@@ -759,6 +762,10 @@ async function runReviewer(
       "exec",
       "--model",
       input.reviewerModel,
+      "--config",
+      `model_reasoning_effort=${input.reviewerReasoningEffort}`,
+      "--config",
+      "service_tier=default",
       "--ephemeral",
       "--json",
       "--output-schema",
@@ -1080,6 +1087,7 @@ export async function admitTask(
     implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
     implementerProfile: process.env.USINE_IMPLEMENTER_PROFILE ?? "usine-implementer",
     reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
+    reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",
     crashAfterActivation: process.env.USINE_CRASH_AFTER === "activation",

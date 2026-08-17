@@ -152,6 +152,30 @@ if (process.env.USINE_CODEX_ROLE === "implementer" && profile !== "usine-impleme
 if (process.env.USINE_CODEX_ROLE === "reviewer" && profile !== undefined) {
   throw new Error(`reviewer must remain fresh without implementer profile, received ${profile}`);
 }
+if (process.env.USINE_CODEX_ROLE === "reviewer") {
+  const configValues = args.flatMap((arg, index) => (arg === "--config" ? [args[index + 1]] : []));
+  const expectedReasoningEffort = process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low";
+  if (!configValues.includes(`model_reasoning_effort=${expectedReasoningEffort}`)) {
+    throw new Error(
+      `reviewer must set model_reasoning_effort=${expectedReasoningEffort} explicitly`,
+    );
+  }
+  if (!configValues.includes("service_tier=default")) {
+    throw new Error("reviewer must set service_tier=default explicitly");
+  }
+  if (
+    !prompt.includes("The frozen Task Contract is the complete private Issue authority projection")
+  ) {
+    throw new Error("reviewer prompt is missing the frozen Task Contract authority guidance");
+  }
+  if (
+    !prompt.includes("do not access GitHub") ||
+    !prompt.includes("do not wait for user input") ||
+    !prompt.includes("missing GitHub credentials are not a blocker")
+  ) {
+    throw new Error("reviewer prompt is missing the no-GitHub instruction");
+  }
+}
 
 if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (prompt.includes("Hang forever")) {
