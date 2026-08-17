@@ -107,14 +107,16 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
     "docs/DECISIONS.md",
   ]) {
     const marker = `Canonical document ${document}:\n`;
+    const endMarker = `\nEnd canonical document ${document}.`;
     const start = prompt.indexOf(marker);
-    const nextDocument = prompt.indexOf("\nCanonical document ", start + marker.length);
-    const contents = prompt.slice(
-      start + marker.length,
-      nextDocument < 0 ? undefined : nextDocument,
-    );
-    if (start < 0 || contents.trim().length === 0) {
+    const end = prompt.indexOf(endMarker, start + marker.length);
+    if (start < 0 || end < 0) {
       throw new Error(`implementer prompt is missing canonical document ${document}`);
+    }
+    const contents = prompt.slice(start + marker.length, end);
+    const expected = await readFile(new URL(`../../${document}`, import.meta.url), "utf8");
+    if (contents !== expected) {
+      throw new Error(`implementer prompt has incomplete canonical document ${document}`);
     }
   }
   if (

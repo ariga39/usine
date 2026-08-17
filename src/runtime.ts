@@ -368,9 +368,9 @@ async function runImplementer(
     "GitHub access is neither available nor required: do not access GitHub, do not wait for user input, and missing GitHub credentials are not a blocker.",
     `Frozen Task Contract JSON: ${JSON.stringify(input.contract)}`,
     "Canonical corpus already loaded; do not reread before first action.",
-    `Canonical corpus source SHA: ${input.contract.baseSha}`,
     ...input.canonicalCorpus.map(
-      ({ path, contents }) => `Canonical document ${path}:\n${contents}`,
+      ({ path, contents }) =>
+        `Canonical document ${path}:\n${contents}\nEnd canonical document ${path}.`,
     ),
     ...input.targetRules.map(
       ({ path, contents }) => `Target repository rule ${path} (exact base SHA):\n${contents}`,
