@@ -46,7 +46,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - Prefer small commits and small PRs that each move one observable outcome. Push and open a draft PR at the first checkable state; keep subsequent fix commits visible. After scoped checks and fresh semantic review pass, merge and continue to the next authorized Issue without a human approval queue.
 - Process, compliance, planning, and review are tools, not outcomes. They may block early iteration only when they expose a concrete correctness, security/authority, destructive-action, or product-direction risk. Non-blocking concerns become later Issues.
 - User corrections update canonical documents or the active Issue promptly. The user may inspect occasionally and redirect work, but is not required to supervise normal progress.
-- Implementation runs use a fresh `usine-implementer` Codex profile with GPT-5.6 Luna at medium reasoning and `service_tier = "default"`; fast is never enabled. Fresh semantic review uses Sol, and bounded read-only research may use Terra. If the implementer profile cannot be launched, use Herdr to start a new Codex implementer explicitly on Luna without fast.
+- Implementation runs use a fresh `usine-implementer` Codex profile with GPT-5.6 Luna at medium reasoning and `service_tier = "default"`; fast is never enabled. Fresh semantic review uses Sol, and bounded read-only research may use Terra. Only when the implementer profile file/path is unavailable, use Herdr to start a new Codex implementer explicitly on Luna without fast.
 
 ## Independent direction audits
 
