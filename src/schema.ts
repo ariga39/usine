@@ -13,7 +13,7 @@ export const taskRuns = pgTable("task_runs", {
 });
 
 export const repositoryLeases = pgTable("repository_leases", {
-  repository: text("repository").primaryKey(),
+  repositoryIdentity: text("repository").primaryKey(),
   taskId: text("task_id").notNull().unique(),
   generation: integer("generation").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

@@ -50,7 +50,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Add the requested fixture behavior.",
           acceptance: ["The fixture check passes."],
@@ -109,6 +109,96 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "freezes admitted input and leases one normalized repository identity across clone paths",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-frozen-"));
+      const repository = join(directory, "repository");
+      const secondRepository = join(directory, "second-clone");
+      const stateDirectory = join(directory, "state");
+      await mkdir(repository);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(join(repository, "README.md"), "fixture\n");
+      await execa("git", ["add", "README.md"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `frozen-${Date.now()}`;
+      const contractPath = join(repository, "task.json");
+      const contract = {
+        id: taskId,
+        repository: { path: repository, owner: "Example", name: "Fixture" },
+        baseSha,
+        instructions: "Original frozen instructions.",
+        acceptance: ["The task remains frozen."],
+        nonGoals: [],
+        projectCheck: { command: "true", timeoutMs: 10_000 },
+        budget: { maxImplementerActivations: 2, maxReviewCycles: 2, maxElapsedMs: 60_000 },
+        authorization: { source: "test issue", delivery: true },
+        delivery: {
+          baseBranch: "main",
+          branch: `agent/${taskId}`,
+          issue: 3,
+          title: "Frozen task",
+          body: "Frozen task body",
+        },
+      };
+      await writeFile(contractPath, JSON.stringify(contract));
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+      const env = {
+        USINE_CRASH_AFTER: "admitted",
+        USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+        USINE_STATE_DIR: stateDirectory,
+      };
+
+      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+      expect(interrupted.signal).toBe("SIGKILL");
+
+      contract.instructions = "Mutated instructions must not resume.";
+      await writeFile(contractPath, JSON.stringify(contract));
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "mutate admitted task"], { cwd: repository });
+      const mutated = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+      expect(mutated.exitCode).toBe(1);
+      expect(mutated.stderr).toContain("admitted contract is immutable");
+
+      await execa("git", ["clone", repository, secondRepository]);
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: secondRepository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], {
+        cwd: secondRepository,
+      });
+      const secondId = `${taskId}-second`;
+      const secondContractPath = join(secondRepository, "task.json");
+      await writeFile(
+        secondContractPath,
+        JSON.stringify({
+          ...contract,
+          id: secondId,
+          instructions: "A second clone must not receive a writer.",
+          repository: { ...contract.repository, path: secondRepository },
+          delivery: { ...contract.delivery, branch: `agent/${secondId}` },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: secondRepository });
+      await execa("git", ["commit", "-m", "authorize competing task"], { cwd: secondRepository });
+      const competing = await execa("node", ["dist/cli.mjs", "run", secondContractPath], {
+        env: { ...env, USINE_CRASH_AFTER: undefined },
+        reject: false,
+      });
+      expect(competing.exitCode).toBe(1);
+      expect(competing.stderr).toContain("repository already has an active writer");
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
     "delivers one checked and independently approved immutable candidate",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-delivery-"));
@@ -131,7 +221,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Create delivered.txt.",
           acceptance: ["node check.mjs passes."],
@@ -216,7 +306,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Create delivered.txt and address review findings.",
           acceptance: ["node check.mjs passes."],
@@ -297,7 +387,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Create delivered.txt.",
           acceptance: ["node check.mjs passes."],
@@ -379,7 +469,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Create delivered.txt.",
           acceptance: ["node check.mjs passes."],
@@ -556,7 +646,7 @@ describe("usine run", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: "fixture" },
+          repository: { path: repository, owner: "example", name: taskId },
           baseSha,
           instructions: "Create delivered.txt.",
           acceptance: ["The task is committed."],

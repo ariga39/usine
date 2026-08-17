@@ -47,7 +47,7 @@ interface TaskResult {
   review: ReviewResult | null;
   delivery: DeliveryResult | null;
   blocker: string | null;
-  writer: { repository: string; generation: number };
+  writer: { repository: string; repositoryIdentity: string; generation: number };
   evidence: {
     workflowId: string;
     implementerActivations: number;
@@ -61,8 +61,11 @@ interface WorkflowInput {
   contract: TaskContract;
   contractHash: string;
   repository: string;
+  repositoryIdentity: string;
   stateDirectory: string;
+  deadlineEpochMs: number;
   stopAfterAdmitted: boolean;
+  crashAfterAdmitted: boolean;
   crashAfterDelivery: boolean;
 }
 
@@ -178,6 +181,25 @@ async function applyMigrations(databaseUrl: string): Promise<void> {
     await pool.end();
   }
   await DrizzleDataSource.initializeDBOSSchema({ connectionString: databaseUrl });
+}
+
+async function rejectChangedAdmittedContract(
+  databaseUrl: string,
+  taskId: string,
+  contractHash: string,
+): Promise<void> {
+  const pool = new Pool({ connectionString: databaseUrl });
+  try {
+    const database = drizzle(pool, { schema: { taskRuns } });
+    const existing = await database.query.taskRuns.findFirst({
+      where: eq(taskRuns.taskId, taskId),
+    });
+    if (existing && existing.contractHash !== contractHash) {
+      throw new Error("admitted contract is immutable");
+    }
+  } finally {
+    await pool.end();
+  }
 }
 
 async function ensureWorktree(input: WorkflowInput): Promise<string> {
@@ -575,14 +597,14 @@ async function deliver(
     : githubDelivery(input, sha, check, review);
 }
 
-async function crashOnceAfterDelivery(input: WorkflowInput): Promise<boolean> {
-  const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-delivery-crash`);
+async function crashOnce(input: WorkflowInput, stage: "admitted" | "delivery"): Promise<boolean> {
+  const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-${stage}-crash`);
   try {
     await readFile(marker, "utf8");
     return true;
   } catch {
     await mkdir(dirname(marker), { recursive: true });
-    await writeFile(marker, "crash injected after checkpointed delivery\n");
+    await writeFile(marker, `crash injected after checkpointed ${stage}\n`);
     process.kill(process.pid, "SIGKILL");
     return new Promise<boolean>(() => undefined);
   }
@@ -605,14 +627,20 @@ export async function admitTask(
   await applyMigrations(databaseUrl);
   const stateDirectory = resolve(process.env.USINE_STATE_DIR ?? ".usine");
   const contractHash = createHash("sha256").update(rawContract).digest("hex");
+  const repositoryIdentity =
+    `${contract.repository.owner}/${contract.repository.name}`.toLowerCase();
   const input: WorkflowInput = {
     contract,
     contractHash,
     repository,
+    repositoryIdentity,
     stateDirectory,
+    deadlineEpochMs: Date.now() + contract.budget.maxElapsedMs,
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
+    crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",
     crashAfterDelivery: process.env.USINE_CRASH_AFTER === "delivery",
   };
+  await rejectChangedAdmittedContract(databaseUrl, contract.id, contractHash);
 
   const dataSource = new DrizzleDataSource<UsineDatabase>(
     "usine-domain",
@@ -620,7 +648,8 @@ export async function admitTask(
     { repositoryLeases, taskRuns },
   );
   const admit = dataSource.registerTransaction(
-    async (): Promise<TaskResult> => {
+    async (frozenInput: WorkflowInput): Promise<TaskResult> => {
+      const { contract, contractHash, repository, repositoryIdentity } = frozenInput;
       const existing = await dataSource.client.query.taskRuns.findFirst({
         where: eq(taskRuns.taskId, contract.id),
       });
@@ -632,14 +661,14 @@ export async function admitTask(
 
       const insertedLease = await dataSource.client
         .insert(repositoryLeases)
-        .values({ repository, taskId: contract.id, generation: 1 })
+        .values({ repositoryIdentity, taskId: contract.id, generation: 1 })
         .onConflictDoNothing()
         .returning();
       const lease =
         insertedLease[0] ??
         (await dataSource.client.query.repositoryLeases.findFirst({
           where: and(
-            eq(repositoryLeases.repository, repository),
+            eq(repositoryLeases.repositoryIdentity, repositoryIdentity),
             eq(repositoryLeases.taskId, contract.id),
           ),
         }));
@@ -654,7 +683,7 @@ export async function admitTask(
         review: null,
         delivery: null,
         blocker: null,
-        writer: { repository, generation: lease.generation },
+        writer: { repository, repositoryIdentity, generation: lease.generation },
         evidence: {
           workflowId: contract.id,
           implementerActivations: 0,
@@ -687,8 +716,14 @@ export async function admitTask(
     { name: "saveTaskResult" },
   );
   const workflow = DBOS.registerWorkflow(
-    async (): Promise<TaskResult> => {
-      let result = await admit();
+    async (frozenInput: WorkflowInput): Promise<TaskResult> => {
+      const input = frozenInput;
+      let result = await admit(input);
+      if (input.crashAfterAdmitted) {
+        await DBOS.runStep(() => crashOnce(input, "admitted"), {
+          name: "crash-after-admitted",
+        });
+      }
       if (input.stopAfterAdmitted) return result;
       let findings: string[] = [];
       let previousSha = input.contract.baseSha;
@@ -731,7 +766,7 @@ export async function admitTask(
             { name: "delivery" },
           );
           if (input.crashAfterDelivery) {
-            const recovered = await DBOS.runStep(() => crashOnceAfterDelivery(input), {
+            const recovered = await DBOS.runStep(() => crashOnce(input, "delivery"), {
               name: "crash-after-delivery",
             });
             result = {
@@ -787,7 +822,7 @@ export async function admitTask(
     const handle = await DBOS.startWorkflow(workflow, {
       workflowID: contract.id,
       timeoutMS: contract.budget.maxElapsedMs,
-    })();
+    })(input);
     const result = await handle.getResult();
     await writeResultArtifact(stateDirectory, result);
     return result;
