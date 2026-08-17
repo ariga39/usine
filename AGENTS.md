@@ -38,7 +38,15 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - Commentary and checkpoints report progress; they do not terminate the task. After reporting, continue with the next safe in-scope action.
 - Stop only when: the stated acceptance and delivery condition is verified; the user pauses/replaces the objective; or progress genuinely requires new authority, unavailable input, or an external state change that cannot be safely worked around.
 - When blocked, exhaust safe in-scope diagnostics and alternatives, then record the exact blocker and required decision. Do not label difficult, slow, or partially complete work as blocked.
-- Use Codex `/goal` for work expected to span turns or run unattended. The goal must name one objective, its non-goals, evidence of progress, and a verifiable stopping condition. `/goal` reinforces persistence; it does not replace the Issue, canonical documents, Git state, or these rules.
+- Codex `/goal` is an optional internal persistence mechanism, not a prompt or approval the user must provide. If used, it must name one objective, its non-goals, evidence of progress, and a verifiable stopping condition; it never replaces the Issue, canonical documents, Git state, or these rules.
+
+## Autonomous rapid iteration
+
+- The user is not the routine supervisor. Authorized work does not wait for the user to send `/goal`, “continue,” review, merge, or next-task confirmation. The orchestrator owns continuation and only asks for a genuine product/authority decision, unavailable required input, or an irreversible external choice outside existing scope.
+- Prefer small commits and small PRs that each move one observable outcome. Push and open a draft PR at the first checkable state; keep subsequent fix commits visible. After scoped checks and fresh semantic review pass, merge and continue to the next authorized Issue without a human approval queue.
+- Process, compliance, planning, and review are tools, not outcomes. They may block early iteration only when they expose a concrete correctness, security/authority, destructive-action, or product-direction risk. Non-blocking concerns become later Issues.
+- User corrections update canonical documents or the active Issue promptly. The user may inspect occasionally and redirect work, but is not required to supervise normal progress.
+- Implementation runs use a fresh `usine-implementer` Codex profile with GPT-5.6 Luna at medium reasoning and `service_tier = "default"`; fast is never enabled. Fresh semantic review uses Sol, and bounded read-only research may use Terra. Only when the implementer profile file/path is unavailable, use Herdr to start a new Codex implementer explicitly on Luna without fast.
 
 ## Independent direction audits
 
