@@ -431,7 +431,11 @@ describe("usine run", () => {
         join(repository, "check.mjs"),
         'import { access } from "node:fs/promises"; await access("delivered.txt");\n',
       );
-      await execa("git", ["add", "check.mjs"], { cwd: repository });
+      await writeFile(
+        join(repository, "AGENTS.md"),
+        "Fixture target rule: preserve review evidence.\n",
+      );
+      await execa("git", ["add", "check.mjs", "AGENTS.md"], { cwd: repository });
       await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
       const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
       const taskId = `fix-${Date.now()}`;
@@ -442,7 +446,7 @@ describe("usine run", () => {
           id: taskId,
           repository: { path: repository, owner: "example", name: taskId },
           baseSha,
-          instructions: "Create delivered.txt and address review findings.",
+          instructions: "Create delivered.txt, address review findings, and respect target rules.",
           acceptance: ["node check.mjs passes."],
           nonGoals: [],
           projectCheck: { command: "node check.mjs", timeoutMs: 10_000 },

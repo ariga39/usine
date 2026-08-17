@@ -60,6 +60,8 @@ interface TaskResult {
 interface WorkflowInput {
   contract: TaskContract;
   contractHash: string;
+  canonicalCorpus: Array<{ path: string; contents: string }>;
+  targetRules: Array<{ path: string; contents: string }>;
   repository: string;
   repositoryIdentity: string;
   stateDirectory: string;
@@ -131,6 +133,13 @@ const reviewerJsonSchema = {
 };
 
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
+const coordinatorRoot = fileURLToPath(new URL("../", import.meta.url));
+const canonicalDocumentPaths = [
+  "AGENTS.md",
+  "docs/DESIGN.md",
+  "docs/DEVELOPMENT.md",
+  "docs/DECISIONS.md",
+] as const;
 
 function remainingUntil(deadlineEpochMs: number, maximum = Number.POSITIVE_INFINITY): number {
   const remaining = deadlineEpochMs - Date.now();
@@ -235,6 +244,28 @@ async function verifyCommittedContract(
   return repository;
 }
 
+async function readCanonicalCorpus(): Promise<Array<{ path: string; contents: string }>> {
+  return Promise.all(
+    canonicalDocumentPaths.map(async (path) => {
+      return { path, contents: await readFile(resolve(coordinatorRoot, path), "utf8") };
+    }),
+  );
+}
+
+async function readTargetRules(
+  repository: string,
+  baseSha: string,
+  deadlineEpochMs: number,
+): Promise<Array<{ path: string; contents: string }>> {
+  const path = "AGENTS.md";
+  const result = await execa("git", ["-C", repository, "show", `${baseSha}:${path}`], {
+    timeout: remainingUntil(deadlineEpochMs),
+    reject: false,
+  });
+  if (result.exitCode !== 0) return [];
+  return [{ path, contents: String(result.stdout) }];
+}
+
 async function applyMigrations(databaseUrl: string): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl });
   try {
@@ -336,6 +367,14 @@ async function runImplementer(
     "The coordinator has provided the authoritative credential-separated projection of active private Issue/PR/thread authority for this activation.",
     "GitHub access is neither available nor required: do not access GitHub, do not wait for user input, and missing GitHub credentials are not a blocker.",
     `Frozen Task Contract JSON: ${JSON.stringify(input.contract)}`,
+    "Canonical corpus already loaded; do not reread before first action.",
+    `Canonical corpus source SHA: ${input.contract.baseSha}`,
+    ...input.canonicalCorpus.map(
+      ({ path, contents }) => `Canonical document ${path}:\n${contents}`,
+    ),
+    ...input.targetRules.map(
+      ({ path, contents }) => `Target repository rule ${path} (exact base SHA):\n${contents}`,
+    ),
     `Authorization source: ${input.contract.authorization.source}`,
     `Base SHA: ${input.contract.baseSha}`,
     `Current SHA: ${previousSha}`,
@@ -811,6 +850,10 @@ export async function admitTask(
   if (!databaseUrl) throw new Error("USINE_DATABASE_URL is required");
   const deadlineEpochMs = Date.now() + contract.budget.maxElapsedMs;
   const repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
+  const [canonicalCorpus, targetRules] = await Promise.all([
+    readCanonicalCorpus(),
+    readTargetRules(repository, contract.baseSha, deadlineEpochMs),
+  ]);
   await applyMigrations(databaseUrl);
   const stateDirectory = resolve(process.env.USINE_STATE_DIR ?? ".usine");
   const contractHash = createHash("sha256").update(rawContract).digest("hex");
@@ -819,6 +862,8 @@ export async function admitTask(
   const input: WorkflowInput = {
     contract,
     contractHash,
+    canonicalCorpus,
+    targetRules,
     repository,
     repositoryIdentity,
     stateDirectory,
