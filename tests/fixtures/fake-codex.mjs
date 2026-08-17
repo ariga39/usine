@@ -11,6 +11,9 @@ function requireExactKeys(value, expected, label) {
 }
 
 const args = process.argv.slice(2);
+if (process.env.USINE_CODEX_ROLE === "reviewer" && args[0] === "exec") {
+  throw new Error("reviewer must not use direct codex exec");
+}
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
 if (!outputPath) throw new Error("missing structured output path");
@@ -162,6 +165,10 @@ if (process.env.USINE_CODEX_ROLE === "reviewer") {
   }
   if (!configValues.includes("service_tier=default")) {
     throw new Error("reviewer must set service_tier=default explicitly");
+  }
+  const sandboxIndex = args.findIndex((arg) => arg === "--sandbox");
+  if (sandboxIndex < 0 || args[sandboxIndex + 1] !== "read-only") {
+    throw new Error("reviewer must use a read-only sandbox");
   }
   if (
     !prompt.includes("The frozen Task Contract is the complete private Issue authority projection")

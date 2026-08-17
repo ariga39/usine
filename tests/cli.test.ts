@@ -10,6 +10,49 @@ const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.ur
 const fakeCodexPath = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
 const fakeHerdrPath = fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url));
 
+interface FakeHerdrEvent {
+  command: string[];
+  context?: Record<string, unknown>;
+  pane?: string;
+  type: string;
+}
+
+function herdrOption(event: FakeHerdrEvent, option: string): string | undefined {
+  const index = event.command?.indexOf(option) ?? -1;
+  return index >= 0 ? event.command?.[index + 1] : undefined;
+}
+
+function currentTaskHerdrEvents(events: FakeHerdrEvent[], taskId: string): FakeHerdrEvent[] {
+  const splits = events.filter(
+    (event) => event.type === "split" && event.command?.some((arg) => arg.includes(taskId)),
+  );
+  const panes = new Set(
+    splits.map((event) => event.pane).filter((pane): pane is string => typeof pane === "string"),
+  );
+  const starts = events.filter((event) => {
+    const pane = herdrOption(event, "--pane");
+    return event.type === "start" && pane !== undefined && panes.has(pane);
+  });
+  const agents = new Set(
+    starts
+      .map((event) => event.command[2])
+      .filter((agent): agent is string => typeof agent === "string"),
+  );
+  return events.filter((event) => {
+    if (event.type === "split") return splits.includes(event);
+    if (event.type === "start") return starts.includes(event);
+    if (event.type === "close") {
+      const pane = event.command[2];
+      return pane !== undefined && panes.has(pane);
+    }
+    if (["get", "prompt", "read"].includes(event.type ?? "")) {
+      const agent = event.command[2];
+      return agent !== undefined && agents.has(agent);
+    }
+    return false;
+  });
+}
+
 async function createFallbackFixture(directory: string, taskId: string, maxElapsedMs = 60_000) {
   const repository = join(directory, "repository");
   const stateDirectory = join(directory, "state");
@@ -50,7 +93,7 @@ async function createFallbackFixture(directory: string, taskId: string, maxElaps
 
 describe("usine run", () => {
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
-    "falls back to direct Codex when the Herdr launcher is unavailable",
+    "does not fall back to direct Codex when the reviewer Herdr launcher is unavailable",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-herdr-unavailable-"));
       const taskId = `herdr-unavailable-${Date.now()}`;
@@ -65,11 +108,8 @@ describe("usine run", () => {
         },
         reject: false,
       });
-      expect(run.exitCode).toBe(0);
-      expect(JSON.parse(run.stdout)).toMatchObject({
-        state: "reviewed_pr",
-        review: { verdict: "approved" },
-      });
+      expect(run.exitCode).toBe(1);
+      expect(`${run.stdout}\n${run.stderr}`).toContain("herdr pane split failed");
     },
     30_000,
   );
@@ -185,7 +225,18 @@ describe("usine run", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-      expect(events.filter((event) => event.type === "read")).toHaveLength(2);
+      const taskEvents = currentTaskHerdrEvents(events, taskId);
+      expect(taskEvents.filter((event) => event.type === "read")).toHaveLength(4);
+      expect(
+        taskEvents.filter(
+          (event) => event.type === "read" && event.command[2]?.startsWith("usine-impl-"),
+        ),
+      ).toHaveLength(2);
+      expect(
+        taskEvents.filter(
+          (event) => event.type === "read" && event.command[2]?.startsWith("usine-review-"),
+        ),
+      ).toHaveLength(2);
     },
     30_000,
   );
@@ -547,22 +598,37 @@ describe("usine run", () => {
         (await execa("git", ["show", `${result.candidateSha}:delivered.txt`], { cwd: repository }))
           .stdout,
       ).toBe("implemented");
-      const herdrEvents = (await readFile(herdrLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(herdrEvents.filter((event) => event.type === "split")).toHaveLength(2);
-      expect(herdrEvents.filter((event) => event.type === "close")).toHaveLength(2);
+      const herdrEvents = currentTaskHerdrEvents(
+        (await readFile(herdrLog, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+        taskId,
+      );
+      expect(herdrEvents.filter((event) => event.type === "split")).toHaveLength(3);
+      expect(herdrEvents.filter((event) => event.type === "close")).toHaveLength(3);
       const starts = herdrEvents.filter((event) => event.type === "start");
-      expect(starts).toHaveLength(2);
-      expect(starts[0].command).toEqual(expect.arrayContaining(["-p", "usine-implementer"]));
-      expect(starts[0].command[2]).not.toBe(starts[1].command[2]);
-      expect(herdrEvents.filter((event) => event.type === "prompt")).toHaveLength(2);
+      expect(starts).toHaveLength(3);
+      expect(starts[0]?.command).toEqual(expect.arrayContaining(["-p", "usine-implementer"]));
+      expect(starts[0]?.command[2]).not.toBe(starts[1]?.command[2]);
+      const reviewerStart = starts.find((event) => event.command.includes("gpt-5.6-sol"));
+      expect(reviewerStart?.command).toEqual(
+        expect.arrayContaining([
+          "--model",
+          "gpt-5.6-sol",
+          "--sandbox",
+          "read-only",
+          "--config",
+          "model_reasoning_effort=low",
+          "service_tier=default",
+        ]),
+      );
+      expect(herdrEvents.filter((event) => event.type === "prompt")).toHaveLength(3);
       expect(herdrEvents.some((event) => event.type === "wait")).toBe(false);
       const splits = herdrEvents.filter((event) => event.type === "split");
       const closes = herdrEvents.filter((event) => event.type === "close");
-      expect(splits[0].command).toContain("--current");
-      expect(splits[0].context).toMatchObject({
+      expect(splits[0]?.command).toContain("--current");
+      expect(splits[0]?.context).toMatchObject({
         HERDR_ENV: "1",
         HERDR_SOCKET_PATH: "/tmp/herdr.sock",
         HERDR_WORKSPACE_ID: "w-test",
@@ -571,7 +637,7 @@ describe("usine run", () => {
         USINE_CODEX_BIN: fakeCodex,
         USINE_HERDR_LOG: herdrLog,
       });
-      expect(splits[0].pane).not.toBe(splits[1].pane);
+      expect(new Set(splits.map((event) => event.pane)).size).toBe(3);
       expect(closes.map((event) => event.command[2]).toSorted()).toEqual(
         splits.map((event) => event.pane).toSorted(),
       );

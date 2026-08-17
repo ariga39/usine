@@ -208,8 +208,8 @@ function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv 
   return environment;
 }
 
-function herdrEnvironment(): NodeJS.ProcessEnv {
-  const environment = workerEnvironment("implementer");
+function herdrEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv {
+  const environment = workerEnvironment(role);
   for (const key of [
     "HERDR_ENV",
     "HERDR_SOCKET_PATH",
@@ -474,7 +474,10 @@ async function runImplementer(
       const invocation = codexCommand(herdrBinary, args);
       return execa(invocation.executable, invocation.args, {
         cwd: workspace,
-        env: { ...herdrEnvironment(), USINE_EXPECTED_OBSERVATION_DIR: observationDirectory },
+        env: {
+          ...herdrEnvironment("implementer"),
+          USINE_EXPECTED_OBSERVATION_DIR: observationDirectory,
+        },
         extendEnv: false,
         reject: false,
         timeout: timeoutMs ?? operationTimeout(input),
@@ -756,57 +759,151 @@ async function runReviewer(
       `Contract: ${JSON.stringify(input.contract)}`,
       `Check evidence: ${JSON.stringify(check)}`,
       "Return an explicit exact-SHA verdict. Process success alone is not approval.",
+      "Do not use or request implementer chat; review only the frozen contract, candidate, and check evidence.",
+      `Before settling, atomically write the exact JSON object {"sha":"${sha}","verdict":"approved|changes_requested|inconclusive","summary":"...","findings":[]} to ${outputPath}; this file is coordinator evidence and must exist even though interactive Herdr mode has no exec structured-output flags.`,
     ].join("\n");
-    const binary = process.env.USINE_CODEX_BIN ?? "codex";
-    const invocation = codexCommand(binary, [
-      "exec",
-      "--model",
-      input.reviewerModel,
-      "--config",
-      `model_reasoning_effort=${input.reviewerReasoningEffort}`,
-      "--config",
-      "service_tier=default",
-      "--ephemeral",
-      "--json",
-      "--output-schema",
-      schemaPath,
-      "-o",
-      outputPath,
-      "--sandbox",
-      "read-only",
-      "-C",
+    const herdrBinary = process.env.USINE_HERDR_BIN ?? "herdr";
+    const observationDirectory = dirname(outputPath);
+    const runHerdr = async (args: string[], timeoutMs?: number) =>
+      (() => {
+        const invocation = codexCommand(herdrBinary, args);
+        return execa(invocation.executable, invocation.args, {
+          cwd: path,
+          env: {
+            ...herdrEnvironment("reviewer"),
+            USINE_EXPECTED_OBSERVATION_DIR: observationDirectory,
+          },
+          extendEnv: false,
+          reject: false,
+          timeout: timeoutMs ?? operationTimeout(input),
+        });
+      })();
+    const clearedPaneEnvironment = [
+      "USINE_DATABASE_URL",
+      "USINE_STATE_DIR",
+      "USINE_GITHUB_TEST_TOKEN",
+      "USINE_GITHUB_PRIVATE_KEY_PATH",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+    ];
+    const paneResult = await runHerdr([
+      "pane",
+      "split",
+      "--current",
+      "--direction",
+      "right",
+      "--cwd",
       path,
-      prompt,
+      "--no-focus",
+      ...clearedPaneEnvironment.flatMap((key) => ["--env", `${key}=`]),
+      "--env",
+      "USINE_CODEX_ROLE=reviewer",
     ]);
-    let processResult;
+    if (processTimedOut(paneResult)) throw new ElapsedBudgetError();
+    if (paneResult.exitCode !== 0) throw new Error(`herdr pane split failed: ${paneResult.stderr}`);
+    const pane = JSON.parse(String(paneResult.stdout)).result?.pane?.pane_id;
+    if (typeof pane !== "string") throw new Error("herdr pane split returned no pane id");
+    const agentName = `usine-review-${createHash("sha256").update(input.contract.id).digest("hex").slice(0, 12)}-${cycle}`;
+    const closePane = async () => {
+      const remaining = input.deadlineEpochMs - Date.now();
+      if (remaining <= 0) return;
+      const closed = await runHerdr(["pane", "close", pane], Math.min(1_000, remaining));
+      if (closed.exitCode !== 0) throw new Error(`herdr pane close failed: ${closed.stderr}`);
+    };
     try {
-      processResult = await execa(invocation.executable, invocation.args, {
-        cwd: path,
-        env: workerEnvironment("reviewer"),
-        extendEnv: false,
-        reject: false,
-        timeout: operationTimeout(input),
-      });
-    } catch (error) {
-      if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
-        throw new ElapsedBudgetError();
+      const started = await runHerdr([
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        "codex",
+        "--pane",
+        pane,
+        "--",
+        "--model",
+        input.reviewerModel,
+        "--sandbox",
+        "read-only",
+        "-C",
+        path,
+        "--no-alt-screen",
+        "--add-dir",
+        observationDirectory,
+        "--config",
+        "shell_environment_policy.inherit=core",
+        "--config",
+        `model_reasoning_effort=${input.reviewerReasoningEffort}`,
+        "--config",
+        "service_tier=default",
+      ]);
+      if (processTimedOut(started)) throw new ElapsedBudgetError();
+      if (started.exitCode !== 0) throw new Error(`herdr agent start failed: ${started.stderr}`);
+      const prompted = await runHerdr([
+        "agent",
+        "prompt",
+        agentName,
+        prompt,
+        "--wait",
+        "--timeout",
+        String(operationTimeout(input)),
+      ]);
+      if (processTimedOut(prompted)) throw new ElapsedBudgetError();
+      if (prompted.exitCode !== 0) throw new Error(`herdr agent prompt failed: ${prompted.stderr}`);
+      let review: z.infer<typeof reviewerOutputSchema>;
+      while (true) {
+        const observed = await runHerdr([
+          "agent",
+          "read",
+          agentName,
+          "--source",
+          "recent-unwrapped",
+          "--lines",
+          "200",
+        ]);
+        if (processTimedOut(observed)) throw new ElapsedBudgetError();
+        if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
+        try {
+          review = reviewerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+          break;
+        } catch (error) {
+          if (
+            !(
+              typeof error === "object" &&
+              error !== null &&
+              "code" in error &&
+              error.code === "ENOENT"
+            )
+          )
+            throw error;
+        }
+        const lifecycle = await runHerdr(["agent", "get", agentName]);
+        if (processTimedOut(lifecycle)) throw new ElapsedBudgetError();
+        if (lifecycle.exitCode !== 0)
+          throw new Error(`herdr agent get failed: ${lifecycle.stderr}`);
+        let agentStatus: unknown;
+        try {
+          agentStatus = (
+            JSON.parse(String(lifecycle.stdout)) as {
+              result?: { agent?: { agent_status?: unknown } };
+            }
+          ).result?.agent?.agent_status;
+        } catch (error) {
+          throw new Error("herdr agent get returned invalid JSON", { cause: error });
+        }
+        if (agentStatus === "blocked") throw new Error("herdr agent blocked");
+        if (typeof agentStatus !== "string")
+          throw new Error("herdr agent get returned no lifecycle state");
+        await new Promise<void>((resolveDelay) =>
+          setTimeout(resolveDelay, Math.min(50, operationTimeout(input, 50))),
+        );
       }
+      if (review.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
+      await closePane();
+      return review;
+    } catch (error) {
+      await closePane();
       throw error;
     }
-    if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100) {
-      throw new ElapsedBudgetError();
-    }
-    if (processResult.exitCode !== 0) {
-      return {
-        sha,
-        verdict: "inconclusive",
-        summary: `reviewer process failed: ${processResult.stderr}`,
-        findings: [],
-      };
-    }
-    const review = reviewerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
-    if (review.sha !== sha) throw new Error("review verdict names a stale candidate SHA");
-    return review;
   });
 }
 
