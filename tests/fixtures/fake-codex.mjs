@@ -3,6 +3,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 
+function requireExactKeys(value, expected, label) {
+  const actual = Object.keys(value ?? {}).toSorted();
+  if (JSON.stringify(actual) !== JSON.stringify(expected.toSorted())) {
+    throw new Error(`${label} is incomplete: ${actual.join(",")}`);
+  }
+}
+
 const args = process.argv.slice(2);
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
@@ -22,6 +29,82 @@ for (const key of [
   if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
 }
 const prompt = args.at(-1) ?? "";
+if (process.env.USINE_CODEX_ROLE === "implementer") {
+  if (!prompt.includes("Frozen Task Contract JSON:")) {
+    throw new Error("implementer prompt is missing the frozen Task Contract JSON");
+  }
+  const contractLine = prompt
+    .split("\n")
+    .find((line) => line.startsWith("Frozen Task Contract JSON: "));
+  const contract = JSON.parse(contractLine.slice("Frozen Task Contract JSON: ".length));
+  requireExactKeys(
+    contract,
+    [
+      "acceptance",
+      "authorization",
+      "baseSha",
+      "budget",
+      "delivery",
+      "id",
+      "instructions",
+      "nonGoals",
+      "projectCheck",
+      "repository",
+    ],
+    "frozen Task Contract",
+  );
+  requireExactKeys(contract.repository, ["name", "owner", "path"], "repository authority");
+  requireExactKeys(contract.projectCheck, ["command", "timeoutMs"], "project check authority");
+  requireExactKeys(
+    contract.budget,
+    ["maxElapsedMs", "maxImplementerActivations", "maxReviewCycles"],
+    "budget authority",
+  );
+  requireExactKeys(contract.authorization, ["delivery", "source"], "authorization");
+  requireExactKeys(
+    contract.delivery,
+    ["baseBranch", "body", "branch", "issue", "title"],
+    "delivery authority",
+  );
+  if (!Array.isArray(contract.acceptance) || !Array.isArray(contract.nonGoals)) {
+    throw new Error("frozen Task Contract is missing acceptance or nonGoals arrays");
+  }
+  if (
+    !contract.authorization?.source ||
+    !prompt.includes(`Authorization source: ${contract.authorization.source}`)
+  ) {
+    throw new Error("implementer prompt is missing the authorization source");
+  }
+  const currentSha = (await execa("git", ["rev-parse", "HEAD"])).stdout;
+  if (
+    !prompt.includes(`Base SHA: ${contract.baseSha}`) ||
+    !prompt.includes(`Current SHA: ${currentSha}`)
+  ) {
+    throw new Error("implementer prompt is missing exact Git facts");
+  }
+  if (
+    !prompt.includes("credential-separated projection of active private Issue/PR/thread authority")
+  ) {
+    throw new Error("implementer prompt is missing coordinator authority statement");
+  }
+  if (
+    !prompt.includes("do not access GitHub") ||
+    !prompt.includes("do not wait for user input") ||
+    !prompt.includes("missing GitHub credentials are not a blocker")
+  ) {
+    throw new Error("implementer prompt is missing the no-GitHub instruction");
+  }
+  if (!prompt.includes("Make the first observable in-scope action promptly")) {
+    throw new Error("implementer prompt is missing prompt-action guidance");
+  }
+  if (
+    contract.instructions.includes("address review findings") &&
+    outputPath.includes("implementer-2") &&
+    !prompt.includes("Add the reviewed fix.")
+  ) {
+    throw new Error("implementer prompt is missing unresolved findings");
+  }
+}
 const modelIndex = args.findIndex((arg) => arg === "--model" || arg === "-m");
 const model = args[modelIndex + 1];
 const expectedModel =

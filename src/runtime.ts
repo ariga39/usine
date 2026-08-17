@@ -333,6 +333,17 @@ async function runImplementer(
   await writeFile(schemaPath, JSON.stringify(implementerJsonSchema));
   const prompt = [
     "Role: implementer.",
+    "The coordinator has provided the authoritative credential-separated projection of active private Issue/PR/thread authority for this activation.",
+    "GitHub access is neither available nor required: do not access GitHub, do not wait for user input, and missing GitHub credentials are not a blocker.",
+    `Frozen Task Contract JSON: ${JSON.stringify(input.contract)}`,
+    `Authorization source: ${input.contract.authorization.source}`,
+    `Base SHA: ${input.contract.baseSha}`,
+    `Current SHA: ${previousSha}`,
+    "The workspace is isolated and clean at the current SHA.",
+    "Make the first observable in-scope action promptly; avoid broad planning.",
+    ...(findings.length > 0
+      ? [`Unresolved findings from the prior review: ${findings.join("; ")}`]
+      : ["Unresolved findings from the prior review: none."]),
     "Implement the following authorized task in this isolated workspace.",
     "Commit the complete change and leave the worktree clean.",
     `Instructions: ${input.contract.instructions}`,
