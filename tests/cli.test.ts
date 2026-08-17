@@ -347,6 +347,77 @@ describe("usine run", () => {
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "replays the activation checkpoint in order and persists an expired-budget blocker",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-budget-replay-"));
+      const repository = join(directory, "repository");
+      const stateDirectory = join(directory, "state");
+      await mkdir(repository);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(join(repository, "README.md"), "fixture\n");
+      await execa("git", ["add", "README.md"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `budget-replay-${Date.now()}`;
+      const contractPath = join(repository, "task.json");
+      await writeFile(
+        contractPath,
+        JSON.stringify({
+          id: taskId,
+          repository: { path: repository, owner: "example", name: taskId },
+          baseSha,
+          instructions: "Create delivered.txt.",
+          acceptance: ["Expired recovery is durably blocked."],
+          nonGoals: [],
+          projectCheck: { command: "true", timeoutMs: 10_000 },
+          budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
+          authorization: { source: "test issue", delivery: true },
+          delivery: {
+            baseBranch: "main",
+            branch: `agent/${taskId}`,
+            issue: 3,
+            title: "Replay budget task",
+            body: "Replay budget task body",
+          },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+      const env = {
+        USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+        USINE_CRASH_AFTER: "activation",
+        USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+        USINE_DELIVERY_MODE: "record",
+        USINE_STATE_DIR: stateDirectory,
+      };
+      const interrupted = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+      expect(interrupted.signal).toBe("SIGKILL");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_200));
+
+      const recovered = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env,
+        reject: false,
+      });
+      expect(recovered.exitCode).toBe(0);
+      const result = JSON.parse(recovered.stdout);
+      expect(result).toMatchObject({
+        state: "blocked",
+        evidence: { implementerActivations: 1 },
+      });
+      expect(result.blocker).toContain("elapsed budget exhausted");
+      expect(
+        JSON.parse(await readFile(join(stateDirectory, "results", `${taskId}.json`), "utf8")),
+      ).toEqual(result);
+    },
+    10_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
     "aggregates requested changes into one fix activation and invalidates stale evidence",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-fix-"));

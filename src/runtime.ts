@@ -66,6 +66,7 @@ interface WorkflowInput {
   deadlineEpochMs: number;
   stopAfterAdmitted: boolean;
   crashAfterAdmitted: boolean;
+  crashAfterActivation: boolean;
   crashAfterDelivery: boolean;
 }
 
@@ -760,7 +761,10 @@ async function deliver(
   throw lastError;
 }
 
-async function crashOnce(input: WorkflowInput, stage: "admitted" | "delivery"): Promise<boolean> {
+async function crashOnce(
+  input: WorkflowInput,
+  stage: "admitted" | "activation" | "delivery",
+): Promise<boolean> {
   const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-${stage}-crash`);
   try {
     await readFile(marker, "utf8");
@@ -802,6 +806,7 @@ export async function admitTask(
     deadlineEpochMs,
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",
+    crashAfterActivation: process.env.USINE_CRASH_AFTER === "activation",
     crashAfterDelivery: process.env.USINE_CRASH_AFTER === "delivery",
   };
   await rejectChangedAdmittedContract(databaseUrl, contract.id, contractHash);
@@ -895,13 +900,6 @@ export async function admitTask(
       for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
         let implementation: ImplementerResult | null = null;
         while (implementation === null) {
-          if (Date.now() >= input.deadlineEpochMs - 100) {
-            return saveResult({
-              ...result,
-              state: "blocked",
-              blocker: "elapsed budget exhausted during implementation",
-            });
-          }
           const activation = result.evidence.implementerActivations + 1;
           if (activation > input.contract.budget.maxImplementerActivations) {
             return saveResult({
@@ -914,6 +912,11 @@ export async function admitTask(
             ...result,
             evidence: { ...result.evidence, implementerActivations: activation },
           });
+          if (input.crashAfterActivation) {
+            await DBOS.runStep(() => crashOnce(input, "activation"), {
+              name: `crash-after-activation-${activation}`,
+            });
+          }
           const attempt = await DBOS.runStep(
             () => attemptImplementer(input, activation, findings, previousSha),
             { name: `implementer-${activation}` },
@@ -952,7 +955,7 @@ export async function admitTask(
             name: `check-${cycle}`,
           });
         } catch (error) {
-          if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+          if (processTimedOut(error)) {
             return saveResult({
               ...result,
               state: "blocked",
@@ -972,7 +975,7 @@ export async function admitTask(
             { name: `review-${cycle}` },
           );
         } catch (error) {
-          if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+          if (processTimedOut(error)) {
             return saveResult({
               ...result,
               state: "blocked",
@@ -995,7 +998,7 @@ export async function admitTask(
               { name: "delivery" },
             );
           } catch (error) {
-            if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+            if (processTimedOut(error)) {
               return saveResult({
                 ...result,
                 state: "blocked",
@@ -1058,10 +1061,7 @@ export async function admitTask(
   });
   await DBOS.launch();
   try {
-    const handle = await DBOS.startWorkflow(workflow, {
-      workflowID: contract.id,
-      timeoutMS: remainingUntil(input.deadlineEpochMs),
-    })(input);
+    const handle = await DBOS.startWorkflow(workflow, { workflowID: contract.id })(input);
     const result = await handle.getResult();
     await writeResultArtifact(stateDirectory, result);
     return result;
