@@ -32,6 +32,14 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.
 - Do not commit secrets, tokens, private keys, generated agent transcripts, local checkpoints, or historical clean-room archives.
 
+## Completion discipline
+
+- For an authorized build, change, fix, or design-delivery task, continue making in-scope progress until the Issue's verifiable stopping condition is reached. A plan, summary, status report, local commit, passing subset of checks, or one agent turn is not completion.
+- Commentary and checkpoints report progress; they do not terminate the task. After reporting, continue with the next safe in-scope action.
+- Stop only when: the stated acceptance and delivery condition is verified; the user pauses/replaces the objective; or progress genuinely requires new authority, unavailable input, or an external state change that cannot be safely worked around.
+- When blocked, exhaust safe in-scope diagnostics and alternatives, then record the exact blocker and required decision. Do not label difficult, slow, or partially complete work as blocked.
+- Use Codex `/goal` for work expected to span turns or run unattended. The goal must name one objective, its non-goals, evidence of progress, and a verifiable stopping condition. `/goal` reinforces persistence; it does not replace the Issue, canonical documents, Git state, or these rules.
+
 ## Drift stop rule
 
 Stop and re-read the canonical documents before continuing when any of these occurs:

@@ -78,6 +78,20 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 若只是把一个紧耦合功能机械拆给两个 agent，会把节省的墙钟时间变成 merge、沟通和返工成本，应串行。主编排者不亲自同时深写两个任务；它负责边界、进度、integration 和纠偏。每完成一项才从 Issue 队列补下一项。
 
+### `/goal` 与完成条件
+
+预计需要跨多个 turn、长时间无人值守或多个验证 checkpoint 的单一任务，应使用 Codex `/goal`。普通 prompt 适合一次性分析或很短的操作，但不能依靠 prompt 中一句“请坚持做完”获得 durable continuation。
+
+一个 goal 必须引用一个 GitHub Issue，并明确：objective、non-goals、必须先读的文件、可验证进展、最终停止条件和真正需要暂停的 blocker。推荐形状：
+
+```text
+/goal 完成 Issue #N 的 <outcome>。先读取 AGENTS、canonical docs 和 Issue/PR。
+持续实施、验证、提交并更新同一 PR；状态汇报后继续工作。
+不要改动 <non-goals>。只有在 <verifiable end state> 达成，或确实需要新的用户授权时停止。
+```
+
+`/goal` 不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。设计、权限或产品方向改变时，应 pause/clear 当前 goal，更新 durable artifacts 后再建立新 goal。对于普通短 review，不必机械使用 `/goal`；但如果要求 reviewer 发现问题后直接修订并交付 PR，而不是只返回报告，就应使用。
+
 ## 4. Library-first，而不是 abstraction-first
 
 在编写 scheduler、queue、retry、migration、ORM、GitHub auth、process runner、logging、schema validation 或测试容器代码前：
