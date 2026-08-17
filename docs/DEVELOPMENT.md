@@ -50,9 +50,9 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 1. 创建一个有明确 outcome、scope、non-goals 和 acceptance 的 GitHub Issue。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
 3. 每个 branch 只实现一个 Issue。实现 agent 只写该任务声明的 surfaces。
-4. 在能形成可检查状态时提交，不把数小时工作只留在未提交目录。
-5. 推送后创建 draft PR，PR 必须引用 Issue，并说明变化、原因、用户影响和验证。
-6. review/fix 在同一 PR 收敛；merge 后 Issue 才完成。
+4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。
+5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
+6. scoped review/fix 在同一 PR 收敛；checks 与 fresh semantic verdict 通过后由 orchestrator 自动 merge，并继续下一项已授权 Issue，不等待用户监督。
 
 GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、验收与停止条件；它被 gitignore，不积累成第二套任务系统。
 
@@ -72,19 +72,18 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 若只是把一个紧耦合功能机械拆给两个 agent，会把节省的墙钟时间变成 merge、沟通和返工成本，应串行。主编排者不亲自同时深写两个任务；它负责边界、进度、integration 和纠偏。每完成一项才从 Issue 队列补下一项。
 
-### `/goal` 与完成条件
+### Continuation 与完成条件
 
-预计需要跨多个 turn、长时间无人值守或多个验证 checkpoint 的单一任务，应使用 Codex `/goal`。普通 prompt 适合一次性分析或很短的操作，但不能依靠 prompt 中一句“请坚持做完”获得 durable continuation。
+用户不需要发送 Codex `/goal` 或重复“继续”。GitHub Issue、canonical docs、Git state 和 PR gate 定义 durable continuation；主编排者负责跨 turn、验证 checkpoint、review/fix、merge 和下一项工作的自主推进。Codex `/goal` 只可作为内部运行机制，不能成为用户监督前置条件，也不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。
 
-一个 goal 必须引用一个 GitHub Issue，并明确：objective、non-goals、必须先读的文件、可验证进展、最终停止条件和真正需要暂停的 blocker。推荐形状：
+每项工作仍须明确 objective、non-goals、可验证进展、最终停止条件和真正需要暂停的 blocker。状态汇报不是停止；只有 acceptance 已验证，或确实出现新的 product/authority decision、不可逆外部选择或缺失必要输入时才找用户。
 
-```text
-/goal 完成 Issue #N 的 <outcome>。先读取 AGENTS、canonical docs 和 Issue/PR。
-持续实施、验证、提交并更新同一 PR；状态汇报后继续工作。
-不要改动 <non-goals>。只有在 <verifiable end state> 达成，或确实需要新的用户授权时停止。
-```
+### Role model routing
 
-`/goal` 不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。设计、权限或产品方向改变时，应 pause/clear 当前 goal，更新 durable artifacts 后再建立新 goal。对于普通短 review，不必机械使用 `/goal`；但如果要求 reviewer 发现问题后直接修订并交付 PR，而不是只返回报告，就应使用。
+- implementation：每项实现使用 fresh session，默认 `codex -p usine-implementer`；profile 固定 GPT-5.6 Luna medium、default service tier、workspace-write 和 non-interactive continuation，禁止 fast；
+- semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
+- bounded research：需要独立 read-only evidence 时可用 Terra；
+- profile 无法启动时，才通过 Herdr 新开 Codex pane 并显式指定 Luna；不得静默退回默认模型或 fast。
 
 ## 4. Library-first，而不是 abstraction-first
 
@@ -110,6 +109,8 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 ## 5. 纵切优先与复杂度预算
 
 每个 PR 应尽量完成一个可从公共入口观察到的行为。内部基础工作只有在下一条纵切直接使用它时才单独存在。
+
+默认选择最小可合并 PR，而不是把一条路线的所有后续能力塞进一次“大而全”交付。若一个 diff 已经包含多个可独立验证、可独立回滚的 outcome，应拆成串行小 Issue/PR；不要用 stacked-PR 管理本身制造新的协调负担。
 
 出现以下情况时停止扩张，先提交 decision note 或缩小方案：
 
