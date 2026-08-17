@@ -7,8 +7,101 @@ import { execa } from "execa";
 import { describe, expect, test } from "vitest";
 
 const cliPath = fileURLToPath(new URL("../apps/cli/dist/cli.mjs", import.meta.url));
+const fakeCodexPath = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
+const fakeHerdrPath = fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url));
+
+async function createFallbackFixture(directory: string, taskId: string) {
+  const repository = join(directory, "repository");
+  const stateDirectory = join(directory, "state");
+  await mkdir(repository);
+  await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+  await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+  await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+  await writeFile(join(repository, "README.md"), "fixture\n");
+  await execa("git", ["add", "README.md"], { cwd: repository });
+  await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+  const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+  const contractPath = join(repository, "task.json");
+  await writeFile(
+    contractPath,
+    JSON.stringify({
+      id: taskId,
+      repository: { path: repository, owner: "example", name: taskId },
+      baseSha,
+      instructions: "Create delivered.txt.",
+      acceptance: ["The fixture check passes."],
+      nonGoals: [],
+      projectCheck: { command: "test -f delivered.txt", timeoutMs: 10_000 },
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+      authorization: { source: "test issue", delivery: true },
+      delivery: {
+        baseBranch: "main",
+        branch: `agent/${taskId}`,
+        issue: 3,
+        title: "Fixture",
+        body: "Fixture",
+      },
+    }),
+  );
+  await execa("git", ["add", "task.json"], { cwd: repository });
+  await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+  return { repository, stateDirectory, contractPath };
+}
 
 describe("usine run", () => {
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "falls back to direct Codex when the Herdr launcher is unavailable",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-unavailable-"));
+      const taskId = `herdr-unavailable-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: join(directory, "missing-herdr"),
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+      expect(run.exitCode).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "does not fall back when a launched Herdr process fails",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-herdr-failure-"));
+      const taskId = `herdr-failure-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_MODE: "fail",
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+      expect(run.exitCode).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({ state: "blocked", candidateSha: null });
+      expect(result.blocker).toContain("herdr pane split failed");
+      await expect(
+        readFile(join(fixture.stateDirectory, "workspaces", taskId, "delivered.txt"), "utf8"),
+      ).rejects.toThrow();
+    },
+    30_000,
+  );
+
   test("rejects a contract before starting work when required authority is missing", async () => {
     const directory = await mkdtemp(join(tmpdir(), "usine-contract-"));
     const contractPath = join(directory, "task.json");
@@ -204,6 +297,7 @@ describe("usine run", () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-delivery-"));
       const repository = join(directory, "repository");
       const stateDirectory = join(directory, "state");
+      const herdrLog = join(directory, "herdr.jsonl");
       await mkdir(repository);
       await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
       await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
@@ -251,6 +345,13 @@ describe("usine run", () => {
       const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodex,
+          USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
+          USINE_HERDR_LOG: herdrLog,
+          HERDR_ENV: "1",
+          HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+          HERDR_WORKSPACE_ID: "w-test",
+          HERDR_TAB_ID: "w-test:t1",
+          HERDR_PANE_ID: "w-test:p1",
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: stateDirectory,
@@ -280,6 +381,34 @@ describe("usine run", () => {
         (await execa("git", ["show", `${result.candidateSha}:delivered.txt`], { cwd: repository }))
           .stdout,
       ).toBe("implemented");
+      const herdrEvents = (await readFile(herdrLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(herdrEvents.filter((event) => event.type === "split")).toHaveLength(2);
+      expect(herdrEvents.filter((event) => event.type === "close")).toHaveLength(2);
+      const starts = herdrEvents.filter((event) => event.type === "start");
+      expect(starts).toHaveLength(2);
+      expect(starts[0].command).toEqual(expect.arrayContaining(["-p", "usine-implementer"]));
+      expect(starts[0].command[2]).not.toBe(starts[1].command[2]);
+      expect(herdrEvents.filter((event) => event.type === "prompt")).toHaveLength(2);
+      expect(herdrEvents.some((event) => event.type === "wait")).toBe(false);
+      const splits = herdrEvents.filter((event) => event.type === "split");
+      const closes = herdrEvents.filter((event) => event.type === "close");
+      expect(splits[0].command).toContain("--current");
+      expect(splits[0].context).toMatchObject({
+        HERDR_ENV: "1",
+        HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+        HERDR_WORKSPACE_ID: "w-test",
+        HERDR_TAB_ID: "w-test:t1",
+        HERDR_PANE_ID: "w-test:p1",
+        USINE_CODEX_BIN: fakeCodex,
+        USINE_HERDR_LOG: herdrLog,
+      });
+      expect(splits[0].pane).not.toBe(splits[1].pane);
+      expect(closes.map((event) => event.command[2]).toSorted()).toEqual(
+        splits.map((event) => event.pane).toSorted(),
+      );
     },
     30_000,
   );
@@ -327,6 +456,7 @@ describe("usine run", () => {
       const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+          USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: stateDirectory,
@@ -387,6 +517,7 @@ describe("usine run", () => {
       await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
       const env = {
         USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+        USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
         USINE_CRASH_AFTER: "activation",
         USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
         USINE_DELIVERY_MODE: "record",
@@ -472,6 +603,7 @@ describe("usine run", () => {
       const run = await execa("node", [cliPath, "run", contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodex,
+          USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: stateDirectory,
@@ -550,6 +682,7 @@ describe("usine run", () => {
       const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
       const env = {
         USINE_CODEX_BIN: fakeCodex,
+        USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
         USINE_CRASH_AFTER: "delivery",
         USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
         USINE_DELIVERY_MODE: "record",
@@ -728,6 +861,7 @@ describe("usine run", () => {
       const fakeCodex = fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url));
       const env = {
         USINE_CODEX_BIN: fakeCodex,
+        USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
         USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
         USINE_DELIVERY_MODE: "github",
         USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
@@ -856,6 +990,7 @@ describe("usine run", () => {
         const result = await execa("node", [cliPath, "run", contractPath], {
           env: {
             USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+            USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
             USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
             USINE_DELIVERY_MODE: "github",
             USINE_GITHUB_API_URL: `http://127.0.0.1:${address.port}`,

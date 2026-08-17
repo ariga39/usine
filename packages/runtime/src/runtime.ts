@@ -195,6 +195,24 @@ function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv 
   return environment;
 }
 
+function herdrEnvironment(): NodeJS.ProcessEnv {
+  const environment = workerEnvironment("implementer");
+  for (const key of [
+    "HERDR_ENV",
+    "HERDR_SOCKET_PATH",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_TAB_ID",
+    "HERDR_PANE_ID",
+    "HERDR_CONFIG_PATH",
+    "USINE_CODEX_BIN",
+    "USINE_HERDR_LOG",
+    "USINE_HERDR_MODE",
+  ]) {
+    if (process.env[key] !== undefined) environment[key] = process.env[key];
+  }
+  return environment;
+}
+
 function projectCheckEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { CI: "true" };
   for (const key of [
@@ -385,66 +403,174 @@ async function runImplementer(
       : ["Unresolved findings from the prior review: none."]),
     "Implement the following authorized task in this isolated workspace.",
     "Commit the complete change and leave the worktree clean.",
+    `Before settling, atomically write the exact JSON object {"status":"proposed","summary":"..."} (or status "blocked") to ${outputPath}; this file is coordinator evidence and must exist even though interactive Herdr mode has no exec structured-output flags.`,
     `Instructions: ${input.contract.instructions}`,
     `Acceptance: ${input.contract.acceptance.join("; ")}`,
     `Non-goals: ${input.contract.nonGoals.join("; ")}`,
     ...(findings.length > 0 ? [`Aggregated review findings: ${findings.join("; ")}`] : []),
   ].join("\n");
-  const binary = process.env.USINE_CODEX_BIN ?? "codex";
-  const invocation = codexCommand(binary, [
-    "exec",
-    "--model",
-    input.implementerModel,
-    "--profile",
-    input.implementerProfile,
-    "--json",
-    "--output-schema",
-    schemaPath,
-    "-o",
-    outputPath,
-    "--sandbox",
-    "workspace-write",
-    "-C",
+  const directBinary = process.env.USINE_CODEX_BIN ?? "codex";
+  const herdrBinary = process.env.USINE_HERDR_BIN ?? "herdr";
+  const runHerdr = async (args: string[]) =>
+    (() => {
+      const invocation = codexCommand(herdrBinary, args);
+      return execa(invocation.executable, invocation.args, {
+        cwd: workspace,
+        env: herdrEnvironment(),
+        extendEnv: false,
+        reject: false,
+        timeout: operationTimeout(input),
+      });
+    })();
+  const paneResult = await runHerdr([
+    "pane",
+    "split",
+    "--current",
+    "--direction",
+    "right",
+    "--cwd",
     workspace,
-    prompt,
+    "--no-focus",
   ]);
-  const processResult = await execa(invocation.executable, invocation.args, {
-    cwd: workspace,
-    env: workerEnvironment("implementer"),
-    extendEnv: false,
-    reject: false,
-    timeout: operationTimeout(input),
-  });
-  if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100) {
-    throw new ElapsedBudgetError();
+  const herdrUnavailable = paneResult.failed === true && paneResult.code === "ENOENT";
+  if (herdrUnavailable) {
+    const invocation = codexCommand(directBinary, [
+      "exec",
+      "--model",
+      input.implementerModel,
+      "--profile",
+      input.implementerProfile,
+      "--json",
+      "--output-schema",
+      schemaPath,
+      "-o",
+      outputPath,
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      workspace,
+      prompt,
+    ]);
+    const processResult = await execa(invocation.executable, invocation.args, {
+      cwd: workspace,
+      env: workerEnvironment("implementer"),
+      extendEnv: false,
+      reject: false,
+      timeout: operationTimeout(input),
+    });
+    if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100)
+      throw new ElapsedBudgetError();
+    if (processResult.exitCode !== 0)
+      throw new Error(`implementer process failed: ${processResult.stderr}`);
+    const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+    if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
+    const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
+    if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
+    const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+    if (candidateSha === previousSha)
+      throw new Error("implementer did not create a new candidate commit");
+    await runGit(input, [
+      "-C",
+      workspace,
+      "merge-base",
+      "--is-ancestor",
+      input.contract.baseSha,
+      candidateSha,
+    ]);
+    return {
+      candidateSha,
+      observation: {
+        summary: output.summary,
+        sessionId: sessionIdFromJsonl(String(processResult.stdout)),
+        stdout: String(processResult.stdout),
+        stderr: String(processResult.stderr),
+      },
+    };
   }
-  if (processResult.exitCode !== 0) {
-    throw new Error(`implementer process failed: ${processResult.stderr}`);
+  if (paneResult.exitCode !== 0) throw new Error(`herdr pane split failed: ${paneResult.stderr}`);
+  const pane = JSON.parse(String(paneResult.stdout)).result?.pane?.pane_id;
+  if (typeof pane !== "string") throw new Error("herdr pane split returned no pane id");
+  const agentName = `usine-impl-${createHash("sha256").update(input.contract.id).digest("hex").slice(0, 12)}-${activation}`;
+  let implementation: ImplementerResult;
+  try {
+    const started = await runHerdr([
+      "agent",
+      "start",
+      agentName,
+      "--kind",
+      "codex",
+      "--pane",
+      pane,
+      "--",
+      "--model",
+      input.implementerModel,
+      "-p",
+      input.implementerProfile,
+      "--sandbox",
+      "workspace-write",
+      "-C",
+      workspace,
+      "--no-alt-screen",
+    ]);
+    if (started.exitCode !== 0) throw new Error(`herdr agent start failed: ${started.stderr}`);
+    const prompted = await runHerdr([
+      "agent",
+      "prompt",
+      agentName,
+      prompt,
+      "--wait",
+      "--timeout",
+      String(operationTimeout(input)),
+    ]);
+    if (prompted.exitCode !== 0) throw new Error(`herdr agent prompt failed: ${prompted.stderr}`);
+    const observed = await runHerdr([
+      "agent",
+      "read",
+      agentName,
+      "--source",
+      "recent-unwrapped",
+      "--lines",
+      "200",
+    ]);
+    if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
+    const processResult = {
+      stdout: String(observed.stdout),
+      stderr: String(observed.stderr),
+      exitCode: 0,
+    };
+    const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+    if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
+    const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
+    if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
+    const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+    if (candidateSha === previousSha)
+      throw new Error("implementer did not create a new candidate commit");
+    await runGit(input, [
+      "-C",
+      workspace,
+      "merge-base",
+      "--is-ancestor",
+      input.contract.baseSha,
+      candidateSha,
+    ]);
+    implementation = {
+      candidateSha,
+      observation: {
+        summary: output.summary,
+        sessionId: sessionIdFromJsonl(processResult.stdout),
+        stdout: processResult.stdout,
+        stderr: processResult.stderr,
+      },
+    };
+  } catch (error) {
+    const closed = await runHerdr(["pane", "close", pane]);
+    if (closed.exitCode !== 0)
+      throw new Error(`herdr pane close failed: ${closed.stderr}`, { cause: error });
+    throw error;
   }
-  const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
-  if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-  const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
-  if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
-  const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
-  if (candidateSha === previousSha)
-    throw new Error("implementer did not create a new candidate commit");
-  await runGit(input, [
-    "-C",
-    workspace,
-    "merge-base",
-    "--is-ancestor",
-    input.contract.baseSha,
-    candidateSha,
-  ]);
-  return {
-    candidateSha,
-    observation: {
-      summary: output.summary,
-      sessionId: sessionIdFromJsonl(String(processResult.stdout)),
-      stdout: String(processResult.stdout),
-      stderr: String(processResult.stderr),
-    },
-  };
+  const closed = await runHerdr(["pane", "close", pane]);
+  if (closed.exitCode !== 0) throw new Error(`herdr pane close failed: ${closed.stderr}`);
+  return implementation;
 }
 
 async function attemptImplementer(
