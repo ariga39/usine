@@ -165,6 +165,18 @@ async function runGit(input: WorkflowInput, args: string[]): Promise<{ stdout: s
   return { stdout: String(result.stdout) };
 }
 
+async function runCredentialFreeGit(
+  input: WorkflowInput,
+  args: string[],
+): Promise<{ stdout: string }> {
+  const result = await execa("git", args, {
+    env: workerEnvironment("implementer"),
+    extendEnv: false,
+    timeout: operationTimeout(input),
+  });
+  return { stdout: String(result.stdout) };
+}
+
 function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { USINE_CODEX_ROLE: role };
   for (const key of [
@@ -373,8 +385,16 @@ async function finalizeCandidate(
   let candidateSha = currentSha;
   if (currentSha === previousSha) {
     if (status.stdout === "") throw new Error("implementer proposed no workspace changes");
-    await runGit(input, ["-C", workspace, "add", "--all"]);
-    await runGit(input, ["-C", workspace, "commit", "-m", "Implement authorized task"]);
+    const gitConfig = ["-c", "core.hooksPath=/dev/null"];
+    await runCredentialFreeGit(input, [...gitConfig, "-C", workspace, "add", "--all"]);
+    await runCredentialFreeGit(input, [
+      ...gitConfig,
+      "-C",
+      workspace,
+      "commit",
+      "-m",
+      "Implement authorized task",
+    ]);
     candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
     if (candidateSha === previousSha) throw new Error("host did not create a new candidate commit");
   } else if (status.stdout !== "") {

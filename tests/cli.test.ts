@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -152,6 +152,46 @@ describe("usine run", () => {
         result.candidateSha,
       );
       expect((await execa("git", ["status", "--porcelain"], { cwd: workspace })).stdout).toBe("");
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "finalizes a proposal without running repository hooks with coordinator credentials",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-candidate-hooks-"));
+      const taskId = `candidate-hooks-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const hookDirectory = join(fixture.repository, ".hooks");
+      const hookMarker = join(directory, "pre-commit-invoked");
+      await mkdir(hookDirectory);
+      await writeFile(
+        join(hookDirectory, "pre-commit"),
+        `#!/bin/sh\nprintf '%s:%s\\n' "${process.env.USINE_TEST_DATABASE_URL ?? ""}" "${process.env.USINE_GITHUB_TEST_TOKEN ?? ""}" > "${hookMarker}"\nexit 97\n`,
+      );
+      await chmod(join(hookDirectory, "pre-commit"), 0o755);
+      await execa("git", ["config", "core.hooksPath", hookDirectory], {
+        cwd: fixture.repository,
+      });
+
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_HERDR_MODE: "propose-without-commit",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      await expect(readFile(hookMarker, "utf8")).rejects.toThrow();
     },
     30_000,
   );
