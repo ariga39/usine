@@ -21,6 +21,10 @@ for (const key of [
 const prompt = args.at(-1) ?? "";
 
 if (process.env.USINE_CODEX_ROLE === "implementer") {
+  if (prompt.includes("Hang forever")) {
+    setInterval(() => undefined, 1_000);
+    await new Promise(() => undefined);
+  }
   if (prompt.includes("Stop once") && outputPath.includes("implementer-1")) {
     await writeFile(
       outputPath,

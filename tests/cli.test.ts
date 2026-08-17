@@ -127,7 +127,7 @@ describe("usine run", () => {
       const contractPath = join(repository, "task.json");
       const contract = {
         id: taskId,
-        repository: { path: repository, owner: "Example", name: "Fixture" },
+        repository: { path: repository, owner: "Example", name: taskId },
         baseSha,
         instructions: "Original frozen instructions.",
         acceptance: ["The task remains frozen."],
@@ -282,6 +282,68 @@ describe("usine run", () => {
       ).toBe("implemented");
     },
     30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "bounds a hung implementer by one durable end-to-end deadline",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-budget-"));
+      const repository = join(directory, "repository");
+      const stateDirectory = join(directory, "state");
+      await mkdir(repository);
+      await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+      await execa("git", ["config", "user.name", "Usine Test"], { cwd: repository });
+      await execa("git", ["config", "user.email", "usine@example.invalid"], { cwd: repository });
+      await writeFile(join(repository, "README.md"), "fixture\n");
+      await execa("git", ["add", "README.md"], { cwd: repository });
+      await execa("git", ["commit", "-m", "fixture base"], { cwd: repository });
+      const baseSha = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout;
+      const taskId = `budget-${Date.now()}`;
+      const contractPath = join(repository, "task.json");
+      await writeFile(
+        contractPath,
+        JSON.stringify({
+          id: taskId,
+          repository: { path: repository, owner: "example", name: taskId },
+          baseSha,
+          instructions: "Hang forever.",
+          acceptance: ["The coordinator stops within budget."],
+          nonGoals: [],
+          projectCheck: { command: "true", timeoutMs: 10_000 },
+          budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_500 },
+          authorization: { source: "test issue", delivery: true },
+          delivery: {
+            baseBranch: "main",
+            branch: `agent/${taskId}`,
+            issue: 3,
+            title: "Budget task",
+            body: "Budget task body",
+          },
+        }),
+      );
+      await execa("git", ["add", "task.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+      const startedAt = Date.now();
+      const run = await execa("node", ["dist/cli.mjs", "run", contractPath], {
+        env: {
+          USINE_CODEX_BIN: fileURLToPath(new URL("fixtures/fake-codex.mjs", import.meta.url)),
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: stateDirectory,
+        },
+        reject: false,
+      });
+      const elapsedMs = Date.now() - startedAt;
+      expect(run.exitCode).toBe(0);
+      const result = JSON.parse(run.stdout);
+      expect(result).toMatchObject({ state: "blocked" });
+      expect(result.blocker).toContain("elapsed budget exhausted");
+      expect(elapsedMs).toBeLessThan(5_000);
+      expect(
+        JSON.parse(await readFile(join(stateDirectory, "results", `${taskId}.json`), "utf8")),
+      ).toEqual(result);
+    },
+    10_000,
   );
 
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(

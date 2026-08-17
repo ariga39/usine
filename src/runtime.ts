@@ -76,7 +76,13 @@ interface ImplementerResult {
 
 type ImplementerAttempt =
   | { status: "succeeded"; implementation: ImplementerResult }
-  | { status: "failed"; reason: string };
+  | { status: "failed"; reason: string; budgetExhausted: boolean };
+
+class ElapsedBudgetError extends Error {
+  constructor() {
+    super("elapsed budget exhausted");
+  }
+}
 
 type UsineDatabase = NodePgDatabase<{
   repositoryLeases: typeof repositoryLeases;
@@ -121,6 +127,30 @@ const reviewerJsonSchema = {
 };
 
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
+
+function remainingUntil(deadlineEpochMs: number, maximum = Number.POSITIVE_INFINITY): number {
+  const remaining = deadlineEpochMs - Date.now();
+  if (remaining <= 0) throw new ElapsedBudgetError();
+  return Math.max(1, Math.min(remaining, maximum));
+}
+
+function operationTimeout(input: WorkflowInput, maximum = Number.POSITIVE_INFINITY): number {
+  const remaining = input.deadlineEpochMs - Date.now() - 150;
+  if (remaining <= 0) throw new ElapsedBudgetError();
+  return Math.max(1, Math.min(remaining, maximum));
+}
+
+function processTimedOut(error: unknown): boolean {
+  return (
+    error instanceof ElapsedBudgetError ||
+    (typeof error === "object" && error !== null && "timedOut" in error && error.timedOut === true)
+  );
+}
+
+async function runGit(input: WorkflowInput, args: string[]): Promise<{ stdout: string }> {
+  const result = await execa("git", args, { timeout: operationTimeout(input) });
+  return { stdout: String(result.stdout) };
+}
 
 function workerEnvironment(role: "implementer" | "reviewer"): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { USINE_CODEX_ROLE: role };
@@ -174,6 +204,7 @@ function projectCheckEnvironment(): NodeJS.ProcessEnv {
 async function verifyCommittedContract(
   contractPath: string,
   contract: TaskContract,
+  deadlineEpochMs: number,
 ): Promise<string> {
   const repository = await realpath(contract.repository.path);
   const path = await realpath(contractPath);
@@ -182,18 +213,21 @@ async function verifyCommittedContract(
     throw new Error("task contract must be a committed file in the authorized repository");
   }
 
-  await execa("git", ["-C", repository, "ls-files", "--error-unmatch", relativePath]);
-  const status = await execa("git", [
-    "-C",
-    repository,
-    "status",
-    "--porcelain",
-    "--",
-    relativePath,
-  ]);
+  await execa("git", ["-C", repository, "ls-files", "--error-unmatch", relativePath], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
+  const status = await execa(
+    "git",
+    ["-C", repository, "status", "--porcelain", "--", relativePath],
+    { timeout: remainingUntil(deadlineEpochMs) },
+  );
   if (status.stdout !== "") throw new Error("task contract has uncommitted changes");
-  await execa("git", ["-C", repository, "cat-file", "-e", `${contract.baseSha}^{commit}`]);
-  await execa("git", ["-C", repository, "merge-base", "--is-ancestor", contract.baseSha, "HEAD"]);
+  await execa("git", ["-C", repository, "cat-file", "-e", `${contract.baseSha}^{commit}`], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
+  await execa("git", ["-C", repository, "merge-base", "--is-ancestor", contract.baseSha, "HEAD"], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
   return repository;
 }
 
@@ -229,8 +263,8 @@ async function rejectChangedAdmittedContract(
 async function ensureWorktree(input: WorkflowInput): Promise<string> {
   const workspace = resolve(input.stateDirectory, "workspaces", input.contract.id);
   try {
-    const current = await execa("git", ["-C", workspace, "rev-parse", "HEAD"]);
-    await execa("git", [
+    const current = await runGit(input, ["-C", workspace, "rev-parse", "HEAD"]);
+    await runGit(input, [
       "-C",
       workspace,
       "merge-base",
@@ -243,7 +277,7 @@ async function ensureWorktree(input: WorkflowInput): Promise<string> {
     await rm(workspace, { recursive: true, force: true });
   }
   await mkdir(dirname(workspace), { recursive: true });
-  await execa("git", [
+  await runGit(input, [
     "-C",
     input.repository,
     "worktree",
@@ -282,8 +316,8 @@ async function runImplementer(
   previousSha: string,
 ): Promise<ImplementerResult> {
   const workspace = await ensureWorktree(input);
-  await execa("git", ["-C", workspace, "reset", "--hard", previousSha]);
-  await execa("git", ["-C", workspace, "clean", "-fd"]);
+  await runGit(input, ["-C", workspace, "reset", "--hard", previousSha]);
+  await runGit(input, ["-C", workspace, "clean", "-fd"]);
   const schemaPath = resolve(input.stateDirectory, "schemas", "implementer.json");
   const outputPath = resolve(
     input.stateDirectory,
@@ -322,19 +356,22 @@ async function runImplementer(
     env: workerEnvironment("implementer"),
     extendEnv: false,
     reject: false,
-    timeout: input.contract.budget.maxElapsedMs,
+    timeout: operationTimeout(input),
   });
+  if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100) {
+    throw new ElapsedBudgetError();
+  }
   if (processResult.exitCode !== 0) {
     throw new Error(`implementer process failed: ${processResult.stderr}`);
   }
   const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
   if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-  const status = await execa("git", ["-C", workspace, "status", "--porcelain"]);
+  const status = await runGit(input, ["-C", workspace, "status", "--porcelain"]);
   if (status.stdout !== "") throw new Error("implementer left uncommitted changes");
-  const candidateSha = (await execa("git", ["-C", workspace, "rev-parse", "HEAD"])).stdout;
+  const candidateSha = (await runGit(input, ["-C", workspace, "rev-parse", "HEAD"])).stdout;
   if (candidateSha === previousSha)
     throw new Error("implementer did not create a new candidate commit");
-  await execa("git", [
+  await runGit(input, [
     "-C",
     workspace,
     "merge-base",
@@ -346,9 +383,9 @@ async function runImplementer(
     candidateSha,
     observation: {
       summary: output.summary,
-      sessionId: sessionIdFromJsonl(processResult.stdout),
-      stdout: processResult.stdout,
-      stderr: processResult.stderr,
+      sessionId: sessionIdFromJsonl(String(processResult.stdout)),
+      stdout: String(processResult.stdout),
+      stderr: String(processResult.stderr),
     },
   };
 }
@@ -365,7 +402,11 @@ async function attemptImplementer(
       implementation: await runImplementer(input, activation, findings, previousSha),
     };
   } catch (error) {
-    return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+    return {
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+      budgetExhausted: processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100,
+    };
   }
 }
 
@@ -378,34 +419,47 @@ async function withDisposableWorktree<T>(
   const path = resolve(input.stateDirectory, "checkouts", `${input.contract.id}-${purpose}`);
   await mkdir(dirname(path), { recursive: true });
   try {
-    await execa("git", ["-C", input.repository, "worktree", "remove", "--force", path]);
+    await runGit(input, ["-C", input.repository, "worktree", "remove", "--force", path]);
   } catch {
     await rm(path, { recursive: true, force: true });
   }
-  await execa("git", ["-C", input.repository, "worktree", "add", "--detach", path, sha]);
+  await runGit(input, ["-C", input.repository, "worktree", "add", "--detach", path, sha]);
   try {
     return await callback(path);
   } finally {
-    await execa("git", ["-C", input.repository, "worktree", "remove", "--force", path]);
+    if (Date.now() < input.deadlineEpochMs - 25) {
+      await runGit(input, ["-C", input.repository, "worktree", "remove", "--force", path]);
+    }
   }
 }
 
 async function runCheck(input: WorkflowInput, sha: string): Promise<CheckResult> {
   return withDisposableWorktree(input, `check-${sha}`, sha, async (path) => {
-    const result = await execa("sh", ["-c", input.contract.projectCheck.command], {
-      cwd: path,
-      env: projectCheckEnvironment(),
-      extendEnv: false,
-      reject: false,
-      timeout: input.contract.projectCheck.timeoutMs,
-    });
+    let result;
+    try {
+      result = await execa("sh", ["-c", input.contract.projectCheck.command], {
+        cwd: path,
+        env: projectCheckEnvironment(),
+        extendEnv: false,
+        reject: false,
+        timeout: operationTimeout(input, input.contract.projectCheck.timeoutMs),
+      });
+    } catch (error) {
+      if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+        throw new ElapsedBudgetError();
+      }
+      throw error;
+    }
+    if (processTimedOut(result) || Date.now() >= input.deadlineEpochMs - 100) {
+      throw new ElapsedBudgetError();
+    }
     return {
       sha,
       status: result.exitCode === 0 ? "passed" : "failed",
       command: input.contract.projectCheck.command,
       exitCode: result.exitCode ?? 1,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout: String(result.stdout),
+      stderr: String(result.stderr),
     };
   });
 }
@@ -449,13 +503,24 @@ async function runReviewer(
       path,
       prompt,
     ]);
-    const processResult = await execa(invocation.executable, invocation.args, {
-      cwd: path,
-      env: workerEnvironment("reviewer"),
-      extendEnv: false,
-      reject: false,
-      timeout: input.contract.budget.maxElapsedMs,
-    });
+    let processResult;
+    try {
+      processResult = await execa(invocation.executable, invocation.args, {
+        cwd: path,
+        env: workerEnvironment("reviewer"),
+        extendEnv: false,
+        reject: false,
+        timeout: operationTimeout(input),
+      });
+    } catch (error) {
+      if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+        throw new ElapsedBudgetError();
+      }
+      throw error;
+    }
+    if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100) {
+      throw new ElapsedBudgetError();
+    }
     if (processResult.exitCode !== 0) {
       return {
         sha,
@@ -480,17 +545,17 @@ async function recordDelivery(input: WorkflowInput, sha: string): Promise<Delive
   };
   const counterPath = process.env.USINE_RECORD_DELIVERY_COUNTER;
   if (counterPath) {
+    let count = 0;
     try {
       const existing = JSON.parse(await readFile(counterPath, "utf8")) as {
         count: number;
-        delivery: DeliveryResult;
       };
-      if (existing.delivery.sha === sha) return existing.delivery;
+      count = existing.count;
     } catch {
-      // A missing or incomplete record means the effect has not been confirmed.
+      // Missing means no delivery effect attempt has been recorded yet.
     }
     await mkdir(dirname(counterPath), { recursive: true });
-    await writeFile(counterPath, JSON.stringify({ count: 1, delivery }));
+    await writeFile(counterPath, JSON.stringify({ count: count + 1, delivery }));
   }
   return delivery;
 }
@@ -566,7 +631,12 @@ async function githubDelivery(
   const { octokit, token, appSlug } = await githubClient();
   let expectedHead: string | null = null;
   try {
-    const reference = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    const reference = await octokit.rest.git.getRef({
+      owner,
+      repo,
+      ref: `heads/${branch}`,
+      request: { timeout: operationTimeout(input), retries: 0 },
+    });
     expectedHead = reference.data.object.sha;
   } catch (error) {
     if (httpStatus(error) !== 404) throw error;
@@ -590,7 +660,7 @@ async function githubDelivery(
         gitUrl,
         `${sha}:refs/heads/${branch}`,
       ],
-      { env: environment },
+      { env: environment, timeout: operationTimeout(input) },
     );
   }
 
@@ -601,6 +671,7 @@ async function githubDelivery(
     base: baseBranch,
     state: "all",
     per_page: 100,
+    request: { timeout: operationTimeout(input), retries: 0 },
   });
   const existingPullRequest = pullRequests.data.find((pullRequest) => pullRequest.head.sha === sha);
   if (existingPullRequest && existingPullRequest.state !== "open") {
@@ -625,7 +696,7 @@ async function githubDelivery(
         title: input.contract.delivery.title,
         body: `${input.contract.delivery.body}\n\nCloses #${input.contract.delivery.issue}`,
         draft: false,
-        request: { retries: 0 },
+        request: { retries: 0, timeout: operationTimeout(input) },
       })
     ).data;
   const expectedAttestationBody = approvalAttestationBody(input, sha, check, review);
@@ -634,6 +705,7 @@ async function githubDelivery(
     repo,
     issue_number: pullRequest.number,
     per_page: 100,
+    request: { timeout: operationTimeout(input), retries: 0 },
   });
   const existingAttestation = comments.find((comment) => {
     const identity = comment as typeof comment & {
@@ -653,7 +725,7 @@ async function githubDelivery(
         repo,
         issue_number: pullRequest.number,
         body: expectedAttestationBody,
-        request: { retries: 0 },
+        request: { retries: 0, timeout: operationTimeout(input) },
       })
     ).data;
   return {
@@ -680,8 +752,9 @@ async function deliver(
       lastError = error;
       const status = httpStatus(error);
       const retryable = status === undefined || status === 408 || status === 429 || status >= 500;
-      if (!retryable || attempt === 3 || Date.now() + 50 >= input.deadlineEpochMs) throw error;
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      if (!retryable || attempt === 3) throw error;
+      const delay = Math.min(50, operationTimeout(input));
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, delay));
     }
   }
   throw lastError;
@@ -713,7 +786,8 @@ export async function admitTask(
 ): Promise<TaskResult> {
   const databaseUrl = process.env.USINE_DATABASE_URL;
   if (!databaseUrl) throw new Error("USINE_DATABASE_URL is required");
-  const repository = await verifyCommittedContract(contractPath, contract);
+  const deadlineEpochMs = Date.now() + contract.budget.maxElapsedMs;
+  const repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
   await applyMigrations(databaseUrl);
   const stateDirectory = resolve(process.env.USINE_STATE_DIR ?? ".usine");
   const contractHash = createHash("sha256").update(rawContract).digest("hex");
@@ -725,7 +799,7 @@ export async function admitTask(
     repository,
     repositoryIdentity,
     stateDirectory,
-    deadlineEpochMs: Date.now() + contract.budget.maxElapsedMs,
+    deadlineEpochMs,
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterAdmitted: process.env.USINE_CRASH_AFTER === "admitted",
     crashAfterDelivery: process.env.USINE_CRASH_AFTER === "delivery",
@@ -789,6 +863,7 @@ export async function admitTask(
         repository,
         state: result.state,
         writerGeneration: lease.generation,
+        deadlineAt: new Date(frozenInput.deadlineEpochMs),
         result,
       });
       return result;
@@ -820,6 +895,13 @@ export async function admitTask(
       for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
         let implementation: ImplementerResult | null = null;
         while (implementation === null) {
+          if (Date.now() >= input.deadlineEpochMs - 100) {
+            return saveResult({
+              ...result,
+              state: "blocked",
+              blocker: "elapsed budget exhausted during implementation",
+            });
+          }
           const activation = result.evidence.implementerActivations + 1;
           if (activation > input.contract.budget.maxImplementerActivations) {
             return saveResult({
@@ -837,6 +919,13 @@ export async function admitTask(
             { name: `implementer-${activation}` },
           );
           if (attempt.status === "failed") {
+            if (attempt.budgetExhausted) {
+              return saveResult({
+                ...result,
+                state: "blocked",
+                blocker: "elapsed budget exhausted during implementation",
+              });
+            }
             if (activation >= input.contract.budget.maxImplementerActivations) {
               return saveResult({
                 ...result,
@@ -857,17 +946,41 @@ export async function admitTask(
           delivery: null,
           blocker: null,
         });
-        const check = await DBOS.runStep(() => runCheck(input, implementation.candidateSha), {
-          name: `check-${cycle}`,
-        });
+        let check: CheckResult;
+        try {
+          check = await DBOS.runStep(() => runCheck(input, implementation.candidateSha), {
+            name: `check-${cycle}`,
+          });
+        } catch (error) {
+          if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+            return saveResult({
+              ...result,
+              state: "blocked",
+              blocker: "elapsed budget exhausted during project checks",
+            });
+          }
+          throw error;
+        }
         result = await saveResult({ ...result, state: "checked", check });
         if (check.status !== "passed") {
           return saveResult({ ...result, state: "blocked", blocker: "project check failed" });
         }
-        const review = await DBOS.runStep(
-          () => runReviewer(input, implementation.candidateSha, check, cycle),
-          { name: `review-${cycle}` },
-        );
+        let review: ReviewResult;
+        try {
+          review = await DBOS.runStep(
+            () => runReviewer(input, implementation.candidateSha, check, cycle),
+            { name: `review-${cycle}` },
+          );
+        } catch (error) {
+          if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+            return saveResult({
+              ...result,
+              state: "blocked",
+              blocker: "elapsed budget exhausted during review",
+            });
+          }
+          throw error;
+        }
         result = await saveResult({
           ...result,
           state: "reviewed",
@@ -875,10 +988,22 @@ export async function admitTask(
           evidence: { ...result.evidence, reviewCycles: cycle },
         });
         if (review.verdict === "approved") {
-          const delivery = await DBOS.runStep(
-            () => deliver(input, implementation.candidateSha, check, review),
-            { name: "delivery" },
-          );
+          let delivery: DeliveryResult;
+          try {
+            delivery = await DBOS.runStep(
+              () => deliver(input, implementation.candidateSha, check, review),
+              { name: "delivery" },
+            );
+          } catch (error) {
+            if (processTimedOut(error) || Date.now() >= input.deadlineEpochMs - 100) {
+              return saveResult({
+                ...result,
+                state: "blocked",
+                blocker: "elapsed budget exhausted during delivery",
+              });
+            }
+            throw error;
+          }
           if (input.crashAfterDelivery) {
             const recovered = await DBOS.runStep(() => crashOnce(input, "delivery"), {
               name: "crash-after-delivery",
@@ -935,7 +1060,7 @@ export async function admitTask(
   try {
     const handle = await DBOS.startWorkflow(workflow, {
       workflowID: contract.id,
-      timeoutMS: contract.budget.maxElapsedMs,
+      timeoutMS: remainingUntil(input.deadlineEpochMs),
     })(input);
     const result = await handle.getResult();
     await writeResultArtifact(stateDirectory, result);
