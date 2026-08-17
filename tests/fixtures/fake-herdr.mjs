@@ -82,7 +82,7 @@ if (args[0] === "pane" && args[1] === "split") {
   if (!outputPath) throw new Error("fake Herdr prompt is missing coordinator output path");
   if (state.observationDir !== outputPath.slice(0, outputPath.lastIndexOf("/")))
     throw new Error("fake Herdr did not grant the observation directory");
-  if (process.env.USINE_HERDR_MODE === "early-settle") {
+  if (["early-settle", "blocked"].includes(process.env.USINE_HERDR_MODE)) {
     await writeFile(
       ".fake-herdr-agent.json",
       JSON.stringify({ ...state, earlySettle: true, outputPath, prompt, readCount: 0 }),
@@ -97,6 +97,12 @@ if (args[0] === "pane" && args[1] === "split") {
     });
     await rm(".fake-herdr-agent.json", { force: true });
   }
+} else if (args[0] === "agent" && args[1] === "get") {
+  await record({ command: args, type: "get" });
+  const lifecycleState = process.env.USINE_HERDR_MODE === "blocked" ? "blocked" : "working";
+  process.stdout.write(
+    JSON.stringify({ result: { agent: { agent_status: lifecycleState } }, type: "agent_info" }),
+  );
 } else if (args[0] === "agent" && args[1] === "read") {
   await record({ command: args, type: "read" });
   let settled = true;

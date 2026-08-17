@@ -615,6 +615,21 @@ async function runImplementer(
         )
           throw error;
       }
+      const lifecycle = await runHerdr(["agent", "get", agentName]);
+      if (lifecycle.exitCode !== 0) throw new Error(`herdr agent get failed: ${lifecycle.stderr}`);
+      let agentStatus: unknown;
+      try {
+        agentStatus = (
+          JSON.parse(String(lifecycle.stdout)) as {
+            result?: { agent?: { agent_status?: unknown } };
+          }
+        ).result?.agent?.agent_status;
+      } catch (error) {
+        throw new Error("herdr agent get returned invalid JSON", { cause: error });
+      }
+      if (agentStatus === "blocked") throw new Error("herdr agent blocked");
+      if (typeof agentStatus !== "string")
+        throw new Error("herdr agent get returned no lifecycle state");
       await new Promise<void>((resolveDelay) =>
         setTimeout(resolveDelay, Math.min(50, operationTimeout(input, 50))),
       );
