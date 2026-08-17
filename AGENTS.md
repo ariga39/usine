@@ -34,6 +34,7 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 
 ## Completion discipline
 
+- When an authorized active Issue has not reached its stopping condition, answer any interim status, confirmation, or clarification interruption and resume the next safe in-scope action in the same turn.
 - For an authorized build, change, fix, or design-delivery task, continue making in-scope progress until the Issue's verifiable stopping condition is reached. A plan, summary, status report, local commit, passing subset of checks, or one agent turn is not completion.
 - Commentary and checkpoints report progress; they do not terminate the task. After reporting, continue with the next safe in-scope action.
 - Stop only when: the stated acceptance and delivery condition is verified; the user pauses/replaces the objective; or progress genuinely requires new authority, unavailable input, or an external state change that cannot be safely worked around.
