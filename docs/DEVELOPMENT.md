@@ -80,7 +80,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：每项实现使用 fresh session，默认 `codex -p usine-implementer`；profile 固定 GPT-5.6 Luna medium、default service tier、workspace-write 和 non-interactive continuation，禁止 fast；
+- implementation：每项实现使用 fresh session，默认 `codex -p usine-implementer`；profile 固定 GPT-5.6 Luna low、default service tier、workspace-write 和 non-interactive continuation，禁止 fast；只有 task-local evidence 证明必要时才提高 reasoning；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
 - 仅当 profile file/path 不可用时，才通过 Herdr 新开 Codex pane 并显式指定 Luna；authentication、permission 或 model failure 不得借此绕过 profile，也不得静默退回默认模型或 fast。
