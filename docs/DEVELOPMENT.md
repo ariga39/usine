@@ -76,6 +76,8 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 用户不需要发送 Codex `/goal` 或重复“继续”。GitHub Issue、canonical docs、Git state 和 PR gate 定义 durable continuation；主编排者负责跨 turn、验证 checkpoint、review/fix、merge 和下一项工作的自主推进。Codex `/goal` 只可作为内部运行机制，不能成为用户监督前置条件，也不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。
 
+当授权中的 active Issue 尚未达到 stopping condition 时，回答任何 interim status、confirmation 或 clarification interruption 后，必须在同一 turn 恢复下一项安全且仍在 scope 内的动作。
+
 每项工作仍须明确 objective、non-goals、可验证进展、最终停止条件和真正需要暂停的 blocker。状态汇报不是停止；只有 acceptance 已验证，或确实出现新的 product/authority decision、不可逆外部选择或缺失必要输入时才找用户。
 
 ### Role model routing
