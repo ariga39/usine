@@ -1,5 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
 import type { TaskContract } from "./contract.js";
 import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
@@ -307,10 +305,4 @@ export async function executeDeliveryRun(
 
     return blockTask(services.authority, result, "unknown durable task phase");
   }
-}
-
-export async function writeTaskResult(stateDirectory: string, result: TaskResult): Promise<void> {
-  const path = resolve(stateDirectory, "results", `${result.taskId}.json`);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(result, null, 2)}\n`);
 }

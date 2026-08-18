@@ -23,7 +23,6 @@ export interface SessionRequest<Output = unknown> {
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
-  continuation?: string | null;
   environment: NodeJS.ProcessEnv;
 }
 
@@ -43,7 +42,6 @@ export interface CodingThread {
 
 export interface CodingSessionClient {
   startThread(options?: Record<string, unknown>): CodingThread;
-  resumeThread?(id: string, options?: Record<string, unknown>): CodingThread;
 }
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<CodingSessionClient>;
@@ -97,18 +95,11 @@ export class CodexCodingSession {
     const abortSignal = AbortSignal.timeout(remaining);
     try {
       const client = await this.createClient(request);
-      const thread =
-        request.continuation && client.resumeThread
-          ? client.resumeThread(request.continuation, {
-              model: request.model,
-              sandboxMode: request.sandbox,
-              workingDirectory: request.workspace,
-            })
-          : client.startThread({
-              model: request.model,
-              sandboxMode: request.sandbox,
-              workingDirectory: request.workspace,
-            });
+      const thread = client.startThread({
+        model: request.model,
+        sandboxMode: request.sandbox,
+        workingDirectory: request.workspace,
+      });
       const result = await thread.run(request.prompt, {
         signal: abortSignal,
         outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),

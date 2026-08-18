@@ -4,7 +4,7 @@ import type { TaskContract } from "./contract.js";
 import { applyMigrations } from "./apply-migrations.js";
 import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
-import { executeDeliveryRun, writeTaskResult, type DeliveryRunInput } from "./delivery-run.js";
+import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { openSqliteDatabase } from "./sqlite-database.js";
@@ -52,17 +52,13 @@ export async function admitTask(
   try {
     const existing = await authority.lookupExisting(contract.id, contractHash);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
-    if (existing?.state === "reviewed_pr" || existing?.state === "blocked") {
-      await writeTaskResult(stateDirectory, existing);
-      return existing;
-    }
+    if (existing?.state === "reviewed_pr" || existing?.state === "blocked") return existing;
     const blockExpiredExisting = async (): Promise<TaskResult> => {
       if (!existing) throw new Error("cannot expire a task before admission");
       const blocked = await authority.block(
         { taskId: existing.taskId, revision: existing.revision },
         "elapsed budget exhausted",
       );
-      await writeTaskResult(stateDirectory, blocked);
       return blocked;
     };
     if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
@@ -88,10 +84,7 @@ export async function admitTask(
       deadlineEpochMs,
     });
     const persistedDeadlineEpochMs = admitted.deadlineEpochMs;
-    if (policy.stopAfterAdmitted) {
-      await writeTaskResult(stateDirectory, admitted);
-      return admitted;
-    }
+    if (policy.stopAfterAdmitted) return admitted;
     if (!policy.forge) throw new Error("GitHub App credentials are required");
     const workspace = new CandidateWorkspace({
       repository,
@@ -129,7 +122,6 @@ export async function admitTask(
       quality,
       forge,
     });
-    await writeTaskResult(stateDirectory, result);
     return result;
   } finally {
     handle.close();
