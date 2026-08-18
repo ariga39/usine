@@ -64,9 +64,11 @@ const session = {
   },
 };
 const quality = {
-  evaluate: async (_contract, sha) => ({
-    check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
-    review: { sha, verdict: "approved", summary: "approved", findings: [] },
+  check: async (_contract, sha) => ({
+    sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "",
+  }),
+  review: async (_contract, sha) => ({
+    sha, verdict: "approved", summary: "approved", findings: [],
   }),
 };
 const forge = { deliver: async (_contract, sha) => ({ sha, effect: "github", prNumber: 1, url: "https://example.invalid/pr/1", attestationId: "recovery" }) };

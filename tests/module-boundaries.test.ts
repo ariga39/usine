@@ -162,9 +162,10 @@ describe("module contracts", () => {
       reviewerReasoningEffort: "low",
       deadlineEpochMs: Date.now() + 30_000,
     });
-    const evaluation = await gate.evaluate(task, base, 1);
-    expect(evaluation.check.status).toBe("passed");
-    expect(evaluation.review.verdict).toBe("approved");
+    const check = await gate.check(task, base, 1);
+    expect(check.status).toBe("passed");
+    const review = await gate.review(task, base, check, 1);
+    expect(review.verdict).toBe("approved");
   });
 
   test("Forge Delivery attestation is bound to exact candidate SHA", () => {

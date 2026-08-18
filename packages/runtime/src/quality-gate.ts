@@ -4,11 +4,6 @@ import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession, type SessionObservation } from "./coding-session.js";
 import type { CheckResult, ReviewVerdict } from "./task-authority.js";
 
-export interface QualityEvaluation {
-  check: CheckResult;
-  review: ReviewVerdict;
-}
-
 const reviewSchema = {
   type: "object",
   additionalProperties: false,
@@ -95,8 +90,8 @@ export interface QualityGateOptions {
 export class QualityGate {
   constructor(private readonly options: QualityGateOptions) {}
 
-  async evaluate(contract: TaskContract, sha: string, cycle: number): Promise<QualityEvaluation> {
-    const check = await this.options.workspace.withCheckout(
+  async check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult> {
+    return this.options.workspace.withCheckout(
       `check-${contract.id}-${cycle}`,
       sha,
       async (path) => {
@@ -139,18 +134,17 @@ export class QualityGate {
         };
       },
     );
-    if (check.status !== "passed")
-      return {
-        check,
-        review: {
-          sha,
-          verdict: "inconclusive",
-          summary: "project check failed",
-          findings: [check.stderr || "project check failed"],
-        },
-      };
+  }
 
-    const review = await this.options.workspace.withCheckout(
+  async review(
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    cycle: number,
+  ): Promise<ReviewVerdict> {
+    if (check.status !== "passed" || check.sha !== sha)
+      throw new Error("review requires a passing exact-SHA check");
+    return this.options.workspace.withCheckout(
       `review-${contract.id}-${cycle}`,
       sha,
       async (path) => {
@@ -177,6 +171,5 @@ export class QualityGate {
         return parseReviewObservation(observation.output, sha);
       },
     );
-    return { check, review };
   }
 }
