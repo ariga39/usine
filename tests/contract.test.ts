@@ -17,7 +17,7 @@ function contractWithRepositoryPath(path: string): Record<string, unknown> {
 }
 
 describe("Task Contract repository paths", () => {
-  test.each([".", "fixtures/repository"])(
+  test.each([".", "fixtures/repository", "release..candidate"])(
     "accepts repository-relative path %j in the native JSON format",
     (path) => {
       const result = taskContractSchema.safeParse(contractWithRepositoryPath(path));
@@ -33,6 +33,9 @@ describe("Task Contract repository paths", () => {
     ["E:relative\\usine", "Windows drive-qualified"],
     ["\\\\server\\share\\usine", "UNC"],
     ["//server/share/usine", "UNC"],
+    ["..", "parent-directory traversal"],
+    ["../target", "parent-directory traversal"],
+    ["..\\target", "parent-directory traversal"],
   ])("rejects %s as a %s repository path", (path) => {
     const result = taskContractSchema.safeParse(contractWithRepositoryPath(path));
 
