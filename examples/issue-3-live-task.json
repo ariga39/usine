@@ -1,7 +1,7 @@
 {
   "id": "issue-3-live-self-host",
   "repository": {
-    "path": "/Users/kagami/dev/usine/.worktrees/issue-3",
+    "path": ".worktrees/issue-3",
     "owner": "ariga39",
     "name": "usine"
   },

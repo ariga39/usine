@@ -1,7 +1,7 @@
 {
   "id": "issue-12-live-herdr-559531f-v1",
   "repository": {
-    "path": "/Users/kagami/dev/usine/.worktrees/issue-12l",
+    "path": ".worktrees/issue-12l",
     "owner": "ariga39",
     "name": "usine"
   },
