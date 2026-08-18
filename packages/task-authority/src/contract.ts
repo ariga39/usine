@@ -53,8 +53,18 @@ export const taskContractSchema = z
       delivery: z.literal(true),
     }),
     delivery: z.object({
-      baseBranch: z.string().min(1),
-      branch: z.string().min(1),
+      baseBranch: z
+        .string()
+        .min(1)
+        .refine((value) => value.trim().length > 0, {
+          message: "must not be blank",
+        }),
+      branch: z
+        .string()
+        .min(1)
+        .refine((value) => value.trim().length > 0, {
+          message: "must not be blank",
+        }),
       issue: z.number().int().positive(),
       title: z.string().min(1),
       body: z.string().min(1),
