@@ -4,6 +4,8 @@ Usine 是一个面向自主软件交付的确定性协调器。它的目标不�
 
 当前仓库包含第一条串行交付纵切的可运行实现：`usine run <task-contract.json>` 接收一个已授权且已提交的 Task Contract，通过 PostgreSQL/DBOS 持久化执行，在隔离 Git worktree 中调用 Codex，针对 immutable candidate SHA 运行项目检查和 fresh review，并通过 GitHub App 交付带 exact-SHA approval attestation 的 reviewed PR。它仍是仅面向一个 Task、一个 repository writer 和一个 GitHub forge 的 V0 纵切；历史实现和旧任务分解不属于当前基线。
 
+当前实现的 Herdr/transcript lifecycle 已被真实 settled-without-observation failure证伪，不能视为可靠生产路径。Issue #76 选择以 provider-neutral Coding Session 包住当前 Codex SDK adapter，并在一个 full-refactor PR 中完成六个目标模块；真实 executable task 与 coordinator hard-kill/restart是最终 merge gate，不是其它模块开始重构的前置许可。
+
 运行需要 Node 24、pnpm、Git、Codex CLI 和 PostgreSQL。安装依赖并构建后，通过数据库和 GitHub App 环境配置运行 CLI：
 
 ```sh

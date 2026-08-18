@@ -30,7 +30,7 @@ Repeat these six steps after context compaction, session replacement, handoff, o
 
 - No implementation work without a GitHub Issue, an isolated branch/worktree, and an explicit PR-sized outcome. The empty-repository bootstrap commit is the sole exception.
 - One completed task produces one PR, but a product milestone may span many tasks/PRs. Each Issue must authorize the smallest coherent module behavior or user-observable behavior that is independently useful, testable, and revertible; never interpret “complete vertical” as a requirement for one large PR.
-- The current `stop_and_redesign` checkpoint permits no implementation task. After a reviewed module decision restores implementation eligibility, only one implementation task may be active until representative executable code task plus induced live coordinator restart recovery evidence exists; afterward at most two may be active with independent ownership and non-overlapping writable surfaces.
+- The current `correct_before_expansion` checkpoint permits exactly one full-refactor implementation task. Until representative executable code task plus induced live coordinator restart recovery evidence exists, no second implementation task may be active; afterward at most two may be active with independent ownership and non-overlapping writable surfaces.
 - Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file and must name the early draft checkpoint, merge gate, active falsifier status, and behavior-cluster owner. Command-line prompts only point to that file. `.tasks/` is never design authority.
 - Use test-first development for stable contracts, invariants, and bug reproductions. For uncertain integrations, establish the thinnest observable vertical behavior first and add tests around the behavior; do not pre-specify internals through hundreds of seam tests.
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.
@@ -54,11 +54,11 @@ Repeat these six steps after context compaction, session replacement, handoff, o
 - Process, compliance, planning, and review are tools, not outcomes. They may block early iteration only when they expose a concrete correctness, security/authority, destructive-action, or product-direction risk. Non-blocking concerns become later Issues.
 - User corrections update canonical documents or the active Issue promptly. The user may inspect occasionally and redirect work, but is not required to supervise normal progress.
 
-## Current route stop
+## Current route correction
 
-- Issue #65 triggered the documented settled-without-observation falsifier for the Herdr/transcript bridge. The previous `correct_before_expansion` route is superseded: ordinary product implementation, cleanup, package movement, concurrency, and runtime substitution are ineligible.
-- The next eligible work is a bounded module-design and salvage-versus-rewrite decision for the existing behavior clusters. Do not choose a launcher or begin a third implementation before that decision is reviewed and merged.
-- Preserve the requested implementer policy—fresh worker, GPT-5.6 Luna high, `service_tier = "default"`, no fast, isolated workspace—when evaluating a future runtime boundary, but do not treat Herdr, hooks, transcripts, or any replacement platform as preselected.
+- Issue #65's settled-without-observation falsifier remains active. Issue #76 selected a `clean_implementation` around a provider-neutral Coding Session port whose only current production adapter is Codex SDK; Herdr panes, prompt settlement, hooks, and rendered transcripts are not production completion authority.
+- Classification is `correct_before_expansion`. Exactly one full-refactor implementation task may run serially, in one PR with small visible commits. Do not recreate the closed backlog, preserve transitional seams as separate PRs, add a second runtime/forge/lane, or build a custom agent runtime.
+- The refactor must build all six required modules in one PR and preserve a fresh GPT-5.6 Luna high/default-tier/no-fast implementer in an isolated workspace. Characterize the SDK early enough to replace a bad adapter without protecting sunk cost, but do not make that characterization a prerequisite for restructuring the other required modules. The final merge gate requires a representative executable task and induced live coordinator restart proving fenced retry, structured terminal evidence, environment separation, and no orphan authority; design, fixture-only evidence, file splitting, or green unit tests do not clear it.
 
 ## Independent direction audits
 
