@@ -2,7 +2,7 @@ import { writeFile, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { describe, expect, test } from "vite-plus/test";
+import { expect, test } from "vite-plus/test";
 import { reviewerOutputSchema } from "@usine/coding-session";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { QualityGate } from "@usine/quality-gate";

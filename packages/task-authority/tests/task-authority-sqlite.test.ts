@@ -355,9 +355,9 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       firstAuthority.reserveActivation(taskId, 3),
       secondAuthority.reserveActivation(taskId, 3),
     ]);
-    expect(reservations.map(({ activation }) => activation).toSorted((a, b) => a - b)).toEqual([
-      1, 2,
-    ]);
+    expect(
+      reservations.map(({ activation }) => activation).sort((a: number, b: number) => a - b),
+    ).toEqual([1, 2]);
     expect(
       (await firstAuthority.lookupExisting(taskId, input.contractHash))?.evidence,
     ).toMatchObject({

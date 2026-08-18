@@ -32,6 +32,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-020 | Task eligibility 顺序为 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；局部 Issue/non-goal 不能 waive 全局 falsifier | 第二次实现证明 flat backlog 会自动偏向最容易闭合、最低价值的机械任务。 |
 | D-021 | 每个 active behavior cluster 有一个临时 design owner；首次 cluster、新 package/interface、连续三次修改同一大文件、三处重复 policy 或 falsified lifecycle change 触发独立 design review。Design verdict 与 spec/correctness verdict 分离 | Module map、interface depth、test placement 和 deletion plan 需要跨 Issue 的持续责任，不能期待局部 reviewer 从被禁止的 scope 中恢复架构。 |
 | D-022 | 建立 module interface 后，测试必须 replace 而不是 layer：interface behavior、adapter protocol 和少量 CLI end-to-end 分层；新 tests 覆盖旧 claim 后删除 implementation-coupled fixtures | 单一巨大 CLI suite 和不断增加的 fake modes 会冻结偶然 transport 细节，使真正重构成为最昂贵选择。 |
+| D-023 | Issue #116 将六个 canonical product modules 固定为真实 pnpm workspace packages：`@usine/task-authority`、`@usine/delivery-run`、`@usine/coding-session`、`@usine/candidate-workspace`、`@usine/quality-gate` 和 `@usine/forge-delivery`。生产代码与测试只能经声明依赖的 package exports 访问；图必须无环；CLI 与 `@usine/runtime` 是 composition root，不是第七个 behavior package。此决定 supersedes 8 节原先“模块不预先等同于 package、留在少量 workspace package 内”的可选边界方向。 | POC 将扩展，物理 package boundary 现在就是 ownership、测试 locality 和依赖图的可检查证据；Delivery Run 不再接收无关 capability bundle，旧 runtime 私有 source/dist route 也不保留兼容层。 |
 
 当前 classification 为 `continue`。Issue #76 选择围绕 Codex SDK 与六个 deep modules 的 `clean_implementation`；Issue #80 的 PR #82 / #83 live evidence 已清除 Issue #65 route falsifier。
 
@@ -39,7 +40,7 @@ Issue #80 仍须完成 final exact-SHA correctness/design review 与 merge；不
 
 ## 已确定的依赖方向
 
-Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementation。Composition root 把成熟库组合到少量 adapter；这条 inward dependency 规则不意味着每个 adapter 都必须成为独立 package。
+Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementation。六个 canonical package 通过显式 exports 形成无环依赖图；runtime/CLI composition root 把成熟库组合到它们，option/type ownership 留在消费 policy 的 module。
 
 当前默认依赖的官方能力依据：
 
