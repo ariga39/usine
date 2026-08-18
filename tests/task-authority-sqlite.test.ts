@@ -53,19 +53,25 @@ async function terminalResult(
   state: "reviewed_pr" | "blocked",
 ): Promise<TaskResult> {
   if (state === "blocked")
-    return authority.save({ ...admitted, state, blocker: "blocked by test" });
+    return authority.block(
+      { taskId: admitted.taskId, revision: admitted.revision },
+      "blocked by test",
+    );
 
   const candidateSha = "b".repeat(40);
-  const candidate = await authority.save({
-    ...admitted,
-    state: "candidate",
-    candidateSha,
-    candidateFence: null,
-  });
-  const checked = await authority.save({
-    ...candidate,
-    state: "checked",
-    check: {
+  const reservation = await authority.reserveActivation(admitted.taskId, 3);
+  const candidate = await authority.recordCandidate(
+    { taskId: admitted.taskId, revision: reservation.result.revision },
+    {
+      sha: candidateSha,
+      baseSha: "a".repeat(40),
+      generation: admitted.writer.generation,
+      fence: reservation.activation,
+    },
+  );
+  const checked = await authority.recordCheck(
+    { taskId: candidate.taskId, revision: candidate.revision },
+    {
       sha: candidateSha,
       status: "passed",
       command: "true",
@@ -73,26 +79,63 @@ async function terminalResult(
       stdout: "",
       stderr: "",
     },
-  });
-  const reviewed = await authority.save({
-    ...checked,
-    state: "reviewed",
-    review: { sha: candidateSha, verdict: "approved", summary: "approved", findings: [] },
-  });
-  return authority.save({
-    ...reviewed,
-    state,
-    delivery: {
+  );
+  const reviewed = await authority.recordReview(
+    { taskId: checked.taskId, revision: checked.revision },
+    { sha: candidateSha, verdict: "approved", summary: "approved", findings: [] },
+  );
+  return authority.recordDelivery(
+    { taskId: reviewed.taskId, revision: reviewed.revision },
+    {
       sha: candidateSha,
       effect: "github",
       prNumber: 80,
       url: "https://example.invalid/pr/80",
       attestationId: "authority-test",
     },
-  });
+  );
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("accepts a candidate fact without accepting a caller-owned durable snapshot", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-candidate-fact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const contract = makeContract(taskId);
+    const deadlineEpochMs = Date.now() + 30_000;
+    const admitted = await authority.admit({
+      contract,
+      contractHash: "authority-candidate-fact-hash",
+      repository: ".",
+      repositoryIdentity: `authority/candidate-fact-${taskId}`,
+      deadlineEpochMs,
+    });
+    const reservation = await authority.reserveActivation(taskId, 3);
+
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: reservation.result.revision },
+      {
+        sha: "b".repeat(40),
+        baseSha: contract.baseSha,
+        generation: reservation.result.writer.generation,
+        fence: reservation.activation,
+      },
+    );
+
+    expect(candidate).toMatchObject({
+      state: "candidate",
+      deadlineEpochMs: admitted.deadlineEpochMs,
+      writer: admitted.writer,
+      revision: reservation.result.revision + 1,
+      candidateSha: "b".repeat(40),
+      candidateFence: reservation.activation,
+      evidence: reservation.result.evidence,
+    });
+    expect(
+      (await authority.lookupExisting(taskId, "authority-candidate-fact-hash"))?.deadlineEpochMs,
+    ).toBe(deadlineEpochMs);
+  });
+
   test("rejects every stale activation observation without releasing the newer lease", async () => {
     const path = await makeDatabase();
     const firstAuthority = authorityAt(path);
@@ -111,28 +154,43 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const second = await secondAuthority.reserveActivation(taskId, 3);
 
     await expect(
-      firstAuthority.save({
-        ...first.result,
-        candidateSha: null,
-        candidateFence: null,
-        state: "candidate",
-      }),
+      firstAuthority.recordCandidate(
+        { taskId, revision: first.result.revision },
+        {
+          sha: "b".repeat(40),
+          baseSha: contract.baseSha,
+          generation: first.result.writer.generation,
+          fence: first.activation,
+        },
+      ),
     ).rejects.toThrow("stale task revision");
     await expect(
-      firstAuthority.save({
-        ...first.result,
-        state: "blocked",
-        blocker: "stale terminal observation",
-      }),
+      firstAuthority.block(
+        { taskId, revision: first.result.revision },
+        "stale terminal observation",
+      ),
     ).rejects.toThrow("stale task revision");
+    await expect(
+      firstAuthority.recordCandidate(
+        { taskId, revision: second.result.revision },
+        {
+          sha: "c".repeat(40),
+          baseSha: contract.baseSha,
+          generation: second.result.writer.generation,
+          fence: first.activation,
+        },
+      ),
+    ).rejects.toThrow("candidate fence is stale");
 
-    const current = await secondAuthority.save({
-      ...second.result,
-      state: "candidate",
-      candidateSha: "b".repeat(40),
-      candidateFence: second.activation,
-      deadlineEpochMs: second.result.deadlineEpochMs + 60_000,
-    });
+    const current = await secondAuthority.recordCandidate(
+      { taskId, revision: second.result.revision },
+      {
+        sha: "b".repeat(40),
+        baseSha: contract.baseSha,
+        generation: second.result.writer.generation,
+        fence: second.activation,
+      },
+    );
     expect(current.revision).toBeGreaterThan(second.result.revision);
     expect(current.deadlineEpochMs).toBe(admitted.deadlineEpochMs);
     await expect(
@@ -145,6 +203,102 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       }),
     ).rejects.toThrow("active writer");
     expect(admitted.revision).toBe(0);
+  }, 30_000);
+
+  test("rejects check, review, and delivery facts from an older candidate SHA", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-stale-evidence-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const contract = makeContract(taskId);
+    const input = {
+      contract,
+      contractHash: "authority-stale-evidence-hash",
+      repository: ".",
+      repositoryIdentity: `authority/stale-evidence-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    };
+    await authority.admit(input);
+    const first = await authority.reserveActivation(taskId, 3);
+    const candidateOne = await authority.recordCandidate(
+      { taskId, revision: first.result.revision },
+      {
+        sha: "b".repeat(40),
+        baseSha: contract.baseSha,
+        generation: first.result.writer.generation,
+        fence: first.activation,
+      },
+    );
+    const checkedOne = await authority.recordCheck(
+      { taskId, revision: candidateOne.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const second = await authority.reserveActivation(taskId, 3);
+    const candidateTwo = await authority.recordCandidate(
+      { taskId, revision: second.result.revision },
+      {
+        sha: "c".repeat(40),
+        baseSha: "b".repeat(40),
+        generation: second.result.writer.generation,
+        fence: second.activation,
+      },
+    );
+
+    await expect(
+      authority.recordCheck(
+        { taskId, revision: candidateTwo.revision },
+        {
+          sha: "b".repeat(40),
+          status: "passed",
+          command: "true",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        },
+      ),
+    ).rejects.toThrow("stale candidate");
+
+    const checkedTwo = await authority.recordCheck(
+      { taskId, revision: candidateTwo.revision },
+      {
+        sha: "c".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    await expect(
+      authority.recordReview(
+        { taskId, revision: checkedTwo.revision },
+        { sha: "b".repeat(40), verdict: "approved", summary: "old", findings: [] },
+      ),
+    ).rejects.toThrow("stale");
+
+    const reviewed = await authority.recordReview(
+      { taskId, revision: checkedTwo.revision },
+      { sha: "c".repeat(40), verdict: "approved", summary: "approved", findings: [] },
+    );
+    await expect(
+      authority.recordDelivery(
+        { taskId, revision: reviewed.revision },
+        {
+          sha: "b".repeat(40),
+          effect: "github",
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "old",
+        },
+      ),
+    ).rejects.toThrow("exact approved candidate");
+    expect(checkedOne.review).toBeNull();
   }, 30_000);
 
   test("atomically admits one immutable task and one lease for concurrent same-ID requests", async () => {
@@ -235,9 +389,9 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
           deadlineEpochMs: Date.now() + 30_000,
         }),
       ).resolves.toMatchObject({ taskId: nextContract.id, state: "admitted" });
-      await expect(authority.save({ ...terminal, blocker: "stale observation" })).rejects.toThrow(
-        "repository writer lease is stale",
-      );
+      await expect(
+        authority.block({ taskId, revision: terminal.revision }, "stale observation"),
+      ).rejects.toThrow("repository writer lease is stale");
     },
     30_000,
   );

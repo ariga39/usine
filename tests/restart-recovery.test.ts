@@ -84,7 +84,15 @@ const result = await executeDeliveryRun(
 );
 let staleRejected = false;
 try {
-  await authority.save({ ...result, state: "candidate", candidateSha: "c".repeat(40), candidateFence: 1 });
+  await authority.recordCandidate(
+    { taskId: result.taskId, revision: result.revision },
+    {
+      sha: "c".repeat(40),
+      baseSha: nextSha,
+      generation: result.writer.generation,
+      fence: result.candidateFence ?? 1,
+    },
+  );
 } catch {
   staleRejected = true;
 }

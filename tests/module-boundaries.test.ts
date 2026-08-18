@@ -6,10 +6,12 @@ import { describe, expect, test } from "vite-plus/test";
 import { CodexCodingSession, workerEnvironment } from "../packages/runtime/src/coding-session.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
 import { parseReviewObservation } from "../packages/runtime/src/quality-gate.js";
-import { canTransition } from "../packages/runtime/src/task-authority.js";
-import { TaskAuthority } from "../packages/runtime/src/task-authority.js";
+import {
+  applyTaskFact,
+  canTransition,
+  type TaskResult,
+} from "../packages/runtime/src/task-authority.js";
 import type { TaskContract } from "../packages/runtime/src/contract.js";
-import { repositoryLeases } from "../packages/runtime/src/schema.js";
 import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
 import { QualityGate } from "../packages/runtime/src/quality-gate.js";
 import { ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
@@ -17,82 +19,48 @@ import { ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
 const sha = "a".repeat(40);
 const contract = { id: "module-test" } as TaskContract;
 
-function fakeAuthorityDatabase() {
-  let stored: { contractHash: string; result: unknown } | undefined;
-  type Lease = { repositoryIdentity: string; taskId: string; generation: number };
-  let lease: Lease | undefined;
-  const database = {
-    query: {
-      taskRuns: { findFirst: async () => stored },
-      repositoryLeases: { findFirst: async () => lease },
-    },
-    insert: (table: unknown) => ({
-      values: (values: Record<string, unknown>) => {
-        if (table === repositoryLeases) {
-          return {
-            onConflictDoNothing: () => ({
-              returning: async () => {
-                if (!lease) lease = values as unknown as Lease;
-                return lease ? [lease] : [];
-              },
-            }),
-          };
-        }
-        stored = { contractHash: String(values.contractHash), result: values.result };
-        return Promise.resolve();
-      },
-    }),
-    update: () => ({
-      set: (values: { result: unknown; state: string }) => ({
-        where: async () => {
-          stored = { contractHash: stored?.contractHash ?? "", result: values.result };
-        },
-      }),
-    }),
-  };
-  return database;
-}
-
 describe("module contracts", () => {
   test("Task Authority accepts only legal lifecycle transitions", () => {
     expect(canTransition("admitted", "candidate")).toBe(true);
     expect(canTransition("reviewed_pr", "candidate")).toBe(false);
   });
 
-  test("Task Authority persists immutable admission and rejects stale fences", async () => {
-    const database = fakeAuthorityDatabase();
-    const authority = new TaskAuthority(database as never);
-    const admitted = await authority.admit({
-      contract,
+  test("Task Authority applies legal facts and rejects stale fences without persistence", () => {
+    const admitted: TaskResult = {
+      taskId: "module-test",
       contractHash: "hash",
-      repository: "/repo",
-      repositoryIdentity: "owner/repo",
-      deadlineEpochMs: Date.now() + 10_000,
-    });
-    const reserved = await authority.save({
-      ...admitted,
+      revision: 4,
+      deadlineEpochMs: 10_000,
+      state: "admitted",
+      candidateSha: null,
+      candidateFence: null,
+      check: null,
+      review: null,
+      delivery: null,
+      blocker: null,
       activeActivation: 1,
-      evidence: { ...admitted.evidence, implementerActivations: 1 },
+      writer: { repository: "/repo", repositoryIdentity: "owner/repo", generation: 1 },
+      evidence: {
+        implementerActivations: 1,
+        reviewCycles: 0,
+        changesRequestedBatches: 0,
+        restartRecoveries: 0,
+      },
+    };
+    const candidate = applyTaskFact(admitted, {
+      type: "candidate",
+      candidate: { sha, baseSha: sha, generation: 1, fence: 1 },
     });
-    const restarted = await new TaskAuthority(database as never).admit({
-      contract,
-      contractHash: "hash",
-      repository: "/repo",
-      repositoryIdentity: "owner/repo",
-      deadlineEpochMs: Date.now() + 10_000,
+    expect(candidate).toMatchObject({
+      state: "candidate",
+      candidateSha: sha,
+      activeActivation: null,
     });
-    expect(restarted.activeActivation).toBe(reserved.activeActivation);
-    await expect(
-      authority.admit({
-        contract,
-        contractHash: "other",
-        repository: "/repo",
-        repositoryIdentity: "owner/repo",
-        deadlineEpochMs: Date.now() + 10_000,
-      }),
-    ).rejects.toThrow("immutable");
     expect(() =>
-      authority.acceptCandidate(restarted, { sha, baseSha: sha, generation: 1, fence: 0 }),
+      applyTaskFact(admitted, {
+        type: "candidate",
+        candidate: { sha, baseSha: sha, generation: 1, fence: 0 },
+      }),
     ).toThrow("stale");
   });
 
