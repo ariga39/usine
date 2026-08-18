@@ -20,6 +20,7 @@ export {
   runtimePolicyFromEnvironment,
   type CapabilityEnvironments,
   type ForgePolicy,
+  type GitAuthor,
   type RolePolicy,
   type RuntimePolicy,
 } from "./runtime-policy.js";
@@ -91,6 +92,7 @@ export async function admitTask(
       stateDirectory,
       deadlineEpochMs: persistedDeadlineEpochMs,
       environment: policy.capabilities,
+      gitAuthor: policy.gitAuthor,
     });
     const session = new CodexCodingSession();
     const quality = new QualityGate({

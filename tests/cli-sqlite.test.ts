@@ -52,6 +52,8 @@ describe("CLI/SQLite admission seam", () => {
       env: {
         USINE_STATE_DIR: undefined,
         USINE_STOP_AFTER: "admitted",
+        USINE_GIT_AUTHOR_NAME: "Release Bot",
+        USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
         XDG_STATE_HOME: userStateRoot,
       },
       reject: false,
@@ -73,6 +75,8 @@ describe("CLI/SQLite admission seam", () => {
       env: {
         USINE_STATE_DIR: join(root, "state"),
         USINE_STOP_AFTER: "admitted",
+        USINE_GIT_AUTHOR_NAME: "Release Bot",
+        USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
       },
       reject: false,
     });
@@ -91,6 +95,8 @@ describe("CLI/SQLite admission seam", () => {
     const env = {
       USINE_STATE_DIR: join(root, "state"),
       USINE_STOP_AFTER: "admitted",
+      USINE_GIT_AUTHOR_NAME: "Release Bot",
+      USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
     };
     const first = await execa("node", [cliPath, "run", "task.json"], {
       cwd: repository,

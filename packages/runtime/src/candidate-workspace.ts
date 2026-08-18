@@ -1,7 +1,7 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
-import type { CapabilityEnvironments } from "./runtime-policy.js";
+import type { CapabilityEnvironments, GitAuthor } from "./runtime-policy.js";
 import { remainingUntil } from "./remaining-until.js";
 
 export interface WriterWorkspace {
@@ -23,6 +23,7 @@ export interface WorkspaceOptions {
   stateDirectory: string;
   deadlineEpochMs: number;
   environment: CapabilityEnvironments;
+  gitAuthor: GitAuthor;
 }
 
 export class CandidateWorkspace {
@@ -83,9 +84,9 @@ export class CandidateWorkspace {
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        "user.name=Usine",
+        `user.name=${this.options.gitAuthor.name}`,
         "-c",
-        "user.email=usine@example.invalid",
+        `user.email=${this.options.gitAuthor.email}`,
       ];
       await this.git([...config, "-C", workspace.path, "add", "--all"]);
       await this.git([

@@ -23,6 +23,11 @@ export interface RolePolicy {
   sandbox: "workspace-write" | "read-only";
 }
 
+export interface GitAuthor {
+  name: string;
+  email: string;
+}
+
 const defaultRolePolicies = {
   implementer: {
     role: "implementer" as const,
@@ -64,6 +69,7 @@ export interface CapabilityEnvironments {
 export interface RuntimePolicy {
   stateDirectory: string;
   stopAfterAdmitted: boolean;
+  gitAuthor: GitAuthor;
   roles: {
     implementer: RolePolicy;
     reviewer: RolePolicy;
@@ -95,14 +101,29 @@ export function runtimePolicyFromEnvironment(
     },
   };
 
+  const gitAuthor = parseGitAuthor(environment);
   const forge = parseForgePolicy(environment, stopAfterAdmitted, repository);
   return {
     stateDirectory,
     stopAfterAdmitted,
+    gitAuthor,
     roles,
     forge,
     capabilities: capabilityEnvironments(environment),
   };
+}
+
+function parseGitAuthor(environment: NodeJS.ProcessEnv): GitAuthor {
+  const name = environment.USINE_GIT_AUTHOR_NAME?.trim();
+  const email = environment.USINE_GIT_AUTHOR_EMAIL?.trim();
+  if (!name || !email) {
+    const missing = [
+      name ? null : "USINE_GIT_AUTHOR_NAME",
+      email ? null : "USINE_GIT_AUTHOR_EMAIL",
+    ].filter((key): key is string => key !== null);
+    throw new Error(`Git author identity requires ${missing.join(" and ")}`);
+  }
+  return { name, email };
 }
 
 export function capabilityEnvironments(environment: NodeJS.ProcessEnv): CapabilityEnvironments {

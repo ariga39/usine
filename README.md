@@ -15,11 +15,15 @@ USINE_GITHUB_APP_ID=... \
 USINE_GITHUB_INSTALLATION_ID=... \
 USINE_GITHUB_APP_SLUG=... \
 USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
+USINE_GIT_AUTHOR_NAME="Release Bot" \
+USINE_GIT_AUTHOR_EMAIL=release@example.invalid \
 USINE_IMPLEMENTER_MODEL=gpt-5.6-luna \
 USINE_IMPLEMENTER_PROFILE=usine-implementer \
 USINE_REVIEWER_MODEL=gpt-5.6-sol \
 node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
 ```
+
+`USINE_GIT_AUTHOR_NAME` 与 `USINE_GIT_AUTHOR_EMAIL` 是必需配置；它们共同固定 host 最终 candidate commit 的 author 和 committer identity。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `vp test`, and `vp run --filter '@usine/cli...' build`. `vp check`
