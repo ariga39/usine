@@ -30,7 +30,7 @@ identify owner + active falsifier + next observable outcome
 
 仓库规则是正确性的第一层；Codex hook 是低成本提醒层：
 
-- `PostCompact` 应提醒主 agent 重新读取 `AGENTS.md`、当前 Issue/PR、Git 状态和当前行为所需的 canonical sections；
+- `PostCompact` 应提醒主 agent 重新读取 `AGENTS.md`、当前 Issue/PR、Git 状态和当前行为所需的 canonical sections，并在委派前重新确认 Herdr environment/launcher constraint；
 - hook 不自动修改文件、不总结设计，也不把旧 session summary 提升为权威；
 - hook 丢失只意味着少一次提醒，不能让流程失去恢复能力；
 - 方向发生重大变化或同一工作经历多次 compact 时，优先生成短 handoff 并开新 session，不无限延长已被旧假设污染的 thread。
@@ -90,7 +90,13 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- product implementation：fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 deployment/task constraint，不是跨模块 runtime type。Provider-neutral Coding Session 的当前 production adapter使用 Codex SDK；Herdr/transcript 不参与 completion authority；repository-agent constitution、orchestration policy 与其 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product implementation 委派；
+本节只约束我们如何开发 Usine repository，不改变 Usine 产品的 Coding Session：产品 runtime 继续使用 canonical design 选择的 Codex SDK adapter，Herdr 不进入 product correctness path。
+
+所有 delegated repository implementer/reviewer session 必须由 primary orchestrator 在 `HERDR_ENV=1` 的会话中通过 Herdr 启动、prompt、inspect 和 wait；不得以 native/internal subagent API 替代。Herdr state 只是观察证据，不授予 Git、Issue、check、review 或 completion authority。Herdr 不可用时报告 development-environment blocker，不静默切换 launcher。
+
+Repository-agent constitution、orchestration policy 与 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product-code implementation 委派。
+
+- product-code implementation：fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 repository-development constraint；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
 - 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
