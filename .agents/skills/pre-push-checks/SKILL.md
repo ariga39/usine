@@ -26,4 +26,4 @@ corepack pnpm check:links
 
 It resolves links against each linking file's directory, rejects missing and local absolute targets, and ignores external `http(s)` URLs. Inspect changed text separately for home-directory names, hostnames, secrets, and private transcripts; the script cannot prove those content properties.
 
-Finally inspect `git diff --stat` and the full diff, confirm no unrelated or generated files changed, and record exact command results. Checks are evidence for the exact candidate; they do not replace fresh Sol review or the Issue's merge gate.
+Finally inspect `git diff --stat` and the full diff, confirm no unrelated or generated files changed, and record exact command results. Checks are evidence for the exact candidate; they do not replace fresh independent exact-SHA review or the Issue's merge gate.
