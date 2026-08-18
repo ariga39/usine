@@ -1,1 +1,0 @@
-ALTER TABLE "task_runs" ADD COLUMN "deadline_at" timestamp with time zone DEFAULT now() NOT NULL;

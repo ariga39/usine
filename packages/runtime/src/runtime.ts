@@ -1,5 +1,6 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { TaskContract } from "./contract.js";
 import { applyMigrations } from "./apply-migrations.js";
 import { CandidateWorkspace } from "./candidate-workspace.js";
@@ -7,7 +8,7 @@ import { CodexCodingSession } from "./coding-session.js";
 import { executeDeliveryRun, writeTaskResult, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
-import { repositoryLeases, taskRuns } from "./schema.js";
+import { openSqliteDatabase } from "./sqlite-database.js";
 import { TaskAuthority, hashTaskContract, type TaskResult } from "./task-authority.js";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 
@@ -24,15 +25,17 @@ export async function admitTask(
   rawContract: string,
   contract: TaskContract,
 ): Promise<TaskResult> {
-  const databaseUrl = process.env.USINE_DATABASE_URL;
-  if (!databaseUrl) throw new Error("USINE_DATABASE_URL is required");
-  await applyMigrations(databaseUrl);
-  const stateDirectory = process.env.USINE_STATE_DIR ?? ".usine";
+  const userStateDirectory =
+    process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
+  const stateDirectory = process.env.USINE_STATE_DIR ?? join(userStateDirectory, "usine");
+  await mkdir(stateDirectory, { recursive: true });
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  await applyMigrations(databasePath);
   const contractHash = hashTaskContract(rawContract);
   const repositoryIdentity =
     `${contract.repository.owner}/${contract.repository.name}`.toLowerCase();
-  const pool = new Pool({ connectionString: databaseUrl });
-  const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
+  const handle = openSqliteDatabase(databasePath);
+  const database = handle.database;
   const authority = new TaskAuthority(database);
   try {
     const existing = await authority.lookupExisting(contract.id, contractHash);
@@ -102,6 +105,6 @@ export async function admitTask(
     await writeTaskResult(stateDirectory, result);
     return result;
   } finally {
-    await pool.end();
+    handle.close();
   }
 }

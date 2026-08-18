@@ -36,7 +36,7 @@ Usine 的第一个完整产品行为是：接收一项已经授权、边界明�
 - 任意 DAG、插件市场或动态 provider router；
 - 分布式调度、跨主机迁移或多 forge 同步；
 - Web dashboard、Mem0、session 向量数据库；
-- 对 Git 对象库、PostgreSQL catalog 或敌对 host 的穷举式证明；
+- 对 Git 对象库、SQLite catalog 或敌对 host 的穷举式证明；
 - 无条件自动 merge。
 
 这些能力并未被永久否决。只有观察到明确需求穿透现有边界时，才按 `DECISIONS.md` 中的 re-entry trigger 重新讨论。
@@ -48,7 +48,7 @@ authorized task contract
         │
         ▼
 deterministic coordinator
-  PostgreSQL facts + reconcile loop
+  SQLite facts + reconcile loop
         │
         ▼
 isolated Codex implementer workspace
@@ -83,7 +83,7 @@ Activation coupling 仍应很弱：普通消息不会广播唤醒其他角色；
 
 ### 4.1 确定性控制面
 
-顶层不需要 LLM 界面，也不存在永久 Chief Agent。协调器是普通 TypeScript 程序；PostgreSQL 保存最小领域事实，Drizzle transaction 原子地保留 lease、attempt fence 和 effect identity，Delivery Run 根据这些事实一次决定一个 next action。协调器只做机械且可审计的决定：admit、lease、activate、observe、retry、invalidate stale evidence、reduce gates 和 publish effects。
+顶层不需要 LLM 界面，也不存在永久 Chief Agent。协调器是普通 TypeScript 程序；本地 SQLite 保存最小领域事实，Drizzle transaction 原子地保留 lease、attempt fence 和 effect identity，Delivery Run 根据这些事实一次决定一个 next action。协调器只做机械且可审计的决定：admit、lease、activate、observe、retry、invalidate stale evidence、reduce gates 和 publish effects。
 
 V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及出现冲突时的有界诊断。轻量的 transcript extraction、classification、normalization 和 short summary 由协调器通过成熟的 `ai` + `@ai-sdk/openai` provider 直接调用配置的 schema-constrained OpenAI-compatible API；除非确实需要 repository、tool 或 session 能力，不通过 Herdr、Codex 或 OpenCode agent runtime。协调器仍负责输入投影、schema 校验、exact-SHA 校验和 lifecycle authority。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
 
@@ -102,7 +102,7 @@ V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及�
 
 ### 4.3 恢复
 
-恢复路径和正常路径相同。协调器重启后读取 PostgreSQL 中的领域状态，再观察进程、workspace、Git 和 GitHub 的当前事实：
+恢复路径和正常路径相同。协调器重启后读取 SQLite 中的领域状态，再观察进程、workspace、Git 和 GitHub 的当前事实：
 
 - 确认已发生的 effect，记录成功；
 - 可证明未发生的 effect，按相同 identity 重试；
@@ -185,7 +185,7 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 | [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) `SandboxAgent` / MCP / tracing | agent loop、sandbox capability binding、session/tracing | 不作为 V0 runtime。它适合更广泛 agent application，但会在当前一个 Codex specialist 内重复 Codex agent loop，并与 Usine task authority 重叠；sandbox 与 MCP capability model 作为设计 donor。Experimental `codexTool` 不是生产依赖。 |
 | Codex App Server | 最完整 thread/turn/item event、interrupt/read/resume | 不直接接入。它会要求 Usine 维护 JSON-RPC lifecycle client；Codex SDK 已覆盖当前 caller。只有 SDK 无法提供一次真实 recovery 所需 observation 时才 re-enter。 |
 | [Gas City runtime/session design](https://github.com/gastownhall/gascity/blob/main/engdocs/architecture/session.md) + Herdr | stable session identity、idempotent stop、runtime/session bookkeeping 分离、provider conformance ideas | 作为 donor，不采用通用 provider。Gas City 需要多个交互式 runtime，Usine 当前只有一个 coding runtime。Herdr pane、prompt settlement、screen state 和 rendered transcript 从 production correctness path 删除；未来若 operator observation 成为实测需要，只能作为 Coding Session 内的可选 host/observer，不能成为 completion evidence。 |
-| [AgentRouter](https://github.com/perixtar/AgentRouter) / [Cezar](https://github.com/open-mercato/cezar) | persisted run/event、sandbox、multi-provider examples、worktree/event UI patterns | 不采用。前者仍为 alpha 且引入 Daytona/R2/第二套 Postgres control plane，后者主要是本地 cockpit；两者都会复制当前 Task Authority/Forge ownership。只借鉴公开的 event mapping、credential separation 和 worktree examples。 |
+| [AgentRouter](https://github.com/perixtar/AgentRouter) / [Cezar](https://github.com/open-mercato/cezar) | persisted run/event、sandbox、multi-provider examples、worktree/event UI patterns | 不采用。前者仍为 alpha 且引入 Daytona/R2/第二套 remote database control plane，后者主要是本地 cockpit；两者都会复制当前 Task Authority/Forge ownership。只借鉴公开的 event mapping、credential separation 和 worktree examples。 |
 
 选择 Codex SDK 作为当前 adapter，而不是更薄的 direct `codex exec`，因为 SDK 已经封装同一官方 CLI 的 structured lifecycle，能删除手写 parsing 并保留本地 Codex authentication/economics。Named profile 和 model slug 都不是 module contract；fresh/high/default-tier/no-fast 是当前 role property，当前用户指定的 Luna slug保留在 deployment/task policy。若 characterization 证明 SDK 无法维持这些设置、无法隔离 environment 或无法产生完整 turn terminal evidence，才降级为 direct exec、替换 adapter 或进入 App Server decision。
 
@@ -198,13 +198,13 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 | **delete/replace** | `runtime.ts` composition monolith；`@usine/agent-runtime` shallow helper package；`@usine/review-extractor` whole rendered-transcript second-model path；全部 production Herdr pane/prompt/read/get/close；manual Codex JSONL/session parser、output artifact instruction和 fallback branch；把 Usine 自身 canonical corpus塞给 target implementer；`record://` production branch；one-function physical decomposition；动态 scattered env reads |
 | **one characterization decides** | Codex SDK 对 Luna/high/default-tier/no-fast、controlled env、structured implementer/reviewer output 与 AbortSignal 的 config parity；现有 read-only MCP/capability 的具体接入配置；restart 后 fresh retry 与 optional thread resume 的成本差异。Characterization 可以替换 adapter/config，不取消 Coding Session 或其它必要模块 |
 
-测试也 replace 而不是 layer：删除 `fake-herdr` 及其 command-count/mode matrix；删除 transcript line-wrap/extractor suite；把 1500 行 CLI suite 拆为 Task Authority reducer/persistence tests、Coding Session SDK-adapter contract tests、Candidate/Quality tests、Forge reconciliation tests和至多两条 CLI/PostgreSQL end-to-end。新 adapter fake 发 typed SDK events，不复刻 CLI/pane 实现；旧 test claim 被新 module behavior 覆盖后在同一 full-refactor PR 删除。
+测试也 replace 而不是 layer：删除 `fake-herdr` 及其 command-count/mode matrix；删除 transcript line-wrap/extractor suite；把 1500 行 CLI suite 拆为 Task Authority reducer/persistence tests、Coding Session SDK-adapter contract tests、Candidate/Quality tests、Forge reconciliation tests和至多两条 CLI/SQLite end-to-end。新 adapter fake 发 typed SDK events，不复刻 CLI/pane 实现；旧 test claim 被新 module behavior 覆盖后在同一 full-refactor PR 删除。
 
 按当前文件的保守 deletion floor，两个 shallow packages 约 150 行 source、`fake-herdr` 约 220 行、`runtime.ts` 中 Herdr/transcript/manual lifecycle 分支约 350 行会直接消失；CLI suite 中对应 command-count、line-wrap、fallback mode cases 也整体替换，预计再删除数百行。该估算只证明 clean boundary 有真实删除空间，不把净行数作为 merge gate。六个 module 是本 PR 的 target map，不是六个预定 package：live caller 若证明某个 boundary 不隐藏 policy，重构 PR应合并或删除它；未经新的 design evidence 不得增加第七个。
 
 ### 8.4 Clean implementation decision and counterargument
 
-决定为 **`clean_implementation`**，含义是围绕成熟 SDK 和上述六个 caller-owned boundary 重组生产代码与测试；不是从零重写 agent runtime，也不是丢弃已验证的 Git/PostgreSQL/GitHub invariants。当前 monolith 让局部迁移继续继承错误 caller knowledge，保留它再逐个抽函数会让旧 tests 和 transport details 支配新接口，删除收益不足。
+决定为 **`clean_implementation`**，含义是围绕成熟 SDK 和上述六个 caller-owned boundary 重组生产代码与测试；不是从零重写 agent runtime，也不是丢弃已验证的 Git/SQLite/GitHub invariants。当前 monolith 让局部迁移继续继承错误 caller knowledge，保留它再逐个抽函数会让旧 tests 和 transport details 支配新接口，删除收益不足。
 
 反对这一选择的最强论据是：一次 full refactor 会同时触碰 restart recovery、Git candidate 和 GitHub uncertain-effect recovery，产生难以定位的回归；增量 strangler 更安全。用户已经明确决定目标架构需要 Coding Session 和其它五个模块，并选择一个完整重构 PR而不是重建 backlog。风险通过 PR 内小而可运行的提交控制：尽早 characterise task-oriented Coding Session，若 Codex SDK 不合格就替换该 adapter而不保护沉没成本；同时按模块迁移 hard-won policy，建立新 interface coverage 后删除旧入口，最后删除 monolith与旧 fakes。真实 executable task 与 hard-kill/restart是整个重构的最终 merge gate，不是其它必要模块开始重构的前置许可。不能用“仍在同一 PR”豁免 exact-SHA review。
 
@@ -212,17 +212,17 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 
 默认依赖选择：
 
-- PostgreSQL + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
+- Node 24 `node:sqlite` + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
 - Zod：外部 JSON/schema 边界；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
 - `@openai/codex-sdk`：唯一 coding-agent lifecycle；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：协调器拥有的 schema-constrained 轻量语义 transform；
 - Pino：结构化日志；
-- Vitest：公共行为测试，Testcontainers 仅用于必要的真实 PostgreSQL integration；
+- Vitest：公共行为测试，SQLite public-seam tests 覆盖独立连接与 hard-kill recovery；
 - Vite+：workspace 唯一的 format、lint、type-check、test 与 package command/config surface；其内部使用 tsdown、Oxlint、Oxfmt 与 Vitest；`vp check` 的 type-check 独立于 `vp pack`。
 
 Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析结构化结果；不实现 Git object plumbing。原始 SQL 只允许用于 ORM 无法表达且有实际性能/一致性证据的局部语句，并必须在 PR 中说明原因。不得用手写 trigger/catalog fingerprint 模拟 ORM 或 migration engine，也不得把 deterministic reconciler扩张成通用 scheduler、queue 或 workflow engine。
 
-官方能力依据：PostgreSQL transaction 和 row locking 提供当前单 Task/单 writer 所需的原子事实保留；Drizzle Kit 提供 schema-derived SQL migration；Octokit 可代管 GitHub App JWT 和 installation token 生命周期。恢复由同一 Delivery Run reconcile 函数重读这些事实完成，不另存 operation-index replay。
+官方能力依据：Node 24 `node:sqlite` transaction 和 SQLite file locking 提供当前单 Task/单 writer 所需的原子事实保留；Drizzle Kit 提供 schema-derived SQL migration；Octokit 可代管 GitHub App JWT 和 installation token 生命周期。恢复由同一 Delivery Run reconcile 函数重读这些事实完成，不另存 operation-index replay。
 
 ## 9. 衡量与扩大
 

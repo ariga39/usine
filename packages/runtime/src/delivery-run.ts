@@ -165,7 +165,7 @@ export async function executeDeliveryRun(
   if (input.stopAfterAdmitted) return result;
 
   // This is intentionally a reducer over the durable result.  A restart must
-  // resume the phase represented by PostgreSQL, never infer progress from a
+  // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
   for (;;) {
     if (Date.now() >= result.deadlineEpochMs)

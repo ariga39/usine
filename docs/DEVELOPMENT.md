@@ -130,7 +130,7 @@ active falsifier / safety-authority defect
 
 如果决定自写，PR 必须列出被拒绝的成熟库、当前缺口和自写代码的删除边界。“可能以后更灵活”不是理由。不要为了包数量制造接口；一个 module 只有在隐藏复杂度、稳定 caller 或允许真正独立开发时才成立。
 
-数据库默认使用 Drizzle schema、ORM 和 Drizzle Kit migration，并直接使用 PostgreSQL transaction 原子地保留 task lease、attempt fence、effect identity 和领域 observation。Delivery Run 每次只根据已持久化事实决定并执行一个 next action；进程重启重走同一 reconcile 路径，不保存第二套 operation replay。生产和 CI 使用 committed migration，不使用 `drizzle-kit push` 代替可审查的 migration。避免 hand-written repository boilerplate、重复 JSON shape checks、触发器状态机和 catalog fingerprint 测试。当前单 Task/单 runner 不引入 queue/workflow engine；多个 runner、durable delayed scheduling 或实测 polling/竞争瓶颈出现时，先评估成熟库，不扩张自制 scheduler。
+数据库默认使用 Drizzle schema、ORM 和 Drizzle Kit migration，并直接使用 Node 24 `node:sqlite` transaction 原子地保留 task lease、attempt fence、effect identity 和领域 observation。Delivery Run 每次只根据已持久化事实决定并执行一个 next action；进程重启重走同一 reconcile 路径，不保存第二套 operation replay。生产和 CI 使用 committed migration，不使用 `drizzle-kit push` 代替可审查的 migration。避免 hand-written repository boilerplate、重复 JSON shape checks、触发器状态机和 catalog fingerprint 测试。当前单 Task/单 runner 不引入 queue/workflow engine；多个 runner、durable delayed scheduling 或实测 polling/竞争瓶颈出现时，先评估成熟库，不扩张自制 scheduler。
 
 ### TypeScript 工具链
 

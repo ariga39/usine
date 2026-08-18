@@ -7,8 +7,8 @@ import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
 
 const childSource = String.raw`
 import { writeFile } from "node:fs/promises";
-import { drizzle } from "./packages/runtime/node_modules/drizzle-orm/node-postgres/index.js";
-import pg from "./packages/runtime/node_modules/pg/esm/index.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { drizzle } from "./packages/runtime/node_modules/drizzle-orm/sqlite-proxy/index.js";
 import { executeDeliveryRun } from "./packages/runtime/dist/delivery-run.mjs";
 import { TaskAuthority } from "./packages/runtime/dist/task-authority.mjs";
 import { repositoryLeases, taskRuns } from "./packages/runtime/dist/schema.mjs";
@@ -16,8 +16,8 @@ import { repositoryLeases, taskRuns } from "./packages/runtime/dist/schema.mjs";
 const marker = process.env.USINE_RECOVERY_MARKER;
 const mode = process.env.USINE_RECOVERY_MODE;
 const taskId = process.env.USINE_RECOVERY_TASK;
-const databaseUrl = process.env.USINE_TEST_DATABASE_URL;
-if (!marker || !taskId || !databaseUrl) throw new Error("recovery test environment is incomplete");
+const databasePath = process.env.USINE_RECOVERY_DATABASE;
+if (!marker || !taskId || !databasePath) throw new Error("recovery test environment is incomplete");
 const baseSha = "a".repeat(40);
 const nextSha = "b".repeat(40);
 const contract = {
@@ -32,8 +32,18 @@ const contract = {
   authorization: { source: "recovery test", delivery: true },
   delivery: { baseBranch: "main", branch: "agent/recovery", issue: 1, title: "recovery", body: "recovery" },
 };
-const pool = new pg.Pool({ connectionString: databaseUrl });
-const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
+const client = new DatabaseSync(databasePath, { timeout: 5000 });
+const database = drizzle(async (query, params, method) => {
+  const statement = client.prepare(query);
+  statement.setReturnArrays(true);
+  const values = params;
+  if (method === "run") {
+    statement.run(...values);
+    return { rows: [] };
+  }
+  if (method === "get") return { rows: statement.get(...values) };
+  return { rows: statement.all(...values) };
+}, { schema: { repositoryLeases, taskRuns } });
 const authority = new TaskAuthority(database);
 const workspace = {
   quarantinePriorWriters: async (_taskId, activation) => {
@@ -47,6 +57,7 @@ const session = {
   run: async () => {
     if (mode === "kill") {
       await writeFile(marker, "activation durable and session started\\n");
+      setInterval(() => undefined, 1_000);
       await new Promise(() => undefined);
     }
     return { status: "completed", sessionId: "recovery", output: { status: "proposed", summary: "candidate" }, usage: null, summary: "done", failure: null };
@@ -80,62 +91,60 @@ try {
 if (!staleRejected) throw new Error("stale candidate was accepted");
 await writeFile(marker + ".result", JSON.stringify(result));
 console.log(JSON.stringify({ ...result, staleRejected }));
-await pool.end();
+client.close();
 `;
 
-describe("PostgreSQL coordinator restart recovery", () => {
-  test.runIf(Boolean(process.env.USINE_TEST_DATABASE_URL))(
-    "fences a killed activation and resumes with one accepted candidate",
-    async () => {
-      await applyMigrations(process.env.USINE_TEST_DATABASE_URL!);
-      const directory = await mkdtemp(join(tmpdir(), "usine-recovery-"));
-      const marker = join(directory, "marker");
-      const taskId = `recovery-${Date.now()}`;
-      const env = {
-        ...process.env,
-        USINE_RECOVERY_MARKER: marker,
-        USINE_RECOVERY_TASK: taskId,
-        USINE_TEST_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
-      };
-      const first = execa("node", ["--input-type=module", "-e", childSource], {
-        env: { ...env, USINE_RECOVERY_MODE: "kill" },
-        reject: false,
-      });
-      let started = false;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        try {
-          if ((await readFile(marker, "utf8")).includes("session started")) {
-            started = true;
-            break;
-          }
-        } catch {
-          await new Promise((resolve) => setTimeout(resolve, 20));
+describe("SQLite coordinator restart recovery", () => {
+  test("fences a killed activation and resumes with one accepted candidate", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "usine-recovery-"));
+    const marker = join(directory, "marker");
+    const databasePath = join(directory, "state.sqlite");
+    await applyMigrations(databasePath);
+    const taskId = `recovery-${Date.now()}`;
+    const env = {
+      ...process.env,
+      USINE_RECOVERY_MARKER: marker,
+      USINE_RECOVERY_TASK: taskId,
+      USINE_RECOVERY_DATABASE: databasePath,
+    };
+    const first = execa("node", ["--input-type=module", "-e", childSource], {
+      env: { ...env, USINE_RECOVERY_MODE: "kill" },
+      reject: false,
+    });
+    let started = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        if ((await readFile(marker, "utf8")).includes("session started")) {
+          started = true;
+          break;
         }
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      if (!started) {
-        const failed = await first;
-        throw new Error(`recovery child failed: ${failed.stderr}`);
-      }
-      if (!first.pid) throw new Error("recovery child did not expose a process id");
-      process.kill(first.pid, "SIGKILL");
-      await first;
-      const second = await execa("node", ["--input-type=module", "-e", childSource], {
-        env: { ...env, USINE_RECOVERY_MODE: "resume" },
-      });
-      const result = JSON.parse(second.stdout) as {
-        state: string;
-        candidateSha: string;
-        evidence: { implementerActivations: number; restartRecoveries: number };
-        staleRejected: boolean;
-      };
-      expect(result).toMatchObject({
-        state: "reviewed_pr",
-        candidateSha: "b".repeat(40),
-        evidence: { implementerActivations: 2, restartRecoveries: 1 },
-        staleRejected: true,
-      });
-      expect(await readFile(marker, "utf8")).toContain("prior writer quarantined");
-    },
-    30_000,
-  );
+    }
+    if (!started) {
+      const failed = await first;
+      throw new Error(`recovery child failed: ${failed.stderr}`);
+    }
+    if (!first.pid) throw new Error("recovery child did not expose a process id");
+    process.kill(first.pid, "SIGKILL");
+    const killed = await first;
+    expect(killed.signal).toBe("SIGKILL");
+    const second = await execa("node", ["--input-type=module", "-e", childSource], {
+      env: { ...env, USINE_RECOVERY_MODE: "resume" },
+    });
+    const result = JSON.parse(second.stdout) as {
+      state: string;
+      candidateSha: string;
+      evidence: { implementerActivations: number; restartRecoveries: number };
+      staleRejected: boolean;
+    };
+    expect(result).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: "b".repeat(40),
+      evidence: { implementerActivations: 2, restartRecoveries: 1 },
+      staleRejected: true,
+    });
+    expect(await readFile(marker, "utf8")).toContain("prior writer quarantined");
+  }, 30_000);
 });

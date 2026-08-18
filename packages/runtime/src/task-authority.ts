@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { TaskContract } from "./contract.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
+import type { RuntimeDatabase } from "./sqlite-database.js";
 
 export type TaskState =
   | "admitted"
@@ -75,10 +75,7 @@ export interface AuthorityInput {
   deadlineEpochMs: number;
 }
 
-type AuthorityDatabase = NodePgDatabase<{
-  repositoryLeases: typeof repositoryLeases;
-  taskRuns: typeof taskRuns;
-}>;
+type AuthorityDatabase = RuntimeDatabase;
 
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
@@ -111,11 +108,7 @@ export class TaskAuthority {
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
     if (typeof database.select === "function") {
-      const rows = await database
-        .select()
-        .from(taskRuns)
-        .where(eq(taskRuns.taskId, taskId))
-        .for("update");
+      const rows = await database.select().from(taskRuns).where(eq(taskRuns.taskId, taskId));
       return rows[0];
     }
     return database.query.taskRuns.findFirst({ where: eq(taskRuns.taskId, taskId) });
@@ -199,10 +192,7 @@ export class TaskAuthority {
       });
       return result;
     };
-    const database = this.database as AuthorityDatabase & {
-      transaction?: <T>(callback: (transaction: AuthorityDatabase) => Promise<T>) => Promise<T>;
-    };
-    return database.transaction ? database.transaction(admit) : admit(this.database);
+    return this.inTransaction(admit);
   }
 
   async save(result: TaskResult): Promise<TaskResult> {
@@ -252,10 +242,7 @@ export class TaskAuthority {
       }
       return saved;
     };
-    const database = this.database as AuthorityDatabase & {
-      transaction?: <T>(callback: (transaction: AuthorityDatabase) => Promise<T>) => Promise<T>;
-    };
-    return database.transaction ? database.transaction(persist) : persist(this.database);
+    return this.inTransaction(persist);
   }
 
   async reserveActivation(
@@ -292,15 +279,29 @@ export class TaskAuthority {
         .where(eq(taskRuns.taskId, taskId));
       return { result, activation };
     };
-    const database = this.database as AuthorityDatabase & {
-      transaction?: <T>(callback: (transaction: AuthorityDatabase) => Promise<T>) => Promise<T>;
-    };
-    return database.transaction ? database.transaction(reserve) : reserve(this.database);
+    return this.inTransaction(reserve);
   }
 
-  private static withDurableFields(result: TaskResult, deadlineAt: Date): TaskResult {
+  private async inTransaction<T>(
+    callback: (database: AuthorityDatabase) => Promise<T>,
+  ): Promise<T> {
+    const database = this.database as AuthorityDatabase & {
+      transaction?: (
+        callback: (transaction: AuthorityDatabase) => Promise<T>,
+        config?: { behavior?: "deferred" | "immediate" | "exclusive" },
+      ) => Promise<T>;
+    };
+    if (!database.transaction) return callback(this.database);
+    return database.transaction(callback, { behavior: "immediate" });
+  }
+
+  private static withDurableFields(result: TaskResult, deadlineAt: Date | number): TaskResult {
     const persistedDeadline =
-      deadlineAt instanceof Date ? deadlineAt.getTime() : result.deadlineEpochMs;
+      deadlineAt instanceof Date
+        ? deadlineAt.getTime()
+        : typeof deadlineAt === "number"
+          ? deadlineAt
+          : result.deadlineEpochMs;
     return {
       ...result,
       revision: Number.isSafeInteger(result.revision) ? result.revision : 0,
