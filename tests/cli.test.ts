@@ -738,7 +738,7 @@ describe("usine run", () => {
           USINE_HERDR_BIN: fileURLToPath(new URL("fixtures/fake-herdr.mjs", import.meta.url)),
           USINE_HERDR_LOG: herdrLog,
           HERDR_ENV: "1",
-          HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+          HERDR_SOCKET_PATH: "<test-herdr-socket>",
           HERDR_WORKSPACE_ID: "w-test",
           HERDR_TAB_ID: "w-test:t1",
           HERDR_PANE_ID: "w-test:p1",
@@ -804,7 +804,7 @@ describe("usine run", () => {
       expect(splits[0]?.command).toContain("--current");
       expect(splits[0]?.context).toMatchObject({
         HERDR_ENV: "1",
-        HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+        HERDR_SOCKET_PATH: "<test-herdr-socket>",
         HERDR_WORKSPACE_ID: "w-test",
         HERDR_TAB_ID: "w-test:t1",
         HERDR_PANE_ID: "w-test:p1",

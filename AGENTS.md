@@ -8,11 +8,12 @@ Before planning, editing, reviewing, or delegating work:
 
 1. Read this file completely.
 2. Read `docs/DESIGN.md`, `docs/DEVELOPMENT.md`, and `docs/DECISIONS.md` completely.
-3. Read the active GitHub Issue and, when present, its PR and unresolved review threads.
-4. Inspect the current branch, base SHA, working tree, and diff.
-5. Identify any active route falsifier, the highest eligible task class, the active behavior cluster and its design owner. Restate why the proposed work is eligible before acting.
+3. When acting as the primary development orchestrator, read the distilled operating guide at `docs/agent-software-factory/codex-unattended-development-harness.md` completely. It selectively retains useful harness constraints and never overrides the canonical files. Implementers and reviewers read their assigned task file instead.
+4. Read the active GitHub Issue and, when present, its PR and unresolved review threads.
+5. Inspect the current branch, base SHA, working tree, and diff.
+6. Identify any active route falsifier, the highest eligible task class, the active behavior cluster and its design owner. Restate why the proposed work is eligible before acting.
 
-Repeat these five steps after context compaction, session replacement, handoff, or any user correction that changes direction. A summary from an earlier context is navigation aid, not authority. If repository state and a summary disagree, repository state wins and the discrepancy must be reported.
+Repeat these six steps after context compaction, session replacement, handoff, or any user correction that changes direction. A summary from an earlier context is navigation aid, not authority. If repository state and a summary disagree, repository state wins and the discrepancy must be reported.
 
 ## Product guardrails
 
@@ -34,6 +35,7 @@ Repeat these five steps after context compaction, session replacement, handoff, 
 - Use test-first development for stable contracts, invariants, and bug reproductions. For uncertain integrations, establish the thinnest observable vertical behavior first and add tests around the behavior; do not pre-specify internals through hundreds of seam tests.
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.
 - Do not commit secrets, tokens, private keys, generated agent transcripts, local checkpoints, or historical clean-room archives.
+- Never put local absolute paths, usernames, home-directory names, hostnames, or other machine-specific identifiers in committed files or GitHub Issues, PRs, reviews, and comments. Use repository-relative paths or explicit placeholders. Local `.tasks/` files may contain paths required for execution, but they remain uncommitted and must be sanitized before any content is copied to GitHub.
 
 ## Completion discipline
 

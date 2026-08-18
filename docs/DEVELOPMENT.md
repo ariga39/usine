@@ -10,12 +10,14 @@ issue: https://github.com/ariga39/usine/issues/1
 
 ## 1. 权威文档与恢复顺序
 
-只有 `AGENTS.md`、`docs/DESIGN.md`、本文和 `docs/DECISIONS.md` 可以定义当前方向。README 只做导航和诚实的实现状态说明。Issue/PR 定义一项具体开发工作的授权范围，但不能静默推翻 canonical design。
+只有 `AGENTS.md`、`docs/DESIGN.md`、本文和 `docs/DECISIONS.md` 可以定义当前方向。`docs/agent-software-factory/codex-unattended-development-harness.md` 是从外部 harness 选择性提炼的简短操作指南，primary development orchestrator 每次 bootstrap/compact 后必须完整读取；它不是第五份设计权威，也不导入外部 harness 的完整命令、工具版本或流程。它与 canonical files、active Issue 或 Git state 冲突时以后者为准。README 只做导航和诚实的实现状态说明。Issue/PR 定义一项具体开发工作的授权范围，但不能静默推翻 canonical design。
 
 任何 agent 在以下时刻必须重新执行 context bootstrap：新 session、compact 后、从其他 agent 接手、用户纠偏后、切换 Issue 或工作树后：
 
 ```text
 read AGENTS + DESIGN + DEVELOPMENT + DECISIONS
+        ↓
+primary orchestrator reads unattended-development harness
         ↓
 read active Issue / PR / unresolved review threads
         ↓
@@ -32,7 +34,7 @@ restate why the task is eligible and its next observable action
 
 仓库规则是正确性的第一层；Codex hook 是低成本提醒层：
 
-- `PostCompact` 应提醒主 agent 重新读取四份 canonical 文档、当前 Issue/PR 和 Git 状态；
+- `PostCompact` 应提醒主 agent 重新读取四份 canonical 文档、repository unattended-development harness、当前 Issue/PR 和 Git 状态；
 - hook 不自动修改文件、不总结设计，也不把旧 session summary 提升为权威；
 - hook 丢失只意味着少一次提醒，不能让流程失去恢复能力；
 - 方向发生重大变化或同一工作经历多次 compact 时，优先生成短 handoff 并开新 session，不无限延长已被旧假设污染的 thread。
@@ -63,6 +65,8 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 6. scoped review/fix 在同一 PR 收敛；coherent outcome、checks、spec/correctness verdict 和适用的 design verdict 全部通过后由 orchestrator 自动 merge，并继续下一项 eligible Issue，不等待用户监督。
 
 GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、active falsifier 状态、behavior-cluster owner、draft checkpoint、merge gate 与停止条件；它被 gitignore，不积累成第二套任务系统。
+
+所有 committed files 与 GitHub durable surfaces 都必须使用 repository-relative paths 或明确占位符；不得写入本地绝对路径、用户名、home-directory name、hostname 或其它 machine-specific identifier。运行所需的本地路径只允许留在未提交的 `.tasks/` 或进程参数中，任何复制到 Issue、PR、review/comment 或 completion evidence 的内容都必须先清理。
 
 ## 3. 有界并排开发
 
@@ -211,6 +215,7 @@ Self-review、普通 code review、更多测试或一份主编排者总结都不
 - 开发流程变化：修改本文和必要的 `AGENTS.md`；
 - 一项具体工作：GitHub Issue/PR；
 - 临时 prompt、checkpoint、handoff：`.tasks/`，不提交；
+- primary orchestrator 选择性提炼的恢复/交付约束、task templates 与 review schema：`docs/agent-software-factory/`；不复制完整外部 harness，且必须服从 canonical files 与 active Issue/Git；
 - 研究笔记和 benchmark 原始输出：只在当前 decision 需要时作为 PR evidence，不成为新的权威设计。
 
 每次 compact 后重读的是这套小 corpus，而不是不断增长的历史。文档的价值在于降低恢复成本和防止漂移，不以数量衡量。
