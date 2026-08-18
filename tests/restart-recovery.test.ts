@@ -79,8 +79,21 @@ const result = await executeDeliveryRun(
     repository: ".",
     repositoryIdentity: "recovery/" + taskId,
     deadlineEpochMs: Date.now() + 60000,
-    implementerModel: "test",
-    stopAfterAdmitted: false,
+    implementer: {
+      role: "implementer",
+      model: "test",
+      reasoningEffort: "high",
+      sandbox: "workspace-write",
+    },
+    environments: {
+      worker: { CI: "true" },
+      check: { CI: "true" },
+      credentialFreeGit: {
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    },
   },
   { authority, workspace, session, quality, forge },
 );

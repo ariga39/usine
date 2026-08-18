@@ -7,6 +7,8 @@ import { implementerOutputSchema } from "./role-output.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { TaskAuthority, type CheckResult, type TaskResult } from "./task-authority.js";
+import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
+import { deadlineExpired } from "./remaining-until.js";
 
 export interface DeliveryRunInput {
   contract: TaskContract;
@@ -14,8 +16,8 @@ export interface DeliveryRunInput {
   repository: string;
   repositoryIdentity: string;
   deadlineEpochMs: number;
-  implementerModel: string;
-  stopAfterAdmitted: boolean;
+  implementer: RolePolicy;
+  environments: CapabilityEnvironments;
 }
 
 export interface DeliveryRunServices {
@@ -80,15 +82,16 @@ async function runCodingAttempt(
     previousSha,
   );
   const observation = await services.session.run({
-    role: "implementer",
+    role: input.implementer.role,
     workspace: workspace.path,
     contract: input.contract,
     prompt: implementerPrompt(input, previousSha, check, findings),
-    model: input.implementerModel,
-    reasoningEffort: "high",
-    sandbox: "workspace-write",
+    model: input.implementer.model,
+    reasoningEffort: input.implementer.reasoningEffort,
+    sandbox: input.implementer.sandbox,
     deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerOutputSchema,
+    environment: input.environments.worker,
   });
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
@@ -175,15 +178,13 @@ export async function executeDeliveryRun(
     deadlineEpochMs: input.deadlineEpochMs,
   });
   if (result.state === "reviewed_pr" || result.state === "blocked") return result;
-  if (Date.now() >= result.deadlineEpochMs)
+  if (deadlineExpired(result.deadlineEpochMs))
     return blockTask(services.authority, result, "elapsed budget exhausted");
-  if (input.stopAfterAdmitted) return result;
-
   // This is intentionally a reducer over the durable result.  A restart must
   // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
   for (;;) {
-    if (Date.now() >= result.deadlineEpochMs)
+    if (deadlineExpired(result.deadlineEpochMs))
       return blockTask(services.authority, result, "elapsed budget exhausted");
 
     if (result.state === "admitted") {

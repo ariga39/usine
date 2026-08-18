@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
+import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "usine-candidate-"));
@@ -26,6 +27,7 @@ describe("Candidate Workspace", () => {
       repository: input.repository,
       stateDirectory: join(input.root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
+      environment: capabilityEnvironments(process.env),
     });
     const first = await workspace.prepareWriter("task", 1, input.baseSha);
     await writeFile(join(first.path, "delivered.txt"), "ok\n");

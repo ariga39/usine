@@ -4,6 +4,8 @@ import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { reviewerOutputSchema } from "./role-output.js";
 import type { CheckResult, ReviewVerdict } from "./task-authority.js";
+import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
+import { remainingUntil } from "./remaining-until.js";
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -15,30 +17,11 @@ function truncateCheckStream(output: string, stream: "stdout" | "stderr"): strin
   return `${output.slice(0, headLength)}${marker}${output.slice(-(available - headLength))}`;
 }
 
-function checkEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { CI: "true" };
-  for (const key of [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-  ]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
-  return env;
-}
-
 export interface QualityGateOptions {
   workspace: CandidateWorkspace;
   session: CodexCodingSession;
-  reviewerModel: string;
-  reviewerReasoningEffort: string;
+  reviewer: RolePolicy;
+  environment: CapabilityEnvironments;
   deadlineEpochMs: number;
 }
 
@@ -51,8 +34,10 @@ export class QualityGate {
       sha,
       async (path) => {
         let result;
-        const remaining = this.options.deadlineEpochMs - Date.now() - 100;
-        if (remaining <= 0)
+        let timeout: number;
+        try {
+          timeout = remainingUntil(this.options.deadlineEpochMs, contract.projectCheck.timeoutMs);
+        } catch {
           return {
             sha,
             status: "failed" as const,
@@ -61,12 +46,13 @@ export class QualityGate {
             stdout: "",
             stderr: "elapsed budget exhausted",
           };
+        }
         try {
           result = await execa("sh", ["-c", contract.projectCheck.command], {
             cwd: path,
-            env: checkEnvironment(),
+            env: this.options.environment.check,
             extendEnv: false,
-            timeout: Math.min(contract.projectCheck.timeoutMs, remaining),
+            timeout,
             reject: false,
           });
         } catch (error) {
@@ -116,15 +102,16 @@ export class QualityGate {
           "Do not rely on implementer conversation or process exit status.",
         ].join("\n");
         const observation = await this.options.session.run({
-          role: "reviewer",
+          role: this.options.reviewer.role,
           workspace: path,
           contract,
           prompt,
-          model: this.options.reviewerModel,
-          reasoningEffort: this.options.reviewerReasoningEffort,
-          sandbox: "read-only",
+          model: this.options.reviewer.model,
+          reasoningEffort: this.options.reviewer.reasoningEffort,
+          sandbox: this.options.reviewer.sandbox,
           deadlineEpochMs: this.options.deadlineEpochMs,
           outputSchema: reviewerOutputSchema,
+          environment: this.options.environment.worker,
         });
         if (observation.status !== "completed" || !observation.output)
           return {

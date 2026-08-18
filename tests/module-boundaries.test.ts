@@ -7,7 +7,6 @@ import {
   CodexCodingSession,
   implementerOutputSchema,
   reviewerOutputSchema,
-  workerEnvironment,
 } from "../packages/runtime/src/coding-session.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
 import {
@@ -19,6 +18,10 @@ import type { TaskContract } from "../packages/runtime/src/contract.js";
 import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
 import { QualityGate } from "../packages/runtime/src/quality-gate.js";
 import { ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
+import {
+  capabilityEnvironments,
+  explicitWorkerEnvironment,
+} from "../packages/runtime/src/runtime-policy.js";
 
 const sha = "a".repeat(40);
 const contract = { id: "module-test" } as TaskContract;
@@ -69,10 +72,13 @@ describe("module contracts", () => {
   });
 
   test("Coding Session strips coordinator and delivery credentials", () => {
-    const env = workerEnvironment({
-      environment: { OPENAI_API_KEY: "secret", GITHUB_TOKEN: "secret", SAFE: "yes" },
+    const env = explicitWorkerEnvironment({
+      OPENAI_API_KEY: "secret",
+      GITHUB_TOKEN: "secret",
+      SAFE: "yes",
+      SAFE_TOKEN: "yes-too",
     });
-    expect(env).toMatchObject({ CI: "true", SAFE: "yes" });
+    expect(env).toMatchObject({ CI: "true", SAFE: "yes", SAFE_TOKEN: "yes-too" });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");
   });
@@ -94,9 +100,11 @@ describe("module contracts", () => {
       contract,
       prompt: "work",
       model: "test-model",
+      reasoningEffort: "high",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
       status: "completed",
@@ -117,6 +125,31 @@ describe("module contracts", () => {
     expect(requestOptions).not.toHaveProperty("env");
   });
 
+  test("Coding Session preserves the deadline reserve before starting a provider", async () => {
+    let started = false;
+    const session = new CodexCodingSession(async () => {
+      started = true;
+      throw new Error("provider should not start");
+    });
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      model: "test-model",
+      reasoningEffort: "high",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 50,
+      outputSchema: implementerOutputSchema,
+      environment: { CI: "true" },
+    });
+    expect(started).toBe(false);
+    expect(observation).toMatchObject({
+      status: "failed",
+      failure: "elapsed budget exhausted",
+    });
+  });
+
   test.each([
     ["malformed JSON", "{malformed"],
     ["wrong status", JSON.stringify({ status: "finished", summary: "done" })],
@@ -133,9 +166,11 @@ describe("module contracts", () => {
       contract,
       prompt: "work",
       model: "test-model",
+      reasoningEffort: "high",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -164,9 +199,11 @@ describe("module contracts", () => {
       contract,
       prompt: "review",
       model: "test-model",
+      reasoningEffort: "low",
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -202,6 +239,7 @@ describe("module contracts", () => {
       repository,
       stateDirectory: join(root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
+      environment: capabilityEnvironments(process.env),
     });
     let reviewerSchema: unknown;
     let sessionStatus: "completed" | "failed" = "completed";
@@ -221,8 +259,13 @@ describe("module contracts", () => {
           };
         },
       } as never,
-      reviewerModel: "reviewer",
-      reviewerReasoningEffort: "low",
+      reviewer: {
+        role: "reviewer",
+        model: "reviewer",
+        reasoningEffort: "low",
+        sandbox: "read-only",
+      },
+      environment: capabilityEnvironments(process.env),
       deadlineEpochMs: Date.now() + 30_000,
     });
     const check = await gate.check(task, base, 1);
@@ -280,7 +323,18 @@ describe("module contracts", () => {
   });
 
   test("Forge Delivery fails closed before any effect without exact approval", async () => {
-    const forge = new ForgeDelivery({ repository: "/repo", deadlineEpochMs: Date.now() + 10_000 });
+    const forge = new ForgeDelivery({
+      repository: "/repo",
+      deadlineEpochMs: Date.now() + 10_000,
+      forge: {
+        mode: "test",
+        appSlug: "test-app",
+        token: "test-token",
+        apiUrl: "http://127.0.0.1:1",
+        gitUrl: "http://127.0.0.1:1/owner/repo.git",
+      },
+      environment: capabilityEnvironments(process.env),
+    });
     await expect(
       forge.deliver(
         contract,

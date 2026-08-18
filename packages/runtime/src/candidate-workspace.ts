@@ -1,6 +1,8 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
+import type { CapabilityEnvironments } from "./runtime-policy.js";
+import { remainingUntil } from "./remaining-until.js";
 
 export interface WriterWorkspace {
   taskId: string;
@@ -20,35 +22,7 @@ export interface WorkspaceOptions {
   repository: string;
   stateDirectory: string;
   deadlineEpochMs: number;
-}
-
-function timeoutUntil(deadlineEpochMs: number): number {
-  const remaining = deadlineEpochMs - Date.now() - 100;
-  if (remaining <= 0) throw new Error("elapsed budget exhausted");
-  return Math.max(1, remaining);
-}
-
-function credentialFreeEnvironment(): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-  };
-  for (const key of [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-  ]) {
-    if (process.env[key] !== undefined) result[key] = process.env[key];
-  }
-  return result;
+  environment: CapabilityEnvironments;
 }
 
 export class CandidateWorkspace {
@@ -113,11 +87,15 @@ export class CandidateWorkspace {
         "-c",
         "user.email=usine@example.invalid",
       ];
-      await this.git([...config, "-C", workspace.path, "add", "--all"], true);
-      await this.git(
-        [...config, "-C", workspace.path, "commit", "-m", "Implement authorized task"],
-        true,
-      );
+      await this.git([...config, "-C", workspace.path, "add", "--all"]);
+      await this.git([
+        ...config,
+        "-C",
+        workspace.path,
+        "commit",
+        "-m",
+        "Implement authorized task",
+      ]);
       candidate = (await this.git(["-C", workspace.path, "rev-parse", "HEAD"])).trim();
     }
     if (candidate === previousSha) throw new Error("candidate did not advance exact SHA");
@@ -165,11 +143,11 @@ export class CandidateWorkspace {
     }
   }
 
-  private async git(args: string[], credentialFree = false): Promise<string> {
+  private async git(args: string[]): Promise<string> {
     const result = await execa("git", args, {
-      env: credentialFree ? credentialFreeEnvironment() : undefined,
-      extendEnv: !credentialFree,
-      timeout: timeoutUntil(this.options.deadlineEpochMs),
+      env: this.options.environment.credentialFreeGit,
+      extendEnv: false,
+      timeout: remainingUntil(this.options.deadlineEpochMs),
       reject: true,
     });
     return String(result.stdout);
