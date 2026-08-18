@@ -1,5 +1,13 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskContract } from "@usine/task-authority";
+import {
+  applyMigrations,
+  openSqliteDatabase,
+  TaskAuthority,
+  type TaskContract,
+} from "@usine/task-authority";
 import { executeDeliveryRun } from "../src/delivery-run.js";
 import { applyTaskFact, type CandidateFact, type TaskResult } from "@usine/task-authority";
 
@@ -155,6 +163,113 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("returns the first durable blocker after a failed check exhausts activations", async () => {
+    const id = `sqlite-terminal-block-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const taskContract = {
+      ...contract(id),
+      budget: { ...contract(id).budget, maxImplementerActivations: 1 },
+    };
+    const repositoryIdentity = `recovery/${id}`;
+    const directory = await mkdtemp(join(tmpdir(), "usine-delivery-run-"));
+    const databasePath = join(directory, "state.sqlite");
+    await applyMigrations(databasePath);
+    const database = openSqliteDatabase(databasePath);
+    const realAuthority = new TaskAuthority(database.database);
+    let blockCalls = 0;
+    const authority = new Proxy(realAuthority, {
+      get(target, property, receiver) {
+        if (property === "block") {
+          return (...args: Parameters<TaskAuthority["block"]>) => {
+            blockCalls += 1;
+            return target.block(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const input = {
+      contract: taskContract,
+      contractHash: "sqlite-terminal-block-hash",
+      repository: ".",
+      repositoryIdentity,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+
+    try {
+      const result = await executeDeliveryRun(input, {
+        authority,
+        workspace: {
+          quarantinePriorWriters: async () => undefined,
+          prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
+            taskId: id,
+            activation,
+            fence: activation,
+            path: ".",
+            baseSha,
+          }),
+          freeze: async (writer: { baseSha: string }) => ({
+            sha,
+            baseSha: writer.baseSha,
+            workspace: writer,
+          }),
+          quarantine: async () => undefined,
+        },
+        session: {
+          run: async () => ({
+            status: "completed" as const,
+            output: { status: "proposed" as const, summary: "candidate" },
+          }),
+        },
+        quality: {
+          check: async () => ({
+            sha,
+            status: "failed" as const,
+            command: "pnpm test",
+            exitCode: 1,
+            stdout: "",
+            stderr: "budget exhausted while checking candidate",
+          }),
+          review: async () => {
+            throw new Error("failed candidate must not be reviewed");
+          },
+        },
+        forge: {
+          deliver: async () => {
+            throw new Error("failed candidate must not be delivered");
+          },
+        },
+      } as never);
+
+      expect(result.state).toBe("blocked");
+      expect(result.blocker).toBe("implementer activation budget exhausted");
+      expect(result.evidence.implementerActivations).toBe(1);
+      expect(blockCalls).toBe(1);
+
+      const rerun = await executeDeliveryRun(input, {
+        authority,
+        workspace: {},
+        session: {},
+        quality: {},
+        forge: {},
+      } as never);
+      expect(rerun).toEqual(result);
+      expect(blockCalls).toBe(1);
+
+      const nextTask = await authority.admit({
+        contract: contract(`${id}-next`),
+        contractHash: "sqlite-terminal-block-next-hash",
+        repository: ".",
+        repositoryIdentity,
+        deadlineEpochMs: Date.now() + 60_000,
+      });
+      expect(nextTask.state).toBe("admitted");
+    } finally {
+      database.close();
+    }
+  }, 30_000);
+
   test("passes lossless failed-check evidence to repair without reviewing or delivering it", async () => {
     const id = "stdout-only-check-failure";
     const fake = fakeAuthority(persistedResult("admitted", id));
