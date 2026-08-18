@@ -4,11 +4,6 @@ import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession, type SessionObservation } from "./coding-session.js";
 import type { CheckResult, ReviewVerdict } from "./task-authority.js";
 
-export interface QualityEvaluation {
-  check: CheckResult;
-  review: ReviewVerdict;
-}
-
 const reviewSchema = {
   type: "object",
   additionalProperties: false,
@@ -20,6 +15,16 @@ const reviewSchema = {
     findings: { type: "array", items: { type: "string" } },
   },
 };
+
+const CHECK_STREAM_LIMIT = 16_384;
+
+function truncateCheckStream(output: string, stream: "stdout" | "stderr"): string {
+  if (output.length <= CHECK_STREAM_LIMIT) return output;
+  const marker = `\n[${stream} truncated to ${CHECK_STREAM_LIMIT} characters]\n`;
+  const available = CHECK_STREAM_LIMIT - marker.length;
+  const headLength = Math.ceil(available / 2);
+  return `${output.slice(0, headLength)}${marker}${output.slice(-(available - headLength))}`;
+}
 
 function checkEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { CI: "true" };
@@ -95,8 +100,8 @@ export interface QualityGateOptions {
 export class QualityGate {
   constructor(private readonly options: QualityGateOptions) {}
 
-  async evaluate(contract: TaskContract, sha: string, cycle: number): Promise<QualityEvaluation> {
-    const check = await this.options.workspace.withCheckout(
+  async check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult> {
+    return this.options.workspace.withCheckout(
       `check-${contract.id}-${cycle}`,
       sha,
       async (path) => {
@@ -126,7 +131,10 @@ export class QualityGate {
             command: contract.projectCheck.command,
             exitCode: 124,
             stdout: "",
-            stderr: error instanceof Error ? error.message : String(error),
+            stderr: truncateCheckStream(
+              error instanceof Error ? error.message : String(error),
+              "stderr",
+            ),
           };
         }
         return {
@@ -134,23 +142,22 @@ export class QualityGate {
           status: result.exitCode === 0 ? ("passed" as const) : ("failed" as const),
           command: contract.projectCheck.command,
           exitCode: result.exitCode ?? 1,
-          stdout: String(result.stdout),
-          stderr: String(result.stderr),
+          stdout: truncateCheckStream(result.stdout, "stdout"),
+          stderr: truncateCheckStream(result.stderr, "stderr"),
         };
       },
     );
-    if (check.status !== "passed")
-      return {
-        check,
-        review: {
-          sha,
-          verdict: "inconclusive",
-          summary: "project check failed",
-          findings: [check.stderr || "project check failed"],
-        },
-      };
+  }
 
-    const review = await this.options.workspace.withCheckout(
+  async review(
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    cycle: number,
+  ): Promise<ReviewVerdict> {
+    if (check.status !== "passed" || check.sha !== sha)
+      throw new Error("review requires a passing exact-SHA check");
+    return this.options.workspace.withCheckout(
       `review-${contract.id}-${cycle}`,
       sha,
       async (path) => {
@@ -177,6 +184,5 @@ export class QualityGate {
         return parseReviewObservation(observation.output, sha);
       },
     );
-    return { check, review };
   }
 }

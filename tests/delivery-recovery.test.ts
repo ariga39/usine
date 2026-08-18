@@ -1,7 +1,11 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { TaskContract } from "../packages/runtime/src/contract.js";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import { applyTaskFact, type TaskResult } from "../packages/runtime/src/task-authority.js";
+import {
+  applyTaskFact,
+  type CandidateFact,
+  type TaskResult,
+} from "../packages/runtime/src/task-authority.js";
 
 const sha = "b".repeat(40);
 
@@ -68,12 +72,18 @@ function fakeAuthority(initial: TaskResult) {
   };
   const authority = {
     admit: async () => stored,
+    recordCandidate: (
+      observation: { taskId: string; revision: number },
+      candidate: CandidateFact,
+    ) => transition(observation, { type: "candidate", candidate }),
     recordCheck: (observation: { taskId: string; revision: number }, check: TaskResult["check"]) =>
       transition(observation, { type: "check", check: check! }),
     recordReview: (
       observation: { taskId: string; revision: number },
       review: TaskResult["review"],
     ) => transition(observation, { type: "review", review: review! }),
+    recordRepairBatch: (observation: { taskId: string; revision: number }) =>
+      transition(observation, { type: "repair_batch" }),
     recordDelivery: (
       observation: { taskId: string; revision: number },
       delivery: TaskResult["delivery"],
@@ -103,7 +113,10 @@ function fakeAuthority(initial: TaskResult) {
 
 function servicesFor(
   authority: ReturnType<typeof fakeAuthority>["authority"],
-  quality: { evaluate: (...args: never[]) => Promise<unknown> },
+  quality: {
+    check: (...args: never[]) => Promise<unknown>;
+    review: (...args: never[]) => Promise<unknown>;
+  },
   forge: { deliver: (...args: never[]) => Promise<unknown> },
 ) {
   return {
@@ -141,6 +154,181 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("passes lossless failed-check evidence to repair without reviewing or delivering it", async () => {
+    const id = "stdout-only-check-failure";
+    const fake = fakeAuthority(persistedResult("admitted", id));
+    const prompts: string[] = [];
+    const checked: string[] = [];
+    const sessions = [
+      { status: "completed", output: { status: "proposed", summary: "candidate" } },
+      { status: "completed", output: { status: "blocked", summary: "repair evidence received" } },
+    ];
+    const quality = {
+      check: async (_contract: TaskContract, candidateSha: string) => {
+        checked.push(candidateSha);
+        return {
+          sha: candidateSha,
+          status: "failed" as const,
+          command: "vp test run tests/repair.test.ts",
+          exitCode: 7,
+          stdout: "repair this stdout-only diagnostic",
+          stderr: "",
+        };
+      },
+      review: async () => {
+        throw new Error("failed candidate must not be reviewed");
+      },
+    };
+    const forge = {
+      deliver: async () => {
+        throw new Error("failed candidate must not be delivered");
+      },
+    };
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "hash",
+        repository: ".",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementerModel: "test",
+        stopAfterAdmitted: false,
+      },
+      {
+        authority: fake.authority,
+        workspace: {
+          quarantinePriorWriters: async () => undefined,
+          prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
+            taskId: id,
+            activation,
+            fence: activation,
+            path: ".",
+            baseSha,
+          }),
+          freeze: async (writer: { baseSha: string }) => ({
+            sha,
+            baseSha: writer.baseSha,
+            workspace: writer,
+          }),
+          quarantine: async () => undefined,
+        },
+        session: {
+          run: async ({ prompt }: { prompt: string }) => {
+            prompts.push(prompt);
+            return sessions.shift();
+          },
+        },
+        quality,
+        forge,
+      } as never,
+    );
+
+    expect(result.state).toBe("blocked");
+    expect(checked).toEqual([sha]);
+    expect(fake.getImplementerActivations()).toBe(2);
+    expect(prompts[1]).toContain(
+      `Failed project check evidence: ${JSON.stringify({
+        sha,
+        status: "failed",
+        command: "vp test run tests/repair.test.ts",
+        exitCode: 7,
+        stdout: "repair this stdout-only diagnostic",
+        stderr: "",
+      })}`,
+    );
+    expect(result.review).toBeNull();
+  });
+
+  test("aggregates one changes-requested batch before the repair delivery", async () => {
+    const id = "review-repair";
+    const initial = {
+      ...persistedResult("reviewed", id),
+      review: { sha, verdict: "changes_requested" as const, summary: "fix", findings: ["fix"] },
+    };
+    const fake = fakeAuthority(initial);
+    const prompts: string[] = [];
+    const checked: string[] = [];
+    const reviewed: string[] = [];
+    const delivered: string[] = [];
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "hash",
+        repository: ".",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementerModel: "test",
+        stopAfterAdmitted: false,
+      },
+      {
+        authority: fake.authority,
+        workspace: {
+          quarantinePriorWriters: async () => undefined,
+          prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
+            taskId: id,
+            activation,
+            fence: activation,
+            path: ".",
+            baseSha,
+          }),
+          freeze: async (writer: { baseSha: string }) => ({
+            sha,
+            baseSha: writer.baseSha,
+            workspace: writer,
+          }),
+          quarantine: async () => undefined,
+        },
+        session: {
+          run: async ({ prompt }: { prompt: string }) => {
+            prompts.push(prompt);
+            return { status: "completed", output: { status: "proposed", summary: "repaired" } };
+          },
+        },
+        quality: {
+          check: async (_contract: TaskContract, candidateSha: string) => {
+            checked.push(candidateSha);
+            return {
+              sha: candidateSha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          },
+          review: async (_contract: TaskContract, candidateSha: string) => {
+            reviewed.push(candidateSha);
+            return {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved",
+              findings: [],
+            };
+          },
+        },
+        forge: {
+          deliver: async (_contract: TaskContract, candidateSha: string) => {
+            delivered.push(candidateSha);
+            return {
+              sha: candidateSha,
+              effect: "github" as const,
+              prNumber: 80,
+              url: "https://example.invalid/pr/80",
+              attestationId: "repair",
+            };
+          },
+        },
+      } as never,
+    );
+
+    expect(result.state).toBe("reviewed_pr");
+    expect(prompts[0]).toContain("Aggregated findings to repair: fix");
+    expect(checked).toEqual([sha]);
+    expect(reviewed).toEqual([sha]);
+    expect(delivered).toEqual([sha]);
+    expect(fake.getStored().evidence.changesRequestedBatches).toBe(1);
+  });
+
   test.each(["candidate", "checked", "reviewed"] as const)(
     "resumes %s without another implementer activation",
     async (state) => {
@@ -148,25 +336,27 @@ describe("Delivery Run durable phase recovery", () => {
       const initial = persistedResult(state, id);
       const fake = fakeAuthority(initial);
       const evaluated: string[] = [];
+      const reviewed: string[] = [];
       const delivered: string[] = [];
       const quality = {
-        evaluate: async (_contract: TaskContract, candidateSha: string) => {
+        check: async (_contract: TaskContract, candidateSha: string) => {
           evaluated.push(candidateSha);
           return {
-            check: {
-              sha: candidateSha,
-              status: "passed" as const,
-              command: "true",
-              exitCode: 0,
-              stdout: "",
-              stderr: "",
-            },
-            review: {
-              sha: candidateSha,
-              verdict: "approved" as const,
-              summary: "approved",
-              findings: [],
-            },
+            sha: candidateSha,
+            status: "passed" as const,
+            command: "true",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+        review: async (_contract: TaskContract, candidateSha: string) => {
+          reviewed.push(candidateSha);
+          return {
+            sha: candidateSha,
+            verdict: "approved" as const,
+            summary: "approved",
+            findings: [],
           };
         },
       };
@@ -196,7 +386,8 @@ describe("Delivery Run durable phase recovery", () => {
       );
       expect(result.state).toBe("reviewed_pr");
       expect(fake.getImplementerActivations()).toBe(0);
-      expect(evaluated).toEqual(state === "reviewed" ? [] : [sha]);
+      expect(evaluated).toEqual(state === "candidate" ? [sha] : []);
+      expect(reviewed).toEqual(state === "reviewed" ? [] : [sha]);
       expect(delivered).toEqual([sha]);
     },
   );
@@ -221,8 +412,11 @@ describe("Delivery Run durable phase recovery", () => {
       servicesFor(
         fake.authority,
         {
-          evaluate: async () => {
+          check: async () => {
             throw new Error("unexpected check");
+          },
+          review: async () => {
+            throw new Error("unexpected review");
           },
         },
         {
@@ -275,8 +469,11 @@ describe("Delivery Run durable phase recovery", () => {
         servicesFor(
           fake.authority,
           {
-            evaluate: async () => {
+            check: async () => {
               throw new Error("unexpected check");
+            },
+            review: async () => {
+              throw new Error("unexpected review");
             },
           },
           forge,
@@ -288,8 +485,11 @@ describe("Delivery Run durable phase recovery", () => {
       servicesFor(
         fake.authority,
         {
-          evaluate: async () => {
+          check: async () => {
             throw new Error("unexpected check");
+          },
+          review: async () => {
+            throw new Error("unexpected review");
           },
         },
         forge,
