@@ -155,6 +155,14 @@ export async function executeDeliveryRun(
       return services.authority.save(
         failedResult(result, `implementer blocked: ${output.summary ?? "no reason"}`),
       );
+    if (!output || output.status !== "proposed" || typeof output.summary !== "string") {
+      await services.workspace.quarantine(workspace);
+      if (activation >= input.contract.budget.maxImplementerActivations)
+        return services.authority.save(
+          failedResult(result, "implementer returned invalid terminal observation"),
+        );
+      continue;
+    }
 
     let candidate;
     try {
