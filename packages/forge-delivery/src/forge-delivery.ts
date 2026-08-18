@@ -9,6 +9,19 @@ import type {
 } from "@usine/task-authority";
 import { remainingUntil } from "@usine/task-authority";
 
+const PORTABLE_ENVIRONMENT_KEYS = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "PATHEXT",
+] as const;
+
 export type ForgePolicy =
   | {
       mode: "test";
@@ -31,7 +44,13 @@ export function forgeGitEnvironment(
   token: string,
   gitUrl: string,
 ): NodeJS.ProcessEnv {
-  const result = { ...environment };
+  const result: NodeJS.ProcessEnv = {};
+  for (const key of PORTABLE_ENVIRONMENT_KEYS) {
+    if (environment[key] !== undefined) result[key] = environment[key];
+  }
+  result.GIT_CONFIG_NOSYSTEM = "1";
+  result.GIT_CONFIG_GLOBAL = "/dev/null";
+  result.GIT_TERMINAL_PROMPT = "0";
   if (gitUrl.startsWith("https://github.com/")) {
     result.GIT_CONFIG_COUNT = "1";
     result.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";

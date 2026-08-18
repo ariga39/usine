@@ -19,14 +19,6 @@ import { deadlineExpired } from "@usine/task-authority";
 
 export { runtimePolicyFromEnvironment, type RuntimePolicy } from "./runtime-policy.js";
 
-export type {
-  CheckResult,
-  DeliveryEffect,
-  ReviewVerdict,
-  TaskResult,
-  TaskState,
-} from "@usine/task-authority";
-
 export async function admitTask(
   contractPath: string,
   rawContract: string,

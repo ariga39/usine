@@ -11,16 +11,20 @@ const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
 
 describe("Coding Session", () => {
-  test("strips coordinator and delivery credentials", () => {
+  test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
       OPENAI_API_KEY: "secret",
       GITHUB_TOKEN: "secret",
-      SAFE: "yes",
-      SAFE_TOKEN: "yes-too",
+      AWS_SECRET_ACCESS_KEY: "cloud-secret",
+      NPM_TOKEN: "package-secret",
+      PATH: "/portable/bin",
+      LANG: "C",
     });
-    expect(env).toMatchObject({ CI: "true", SAFE: "yes", SAFE_TOKEN: "yes-too" });
+    expect(env).toEqual({ CI: "true", PATH: "/portable/bin", LANG: "C" });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");
+    expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+    expect(env).not.toHaveProperty("NPM_TOKEN");
   });
 
   test("maps SDK terminal output through the task-oriented port", async () => {

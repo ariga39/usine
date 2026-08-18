@@ -134,11 +134,11 @@ active falsifier / safety-authority defect
 
 ### TypeScript 工具链
 
-- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、`vp test` 和 `vp run --filter '@usine/cli...' build`。根 `vite.config.ts` 是 format、lint、type-check 和 test 的唯一配置入口；package-local `vite.config.ts` 只保留 CLI 与 runtime 各自的 `pack` entry。
+- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、`vp test` 和 `vp run --filter '@usine/cli...' build`。根 `vite.config.ts` 是 format、lint、type-check 和 test 的唯一配置入口；六个产品 package、runtime 和 CLI 各自的 package-local `vite.config.ts` 提供 `pack` entry，产品 package 另声明自己的 package-local test include。
 - `vp check` 通过 type-aware/type-check 路径独立执行 TypeScript 静态检查，并继续覆盖根 `tsconfig.json` 的 `tests/**/*.ts`；packaging 成功不能替代 type-check。
 - Vite+ 内置并锁定 Oxlint、Oxfmt、Vitest 和 tsdown。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter/build orchestrator。
 - 普通 library package 使用 Vite+ `pack` 的默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，CLI 的 unbundle 保持其 executable/import contract。
-- `vp run --filter '@usine/cli...' build` 只使用 pnpm workspace 的现有依赖图顺序执行 runtime 与 CLI 的 `vp pack`；没有额外 task cache 或第二套 monorepo orchestrator。
+- `vp run --filter '@usine/cli...' build` 使用 pnpm workspace 的现有依赖图顺序递归执行六个产品 package、runtime 与 CLI 的 `vp pack`；没有额外 task cache 或第二套 monorepo orchestrator。
 
 ## 6. 纵切优先与复杂度预算
 
