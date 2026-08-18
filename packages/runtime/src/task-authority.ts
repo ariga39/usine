@@ -78,7 +78,7 @@ type AuthorityDatabase = NodePgDatabase<{
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
   candidate: ["candidate", "checked", "blocked"],
-  checked: ["checked", "reviewed", "blocked"],
+  checked: ["checked", "candidate", "reviewed", "blocked"],
   reviewed: ["reviewed", "candidate", "reviewed_pr", "blocked"],
   reviewed_pr: ["reviewed_pr"],
   blocked: ["blocked"],
