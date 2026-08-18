@@ -22,7 +22,11 @@ async function fixture() {
 describe("Candidate Workspace", () => {
   test("freezes only the current fenced activation and rejects stale writers", async () => {
     const input = await fixture();
-    const workspace = new CandidateWorkspace({ repository: input.repository, stateDirectory: join(input.root, "state"), deadlineEpochMs: Date.now() + 30_000 });
+    const workspace = new CandidateWorkspace({
+      repository: input.repository,
+      stateDirectory: join(input.root, "state"),
+      deadlineEpochMs: Date.now() + 30_000,
+    });
     const first = await workspace.prepareWriter("task", 1, input.baseSha);
     await writeFile(join(first.path, "delivered.txt"), "ok\n");
     const candidate = await workspace.freeze(first, input.baseSha);

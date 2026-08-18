@@ -33,11 +33,22 @@ const implementerSchema = {
   type: "object",
   additionalProperties: false,
   required: ["status", "summary"],
-  properties: { status: { type: "string", enum: ["proposed", "blocked"] }, summary: { type: "string" } },
+  properties: {
+    status: { type: "string", enum: ["proposed", "blocked"] },
+    summary: { type: "string" },
+  },
 };
 
 function failedResult(result: TaskResult, blocker: string): TaskResult {
   return { ...result, state: "blocked", blocker };
+}
+
+export function nextActivation(
+  result: Pick<TaskResult, "evidence">,
+  budget: number,
+): number | null {
+  const activation = result.evidence.implementerActivations + 1;
+  return activation > budget ? null : activation;
 }
 
 async function crashOnce(input: DeliveryRunInput): Promise<void> {
@@ -51,74 +62,188 @@ async function crashOnce(input: DeliveryRunInput): Promise<void> {
   }
 }
 
-function implementerPrompt(input: DeliveryRunInput, previousSha: string, findings: string[]): string {
+function implementerPrompt(
+  input: DeliveryRunInput,
+  previousSha: string,
+  findings: string[],
+): string {
   return [
     "Role: implementer. Work only on the frozen authorized Task Contract.",
     `Task Contract: ${JSON.stringify(input.contract)}`,
     `Current candidate parent SHA: ${previousSha}`,
-    findings.length > 0 ? `Aggregated findings to repair: ${findings.join("; ")}` : "No prior findings.",
+    findings.length > 0
+      ? `Aggregated findings to repair: ${findings.join("; ")}`
+      : "No prior findings.",
     "Implement the requested production behavior and its real tests. Leave the workspace with the complete change; the host will finalize the commit.",
     "Return a schema-valid proposed or blocked result. Do not claim task completion; the coordinator owns authority.",
   ].join("\n");
 }
 
-export async function executeDeliveryRun(input: DeliveryRunInput, services: DeliveryRunServices): Promise<TaskResult> {
-  let result = await DBOS.runStep(() => services.authority.admit({ contract: input.contract, contractHash: input.contractHash, repository: input.repository, repositoryIdentity: input.repositoryIdentity, deadlineEpochMs: input.deadlineEpochMs }), { name: "admit-task" });
+export async function executeDeliveryRun(
+  input: DeliveryRunInput,
+  services: DeliveryRunServices,
+): Promise<TaskResult> {
+  let result = await DBOS.runStep(
+    () =>
+      services.authority.admit({
+        contract: input.contract,
+        contractHash: input.contractHash,
+        repository: input.repository,
+        repositoryIdentity: input.repositoryIdentity,
+        deadlineEpochMs: input.deadlineEpochMs,
+      }),
+    { name: "admit-task" },
+  );
   let previousSha = input.contract.baseSha;
   let findings: string[] = [];
   for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
-    const activation = result.evidence.implementerActivations + 1;
-    if (activation > input.contract.budget.maxImplementerActivations) return services.authority.save(failedResult(result, "implementer activation budget exhausted"));
-    result = await DBOS.runStep(() => services.authority.save({ ...result, evidence: { ...result.evidence, implementerActivations: activation } }), { name: `activate-implementer-${activation}` });
-    if (input.crashAfterActivation) await DBOS.runStep(() => crashOnce(input), { name: `crash-after-activation-${activation}` });
+    const activation = nextActivation(result, input.contract.budget.maxImplementerActivations);
+    if (activation === null)
+      return services.authority.save(
+        failedResult(result, "implementer activation budget exhausted"),
+      );
+    result = await DBOS.runStep(
+      () =>
+        services.authority.save({
+          ...result,
+          evidence: { ...result.evidence, implementerActivations: activation },
+        }),
+      { name: `activate-implementer-${activation}` },
+    );
+    if (input.crashAfterActivation)
+      await DBOS.runStep(() => crashOnce(input), { name: `crash-after-activation-${activation}` });
 
-    const workspace = await services.workspace.prepareWriter(input.contract.id, activation, previousSha);
-    const observation = await DBOS.runStep(() => services.session.run({
-      role: "implementer",
-      workspace: workspace.path,
-      contract: input.contract,
-      prompt: implementerPrompt(input, previousSha, findings),
-      model: input.implementerModel,
-      reasoningEffort: "high",
-      sandbox: "workspace-write",
-      deadlineEpochMs: input.deadlineEpochMs,
-      outputSchema: implementerSchema,
-    }), { name: `implementer-session-${activation}` });
+    const workspace = await services.workspace.prepareWriter(
+      input.contract.id,
+      activation,
+      previousSha,
+    );
+    const observation = await DBOS.runStep(
+      () =>
+        services.session.run({
+          role: "implementer",
+          workspace: workspace.path,
+          contract: input.contract,
+          prompt: implementerPrompt(input, previousSha, findings),
+          model: input.implementerModel,
+          reasoningEffort: "high",
+          sandbox: "workspace-write",
+          deadlineEpochMs: input.deadlineEpochMs,
+          outputSchema: implementerSchema,
+        }),
+      { name: `implementer-session-${activation}` },
+    );
     if (observation.status !== "completed") {
       await services.workspace.quarantine(workspace);
-      if (activation >= input.contract.budget.maxImplementerActivations) return services.authority.save(failedResult(result, `implementer failed: ${observation.failure ?? observation.summary}`));
+      if (activation >= input.contract.budget.maxImplementerActivations)
+        return services.authority.save(
+          failedResult(result, `implementer failed: ${observation.failure ?? observation.summary}`),
+        );
       continue;
     }
-    const output = typeof observation.output === "string" ? (() => { try { return JSON.parse(observation.output) as { status?: string; summary?: string }; } catch { return {}; } })() : observation.output as { status?: string; summary?: string } | null;
-    if (output?.status === "blocked") return services.authority.save(failedResult(result, `implementer blocked: ${output.summary ?? "no reason"}`));
+    const output =
+      typeof observation.output === "string"
+        ? (() => {
+            try {
+              return JSON.parse(observation.output) as { status?: string; summary?: string };
+            } catch {
+              return {};
+            }
+          })()
+        : (observation.output as { status?: string; summary?: string } | null);
+    if (output?.status === "blocked")
+      return services.authority.save(
+        failedResult(result, `implementer blocked: ${output.summary ?? "no reason"}`),
+      );
 
     let candidate;
     try {
       candidate = await services.workspace.freeze(workspace, previousSha);
-      services.authority.acceptCandidate(result, { sha: candidate.sha, baseSha: candidate.baseSha, generation: result.writer.generation, fence: workspace.fence });
+      services.authority.acceptCandidate(result, {
+        sha: candidate.sha,
+        baseSha: candidate.baseSha,
+        generation: result.writer.generation,
+        fence: workspace.fence,
+      });
     } catch (error) {
       await services.workspace.quarantine(workspace);
-      return services.authority.save(failedResult(result, error instanceof Error ? error.message : String(error)));
+      return services.authority.save(
+        failedResult(result, error instanceof Error ? error.message : String(error)),
+      );
     }
-    result = await DBOS.runStep(() => services.authority.save({ ...result, state: "candidate", candidateSha: candidate.sha, check: null, review: null, delivery: null, blocker: null }), { name: `freeze-candidate-${activation}` });
-    const evaluation = await DBOS.runStep(() => services.quality.evaluate(input.contract, candidate.sha, cycle), { name: `quality-gate-${cycle}` });
-    result = await DBOS.runStep(() => services.authority.save({ ...result, state: "checked", check: evaluation.check }), { name: `save-check-${cycle}` });
+    result = await DBOS.runStep(
+      () =>
+        services.authority.save({
+          ...result,
+          state: "candidate",
+          candidateSha: candidate.sha,
+          check: null,
+          review: null,
+          delivery: null,
+          blocker: null,
+        }),
+      { name: `freeze-candidate-${activation}` },
+    );
+    const evaluation = await DBOS.runStep(
+      () => services.quality.evaluate(input.contract, candidate.sha, cycle),
+      { name: `quality-gate-${cycle}` },
+    );
+    result = await DBOS.runStep(
+      () => services.authority.save({ ...result, state: "checked", check: evaluation.check }),
+      { name: `save-check-${cycle}` },
+    );
     if (evaluation.check.status !== "passed") {
       findings = [evaluation.check.stderr || "project check failed"];
       previousSha = candidate.sha;
-      if (activation >= input.contract.budget.maxImplementerActivations) return services.authority.save(failedResult(result, "project check failed after repair budget was exhausted"));
+      if (activation >= input.contract.budget.maxImplementerActivations)
+        return services.authority.save(
+          failedResult(result, "project check failed after repair budget was exhausted"),
+        );
       continue;
     }
-    result = await DBOS.runStep(() => services.authority.save({ ...result, state: "reviewed", review: evaluation.review, evidence: { ...result.evidence, reviewCycles: cycle } }), { name: `save-review-${cycle}` });
+    result = await DBOS.runStep(
+      () =>
+        services.authority.save({
+          ...result,
+          state: "reviewed",
+          review: evaluation.review,
+          evidence: { ...result.evidence, reviewCycles: cycle },
+        }),
+      { name: `save-review-${cycle}` },
+    );
     if (evaluation.review.verdict === "approved") {
-      const delivery = await DBOS.runStep(() => services.forge.deliver(input.contract, candidate.sha, evaluation.check, evaluation.review), { name: "forge-delivery" });
+      const delivery = await DBOS.runStep(
+        () =>
+          services.forge.deliver(
+            input.contract,
+            candidate.sha,
+            evaluation.check,
+            evaluation.review,
+          ),
+        { name: "forge-delivery" },
+      );
       return services.authority.save({ ...result, state: "reviewed_pr", delivery });
     }
-    if (evaluation.review.verdict === "inconclusive") return services.authority.save(failedResult(result, `review inconclusive: ${evaluation.review.summary}`));
+    if (evaluation.review.verdict === "inconclusive")
+      return services.authority.save(
+        failedResult(result, `review inconclusive: ${evaluation.review.summary}`),
+      );
     findings = evaluation.review.findings;
     previousSha = candidate.sha;
-    result = { ...result, evidence: { ...result.evidence, changesRequestedBatches: result.evidence.changesRequestedBatches + 1 } };
-    if (cycle >= input.contract.budget.maxReviewCycles || result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations) return services.authority.save(failedResult(result, "review changes requested after recovery budget was exhausted"));
+    result = {
+      ...result,
+      evidence: {
+        ...result.evidence,
+        changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
+      },
+    };
+    if (
+      cycle >= input.contract.budget.maxReviewCycles ||
+      result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
+    )
+      return services.authority.save(
+        failedResult(result, "review changes requested after recovery budget was exhausted"),
+      );
   }
   return services.authority.save(failedResult(result, "review budget exhausted"));
 }

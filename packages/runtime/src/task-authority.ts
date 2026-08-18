@@ -4,7 +4,13 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { TaskContract } from "./contract.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
 
-export type TaskState = "admitted" | "candidate" | "checked" | "reviewed" | "reviewed_pr" | "blocked";
+export type TaskState =
+  | "admitted"
+  | "candidate"
+  | "checked"
+  | "reviewed"
+  | "reviewed_pr"
+  | "blocked";
 
 export interface CheckResult {
   sha: string;
@@ -78,6 +84,10 @@ const transitions: Record<TaskState, readonly TaskState[]> = {
   blocked: ["blocked"],
 };
 
+export function canTransition(from: TaskState, to: TaskState): boolean {
+  return transitions[from].includes(to);
+}
+
 export function hashTaskContract(rawContract: string): string {
   return createHash("sha256").update(rawContract).digest("hex");
 }
@@ -90,13 +100,18 @@ export class TaskAuthority {
       where: eq(taskRuns.taskId, input.contract.id),
     });
     if (existing) {
-      if (existing.contractHash !== input.contractHash) throw new Error("admitted contract is immutable");
+      if (existing.contractHash !== input.contractHash)
+        throw new Error("admitted contract is immutable");
       return existing.result as TaskResult;
     }
 
     const inserted = await this.database
       .insert(repositoryLeases)
-      .values({ repositoryIdentity: input.repositoryIdentity, taskId: input.contract.id, generation: 1 })
+      .values({
+        repositoryIdentity: input.repositoryIdentity,
+        taskId: input.contract.id,
+        generation: 1,
+      })
       .onConflictDoNothing()
       .returning();
     const lease =
@@ -149,9 +164,10 @@ export class TaskAuthority {
       where: eq(taskRuns.taskId, result.taskId),
     });
     if (!current) throw new Error("task is not admitted");
-    if (current.contractHash !== result.contractHash) throw new Error("admitted contract is immutable");
+    if (current.contractHash !== result.contractHash)
+      throw new Error("admitted contract is immutable");
     const prior = current.result as TaskResult;
-    if (!transitions[prior.state].includes(result.state)) {
+    if (!canTransition(prior.state, result.state)) {
       throw new Error(`illegal task state transition: ${prior.state} -> ${result.state}`);
     }
     await this.database
@@ -162,8 +178,13 @@ export class TaskAuthority {
   }
 
   acceptCandidate(result: TaskResult, fact: CandidateFact): void {
-    if (fact.generation !== result.writer.generation) throw new Error("candidate belongs to a stale writer generation");
-    if (fact.fence <= 0 || !Number.isSafeInteger(fact.fence) || fact.fence !== result.evidence.implementerActivations) {
+    if (fact.generation !== result.writer.generation)
+      throw new Error("candidate belongs to a stale writer generation");
+    if (
+      fact.fence <= 0 ||
+      !Number.isSafeInteger(fact.fence) ||
+      fact.fence !== result.evidence.implementerActivations
+    ) {
       throw new Error("candidate fence is stale");
     }
     // A candidate may descend from the contract base or the prior candidate used for repair.
