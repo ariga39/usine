@@ -60,7 +60,7 @@ Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementa
 |---|---|---|
 | ACP runtime protocol | 延期 | Codex SDK/Coding Session adapter 无法可靠 resume/observe，或 ACP 已有稳定实现并能删除当前 adapter 的实质复杂度。 |
 | OpenCode runtime adapter | 延期 | 必需模型无法通过 Codex Responses provider 使用，或 Codex adapter 成为可测的成本/能力瓶颈。 |
-| Stop hook continuation | 非 authority 的可选优化 | Delivery Run 外层恢复已正确，且运行数据表明 warm continuation 能显著降低延迟/token；hook 仍不得创建 generation。 |
+| Stop hook continuation | 非 authority 的可选优化 | Delivery Run 外层恢复已正确，且运行数据表明 warm continuation 能显著降低延迟/token；hook 仍不得创建 activation 或 fence。 |
 | 自动 merge | 后续 narrow adapter | reviewed PR exact-head gate 与 delivery reconciliation 已稳定，且 GitHub App 身份/权限已验证。 |
 | Gitea/其它 forge | 延期 | GitHub API、私有仓库能力、成本或外部 contributor workflow 形成真实限制。 |
 | Durable queue/workflow engine 或分布式 runner | 延期 | 多个独立 runner、durable delayed scheduling、数据库 polling/竞争形成实测瓶颈，或 reconciler 开始实现通用 queue/timer/DAG。届时优先采用成熟库，不扩张自制 control plane。 |

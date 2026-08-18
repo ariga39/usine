@@ -62,7 +62,7 @@ export async function admitTask(
       throw error;
     }
     // Admission is the single source of the first deadline.  On recovery this
-    // reads task_runs.deadline_at instead of extending the budget in process.
+    // reads the durable result deadline instead of extending the budget in process.
     const admitted = await authority.admit({
       contract,
       contractHash,
