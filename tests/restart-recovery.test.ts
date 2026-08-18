@@ -81,7 +81,6 @@ try {
     {
       sha: "c".repeat(40),
       baseSha: nextSha,
-      generation: result.writer.generation,
       fence: result.candidateFence ?? 1,
     },
   );
