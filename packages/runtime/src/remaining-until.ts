@@ -1,4 +1,8 @@
-import { ElapsedBudgetError } from "@usine/review-extractor";
+export class ElapsedBudgetError extends Error {
+  constructor() {
+    super("elapsed budget exhausted");
+  }
+}
 
 export function remainingUntil(
   deadlineEpochMs: number,

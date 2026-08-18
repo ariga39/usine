@@ -3,6 +3,4 @@ allowBuilds:
 
 packages:
   - apps/cli
-  - packages/agent-runtime
-  - packages/review-extractor
   - packages/runtime

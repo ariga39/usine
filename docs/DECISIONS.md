@@ -12,12 +12,12 @@ issue: https://github.com/ariga39/usine/issues/1
 |---|---|---|
 | D-001 | 优化 valid/valuable delivery outcomes 与 human attention，而不是内部产物数量 | 防止 300 PR/day 退化成刷提交、刷测试或刷 task。 |
 | D-002 | 顶层是确定性 coordinator，不是永久 Lead LLM | 有序激发、恢复、权限和 gate 必须可审计；LLM 只做 bounded semantic work。 |
-| D-003 | TypeScript、Node 24、pnpm monorepo | 与 Codex/DBOS/Octokit 生态一致；monorepo 便于建立明确 module ownership 和并排 worktree。 |
-| D-004 | 使用 DBOS TypeScript SDK + PostgreSQL 提供 durable workflow、queue、timer 和 restart recovery | 不再手写 scheduler、outbox、retry loop 或 SQLite 恢复系统。 |
-| D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并使用 DBOS 官方 Drizzle datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现，同时保留轻量、显式的 TypeScript schema。 |
+| D-003 | TypeScript、Node 24、pnpm monorepo | 与 Codex/Drizzle/Octokit 生态一致；monorepo 便于建立明确 module ownership 和并排 worktree。 |
+| D-004 | PostgreSQL/Drizzle 保存最小领域事实；Delivery Run 以单步 deterministic reconcile loop 提供 restart recovery。每个 next action 先事务性保留 stable identity/fence，再执行并记录 observation；不维护 operation-index replay、第二套 scheduler 或 queue control plane。此决定 supersedes 先前 DBOS 选择 | 当前只有一个 Task、一个 repository writer 和一个本地 coordinator。DBOS replay 与需要 fresh physical attempt fence 的 hard-kill 恢复冲突，registered datasource transaction 也不能嵌入 step；继续适配会增加框架 glue 而不删除 Usine 特有 authority policy。出现多个 runner、durable delayed scheduling、实测 polling/竞争瓶颈或通用 queue/timer 代码时，重新评估成熟 queue/workflow library。 |
+| D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并直接使用 PostgreSQL transaction | 减少原始 SQL、repository boilerplate、migration 重复实现，同时保留轻量、显式的 TypeScript schema；attempt fence、effect identity 和 state transition 在同一事实库原子提交。 |
 | D-006 | V0 的 provider-neutral Coding Session port 当前只有一个 production adapter：官方 `@openai/codex-sdk`。Herdr/transcript route 从 production correctness path 删除；不预建 provider registry或第二 adapter。当前 adapter 保留 fresh worker、GPT-5.6 Luna high、default tier、no fast、isolated workspace 与 controlled environment policy | SDK 已封装 local Codex thread start/resume、structured events/output、sandbox、cwd、config 与 cancellation，能删除 CLI/JSONL/transcript glue而不重建 runtime。Gas City 的 session/runtime 分离和幂等 lifecycle 只作为 donor；未来 runtime 由实证触发后在同一 port替换，Herdr 最多作为 optional observer/host re-enter，永不授予 completion authority。 |
 | D-007 | Coordinator-owned classification、extraction、normalization 和 short summary 使用 `ai` + `@ai-sdk/openai` 对配置的 OpenAI-compatible API 做 schema-constrained 调用；coding-agent lifecycle 使用 D-006 的 Codex SDK。API key 只留在 coordinator，轻量 transform、agent prose、provider success 和 process exit 都不授予 task authority | 成熟 provider 删除自定义 HTTP/parsing glue；轻量 semantic transform 不需要 repository/tool/session runtime，rendered transcript、hook 或 terminal state也不是 lifecycle bridge。 |
-| D-008 | 当前 classification 为 `correct_before_expansion`：只允许一个串行 full-refactor implementation task，完成 Coding Session、Task Authority、Delivery Run、Candidate Workspace、Quality Gate 和 Forge Delivery。SDK characterization 尽早运行但不阻塞其它必要模块重构；representative executable task 与 activation 中途 induced restart 的 fenced retry 是整个 PR 的 merge gate | 用户确认目标架构不因 adapter 验证而改变。早期 characterization 用于低成本替换错误 adapter；最终 live evidence清除 falsifier，此前不增加第二 lane/runtime/authority。 |
+| D-008 | 当前 classification 为 `continue`：Coding Session、Task Authority、Delivery Run、Candidate Workspace、Quality Gate 和 Forge Delivery 已组成 production path。PR #82 证明 representative executable normal delivery；PR #83 证明 activation 中途 SIGKILL 后以同一 Task ID、fresh fence/workspace、exact-SHA review 和 reconciled delivery恢复 | 两条 live evidence 清除了 Issue #65 falsifier。既有 serial path 可继续；第二 runtime/forge、分布式 runner、自动 merge authority 或更高并发仍需新的 observed trigger 与方向 checkpoint。 |
 | D-009 | Candidate、checks、review verdict 和投影出的 attestation 全部绑定 immutable exact SHA | 防止 stale evidence 和“agent 说完成了”成为交付依据。 |
 | D-010 | Reviewer 必须 fresh、可读取完整 codebase，并提交 explicit verdict；exact-SHA `approved` verdict 是 semantic approval，review run 完成与批准是两个事实 | 保留独立判断；delivery executor 只能投影 verdict，不能制造批准。需要 GitHub 原生 approval 时使用不同于 PR author/delivery identity 的 reviewer capability。 |
 | D-011 | GitHub 是当前 forge/delivery surface；使用 Octokit + GitHub App 短期 installation token | 现有 private repos 已安装 App；不再把凭据和 API 轮换手写到每个 agent。 |
@@ -27,26 +27,24 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
 | D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计；审计 finding 必须改变 task eligibility，而不只是生成 backlog | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；方向 blocker 若不能暂停错误任务，就没有控制权。 |
-| D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。DBOS runtime 必须使用 tsdown unbundle 模式，不把 workflow 打成 bundle。 |
+| D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。 |
 | D-019 | 通常每个 Issue/PR 交付最小 coherent module behavior；当前 full-refactor 是显式一次性例外，不能派生新 implementation backlog。其 small commits 必须逐步建立新 module behavior并删除旧 seam，最终 merge gate 仍是代表性 live delivery + restart recovery，而非文件变短或机械等价 | 用户要求一次处理当前结构债；保留可见小提交但不让过渡 package/interface成为长期设计。 |
 | D-020 | Task eligibility 顺序为 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；局部 Issue/non-goal 不能 waive 全局 falsifier | 第二次实现证明 flat backlog 会自动偏向最容易闭合、最低价值的机械任务。 |
 | D-021 | 每个 active behavior cluster 有一个临时 design owner；首次 cluster、新 package/interface、连续三次修改同一大文件、三处重复 policy 或 falsified lifecycle change 触发独立 design review。Design verdict 与 spec/correctness verdict 分离 | Module map、interface depth、test placement 和 deletion plan 需要跨 Issue 的持续责任，不能期待局部 reviewer 从被禁止的 scope 中恢复架构。 |
 | D-022 | 建立 module interface 后，测试必须 replace 而不是 layer：interface behavior、adapter protocol 和少量 CLI end-to-end 分层；新 tests 覆盖旧 claim 后删除 implementation-coupled fixtures | 单一巨大 CLI suite 和不断增加的 fake modes 会冻结偶然 transport 细节，使真正重构成为最昂贵选择。 |
 
-当前 classification 为 `correct_before_expansion`。Issue #76 选择围绕 Codex SDK 与六个 deep modules 的 `clean_implementation`，但 Issue #65 route falsifier 仍 active。
+当前 classification 为 `continue`。Issue #76 选择围绕 Codex SDK 与六个 deep modules 的 `clean_implementation`；Issue #80 的 PR #82 / #83 live evidence 已清除 Issue #65 route falsifier。
 
-当前只允许一个 full-refactor Issue/PR；不得并发、恢复旧 backlog或扩大 authority/runtime/forge。其 merge gate 必须包含 representative executable task 和 activation 中途 induced coordinator restart 的真实 evidence；不得用设计文档、fixture-only task、文件拆分或测试数量代替。若 SDK 无法满足 role policy、structured turn evidence、credential separation 或 restart retry，在同一 Coding Session port 替换成熟 adapter；六个目标模块不因此取消，也不得补写自制 runtime。
+Issue #80 仍须完成 final exact-SHA correctness/design review 与 merge；不得恢复旧 backlog或扩大 authority/runtime/forge。Representative executable task 与 activation 中途 induced coordinator restart 已有真实 evidence，但设计文档、fixture-only task、文件拆分或测试数量仍不能替代未来的 user-visible outcome。若 SDK 无法满足 role policy、structured turn evidence、credential separation 或 restart retry，在同一 Coding Session port 替换成熟 adapter；六个产品模块不因此取消，也不得补写自制 runtime。
 
 ## 已确定的依赖方向
 
-Domain policy 不 import DBOS、Drizzle、Git、GitHub、subprocess 或 HTTP implementation。Composition root 把成熟库组合到少量 adapter；这条 inward dependency 规则不意味着每个 adapter 都必须成为独立 package。
+Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementation。Composition root 把成熟库组合到少量 adapter；这条 inward dependency 规则不意味着每个 adapter 都必须成为独立 package。
 
 当前默认依赖的官方能力依据：
 
-- [DBOS TypeScript programming guide](https://docs.dbos.dev/typescript/programming-guide)：workflow step checkpoint 与 crash recovery；
-- [DBOS queues](https://docs.dbos.dev/typescript/reference/queues)：durable enqueue、并发和 rate control；
-- [DBOS transactions and datasources](https://docs.dbos.dev/typescript/tutorials/transaction-tutorial)：官方 Drizzle datasource 与 durable transaction integration；
-- [DBOS application integration](https://docs.dbos.dev/typescript/integrating-dbos)：workflow registry 要求 DBOS workflow 不被 JavaScript/TypeScript bundler 合并；
+- [PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)：row-level lock 与 transaction-scoped concurrency control；
+- [PostgreSQL transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html)：并发 transaction 的可见性与冲突语义；
 - [Drizzle ORM and Kit](https://orm.drizzle.team/docs/kit-overview)：类型安全 schema、query 与 code-first SQL migration；
 - [tsdown](https://tsdown.dev/guide/)：TypeScript build 与 bundleless compilation；
 - [Oxlint](https://oxc.rs/docs/guide/usage/linter.html) 与 [Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html)：lint 与 format；
@@ -62,15 +60,15 @@ Domain policy 不 import DBOS、Drizzle、Git、GitHub、subprocess 或 HTTP imp
 |---|---|---|
 | ACP runtime protocol | 延期 | Codex SDK/Coding Session adapter 无法可靠 resume/observe，或 ACP 已有稳定实现并能删除当前 adapter 的实质复杂度。 |
 | OpenCode runtime adapter | 延期 | 必需模型无法通过 Codex Responses provider 使用，或 Codex adapter 成为可测的成本/能力瓶颈。 |
-| Stop hook continuation | 非 authority 的可选优化 | DBOS 外层恢复已正确，且运行数据表明 warm continuation 能显著降低延迟/token；hook 仍不得创建 generation。 |
+| Stop hook continuation | 非 authority 的可选优化 | Delivery Run 外层恢复已正确，且运行数据表明 warm continuation 能显著降低延迟/token；hook 仍不得创建 generation。 |
 | 自动 merge | 后续 narrow adapter | reviewed PR exact-head gate 与 delivery reconciliation 已稳定，且 GitHub App 身份/权限已验证。 |
 | Gitea/其它 forge | 延期 | GitHub API、私有仓库能力、成本或外部 contributor workflow 形成真实限制。 |
-| 分布式 runner/多主机 DBOS | 延期 | 单机 CPU/RAM/IO/agent capacity 在持续运行中饱和，而非仅有理论扩容需求。 |
+| Durable queue/workflow engine 或分布式 runner | 延期 | 多个独立 runner、durable delayed scheduling、数据库 polling/竞争形成实测瓶颈，或 reconciler 开始实现通用 queue/timer/DAG。届时优先采用成熟库，不扩张自制 control plane。 |
 | 容器/轻量 VM provider | 延期 | Codex sandbox + host permissions 无法隔离某类实际 candidate，或项目依赖要求可销毁 OS image。 |
 | Mem0/vector/session memory | 延期 | canonical artifact bootstrap 在多个真实 recovery 中反复缺失可复用知识，且普通文件/索引不能解决。 |
 | 动态模型 router | 延期 | 静态 role/project policy 产生持续、可量化的质量或订阅容量损失。 |
 | Requirement Proxy/Planner 自动 task frontier | 产品后续范围 | 手工授权 Task Contract 的 delivery loop 已可持续运行；接入时复用同一 admission seam。 |
 | 穷举 Git/DB catalog hostile validation | 不进入默认路线 | 目标 deployment threat model 或真实 incident 证明当前 fresh checkout、SHA/ancestry、ORM migration 检查不够。 |
 | Web dashboard | 延期 | 现有最小 operator 输出无法支持日常阻塞定位，且缺失的具体 query 已被记录。 |
-| OpenAI Agents SDK `SandboxAgent` / `codexTool` | donor / 延期 | 需要一个 Codex specialist 之外的 agent loop、handoff 或 provider-neutral sandbox，且能删除 DBOS/Codex ownership而不是形成第二套 loop。 |
+| OpenAI Agents SDK `SandboxAgent` / `codexTool` | donor / 延期 | 需要一个 Codex specialist 之外的 agent loop、handoff 或 provider-neutral sandbox，且能删除 Delivery Run/Codex ownership而不是形成第二套 loop。 |
 | Herdr host/observer | production path 删除 | operator observation 成为实测 bottleneck，且一个 Coding Session 内部 adapter 能在不读取 pane/transcript作为 completion evidence 的前提下删除更多代码。 |

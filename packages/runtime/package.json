@@ -11,6 +11,30 @@
     "./contract": {
       "types": "./src/contract.ts",
       "import": "./dist/contract.mjs"
+    },
+    "./task-authority": {
+      "types": "./src/task-authority.ts",
+      "import": "./dist/task-authority.mjs"
+    },
+    "./candidate-workspace": {
+      "types": "./src/candidate-workspace.ts",
+      "import": "./dist/candidate-workspace.mjs"
+    },
+    "./coding-session": {
+      "types": "./src/coding-session.ts",
+      "import": "./dist/coding-session.mjs"
+    },
+    "./quality-gate": {
+      "types": "./src/quality-gate.ts",
+      "import": "./dist/quality-gate.mjs"
+    },
+    "./forge-delivery": {
+      "types": "./src/forge-delivery.ts",
+      "import": "./dist/forge-delivery.mjs"
+    },
+    "./delivery-run": {
+      "types": "./src/delivery-run.ts",
+      "import": "./dist/delivery-run.mjs"
     }
   },
   "scripts": {
@@ -19,10 +43,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dbos-inc/dbos-sdk": "latest",
-    "@dbos-inc/drizzle-datasource": "latest",
-    "@usine/agent-runtime": "workspace:*",
-    "@usine/review-extractor": "workspace:*",
+    "@openai/codex-sdk": "0.146.0",
     "drizzle-orm": "latest",
     "execa": "latest",
     "octokit": "latest",
