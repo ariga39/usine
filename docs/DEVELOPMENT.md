@@ -128,14 +128,14 @@ active falsifier / safety-authority defect
 
 如果决定自写，PR 必须列出被拒绝的成熟库、当前缺口和自写代码的删除边界。“可能以后更灵活”不是理由。不要为了包数量制造接口；一个 module 只有在隐藏复杂度、稳定 caller 或允许真正独立开发时才成立。
 
-数据库默认使用 Drizzle schema、ORM 和 Drizzle Kit migration，并通过 DBOS 官方 Drizzle datasource 执行需要 exactly-once checkpoint 的领域 transaction。DBOS system state 由 DBOS 管理；Usine 只保存产品需要查询和展示的少量领域事实。生产和 CI 使用 committed migration，不使用 `drizzle-kit push` 代替可审查的 migration。避免 hand-written repository boilerplate、重复 JSON shape checks、触发器状态机和 catalog fingerprint 测试。
+数据库默认使用 Drizzle schema、ORM 和 Drizzle Kit migration，并直接使用 PostgreSQL transaction 原子地保留 task lease、attempt fence、effect identity 和领域 observation。Delivery Run 每次只根据已持久化事实决定并执行一个 next action；进程重启重走同一 reconcile 路径，不保存第二套 operation replay。生产和 CI 使用 committed migration，不使用 `drizzle-kit push` 代替可审查的 migration。避免 hand-written repository boilerplate、重复 JSON shape checks、触发器状态机和 catalog fingerprint 测试。当前单 Task/单 runner 不引入 queue/workflow engine；多个 runner、durable delayed scheduling 或实测 polling/竞争瓶颈出现时，先评估成熟库，不扩张自制 scheduler。
 
 ### TypeScript 工具链
 
 - 根 workspace 统一提供 `lint`（oxlint）、`format`/`format:check`（oxfmt）、`typecheck`（TypeScript `--noEmit`）和 `build`（tsdown）；实现 PR 的默认 checks 复用这些命令。
 - oxlint 与 oxfmt 使用各自一份 root config。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter。
 - tsdown 是唯一的 emit/build 工具，但不是 typechecker。Build 和 typecheck 是两个独立信号；不得因为 tsdown 成功而省略 `typecheck`。
-- 普通 library package 可使用 tsdown 默认 external dependency 行为；包含 DBOS workflow/runtime registry 的 package 必须使用 `unbundle: true`，保持逐模块输出，不得把 workflow bundle 到单文件。
+- 普通 library package 使用 tsdown 默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，不为已经删除的 framework 保留 build 特例。
 - 初期直接使用 pnpm workspace scripts 编排 checks/build。只有观测到 monorepo task latency 或 cache 成为瓶颈时，才考虑 Turborepo、Nx 或另一层 build orchestrator。
 
 ## 6. 纵切优先与复杂度预算
