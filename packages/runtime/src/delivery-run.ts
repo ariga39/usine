@@ -1,6 +1,5 @@
 import { CandidateWorkspace, type WriterWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession } from "./coding-session.js";
-import { implementerOutputSchema } from "./role-output.js";
+import { CodexCodingSession, implementerOutputSchema } from "@usine/coding-session";
 import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import {

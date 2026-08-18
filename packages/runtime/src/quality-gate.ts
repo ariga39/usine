@@ -1,8 +1,7 @@
 import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession } from "./coding-session.js";
-import { reviewerOutputSchema } from "./role-output.js";
+import { CodexCodingSession, reviewerOutputSchema } from "@usine/coding-session";
 import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
 import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
 

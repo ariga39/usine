@@ -1,6 +1,23 @@
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
-import { explicitWorkerEnvironment } from "./runtime-policy.js";
 import { z } from "zod";
+
+const WORKER_FORBIDDEN_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"] as const;
+
+export interface RolePolicy {
+  role: "implementer" | "reviewer";
+  model: string;
+  reasoningEffort: string;
+  sandbox: "workspace-write" | "read-only";
+}
+
+export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { CI: "true", ...environment };
+  for (const key of Object.keys(result)) {
+    if (key.startsWith("USINE_") || WORKER_FORBIDDEN_KEYS.some((forbidden) => forbidden === key))
+      delete result[key];
+  }
+  return result;
+}
 
 export {
   implementerOutputSchema,

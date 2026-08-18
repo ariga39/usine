@@ -9,7 +9,7 @@ import {
   type TaskResult,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession } from "./coding-session.js";
+import { CodexCodingSession } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
@@ -21,13 +21,11 @@ export { executeDeliveryRun } from "./delivery-run.js";
 
 export {
   capabilityEnvironments,
-  explicitWorkerEnvironment,
   forgeGitEnvironment,
   runtimePolicyFromEnvironment,
   type CapabilityEnvironments,
   type ForgePolicy,
   type GitAuthor,
-  type RolePolicy,
   type RuntimePolicy,
 } from "./runtime-policy.js";
 

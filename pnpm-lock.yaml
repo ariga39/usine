@@ -21,6 +21,9 @@ importers:
       '@usine/candidate-workspace':
         specifier: workspace:*
         version: link:packages/candidate-workspace
+      '@usine/coding-session':
+        specifier: workspace:*
+        version: link:packages/coding-session
       '@usine/runtime':
         specifier: workspace:*
         version: link:packages/runtime
@@ -70,21 +73,18 @@ importers:
       '@usine/candidate-workspace':
         specifier: workspace:*
         version: link:../candidate-workspace
+      '@usine/coding-session':
+        specifier: workspace:*
+        version: link:../coding-session
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
-      '@openai/codex-sdk':
-        specifier: 0.146.0
-        version: 0.146.0
       execa:
         specifier: latest
         version: 10.0.1
       octokit:
         specifier: latest
         version: 5.0.5
-      zod:
-        specifier: latest
-        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: latest
@@ -107,6 +107,31 @@ importers:
       execa:
         specifier: latest
         version: 10.0.1
+    devDependencies:
+      '@types/node':
+        specifier: latest
+        version: 26.2.0
+      typescript:
+        specifier: latest
+        version: 7.0.2
+      vite:
+        specifier: npm:@voidzero-dev/vite-plus-core@0.2.9
+        version: '@voidzero-dev/vite-plus-core@0.2.9(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12)(typescript@7.0.2)(yaml@2.9.0)'
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.2.9(@types/node@26.2.0)(@voidzero-dev/vite-plus-core@0.2.9(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(tsx@4.23.12)(typescript@7.0.2)(yaml@2.9.0)
+
+  packages/coding-session:
+    dependencies:
+      '@openai/codex-sdk':
+        specifier: 0.146.0
+        version: 0.146.0
+      '@usine/task-authority':
+        specifier: workspace:*
+        version: link:../task-authority
+      zod:
+        specifier: latest
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: latest

@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { RolePolicy } from "@usine/coding-session";
+export { explicitWorkerEnvironment, type RolePolicy } from "@usine/coding-session";
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -13,15 +15,6 @@ const PORTABLE_ENVIRONMENT_KEYS = [
   "COMSPEC",
   "PATHEXT",
 ] as const;
-
-const WORKER_FORBIDDEN_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"] as const;
-
-export interface RolePolicy {
-  role: "implementer" | "reviewer";
-  model: string;
-  reasoningEffort: string;
-  sandbox: "workspace-write" | "read-only";
-}
 
 export interface GitAuthor {
   name: string;
@@ -139,15 +132,6 @@ export function capabilityEnvironments(environment: NodeJS.ProcessEnv): Capabili
       GIT_TERMINAL_PROMPT: "0",
     },
   };
-}
-
-export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { CI: "true", ...environment };
-  for (const key of Object.keys(result)) {
-    if (key.startsWith("USINE_") || WORKER_FORBIDDEN_KEYS.some((forbidden) => forbidden === key))
-      delete result[key];
-  }
-  return result;
 }
 
 export function forgeGitEnvironment(
