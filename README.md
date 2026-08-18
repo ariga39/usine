@@ -17,7 +17,7 @@ USINE_GITHUB_APP_SLUG=example-app \
 USINE_GITHUB_PRIVATE_KEY_PATH=./app-private-key.pem \
 USINE_GIT_AUTHOR_NAME="Example Automation" \
 USINE_GIT_AUTHOR_EMAIL=automation@example.invalid \
-node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
+node apps/cli/dist/cli.mjs run ./committed-task-contract.json
 ```
 
 完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG`、`USINE_GITHUB_PRIVATE_KEY_PATH`、`USINE_GIT_AUTHOR_NAME` 与 `USINE_GIT_AUTHOR_EMAIL`。前四项用于 GitHub App 认证；后两项共同固定 host 最终 candidate commit 的 author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
