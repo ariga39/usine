@@ -1,7 +1,46 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
 import { runtimePolicyFromEnvironment } from "@usine/runtime";
 
+async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  const command = readme.match(/```sh\n([\s\S]*?)\n```/)?.[1];
+  if (!command) throw new Error("README startup command is missing");
+
+  const environment: NodeJS.ProcessEnv = {};
+  for (const line of command.split("\n")) {
+    const assignment = line.match(/^([A-Z][A-Z0-9_]*)=(?:"([^"]*)"|([^ ]+)) \\$/);
+    if (assignment) environment[assignment[1]] = assignment[2] ?? assignment[3];
+  }
+  return environment;
+}
+
 describe("runtime composition", () => {
+  test("accepts the documented production startup shape before external delivery", async () => {
+    const environment = await documentedProductionEnvironment();
+    expect(environment).not.toHaveProperty("USINE_IMPLEMENTER_PROFILE");
+
+    const policy = runtimePolicyFromEnvironment(
+      environment,
+      { owner: "example-owner", name: "example-repository" },
+    );
+
+    expect(policy).toMatchObject({
+      gitAuthor: { name: "Example Automation", email: "automation@example.invalid" },
+      roles: {
+        implementer: { model: "gpt-5.6-luna" },
+        reviewer: { model: "gpt-5.6-sol" },
+      },
+      forge: {
+        mode: "app",
+        appId: "123456",
+        installationId: 123456,
+        appSlug: "example-app",
+        privateKeyPath: "./app-private-key.pem",
+      },
+    });
+  });
+
   test("validates deployment inputs once and derives capability-safe values", () => {
     const policy = runtimePolicyFromEnvironment(
       {
