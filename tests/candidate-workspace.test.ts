@@ -28,6 +28,7 @@ describe("Candidate Workspace", () => {
       stateDirectory: join(input.root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
       environment: capabilityEnvironments(process.env),
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
     const first = await workspace.prepareWriter("task", 1, input.baseSha);
     await writeFile(join(first.path, "delivered.txt"), "ok\n");
@@ -36,5 +37,39 @@ describe("Candidate Workspace", () => {
     const second = await workspace.prepareWriter("task", 2, candidate.sha);
     await expect(workspace.freeze(first, candidate.sha)).rejects.toThrow("stale workspace fence");
     await workspace.quarantine(second);
+  });
+
+  test("freezes commits with the configured author and committer identity", async () => {
+    const input = await fixture();
+    const workspace = new CandidateWorkspace({
+      repository: input.repository,
+      stateDirectory: join(input.root, "state"),
+      deadlineEpochMs: Date.now() + 30_000,
+      environment: capabilityEnvironments({
+        ...process.env,
+        GIT_AUTHOR_NAME: "ambient author",
+        GIT_AUTHOR_EMAIL: "ambient-author@example.invalid",
+        GIT_COMMITTER_NAME: "ambient committer",
+        GIT_COMMITTER_EMAIL: "ambient-committer@example.invalid",
+      }),
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    });
+    const writer = await workspace.prepareWriter("identity-task", 1, input.baseSha);
+    await writeFile(join(writer.path, "delivered.txt"), "ok\n");
+
+    const candidate = await workspace.freeze(writer, input.baseSha);
+    const metadata = await execa(
+      "git",
+      ["-C", writer.path, "show", "-s", "--format=%an%n%ae%n%cn%n%ce", candidate.sha],
+      { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } },
+    );
+
+    expect(metadata.stdout.trim().split("\n")).toEqual([
+      "Release Bot",
+      "release@example.invalid",
+      "Release Bot",
+      "release@example.invalid",
+    ]);
+    await workspace.quarantine(writer);
   });
 });

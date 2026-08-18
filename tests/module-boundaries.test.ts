@@ -240,6 +240,7 @@ describe("module contracts", () => {
       stateDirectory: join(root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
       environment: capabilityEnvironments(process.env),
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
     let reviewerSchema: unknown;
     let sessionStatus: "completed" | "failed" = "completed";
