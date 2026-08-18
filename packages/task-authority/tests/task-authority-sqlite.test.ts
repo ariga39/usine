@@ -101,6 +101,35 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("keeps repository paths out of admitted and terminal durable results", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-path-free-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-path-free-hash",
+      repositoryIdentity: `authority/path-free-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    expect(admitted.writer).toEqual({ repositoryIdentity: `authority/path-free-${taskId}` });
+    const inspection = new DatabaseSync(path);
+    const admittedRow = inspection
+      .prepare("SELECT result FROM task_runs WHERE task_id = ?")
+      .get(taskId) as { result: string };
+    expect(JSON.parse(admittedRow.result).writer).toEqual(admitted.writer);
+    expect(admittedRow.result).not.toContain('"repository"');
+
+    const terminal = await terminalResult(authority, admitted, "blocked");
+    expect(terminal.writer).toEqual(admitted.writer);
+    expect(JSON.stringify(terminal)).not.toContain('"repository"');
+    const terminalRow = inspection
+      .prepare("SELECT result FROM task_runs WHERE task_id = ?")
+      .get(taskId) as { result: string };
+    expect(terminalRow.result).not.toContain('"repository"');
+    inspection.close();
+  });
+
   test("migrates an admitted V0 lifecycle row into the result-only authority schema", async () => {
     const directory = await mkdtemp(join(tmpdir(), "usine-authority-v0-"));
     const path = join(directory, "state.sqlite");
@@ -181,10 +210,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       migrated.lookupExisting("authority-v0-migration", "authority-v0-hash"),
     ).resolves.toEqual({
       ...oldResult,
-      writer: {
-        repository: ".",
-        repositoryIdentity: "authority/v0-migration",
-      },
+      writer: { repositoryIdentity: "authority/v0-migration" },
     });
 
     const inspection = new DatabaseSync(path);
@@ -210,7 +236,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const admitted = await authority.admit({
       contract,
       contractHash: "authority-candidate-fact-hash",
-      repository: ".",
       repositoryIdentity: `authority/candidate-fact-${taskId}`,
       deadlineEpochMs,
     });
@@ -249,7 +274,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const admitted = await firstAuthority.admit({
       contract,
       contractHash: "authority-revision-hash",
-      repository: ".",
       repositoryIdentity,
       deadlineEpochMs: Date.now() + 30_000,
     });
@@ -297,7 +321,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       firstAuthority.admit({
         contract: makeContract(`${taskId}-other`),
         contractHash: "other-hash",
-        repository: ".",
         repositoryIdentity,
         deadlineEpochMs: Date.now() + 30_000,
       }),
@@ -313,7 +336,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const input = {
       contract,
       contractHash: "authority-stale-evidence-hash",
-      repository: ".",
       repositoryIdentity: `authority/stale-evidence-${taskId}`,
       deadlineEpochMs: Date.now() + 30_000,
     };
@@ -408,7 +430,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const input = {
       contract,
       contractHash: "authority-admission-race-hash",
-      repository: ".",
       repositoryIdentity: `authority/admission-race-${taskId}`,
       deadlineEpochMs: Date.now() + 30_000,
     };
@@ -440,7 +461,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const input = {
       contract,
       contractHash: "authority-fence-hash",
-      repository: ".",
       repositoryIdentity: `authority/fence-${taskId}`,
       deadlineEpochMs: Date.now() + 30_000,
     };
@@ -471,7 +491,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       const admitted = await authority.admit({
         contract,
         contractHash: `authority-terminal-${state}-hash`,
-        repository: ".",
         repositoryIdentity,
         deadlineEpochMs: Date.now() + 30_000,
       });
@@ -482,7 +501,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         authority.admit({
           contract: nextContract,
           contractHash: `${taskId}-next-hash`,
-          repository: ".",
           repositoryIdentity,
           deadlineEpochMs: Date.now() + 30_000,
         }),

@@ -16,7 +16,6 @@ import type { RolePolicy } from "@usine/coding-session";
 export interface DeliveryRunInput {
   contract: TaskContract;
   contractHash: string;
-  repository: string;
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementer: RolePolicy;
@@ -185,7 +184,6 @@ export async function executeDeliveryRun(
   let result = await services.authority.admit({
     contract: input.contract,
     contractHash: input.contractHash,
-    repository: input.repository,
     repositoryIdentity: input.repositoryIdentity,
     deadlineEpochMs: input.deadlineEpochMs,
   });

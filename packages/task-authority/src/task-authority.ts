@@ -51,7 +51,7 @@ export interface TaskResult {
   delivery: DeliveryEffect | null;
   blocker: string | null;
   activeActivation: number | null;
-  writer: { repository: string; repositoryIdentity: string };
+  writer: { repositoryIdentity: string };
   evidence: {
     implementerActivations: number;
     reviewCycles: number;
@@ -102,7 +102,6 @@ export type TaskFact =
 export interface AuthorityInput {
   contract: TaskContract;
   contractHash: string;
-  repository: string;
   repositoryIdentity: string;
   deadlineEpochMs: number;
 }
@@ -295,7 +294,6 @@ export class TaskAuthority {
         blocker: null,
         activeActivation: null,
         writer: {
-          repository: input.repository,
           repositoryIdentity: input.repositoryIdentity,
         },
         evidence: {
@@ -430,6 +428,7 @@ export class TaskAuthority {
     return {
       ...result,
       revision: Number.isSafeInteger(result.revision) ? result.revision : 0,
+      writer: { repositoryIdentity: result.writer.repositoryIdentity },
     };
   }
 }

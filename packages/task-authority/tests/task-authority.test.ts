@@ -25,7 +25,7 @@ describe("Task Authority module contract", () => {
       delivery: null,
       blocker: null,
       activeActivation: 1,
-      writer: { repository: "/repo", repositoryIdentity: "owner/repo" },
+      writer: { repositoryIdentity: "owner/repo" },
       evidence: {
         implementerActivations: 1,
         reviewCycles: 0,

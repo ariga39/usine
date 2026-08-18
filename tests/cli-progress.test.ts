@@ -210,6 +210,8 @@ describe("CLI live progress seam", () => {
       expect(stdoutRecords).toHaveLength(1);
       const terminal = stdoutRecords[0];
       expect(terminal).toMatchObject({ taskId, state: "reviewed_pr" });
+      expect(terminal.writer).toEqual({ repositoryIdentity: `example/${taskId}` });
+      expect(run.stdout).not.toContain('"repository":"."');
 
       const progress = run.stderr
         .trim()

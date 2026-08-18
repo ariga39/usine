@@ -60,7 +60,10 @@ describe("CLI/SQLite admission seam", () => {
     });
 
     expect(run.exitCode, run.stderr).toBe(75);
-    expect(JSON.parse(run.stdout)).toMatchObject({ taskId, state: "admitted" });
+    const result = JSON.parse(run.stdout);
+    expect(result).toMatchObject({ taskId, state: "admitted" });
+    expect(result.writer).toEqual({ repositoryIdentity: `example/${taskId}` });
+    expect(run.stdout).not.toContain('"repository":"."');
     await expect(access(join(userStateRoot, "usine", "usine.sqlite"))).resolves.toBeUndefined();
     await expect(access(join(repository, ".usine", "usine.sqlite"))).rejects.toMatchObject({
       code: "ENOENT",

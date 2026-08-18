@@ -212,7 +212,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     const input = {
       contract: taskContractSchema.parse({ ...task, baseSha: fixture.actualBaseSha }),
       contractHash: "forge-e2e-contract",
-      repository: fixture.repository,
       repositoryIdentity: "owner/repo",
       deadlineEpochMs: Date.now() + 60_000,
       implementer: {
@@ -334,7 +333,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     const input = {
       contract: task,
       contractHash: "forge-closed-public-contract",
-      repository: fixture.repository,
       repositoryIdentity: "owner/repo",
       deadlineEpochMs: Date.now() + 60_000,
       implementer: {
@@ -347,7 +345,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     const admitted = await authority.admit({
       contract: task,
       contractHash: input.contractHash,
-      repository: fixture.repository,
       repositoryIdentity: input.repositoryIdentity,
       deadlineEpochMs: input.deadlineEpochMs,
     });
