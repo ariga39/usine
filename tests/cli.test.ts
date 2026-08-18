@@ -187,6 +187,57 @@ async function createFallbackFixture(directory: string, taskId: string, maxElaps
 
 describe("usine run", () => {
   test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "uses direct Codex exec with a complete lifecycle when Herdr is installed",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-direct-codex-"));
+      const taskId = `direct-codex-${Date.now()}`;
+      const fixture = await createFallbackFixture(directory, taskId);
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "reviewed_pr",
+        review: { verdict: "approved" },
+      });
+      const invocations = (
+        await readFile(
+          join(fixture.stateDirectory, "observations", "codex-invocations.jsonl"),
+          "utf8",
+        )
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(invocations).toHaveLength(1);
+      expect(invocations[0]).toMatchObject({
+        args: expect.arrayContaining([
+          "exec",
+          "--model",
+          "gpt-5.6-luna",
+          "--profile",
+          "usine-implementer",
+          "--json",
+          "--output-schema",
+          "--sandbox",
+          "workspace-write",
+        ]),
+        lifecycle: ["thread.started", "turn.started", "turn.completed"],
+        role: "implementer",
+      });
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
     "does not fall back to direct Codex when the reviewer Herdr launcher is unavailable",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-herdr-unavailable-"));

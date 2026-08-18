@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { execa } from "execa";
 
 function requireExactKeys(value, expected, label) {
@@ -24,6 +25,11 @@ if (process.env.USINE_CODEX_ROLE === "reviewer" && args[0] === "exec" && !review
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
 if (!outputPath) throw new Error("missing structured output path");
+const lifecycle = ["thread.started", "turn.started", "turn.completed"];
+await appendFile(
+  join(dirname(outputPath), "codex-invocations.jsonl"),
+  `${JSON.stringify({ args, lifecycle, role: process.env.USINE_CODEX_ROLE })}\n`,
+);
 if (args.includes("--sandbox") && args.includes("--approve-for-me")) {
   throw new Error("--sandbox cannot be combined with --approve-for-me");
 }
@@ -224,7 +230,14 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
     JSON.stringify({ status: "proposed", summary: "Implemented fixture" }),
   );
   process.stdout.write(
-    `${JSON.stringify({ type: "thread.started", thread_id: "fixture-session" })}\n`,
+    `${lifecycle
+      .map((type) =>
+        JSON.stringify({
+          type,
+          ...(type === "thread.started" ? { thread_id: "fixture-session" } : {}),
+        }),
+      )
+      .join("\n")}\n`,
   );
 } else if (process.env.USINE_CODEX_ROLE === "reviewer") {
   const sha = (await execa("git", ["rev-parse", "HEAD"])).stdout;

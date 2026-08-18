@@ -206,18 +206,40 @@ async function ensureWorktree(input: WorkflowInput): Promise<string> {
   return workspace;
 }
 
-function sessionIdFromJsonl(stdout: string): string | null {
+function parseImplementerJsonl(stdout: string): string {
+  let lifecycle = "before-thread";
+  let sessionId: string | undefined;
   for (const line of stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    let event: { type?: unknown; thread_id?: unknown };
     try {
-      const event = JSON.parse(line) as { type?: unknown; thread_id?: unknown };
-      if (event.type === "thread.started" && typeof event.thread_id === "string") {
-        return event.thread_id;
-      }
-    } catch {
-      // JSONL is observation only; malformed lines do not grant authority.
+      event = JSON.parse(line) as { type?: unknown; thread_id?: unknown };
+    } catch (error) {
+      throw new Error("implementer emitted malformed JSONL", { cause: error });
+    }
+    if (typeof event !== "object" || event === null || typeof event.type !== "string") {
+      throw new Error("implementer emitted an invalid JSONL event");
+    }
+    if (event.type === "turn.failed") throw new Error("implementer turn failed");
+    if (event.type === "thread.started") {
+      if (lifecycle !== "before-thread" || typeof event.thread_id !== "string")
+        throw new Error("implementer emitted an invalid thread.started event");
+      sessionId = event.thread_id;
+      lifecycle = "after-thread";
+    } else if (event.type === "turn.started") {
+      if (lifecycle !== "after-thread")
+        throw new Error("implementer emitted turn.started before thread.started");
+      lifecycle = "after-turn-start";
+    } else if (event.type === "turn.completed") {
+      if (lifecycle !== "after-turn-start")
+        throw new Error("implementer emitted turn.completed before turn.started");
+      lifecycle = "complete";
     }
   }
-  return null;
+  if (lifecycle !== "complete" || sessionId === undefined) {
+    throw new Error("implementer emitted incomplete JSONL lifecycle");
+  }
+  return sessionId;
 }
 
 async function finalizeCandidate(
@@ -304,206 +326,56 @@ async function runImplementer(
       : ["Unresolved findings from the prior review: none."]),
     "Implement the following authorized task in this isolated workspace.",
     "Commit the complete change and leave the worktree clean.",
-    `Before settling, atomically write the exact JSON object {"status":"proposed","summary":"..."} (or status "blocked") to ${outputPath}; this file is coordinator evidence and must exist even though interactive Herdr mode has no exec structured-output flags.`,
+    `Before settling, atomically write the exact JSON object {"status":"proposed","summary":"..."} (or status "blocked") to ${outputPath}; this file is coordinator evidence.`,
     `Instructions: ${input.contract.instructions}`,
     `Acceptance: ${input.contract.acceptance.join("; ")}`,
     `Non-goals: ${input.contract.nonGoals.join("; ")}`,
     ...(findings.length > 0 ? [`Aggregated review findings: ${findings.join("; ")}`] : []),
   ].join("\n");
   const directBinary = process.env.USINE_CODEX_BIN ?? "codex";
-  const herdrBinary = process.env.USINE_HERDR_BIN ?? "herdr";
-  const observationDirectory = dirname(outputPath);
-  const runHerdr = async (args: string[], timeoutMs?: number) =>
-    (() => {
-      const invocation = codexCommand(herdrBinary, args);
-      return execa(invocation.executable, invocation.args, {
-        cwd: workspace,
-        env: {
-          ...herdrEnvironment("implementer"),
-          USINE_EXPECTED_OBSERVATION_DIR: observationDirectory,
-        },
-        extendEnv: false,
-        reject: false,
-        timeout: timeoutMs ?? operationTimeout(input),
-      });
-    })();
-  const clearedPaneEnvironment = [
-    "USINE_DATABASE_URL",
-    "USINE_STATE_DIR",
-    "USINE_GITHUB_TEST_TOKEN",
-    "USINE_GITHUB_PRIVATE_KEY_PATH",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "USINE_EXTRACTOR_API_KEY",
-    "OPENAI_API_KEY",
-  ];
-  const paneResult = await runHerdr([
-    "pane",
-    "split",
-    "--current",
-    "--direction",
-    "right",
-    "--cwd",
+  const invocation = codexCommand(directBinary, [
+    "exec",
+    "--model",
+    input.implementerModel,
+    "--profile",
+    input.implementerProfile,
+    "--config",
+    "service_tier=default",
+    "--json",
+    "--output-schema",
+    schemaPath,
+    "-o",
+    outputPath,
+    "--sandbox",
+    "workspace-write",
+    "-C",
     workspace,
-    "--no-focus",
-    ...clearedPaneEnvironment.flatMap((key) => ["--env", `${key}=`]),
-    "--env",
-    "USINE_CODEX_ROLE=implementer",
+    prompt,
   ]);
-  const herdrUnavailable = paneResult.failed === true && paneResult.code === "ENOENT";
-  if (herdrUnavailable) {
-    const invocation = codexCommand(directBinary, [
-      "exec",
-      "--model",
-      input.implementerModel,
-      "--profile",
-      input.implementerProfile,
-      "--json",
-      "--output-schema",
-      schemaPath,
-      "-o",
-      outputPath,
-      "--sandbox",
-      "workspace-write",
-      "-C",
-      workspace,
-      prompt,
-    ]);
-    const processResult = await execa(invocation.executable, invocation.args, {
-      cwd: workspace,
-      env: workerEnvironment("implementer"),
-      extendEnv: false,
-      reject: false,
-      timeout: operationTimeout(input),
-    });
-    if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100)
-      throw new ElapsedBudgetError();
-    if (processResult.exitCode !== 0)
-      throw new Error(`implementer process failed: ${processResult.stderr}`);
-    const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
-    if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-    const candidateSha = await finalizeCandidate(input, workspace, previousSha);
-    return {
-      candidateSha,
-      observation: {
-        summary: output.summary,
-        sessionId: sessionIdFromJsonl(String(processResult.stdout)),
-        stdout: String(processResult.stdout),
-        stderr: String(processResult.stderr),
-      },
-    };
-  }
-  if (paneResult.exitCode !== 0) throw new Error(`herdr pane split failed: ${paneResult.stderr}`);
-  const pane = JSON.parse(String(paneResult.stdout)).result?.pane?.pane_id;
-  if (typeof pane !== "string") throw new Error("herdr pane split returned no pane id");
-  const agentName = `usine-impl-${createHash("sha256").update(input.contract.id).digest("hex").slice(0, 12)}-${activation}`;
-  let implementation: ImplementerResult;
-  try {
-    const started = await startHerdrAgent(input, runHerdr, [
-      "agent",
-      "start",
-      agentName,
-      "--kind",
-      "codex",
-      "--pane",
-      pane,
-      "--",
-      "--model",
-      input.implementerModel,
-      "-p",
-      input.implementerProfile,
-      "--sandbox",
-      "workspace-write",
-      "-C",
-      workspace,
-      "--no-alt-screen",
-      "--add-dir",
-      dirname(outputPath),
-      "--config",
-      "shell_environment_policy.inherit=core",
-    ]);
-    if (started.exitCode !== 0) throw new Error(`herdr agent start failed: ${started.stderr}`);
-    const prompted = await runHerdr([
-      "agent",
-      "prompt",
-      agentName,
-      prompt,
-      "--wait",
-      "--timeout",
-      String(operationTimeout(input)),
-    ]);
-    if (prompted.exitCode !== 0) throw new Error(`herdr agent prompt failed: ${prompted.stderr}`);
-    let processResult: { stdout: string; stderr: string; exitCode: number };
-    let output: z.infer<typeof implementerOutputSchema>;
-    while (true) {
-      const observed = await runHerdr([
-        "agent",
-        "read",
-        agentName,
-        "--source",
-        "recent-unwrapped",
-        "--lines",
-        "200",
-      ]);
-      if (observed.exitCode !== 0) throw new Error(`herdr agent read failed: ${observed.stderr}`);
-      processResult = {
-        stdout: String(observed.stdout),
-        stderr: String(observed.stderr),
-        exitCode: 0,
-      };
-      try {
-        output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
-        break;
-      } catch (error) {
-        if (
-          !(
-            typeof error === "object" &&
-            error !== null &&
-            "code" in error &&
-            error.code === "ENOENT"
-          )
-        )
-          throw error;
-      }
-      const lifecycle = await runHerdr(["agent", "get", agentName]);
-      if (lifecycle.exitCode !== 0) throw new Error(`herdr agent get failed: ${lifecycle.stderr}`);
-      let agentStatus: unknown;
-      try {
-        agentStatus = (
-          JSON.parse(String(lifecycle.stdout)) as {
-            result?: { agent?: { agent_status?: unknown } };
-          }
-        ).result?.agent?.agent_status;
-      } catch (error) {
-        throw new Error("herdr agent get returned invalid JSON", { cause: error });
-      }
-      if (agentStatus === "blocked") throw new Error("herdr agent blocked");
-      if (typeof agentStatus !== "string")
-        throw new Error("herdr agent get returned no lifecycle state");
-      await new Promise<void>((resolveDelay) =>
-        setTimeout(resolveDelay, Math.min(50, operationTimeout(input, 50))),
-      );
-    }
-    if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
-    const candidateSha = await finalizeCandidate(input, workspace, previousSha);
-    implementation = {
-      candidateSha,
-      observation: {
-        summary: output.summary,
-        sessionId: sessionIdFromJsonl(processResult.stdout),
-        stdout: processResult.stdout,
-        stderr: processResult.stderr,
-      },
-    };
-  } catch (error) {
-    const closed = await runHerdr(["pane", "close", pane], 1_000);
-    if (closed.exitCode !== 0)
-      throw new Error(`herdr pane close failed: ${closed.stderr}`, { cause: error });
-    throw error;
-  }
-  const closed = await runHerdr(["pane", "close", pane], 1_000);
-  if (closed.exitCode !== 0) throw new Error(`herdr pane close failed: ${closed.stderr}`);
-  return implementation;
+  const processResult = await execa(invocation.executable, invocation.args, {
+    cwd: workspace,
+    env: workerEnvironment("implementer"),
+    extendEnv: false,
+    reject: false,
+    timeout: operationTimeout(input),
+  });
+  if (processTimedOut(processResult) || Date.now() >= input.deadlineEpochMs - 100)
+    throw new ElapsedBudgetError();
+  if (processResult.exitCode !== 0)
+    throw new Error(`implementer process failed: ${processResult.stderr}`);
+  const sessionId = parseImplementerJsonl(String(processResult.stdout));
+  const output = implementerOutputSchema.parse(JSON.parse(await readFile(outputPath, "utf8")));
+  if (output.status === "blocked") throw new Error(`implementer blocked: ${output.summary}`);
+  const candidateSha = await finalizeCandidate(input, workspace, previousSha);
+  return {
+    candidateSha,
+    observation: {
+      summary: output.summary,
+      sessionId,
+      stdout: String(processResult.stdout),
+      stderr: String(processResult.stderr),
+    },
+  };
 }
 
 async function attemptImplementer(
