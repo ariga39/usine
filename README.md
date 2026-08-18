@@ -26,9 +26,11 @@ node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
 
 当前权威文档只有：
 
-- [`AGENTS.md`](AGENTS.md)：所有 coding agent 必须遵守的工程宪章与 context 恢复协议；
+- [`AGENTS.md`](AGENTS.md)：coding agent 的短入口、恢复顺序与角色约束；
 - [`docs/DESIGN.md`](docs/DESIGN.md)：产品目标、边界和当前架构；
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)：我们开发 Usine 自身时采用的 Git、并行、依赖、测试和 review 流程；
 - [`docs/DECISIONS.md`](docs/DECISIONS.md)：当前生效的技术决策与延期事项的重新进入条件。
 
 GitHub Issue 是开发任务的事实源；每个实现任务使用独立 branch/worktree，并以一个 PR 交付。
+
+`.agents/skills/` 提供按需加载的 task、design、simplification、checks、prose 和 review 方法；它们不覆盖上述 authority 或当前 Issue。
