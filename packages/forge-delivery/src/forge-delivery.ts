@@ -8,11 +8,37 @@ import type {
   TaskContract,
 } from "@usine/task-authority";
 import { remainingUntil } from "@usine/task-authority";
-import {
-  forgeGitEnvironment,
-  type CapabilityEnvironments,
-  type ForgePolicy,
-} from "./runtime-policy.js";
+
+export type ForgePolicy =
+  | {
+      mode: "test";
+      appSlug: string;
+      token: string;
+      apiUrl: string;
+      gitUrl: string;
+    }
+  | {
+      mode: "app";
+      appSlug: string;
+      appId: string;
+      installationId: number;
+      privateKeyPath: string;
+      gitUrl: string;
+    };
+
+export function forgeGitEnvironment(
+  environment: NodeJS.ProcessEnv,
+  token: string,
+  gitUrl: string,
+): NodeJS.ProcessEnv {
+  const result = { ...environment };
+  if (gitUrl.startsWith("https://github.com/")) {
+    result.GIT_CONFIG_COUNT = "1";
+    result.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    result.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  }
+  return result;
+}
 
 function statusOf(error: unknown): number | undefined {
   return typeof error === "object" && error !== null && "status" in error
@@ -32,7 +58,7 @@ export interface ForgeDeliveryOptions {
   repository: string;
   deadlineEpochMs: number;
   forge: ForgePolicy;
-  environment: CapabilityEnvironments;
+  environment: NodeJS.ProcessEnv;
 }
 
 export function approvalAttestationBody(

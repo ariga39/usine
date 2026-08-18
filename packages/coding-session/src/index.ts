@@ -1,5 +1,6 @@
 export {
   CodexCodingSession,
+  type CodingSessionOptions,
   explicitWorkerEnvironment,
   type CodingSessionClient,
   type CodingSessionClientFactory,

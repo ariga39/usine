@@ -10,10 +10,9 @@ import {
   taskContractSchema,
   type TaskContract,
 } from "@usine/task-authority";
-import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import type { WriterWorkspace } from "@usine/candidate-workspace";
-import { approvalAttestationBody, ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
-import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
+import { credentialFreeGitEnvironment, type WriterWorkspace } from "@usine/candidate-workspace";
+import { approvalAttestationBody, ForgeDelivery } from "@usine/forge-delivery";
+import { executeDeliveryRun } from "../src/delivery-run.js";
 
 const baseSha = "a".repeat(40);
 
@@ -170,7 +169,7 @@ function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDeliver
       apiUrl,
       gitUrl,
     },
-    environment: capabilityEnvironments(process.env),
+    environment: credentialFreeGitEnvironment(process.env),
   });
 }
 
@@ -235,7 +234,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
         reasoningEffort: "high",
         sandbox: "workspace-write" as const,
       },
-      environments: capabilityEnvironments(process.env),
     };
 
     const originalFetch = globalThis.fetch;
@@ -454,7 +452,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
         reasoningEffort: "high",
         sandbox: "workspace-write" as const,
       },
-      environments: capabilityEnvironments(process.env),
     };
     const admitted = await authority.admit({
       contract: task,

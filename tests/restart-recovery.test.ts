@@ -7,7 +7,7 @@ import { applyMigrations } from "@usine/task-authority";
 
 const childSource = String.raw`
 import { writeFile } from "node:fs/promises";
-import { executeDeliveryRun } from "@usine/runtime";
+import { executeDeliveryRun } from "@usine/delivery-run";
 import { openSqliteDatabase, TaskAuthority } from "@usine/task-authority";
 
 const marker = process.env.USINE_RECOVERY_MARKER;
@@ -70,15 +70,6 @@ const result = await executeDeliveryRun(
       model: "test",
       reasoningEffort: "high",
       sandbox: "workspace-write",
-    },
-    environments: {
-      worker: { CI: "true" },
-      check: { CI: "true" },
-      credentialFreeGit: {
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_TERMINAL_PROMPT: "0",
-      },
     },
   },
   { authority, workspace, session, quality, forge },

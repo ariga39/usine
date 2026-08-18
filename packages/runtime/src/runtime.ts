@@ -10,24 +10,20 @@ import {
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "@usine/coding-session";
-import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
-import { ForgeDelivery } from "./forge-delivery.js";
+import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
+import { ForgeDelivery } from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "@usine/task-authority";
 
-export { executeDeliveryRun } from "./delivery-run.js";
+export { executeDeliveryRun } from "@usine/delivery-run";
 
-export {
-  capabilityEnvironments,
-  forgeGitEnvironment,
-  runtimePolicyFromEnvironment,
-  type CapabilityEnvironments,
-  type ForgePolicy,
-  type GitAuthor,
-  type RuntimePolicy,
-} from "./runtime-policy.js";
+export { runtimePolicyFromEnvironment, type RuntimePolicy } from "./runtime-policy.js";
+export { forgeGitEnvironment } from "@usine/forge-delivery";
+export type { ForgePolicy } from "@usine/forge-delivery";
+export type { GitAuthor } from "@usine/candidate-workspace";
+export { explicitWorkerEnvironment } from "@usine/coding-session";
 
 export type {
   CheckResult,
@@ -73,7 +69,7 @@ export async function admitTask(
         contractPath,
         contract,
         deadlineEpochMs,
-        policy.capabilities.credentialFreeGit,
+        policy.credentialFreeGitEnvironment,
       );
     } catch (error) {
       if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
@@ -95,22 +91,23 @@ export async function admitTask(
       repository,
       stateDirectory,
       deadlineEpochMs: persistedDeadlineEpochMs,
-      credentialFreeGit: policy.capabilities.credentialFreeGit,
+      credentialFreeGit: policy.credentialFreeGitEnvironment,
       gitAuthor: policy.gitAuthor,
     });
-    const session = new CodexCodingSession();
+    const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
     const quality = new QualityGate({
       workspace,
       session,
       reviewer: policy.roles.reviewer,
-      environment: policy.capabilities,
+      checkEnvironment: policy.checkEnvironment,
+      reviewerEnvironment: policy.workerEnvironment,
       deadlineEpochMs: persistedDeadlineEpochMs,
     });
     const forge = new ForgeDelivery({
       repository,
       deadlineEpochMs: persistedDeadlineEpochMs,
       forge: policy.forge,
-      environment: policy.capabilities,
+      environment: policy.credentialFreeGitEnvironment,
     });
     const workflowInput: DeliveryRunInput = {
       contract,
@@ -119,7 +116,6 @@ export async function admitTask(
       repositoryIdentity,
       deadlineEpochMs: persistedDeadlineEpochMs,
       implementer: policy.roles.implementer,
-      environments: policy.capabilities,
     };
     const result = await executeDeliveryRun(workflowInput, {
       authority,

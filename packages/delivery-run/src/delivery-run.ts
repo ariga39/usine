@@ -1,6 +1,6 @@
 import { CandidateWorkspace, type WriterWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession, implementerOutputSchema } from "@usine/coding-session";
-import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
+import { DeliveryQuarantineError, ForgeDelivery } from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
 import {
   deadlineExpired,
@@ -9,7 +9,7 @@ import {
   type TaskContract,
   type TaskResult,
 } from "@usine/task-authority";
-import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
+import type { RolePolicy } from "@usine/coding-session";
 
 export interface DeliveryRunInput {
   contract: TaskContract;
@@ -18,7 +18,6 @@ export interface DeliveryRunInput {
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementer: RolePolicy;
-  environments: CapabilityEnvironments;
 }
 
 export interface DeliveryRunServices {
@@ -92,7 +91,6 @@ async function runCodingAttempt(
     sandbox: input.implementer.sandbox,
     deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerOutputSchema,
-    environment: input.environments.worker,
   });
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);

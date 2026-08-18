@@ -39,6 +39,10 @@ export interface SessionRequest<Output = unknown> {
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
+  environment?: NodeJS.ProcessEnv;
+}
+
+export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
 }
 
@@ -92,7 +96,10 @@ function sessionIdFrom(result: unknown): string | null {
 }
 
 export class CodexCodingSession {
-  constructor(private readonly clientFactory?: CodingSessionClientFactory) {}
+  constructor(
+    private readonly clientFactory?: CodingSessionClientFactory,
+    private readonly options: CodingSessionOptions = { environment: process.env },
+  ) {}
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
     let remaining: number;
@@ -159,7 +166,7 @@ export class CodexCodingSession {
       Codex: new (options?: Record<string, unknown>) => CodingSessionClient;
     };
     return new sdk.Codex({
-      env: explicitWorkerEnvironment(request.environment),
+      env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
       config: {
         model_reasoning_effort: request.reasoningEffort,
         service_tier: "default",
