@@ -38,9 +38,8 @@
     }
   },
   "scripts": {
-    "build": "tsdown",
-    "db:generate": "drizzle-kit generate",
-    "typecheck": "tsc --noEmit"
+    "build": "vp pack",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "@openai/codex-sdk": "0.146.0",
@@ -54,7 +53,8 @@
     "@types/node": "latest",
     "@types/pg": "latest",
     "drizzle-kit": "latest",
-    "tsdown": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
   }
 }

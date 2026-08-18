@@ -1,7 +1,7 @@
 import { drizzle } from "../packages/runtime/node_modules/drizzle-orm/node-postgres/index.js";
 import { eq } from "../packages/runtime/node_modules/drizzle-orm/index.js";
 import { createRequire } from "node:module";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
 import type { TaskContract } from "../packages/runtime/src/contract.js";
 import { repositoryLeases, taskRuns } from "../packages/runtime/src/schema.js";

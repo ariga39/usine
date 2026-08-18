@@ -2,7 +2,7 @@ import { writeFile, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import { CodexCodingSession, workerEnvironment } from "../packages/runtime/src/coding-session.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
 import { parseReviewObservation } from "../packages/runtime/src/quality-gate.js";
@@ -203,7 +203,7 @@ describe("module contracts", () => {
     const body = approvalAttestationBody(
       contract,
       sha,
-      { sha, status: "passed", command: "pnpm test", exitCode: 0, stdout: "", stderr: "" },
+      { sha, status: "passed", command: "vp test", exitCode: 0, stdout: "", stderr: "" },
       { sha, verdict: "approved", summary: "ok", findings: [] },
     );
     expect(body).toContain(`usine-approval:${contract.id}:${sha}`);

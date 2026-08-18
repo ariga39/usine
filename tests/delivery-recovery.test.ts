@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 import type { TaskContract } from "../packages/runtime/src/contract.js";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
 import type { TaskResult } from "../packages/runtime/src/task-authority.js";
