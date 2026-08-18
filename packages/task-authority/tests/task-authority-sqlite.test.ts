@@ -188,24 +188,17 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
 
     const inspection = new DatabaseSync(path);
-    const taskColumns = inspection.prepare("PRAGMA table_info(task_runs)").all() as Array<{
-      name: string;
-    }>;
-    const leaseColumns = inspection.prepare("PRAGMA table_info(repository_leases)").all() as Array<{
-      name: string;
-    }>;
+    const taskColumns = inspection
+      .prepare("PRAGMA table_info(task_runs)")
+      .all()
+      .map((row) => String(row.name));
+    const leaseColumns = inspection
+      .prepare("PRAGMA table_info(repository_leases)")
+      .all()
+      .map((row) => String(row.name));
     inspection.close();
-    expect(taskColumns.map(({ name }) => name)).toEqual([
-      "task_id",
-      "result",
-      "created_at",
-      "updated_at",
-    ]);
-    expect(leaseColumns.map(({ name }) => name)).toEqual([
-      "repository_identity",
-      "task_id",
-      "created_at",
-    ]);
+    expect(taskColumns).toEqual(["task_id", "result", "created_at", "updated_at"]);
+    expect(leaseColumns).toEqual(["repository_identity", "task_id", "created_at"]);
   });
 
   test("accepts a candidate fact without accepting a caller-owned durable snapshot", async () => {
