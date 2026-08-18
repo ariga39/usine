@@ -24,6 +24,10 @@ import {
 } from "@usine/review-extractor";
 import type { ReviewerVerdict } from "@usine/review-extractor";
 import type { TaskContract } from "./contract.js";
+import { httpStatus } from "./http-status.js";
+import { processTimedOut } from "./process-timed-out.js";
+import { projectCheckEnvironment } from "./project-check-environment.js";
+import { remainingUntil } from "./remaining-until.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
 
 interface CheckResult {
@@ -123,23 +127,10 @@ const canonicalDocumentPaths = [
   "docs/DECISIONS.md",
 ] as const;
 
-function remainingUntil(deadlineEpochMs: number, maximum = Number.POSITIVE_INFINITY): number {
-  const remaining = deadlineEpochMs - Date.now();
-  if (remaining <= 0) throw new ElapsedBudgetError();
-  return Math.max(1, Math.min(remaining, maximum));
-}
-
 function operationTimeout(input: WorkflowInput, maximum = Number.POSITIVE_INFINITY): number {
   const remaining = input.deadlineEpochMs - Date.now() - 150;
   if (remaining <= 0) throw new ElapsedBudgetError();
   return Math.max(1, Math.min(remaining, maximum));
-}
-
-function processTimedOut(error: unknown): boolean {
-  return (
-    error instanceof ElapsedBudgetError ||
-    (typeof error === "object" && error !== null && "timedOut" in error && error.timedOut === true)
-  );
 }
 
 async function startHerdrAgent<T extends { exitCode?: number | null; stderr: unknown }>(
@@ -173,25 +164,6 @@ async function runCredentialFreeGit(
     timeout: operationTimeout(input),
   });
   return { stdout: String(result.stdout) };
-}
-
-function projectCheckEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { CI: "true" };
-  for (const key of [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-  ]) {
-    if (process.env[key] !== undefined) environment[key] = process.env[key];
-  }
-  return environment;
 }
 
 async function verifyCommittedContract(
@@ -859,12 +831,6 @@ async function recordDelivery(input: WorkflowInput, sha: string): Promise<Delive
     await writeFile(counterPath, JSON.stringify({ count: count + 1, delivery }));
   }
   return delivery;
-}
-
-function httpStatus(error: unknown): number | undefined {
-  return typeof error === "object" && error !== null && "status" in error
-    ? Number((error as { status: unknown }).status)
-    : undefined;
 }
 
 async function githubClient(): Promise<{
