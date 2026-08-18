@@ -209,7 +209,9 @@ describe("Task Authority PostgreSQL concurrency and terminal leases", () => {
         client.release();
       }
 
-      expect(reservations.map(({ activation }) => activation).toSorted()).toEqual([1, 2]);
+      expect(reservations.map(({ activation }) => activation).toSorted((a, b) => a - b)).toEqual([
+        1, 2,
+      ]);
       const stored = await drizzle(pool, {
         schema: { repositoryLeases, taskRuns },
       }).query.taskRuns.findFirst({ where: eq(taskRuns.taskId, taskId) });
