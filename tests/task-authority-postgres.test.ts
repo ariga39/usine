@@ -94,6 +94,91 @@ async function terminalResult(
 
 describe("Task Authority PostgreSQL concurrency and terminal leases", () => {
   test.runIf(Boolean(databaseUrl))(
+    "rejects every stale activation observation without releasing the newer lease",
+    async () => {
+      const { authority, pool } = await makeAuthority();
+      const taskId = `authority-revision-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const contract = makeContract(taskId);
+      const repositoryIdentity = `authority/revision-${taskId}`;
+      const admitted = await authority.admit({
+        contract,
+        contractHash: "authority-revision-hash",
+        repository: ".",
+        repositoryIdentity,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      const first = await authority.reserveActivation(taskId, 3);
+      const second = await authority.reserveActivation(taskId, 3);
+
+      await expect(
+        authority.save({
+          ...first.result,
+          candidateSha: null,
+          candidateFence: null,
+          state: "candidate",
+        }),
+      ).rejects.toThrow("stale task revision");
+      await expect(
+        authority.save({
+          ...first.result,
+          state: "blocked",
+          blocker: "stale terminal observation",
+        }),
+      ).rejects.toThrow("stale task revision");
+
+      const current = await authority.save({
+        ...second.result,
+        state: "candidate",
+        candidateSha: "b".repeat(40),
+        candidateFence: second.activation,
+        deadlineEpochMs: second.result.deadlineEpochMs + 60_000,
+      });
+      expect(current.revision).toBeGreaterThan(second.result.revision);
+      expect(current.deadlineEpochMs).toBe(admitted.deadlineEpochMs);
+      const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, repositoryIdentity),
+      });
+      expect(lease).toMatchObject({ taskId, generation: 1 });
+      expect(admitted.revision).toBe(0);
+    },
+    30_000,
+  );
+
+  test.runIf(Boolean(databaseUrl))(
+    "atomically admits one immutable task and one lease for concurrent same-ID requests",
+    async () => {
+      const { authority, pool } = await makeAuthority();
+      const taskId = `authority-admission-race-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const contract = makeContract(taskId);
+      const input = {
+        contract,
+        contractHash: "authority-admission-race-hash",
+        repository: ".",
+        repositoryIdentity: `authority/admission-race-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      };
+      const results = await Promise.all([authority.admit(input), authority.admit(input)]);
+      expect(results.map((result) => result.taskId)).toEqual([taskId, taskId]);
+      expect(results[0]?.deadlineEpochMs).toBe(results[1]?.deadlineEpochMs);
+
+      const changed = makeContract(taskId);
+      changed.instructions = "changed contract";
+      await expect(
+        authority.admit({ ...input, contract: changed, contractHash: "changed-hash" }),
+      ).rejects.toThrow("immutable");
+      const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, input.repositoryIdentity),
+      });
+      const task = await database.query.taskRuns.findFirst({ where: eq(taskRuns.taskId, taskId) });
+      expect(lease).toMatchObject({ taskId, generation: 1 });
+      expect(task?.contractHash).toBe(input.contractHash);
+    },
+    30_000,
+  );
+
+  test.runIf(Boolean(databaseUrl))(
     "reserves distinct monotonic fences for concurrent physical activations",
     async () => {
       const { authority, pool } = await makeAuthority();

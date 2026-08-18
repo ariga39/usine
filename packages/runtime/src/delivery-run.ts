@@ -88,7 +88,7 @@ async function runCodingAttempt(
     model: input.implementerModel,
     reasoningEffort: "high",
     sandbox: "workspace-write",
-    deadlineEpochMs: input.deadlineEpochMs,
+    deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerSchema,
   });
   if (observation.status !== "completed") {
@@ -160,94 +160,148 @@ export async function executeDeliveryRun(
     deadlineEpochMs: input.deadlineEpochMs,
   });
   if (result.state === "reviewed_pr" || result.state === "blocked") return result;
+  if (Date.now() >= result.deadlineEpochMs)
+    return services.authority.save(failedResult(result, "elapsed budget exhausted"));
   if (input.stopAfterAdmitted) return result;
-  let previousSha = input.contract.baseSha;
-  let findings: string[] = [];
-  for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
-    let attempt: Awaited<ReturnType<typeof runCodingAttempt>>;
-    try {
-      attempt = await runCodingAttempt(input, services, previousSha, findings);
-    } catch (error) {
-      return services.authority.save(
-        failedResult(result, error instanceof Error ? error.message : String(error)),
-      );
+
+  // This is intentionally a reducer over the durable result.  A restart must
+  // resume the phase represented by PostgreSQL, never infer progress from a
+  // worker process or start from the contract base again.
+  for (;;) {
+    if (Date.now() >= result.deadlineEpochMs)
+      return services.authority.save(failedResult(result, "elapsed budget exhausted"));
+
+    if (result.state === "admitted" || result.state === "checked" || result.state === "reviewed") {
+      const checkFailed = result.state === "checked" && result.check?.status === "failed";
+      const reviewNeedsRepair =
+        result.state === "reviewed" && result.review?.verdict === "changes_requested";
+      if (
+        reviewNeedsRepair &&
+        result.evidence.changesRequestedBatches < result.evidence.reviewCycles
+      ) {
+        if (
+          result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles ||
+          result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
+        )
+          return services.authority.save(
+            failedResult(result, "review changes requested after recovery budget was exhausted"),
+          );
+        // This marker is durable, so a restart cannot count the same finding
+        // batch twice before activating its repair writer.
+        result = await services.authority.save({
+          ...result,
+          evidence: {
+            ...result.evidence,
+            changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
+          },
+        });
+        continue;
+      }
+      if (result.state === "admitted" || checkFailed || reviewNeedsRepair) {
+        const previousSha = result.candidateSha ?? input.contract.baseSha;
+        const findings =
+          result.state === "checked"
+            ? [result.check?.stderr || "project check failed"]
+            : (result.review?.findings ?? []);
+        let attempt: Awaited<ReturnType<typeof runCodingAttempt>>;
+        try {
+          attempt = await runCodingAttempt(input, services, previousSha, findings);
+        } catch (error) {
+          return services.authority.save(
+            failedResult(result, error instanceof Error ? error.message : String(error)),
+          );
+        }
+        result = attempt.result;
+        if (attempt.status === "failed") {
+          if (
+            result.evidence.implementerActivations >=
+            input.contract.budget.maxImplementerActivations
+          )
+            return services.authority.save(failedResult(result, attempt.reason));
+          continue;
+        }
+        const candidate = attempt.candidate;
+        result = await services.authority.save({
+          ...result,
+          state: "candidate",
+          candidateSha: candidate.sha,
+          candidateFence: candidate.workspace.fence,
+          check: null,
+          review: null,
+          delivery: null,
+          blocker: null,
+          activeActivation: null,
+        });
+        await services.workspace.quarantine(candidate.workspace);
+        continue;
+      }
     }
-    result = attempt.result;
-    const activation = result.evidence.implementerActivations;
-    if (attempt.status === "failed") {
-      if (result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations)
-        return services.authority.save(failedResult(result, attempt.reason));
-      continue;
-    }
-    const candidate = attempt.candidate;
-    result = await services.authority.save({
-      ...result,
-      state: "candidate",
-      candidateSha: candidate.sha,
-      candidateFence: candidate.workspace.fence,
-      check: null,
-      review: null,
-      delivery: null,
-      blocker: null,
-      activeActivation: null,
-    });
-    let evaluation: Awaited<ReturnType<QualityGate["evaluate"]>>;
-    try {
-      evaluation = await services.quality.evaluate(input.contract, candidate.sha, cycle);
-    } finally {
-      await services.workspace.quarantine(candidate.workspace);
-    }
-    result = await services.authority.save({
-      ...result,
-      state: "checked",
-      check: evaluation.check,
-    });
-    if (evaluation.check.status !== "passed") {
-      findings = [evaluation.check.stderr || "project check failed"];
-      previousSha = candidate.sha;
-      if (activation >= input.contract.budget.maxImplementerActivations)
+
+    if (result.state === "candidate" || result.state === "checked") {
+      if (result.state === "checked" && !result.check)
+        return services.authority.save(failedResult(result, "checked phase has no check fact"));
+      if (result.state === "checked" && result.check?.status === "failed") continue;
+      if (!result.candidateSha)
         return services.authority.save(
-          failedResult(result, "project check failed after repair budget was exhausted"),
+          failedResult(result, `${result.state} phase has no exact SHA`),
         );
+      if (result.state === "candidate")
+        await services.workspace.quarantinePriorWriters(input.contract.id, Number.MAX_SAFE_INTEGER);
+      const cycle = Math.min(
+        input.contract.budget.maxReviewCycles,
+        Math.max(1, result.evidence.reviewCycles + 1),
+      );
+      let evaluation: Awaited<ReturnType<QualityGate["evaluate"]>>;
+      try {
+        evaluation = await services.quality.evaluate(input.contract, result.candidateSha, cycle);
+      } catch (error) {
+        return services.authority.save(
+          failedResult(result, error instanceof Error ? error.message : String(error)),
+        );
+      }
+      result = await services.authority.save({
+        ...result,
+        state: "checked",
+        check: evaluation.check,
+        review: null,
+      });
+      if (evaluation.check.status !== "passed") continue;
+      result = await services.authority.save({
+        ...result,
+        state: "reviewed",
+        review: evaluation.review,
+        evidence: { ...result.evidence, reviewCycles: cycle },
+      });
       continue;
     }
-    result = await services.authority.save({
-      ...result,
-      state: "reviewed",
-      review: evaluation.review,
-      evidence: { ...result.evidence, reviewCycles: cycle },
-    });
-    if (evaluation.review.verdict === "approved") {
+
+    if (result.state === "reviewed") {
+      if (!result.review || !result.check || !result.candidateSha)
+        return services.authority.save(failedResult(result, "reviewed phase is incomplete"));
+      if (result.review.verdict === "inconclusive")
+        return services.authority.save(
+          failedResult(result, `review inconclusive: ${result.review.summary}`),
+        );
+      if (result.review.verdict === "changes_requested") {
+        return services.authority.save(
+          failedResult(result, "review repair reducer did not advance"),
+        );
+      }
+      // ForgeDelivery probes before every effect, so a restart after an
+      // uncertain PR/comment write reconciles the same approved bundle.  Keep
+      // the approved review durable if delivery throws; the next run retries
+      // this exact bundle without another implementer.
       const delivery = await services.forge.deliver(
         input.contract,
-        candidate.sha,
-        evaluation.check,
-        evaluation.review,
+        result.candidateSha,
+        result.check,
+        result.review,
       );
       return services.authority.save({ ...result, state: "reviewed_pr", delivery });
     }
-    if (evaluation.review.verdict === "inconclusive")
-      return services.authority.save(
-        failedResult(result, `review inconclusive: ${evaluation.review.summary}`),
-      );
-    findings = evaluation.review.findings;
-    previousSha = candidate.sha;
-    result = {
-      ...result,
-      evidence: {
-        ...result.evidence,
-        changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
-      },
-    };
-    if (
-      cycle >= input.contract.budget.maxReviewCycles ||
-      result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
-    )
-      return services.authority.save(
-        failedResult(result, "review changes requested after recovery budget was exhausted"),
-      );
+
+    return services.authority.save(failedResult(result, "unknown durable task phase"));
   }
-  return services.authority.save(failedResult(result, "review budget exhausted"));
 }
 
 export async function writeTaskResult(stateDirectory: string, result: TaskResult): Promise<void> {

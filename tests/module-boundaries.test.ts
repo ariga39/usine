@@ -132,6 +132,7 @@ describe("module contracts", () => {
       output: { status: "proposed" },
     });
     expect(requestOptions).toMatchObject({ outputSchema: { type: "object" } });
+    expect(requestOptions).not.toHaveProperty("env");
   });
 
   test("Quality Gate rejects malformed and stale exact-SHA review output", () => {

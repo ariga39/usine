@@ -126,7 +126,6 @@ export class CodexCodingSession {
       const result = await thread.run(request.prompt, {
         signal: abortSignal,
         outputSchema: request.outputSchema,
-        env: workerEnvironment(request),
       });
       const output = outputFrom(result) as T;
       return {

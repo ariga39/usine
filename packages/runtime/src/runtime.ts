@@ -36,26 +36,40 @@ export async function admitTask(
   const pool = new Pool({ connectionString: databaseUrl });
   const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
   const authority = new TaskAuthority(database);
-  const workspace = new CandidateWorkspace({ repository, stateDirectory, deadlineEpochMs });
-  const session = new CodexCodingSession();
-  const quality = new QualityGate({
-    workspace,
-    session,
-    reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
-    reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
-    deadlineEpochMs,
-  });
-  const forge = new ForgeDelivery({ repository, deadlineEpochMs });
-  const workflowInput: DeliveryRunInput = {
-    contract,
-    contractHash,
-    repository,
-    repositoryIdentity,
-    deadlineEpochMs,
-    implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
-    stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
-  };
   try {
+    // Admission is the single source of the first deadline.  On recovery this
+    // reads task_runs.deadline_at instead of extending the budget in process.
+    const admitted = await authority.admit({
+      contract,
+      contractHash,
+      repository,
+      repositoryIdentity,
+      deadlineEpochMs,
+    });
+    const persistedDeadlineEpochMs = admitted.deadlineEpochMs;
+    const workspace = new CandidateWorkspace({
+      repository,
+      stateDirectory,
+      deadlineEpochMs: persistedDeadlineEpochMs,
+    });
+    const session = new CodexCodingSession();
+    const quality = new QualityGate({
+      workspace,
+      session,
+      reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
+      reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
+      deadlineEpochMs: persistedDeadlineEpochMs,
+    });
+    const forge = new ForgeDelivery({ repository, deadlineEpochMs: persistedDeadlineEpochMs });
+    const workflowInput: DeliveryRunInput = {
+      contract,
+      contractHash,
+      repository,
+      repositoryIdentity,
+      deadlineEpochMs: persistedDeadlineEpochMs,
+      implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
+      stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
+    };
     const result = await executeDeliveryRun(workflowInput, {
       authority,
       workspace,
