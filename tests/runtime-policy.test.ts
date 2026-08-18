@@ -10,7 +10,8 @@ async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
   const environment: NodeJS.ProcessEnv = {};
   for (const line of command.split("\n")) {
     const assignment = line.match(/^([A-Z][A-Z0-9_]*)=(?:"([^"]*)"|([^ ]+)) \\$/);
-    if (assignment) environment[assignment[1]] = assignment[2] ?? assignment[3];
+    const key = assignment?.[1];
+    if (key) environment[key] = assignment[2] ?? assignment[3];
   }
   return environment;
 }
@@ -20,10 +21,10 @@ describe("runtime composition", () => {
     const environment = await documentedProductionEnvironment();
     expect(environment).not.toHaveProperty("USINE_IMPLEMENTER_PROFILE");
 
-    const policy = runtimePolicyFromEnvironment(
-      environment,
-      { owner: "example-owner", name: "example-repository" },
-    );
+    const policy = runtimePolicyFromEnvironment(environment, {
+      owner: "example-owner",
+      name: "example-repository",
+    });
 
     expect(policy).toMatchObject({
       gitAuthor: { name: "Example Automation", email: "automation@example.invalid" },
