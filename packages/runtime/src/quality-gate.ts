@@ -1,20 +1,9 @@
 import { execa } from "execa";
 import type { TaskContract } from "./contract.js";
 import { CandidateWorkspace } from "./candidate-workspace.js";
-import { CodexCodingSession, type SessionObservation } from "./coding-session.js";
+import { CodexCodingSession } from "./coding-session.js";
+import { reviewerOutputSchema } from "./role-output.js";
 import type { CheckResult, ReviewVerdict } from "./task-authority.js";
-
-const reviewSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["sha", "verdict", "summary", "findings"],
-  properties: {
-    sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-    verdict: { type: "string", enum: ["approved", "changes_requested", "inconclusive"] },
-    summary: { type: "string" },
-    findings: { type: "array", items: { type: "string" } },
-  },
-};
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -43,50 +32,6 @@ function checkEnvironment(): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return env;
-}
-
-export function parseReviewObservation(output: unknown, sha: string): ReviewVerdict {
-  let value = output;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      return {
-        sha,
-        verdict: "inconclusive",
-        summary: "review output was not valid JSON",
-        findings: [],
-      };
-    }
-  }
-  if (!value || typeof value !== "object")
-    return { sha, verdict: "inconclusive", summary: "review output was missing", findings: [] };
-  const candidate = value as {
-    sha?: unknown;
-    verdict?: unknown;
-    summary?: unknown;
-    findings?: unknown;
-  };
-  if (
-    candidate.sha !== sha ||
-    !["approved", "changes_requested", "inconclusive"].includes(String(candidate.verdict)) ||
-    typeof candidate.summary !== "string" ||
-    !Array.isArray(candidate.findings) ||
-    candidate.findings.some((finding) => typeof finding !== "string")
-  ) {
-    return {
-      sha,
-      verdict: "inconclusive",
-      summary: "review output was malformed or stale",
-      findings: [],
-    };
-  }
-  return {
-    sha,
-    verdict: candidate.verdict as ReviewVerdict["verdict"],
-    summary: candidate.summary,
-    findings: candidate.findings as string[],
-  };
 }
 
 export interface QualityGateOptions {
@@ -170,7 +115,7 @@ export class QualityGate {
           `Project check evidence: ${JSON.stringify(check)}`,
           "Do not rely on implementer conversation or process exit status.",
         ].join("\n");
-        const observation: SessionObservation = await this.options.session.run({
+        const observation = await this.options.session.run({
           role: "reviewer",
           workspace: path,
           contract,
@@ -179,9 +124,23 @@ export class QualityGate {
           reasoningEffort: this.options.reviewerReasoningEffort,
           sandbox: "read-only",
           deadlineEpochMs: this.options.deadlineEpochMs,
-          outputSchema: reviewSchema,
+          outputSchema: reviewerOutputSchema,
         });
-        return parseReviewObservation(observation.output, sha);
+        if (observation.status !== "completed" || !observation.output)
+          return {
+            sha,
+            verdict: "inconclusive",
+            summary: observation.failure ?? observation.summary,
+            findings: [],
+          };
+        if (observation.output.sha !== sha)
+          return {
+            sha,
+            verdict: "inconclusive",
+            summary: "review output was stale",
+            findings: [],
+          };
+        return observation.output;
       },
     );
   }

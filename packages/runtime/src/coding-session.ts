@@ -1,9 +1,17 @@
 import type { TaskContract } from "./contract.js";
+import { z } from "zod";
+
+export {
+  implementerOutputSchema,
+  reviewerOutputSchema,
+  type ImplementerOutput,
+  type ReviewerOutput,
+} from "./role-output.js";
 
 export type SessionRole = "implementer" | "reviewer";
 export type SandboxMode = "workspace-write" | "read-only";
 
-export interface SessionRequest {
+export interface SessionRequest<Output = unknown> {
   role: SessionRole;
   workspace: string;
   contract: TaskContract;
@@ -12,7 +20,7 @@ export interface SessionRequest {
   reasoningEffort?: string;
   sandbox: SandboxMode;
   deadlineEpochMs: number;
-  outputSchema: Record<string, unknown>;
+  outputSchema: z.ZodType<Output>;
   continuation?: string | null;
   environment?: NodeJS.ProcessEnv;
 }
@@ -72,16 +80,21 @@ export function workerEnvironment(request: Pick<SessionRequest, "environment">):
 function outputFrom(result: unknown): unknown {
   if (!result || typeof result !== "object") return result;
   const value = result as { finalResponse?: unknown; output?: unknown; text?: unknown };
-  if (value.output !== undefined) return value.output;
+  if (value.output !== undefined) return parseJson(value.output);
   if (typeof value.finalResponse === "string") {
-    try {
-      return JSON.parse(value.finalResponse) as unknown;
-    } catch {
-      return value.finalResponse;
-    }
+    return parseJson(value.finalResponse);
   }
-  if (value.finalResponse !== undefined) return value.finalResponse;
-  return value.text !== undefined ? value.text : result;
+  if (value.finalResponse !== undefined) return parseJson(value.finalResponse);
+  return value.text !== undefined ? parseJson(value.text) : result;
+}
+
+function parseJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
 }
 
 function sessionIdFrom(result: unknown): string | null {
@@ -96,7 +109,7 @@ function sessionIdFrom(result: unknown): string | null {
 export class CodexCodingSession {
   constructor(private readonly clientFactory?: CodingSessionClientFactory) {}
 
-  async run<T = unknown>(request: SessionRequest): Promise<SessionObservation<T>> {
+  async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
     const remaining = request.deadlineEpochMs - Date.now() - 100;
     if (remaining <= 0)
       return {
@@ -124,13 +137,23 @@ export class CodexCodingSession {
             });
       const result = await thread.run(request.prompt, {
         signal: abortSignal,
-        outputSchema: request.outputSchema,
+        outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),
       });
-      const output = outputFrom(result) as T;
+      const parsed = request.outputSchema.safeParse(outputFrom(result));
+      if (!parsed.success) {
+        return {
+          status: "failed",
+          sessionId: thread.id ?? sessionIdFrom(result),
+          output: null,
+          usage: usageFrom(result),
+          summary: "coding session output did not match role schema",
+          failure: "coding session output did not match role schema",
+        };
+      }
       return {
         status: "completed",
         sessionId: thread.id ?? sessionIdFrom(result),
-        output,
+        output: parsed.data,
         usage: usageFrom(result),
         summary: "coding session completed",
         failure: null,

@@ -3,9 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { CodexCodingSession, workerEnvironment } from "../packages/runtime/src/coding-session.js";
+import {
+  CodexCodingSession,
+  implementerOutputSchema,
+  reviewerOutputSchema,
+  workerEnvironment,
+} from "../packages/runtime/src/coding-session.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
-import { parseReviewObservation } from "../packages/runtime/src/quality-gate.js";
 import {
   applyTaskFact,
   canTransition,
@@ -92,30 +96,83 @@ describe("module contracts", () => {
       model: "test-model",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: { type: "object" },
+      outputSchema: implementerOutputSchema,
     });
     expect(observation).toMatchObject({
       status: "completed",
       sessionId: "opaque-thread",
       output: { status: "proposed" },
     });
-    expect(requestOptions).toMatchObject({ outputSchema: { type: "object" } });
+    expect(requestOptions).toMatchObject({
+      outputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["proposed", "blocked"] },
+          summary: { type: "string" },
+        },
+        required: ["status", "summary"],
+        additionalProperties: false,
+      },
+    });
     expect(requestOptions).not.toHaveProperty("env");
   });
 
-  test("Quality Gate rejects malformed and stale exact-SHA review output", () => {
-    expect(
-      parseReviewObservation(
-        JSON.stringify({ sha, verdict: "approved", summary: "ok", findings: [] }),
-        sha,
-      ).verdict,
-    ).toBe("approved");
-    expect(
-      parseReviewObservation(
-        { sha: "b".repeat(40), verdict: "approved", summary: "ok", findings: [] },
-        sha,
-      ).verdict,
-    ).toBe("inconclusive");
+  test.each([
+    ["malformed JSON", "{malformed"],
+    ["wrong status", JSON.stringify({ status: "finished", summary: "done" })],
+    ["missing summary", JSON.stringify({ status: "proposed" })],
+  ])("Coding Session fails closed on implementer output: %s", async (_name, finalResponse) => {
+    const session = new CodexCodingSession(async () => ({
+      startThread: () => ({
+        run: async () => ({ finalResponse }),
+      }),
+    }));
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      model: "test-model",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failure: "coding session output did not match role schema",
+    });
+  });
+
+  test.each([
+    ["malformed JSON", "{malformed"],
+    ["wrong verdict", JSON.stringify({ sha, verdict: "wrong", summary: "ok", findings: [] })],
+    ["missing summary", JSON.stringify({ sha, verdict: "approved", findings: [] })],
+    [
+      "non-string finding",
+      JSON.stringify({ sha, verdict: "approved", summary: "ok", findings: [7] }),
+    ],
+  ])("Coding Session fails closed on reviewer output: %s", async (_name, finalResponse) => {
+    const session = new CodexCodingSession(async () => ({
+      startThread: () => ({
+        run: async () => ({ finalResponse }),
+      }),
+    }));
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      model: "test-model",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failure: "coding session output did not match role schema",
+    });
   });
 
   test("Quality Gate checks a disposable exact-SHA checkout before fresh review", async () => {
@@ -146,17 +203,23 @@ describe("module contracts", () => {
       stateDirectory: join(root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
     });
+    let reviewerSchema: unknown;
+    let sessionStatus: "completed" | "failed" = "completed";
+    let reviewerSha = base;
     const gate = new QualityGate({
       workspace,
       session: {
-        run: async () => ({
-          status: "completed",
-          sessionId: "review",
-          output: { sha: base, verdict: "approved", summary: "ok", findings: [] },
-          usage: null,
-          summary: "ok",
-          failure: null,
-        }),
+        run: async ({ outputSchema }: { outputSchema: unknown }) => {
+          reviewerSchema = outputSchema;
+          return {
+            status: sessionStatus,
+            sessionId: "review",
+            output: { sha: reviewerSha, verdict: "approved", summary: "ok", findings: [] },
+            usage: null,
+            summary: "ok",
+            failure: sessionStatus === "failed" ? "provider failed" : null,
+          };
+        },
       } as never,
       reviewerModel: "reviewer",
       reviewerReasoningEffort: "low",
@@ -186,6 +249,23 @@ describe("module contracts", () => {
     expect(boundedCheck.stderr).toContain("stderr-tail");
     const review = await gate.review(task, base, check, 1);
     expect(review.verdict).toBe("approved");
+    expect(reviewerSchema).toBe(reviewerOutputSchema);
+    reviewerSha = "b".repeat(40);
+    const staleReview = await gate.review(task, base, check, 1);
+    expect(staleReview).toMatchObject({
+      sha: base,
+      verdict: "inconclusive",
+      summary: "review output was stale",
+      findings: [],
+    });
+    sessionStatus = "failed";
+    const failedReview = await gate.review(task, base, check, 1);
+    expect(failedReview).toMatchObject({
+      sha: base,
+      verdict: "inconclusive",
+      summary: "provider failed",
+      findings: [],
+    });
   });
 
   test("Forge Delivery attestation is bound to exact candidate SHA", () => {
