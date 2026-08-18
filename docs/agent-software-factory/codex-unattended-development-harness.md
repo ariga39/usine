@@ -67,12 +67,11 @@ Push and open a draft PR at the first checkable state. Merge only after the cohe
 
 ## Current route
 
-The repository is classified `correct_before_expansion`. Issue #65 falsified the Herdr/transcript lifecycle route; Issue #76 replaces it with a provider-neutral Coding Session port whose only current production adapter is Codex SDK.
+The repository is classified `continue` for the existing delivery path. Issue #65 falsified the Herdr/transcript lifecycle route; Issue #80 replaced it with six behavior modules and a provider-neutral Coding Session port whose only current production adapter is Codex SDK.
 
-- run exactly one full-refactor implementation Issue/PR with small visible commits;
-- complete all six required product modules without recreating the closed implementation backlog;
-- characterize the current SDK adapter early, but do not make adapter validation a prerequisite for restructuring the other required modules;
-- preserve a fresh Luna/high/default-tier/no-fast worker in an isolated workspace;
-- do not add a second runtime, forge, implementation lane, custom agent supervisor, or authority expansion.
+- finish Issue #80's one full-refactor PR with small visible commits and one final exact-SHA correctness/design review;
+- preserve a fresh Luna/high/default-tier/no-fast worker in an isolated workspace and a fresh read-only Sol reviewer;
+- treat PR #82's representative executable delivery and PR #83's induced coordinator-restart delivery as the evidence that cleared the lifecycle falsifier;
+- do not recreate the closed backlog, preserve transitional seams, or add a second runtime, forge, distributed runner, custom agent supervisor, automatic merge authority, or more than two independent implementation tasks without a new checkpoint.
 
-The refactor's merge gate requires a representative executable task and an induced coordinator restart during an active coding session, with fenced retry, one repository publish authority, structured terminal evidence, exact-SHA review, and reconciled delivery. Completing design, module movement, or fixture tests alone does not clear the falsifier.
+The refactor's remaining merge gate is full host validation, canonical consistency, and fresh exact-SHA review. Design text, module movement, fixture tests, file count, and process state still cannot substitute for a user-visible reviewed delivery outcome.

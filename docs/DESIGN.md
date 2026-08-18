@@ -1,6 +1,6 @@
 ---
 status: current
-design_version: 0.4
+design_version: 0.5
 updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
@@ -73,7 +73,7 @@ reviewed PR + explicit approval attestation
 
 Issue #65 随后在普通任务中复现 Herdr agent settled、没有 prompt/observation、协调器不能继续；这正是此前 decision 定义的 route falsifier。局部 pure-move acceptance 仍被合并，进一步证明 task selection 与 merge gate 本身也失效。
 
-Issue #76 选择 `clean_implementation`：保留已经证明有价值的 authority invariants 和 effect-reconciliation algorithm，但不保留当前 monolith、Herdr/transcript lifecycle、shallow helper packages 或 implementation-coupled test shape。当前分类从 `stop_and_redesign` 进入 `correct_before_expansion`。只有一项 full-refactor implementation eligible；它必须用小提交在同一 PR 中建立下述深模块，并以 representative executable task 和 induced coordinator restart 清除 route falsifier。设计完成本身不算清除。
+Issue #76 选择 `clean_implementation`：保留已经证明有价值的 authority invariants 和 effect-reconciliation algorithm，但不保留 monolith、Herdr/transcript lifecycle、shallow helper packages 或 implementation-coupled test shape。Issue #80 用小提交建立下述行为模块，并以两个 executable TypeScript delivery 清除 route falsifier：PR #82 完成正常路径；PR #83 在 durable activation 后 SIGKILL coordinator，以同一 Task ID、fresh fence/workspace、exact-SHA review 和 reconciled delivery恢复。当前 classification 为 `continue`；这些证据不自动授权第二 runtime/forge或更高并发。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
@@ -114,7 +114,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-当前 `correct_before_expansion` checkpoint 只运行一个 full-refactor Task。代表性 executable code task 与 induced live coordinator restart recovery 都有证据后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
+当前 live evidence 允许最多两个 ownership 与 writable surface 不重叠的 implementation Task。最先允许的并发分片是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。第二 runtime/forge、分布式 runner 或更高并发仍须单独审计。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -229,11 +229,11 @@ Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析�
 
 首条纵切只记录能回答核心优化目标的事实：是否形成 accepted outcome、human activation、端到端时间、成本、返修次数和 blocker。观察到具体瓶颈后再增加诊断指标，不预建通用 metrics surface，也不设置 10、30、50、100、300 之间的人工阶段门。
 
-下一项且唯一 eligible implementation 是一个 full-refactor Issue/PR，内部以小提交推进。它的 merge gate 包含两条 live evidence：
+Issue #80 full-refactor 的 merge gate 包含两条已完成的 live evidence：
 
 1. 用 Usine 在一个 private target repository 完成一项真实 executable TypeScript change（修改 production behavior、更新真实 test、运行目标项目原生 check），形成 immutable Candidate、fresh exact-SHA approval 和 reviewed PR；文档复制、fixture script 或只改测试不合格。
 2. 对同一类任务，在 Coding Session 已记录 activation、尚未形成 terminal role output 时强制终止 coordinator；以同一 Task ID 重启。Delivery Run 必须重读 durable facts，保留 fresh monotonic attempt fence 与独立 workspace，最终只形成一个有效 Candidate/PR/attestation，且没有 orphan writer 或 stale evidence。
 
 Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 取得 monotonic fence token 和独立 workspace；Task Authority 只接受当前 token 冻结的 Candidate。旧进程即使短暂存活也只能写旧 workspace，其 output/Candidate 被拒绝并 quarantine，随后由 host cleanup。Restart 恢复同一 Task/repository lease，但 fresh retry 使用新的 activation token；“同一 writer generation”表示只有一个 Task 拥有 repository publish authority，不表示两个进程并发共享目录或 Candidate 权限。Warm thread resume 只是 characterization 后的成本优化，不是 correctness requirement。
 
-这两条证据才清除 Issue #65 lifecycle falsifier。完成后 classification 才可进入 `continue`，并讨论不同 repository 的第二条 lane。若 SDK characterization 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，替换 Coding Session adapter并重新比较 direct exec、App Server 或成熟 runtime；其它五个产品模块的目标架构不因此取消。不得悄悄补一个新的 agent runtime。
+PR #82 与 PR #83 已分别提供上述正常路径和 induced restart 证据，Issue #65 lifecycle falsifier 已清除，classification 进入 `continue`。这只允许既有 serial path 与最多两个独立项目任务继续，不授权第二 runtime/forge、分布式 runner或自动 merge。若后续 SDK 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，替换 Coding Session adapter并重新比较 direct exec、App Server 或成熟 runtime；其它五个产品模块的目标架构不因此取消。不得悄悄补一个新的 agent runtime。

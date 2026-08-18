@@ -70,9 +70,9 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ## 3. 有界并排开发
 
-当前 classification 是 `correct_before_expansion`。只允许一个 full-refactor implementation PR 串行运行；完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
+当前 classification 是 `continue`。Representative executable code task 与 induced live coordinator restart recovery 已由 PR #82 / #83 提供 evidence；最多同时拥有两个 active implementation PR，并继续要求独立 ownership 与不重叠 writable surface。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。增加第二 runtime/forge、分布式 runner、自动 merge authority 或更高并发仍须经过各自方向 checkpoint。
 
-恢复 implementation 后，在完成 representative executable code task 与 induced live coordinator restart recovery 之前必须串行。两项上限只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备并行开发能力的声明。
+在 PR #82 / #83 完成上述证据前，implementation 必须串行。现在的两项上限仍只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备分布式或任意并行开发能力的声明。
 
 只有满足以下条件才并排：
 
