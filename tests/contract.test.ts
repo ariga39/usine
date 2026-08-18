@@ -1,16 +1,30 @@
-import { readFileSync } from "node:fs";
 import { taskContractSchema } from "../packages/runtime/src/contract.js";
 import { describe, expect, test } from "vite-plus/test";
 
-const committedContract = JSON.parse(
-  readFileSync(new URL("../task.json", import.meta.url), "utf8"),
-) as Record<string, unknown>;
+const committedContract = {
+  id: "contract-test",
+  repository: { path: ".", owner: "example", name: "usine" },
+  baseSha: "a".repeat(40),
+  instructions: "Validate repository path handling.",
+  acceptance: ["Repository paths use the native JSON contract."],
+  nonGoals: [],
+  projectCheck: { command: "true", timeoutMs: 1_000 },
+  budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
+  authorization: { source: "test", delivery: true },
+  delivery: {
+    baseBranch: "main",
+    branch: "agent/contract-test",
+    issue: 1,
+    title: "Contract test",
+    body: "Contract test",
+  },
+};
 
 function contractWithRepositoryPath(path: string): Record<string, unknown> {
   return {
     ...committedContract,
     repository: {
-      ...(committedContract.repository as Record<string, unknown>),
+      ...committedContract.repository,
       path,
     },
   };
