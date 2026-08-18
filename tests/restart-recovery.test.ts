@@ -62,7 +62,6 @@ const result = await executeDeliveryRun(
   {
     contract,
     contractHash: "recovery-hash",
-    repository: ".",
     repositoryIdentity: "recovery/" + taskId,
     deadlineEpochMs: Date.now() + 60000,
     implementer: {

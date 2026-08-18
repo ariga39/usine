@@ -57,7 +57,7 @@ function persistedResult(state: TaskResult["state"], id: string): TaskResult {
     delivery: null,
     blocker: null,
     activeActivation: null,
-    writer: { repository: ".", repositoryIdentity: `recovery/${id}` },
+    writer: { repositoryIdentity: `recovery/${id}` },
     evidence: {
       implementerActivations: state === "admitted" ? 0 : 1,
       reviewCycles: state === "reviewed" ? 1 : 0,
@@ -191,7 +191,6 @@ describe("Delivery Run durable phase recovery", () => {
     const input = {
       contract: taskContract,
       contractHash: "sqlite-terminal-block-hash",
-      repository: ".",
       repositoryIdentity,
       deadlineEpochMs: Date.now() + 60_000,
       implementer,
@@ -260,7 +259,6 @@ describe("Delivery Run durable phase recovery", () => {
       const nextTask = await authority.admit({
         contract: contract(`${id}-next`),
         contractHash: "sqlite-terminal-block-next-hash",
-        repository: ".",
         repositoryIdentity,
         deadlineEpochMs: Date.now() + 60_000,
       });
@@ -304,7 +302,6 @@ describe("Delivery Run durable phase recovery", () => {
       {
         contract: contract(id),
         contractHash: "hash",
-        repository: ".",
         repositoryIdentity: `recovery/${id}`,
         deadlineEpochMs: Date.now() + 60_000,
         implementer,
@@ -369,7 +366,6 @@ describe("Delivery Run durable phase recovery", () => {
       {
         contract: contract(id),
         contractHash: "hash",
-        repository: ".",
         repositoryIdentity: `recovery/${id}`,
         deadlineEpochMs: Date.now() + 60_000,
         implementer,
@@ -490,7 +486,6 @@ describe("Delivery Run durable phase recovery", () => {
         {
           contract: contract(id),
           contractHash: "hash",
-          repository: ".",
           repositoryIdentity: `recovery/${id}`,
           deadlineEpochMs: Date.now() + 60_000,
           implementer,
@@ -514,7 +509,6 @@ describe("Delivery Run durable phase recovery", () => {
       {
         contract: contract(id),
         contractHash: "hash",
-        repository: ".",
         repositoryIdentity: `recovery/${id}`,
         // A restarted caller may supply a fresh wall-clock budget; the reducer
         // must ignore it in favor of the persisted deadline.
@@ -569,7 +563,6 @@ describe("Delivery Run durable phase recovery", () => {
     const input = {
       contract: contract(id),
       contractHash: "hash",
-      repository: ".",
       repositoryIdentity: `recovery/${id}`,
       deadlineEpochMs: Date.now() + 60_000,
       implementer,

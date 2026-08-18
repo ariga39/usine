@@ -77,7 +77,6 @@ export async function admitTask(
     const admitted = await authority.admit({
       contract,
       contractHash,
-      repository,
       repositoryIdentity,
       deadlineEpochMs,
     });
@@ -109,7 +108,6 @@ export async function admitTask(
     const workflowInput: DeliveryRunInput = {
       contract,
       contractHash,
-      repository,
       repositoryIdentity,
       deadlineEpochMs: persistedDeadlineEpochMs,
       implementer: policy.roles.implementer,
