@@ -16,6 +16,16 @@ const reviewSchema = {
   },
 };
 
+const CHECK_STREAM_LIMIT = 16_384;
+
+function truncateCheckStream(output: string, stream: "stdout" | "stderr"): string {
+  if (output.length <= CHECK_STREAM_LIMIT) return output;
+  const marker = `\n[${stream} truncated to ${CHECK_STREAM_LIMIT} characters]\n`;
+  const available = CHECK_STREAM_LIMIT - marker.length;
+  const headLength = Math.ceil(available / 2);
+  return `${output.slice(0, headLength)}${marker}${output.slice(-(available - headLength))}`;
+}
+
 function checkEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { CI: "true" };
   for (const key of [
@@ -121,7 +131,10 @@ export class QualityGate {
             command: contract.projectCheck.command,
             exitCode: 124,
             stdout: "",
-            stderr: error instanceof Error ? error.message : String(error),
+            stderr: truncateCheckStream(
+              error instanceof Error ? error.message : String(error),
+              "stderr",
+            ),
           };
         }
         return {
@@ -129,8 +142,8 @@ export class QualityGate {
           status: result.exitCode === 0 ? ("passed" as const) : ("failed" as const),
           command: contract.projectCheck.command,
           exitCode: result.exitCode ?? 1,
-          stdout: String(result.stdout),
-          stderr: String(result.stderr),
+          stdout: truncateCheckStream(result.stdout, "stdout"),
+          stderr: truncateCheckStream(result.stderr, "stderr"),
         };
       },
     );
