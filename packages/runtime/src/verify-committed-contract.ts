@@ -2,7 +2,7 @@ import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
 import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
-import { remainingUntil } from "./remaining-until.js";
+import { remainingUntil } from "@usine/task-authority";
 
 export async function verifyCommittedContract(
   contractPath: string,

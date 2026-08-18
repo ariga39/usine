@@ -11,7 +11,7 @@ import {
   type TaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import type { WriterWorkspace } from "../packages/runtime/src/candidate-workspace.js";
+import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { approvalAttestationBody, ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
 import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
 

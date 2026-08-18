@@ -11,7 +11,7 @@ import {
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
 import { applyTaskFact, canTransition, type TaskResult } from "@usine/task-authority";
 import type { TaskContract } from "@usine/task-authority";
-import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
+import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { QualityGate } from "../packages/runtime/src/quality-gate.js";
 import { ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
 import {
@@ -235,7 +235,7 @@ describe("module contracts", () => {
       repository,
       stateDirectory: join(root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
-      environment: capabilityEnvironments(process.env),
+      credentialFreeGit: credentialFreeGitEnvironment(process.env),
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
     let reviewerSchema: unknown;

@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@usine/candidate-workspace": "workspace:*",
     "@usine/runtime": "workspace:*",
     "@usine/task-authority": "workspace:*",
     "execa": "latest",

@@ -8,14 +8,14 @@ import {
   type TaskContract,
   type TaskResult,
 } from "@usine/task-authority";
-import { CandidateWorkspace } from "./candidate-workspace.js";
+import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "./coding-session.js";
 import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
-import { deadlineExpired } from "./remaining-until.js";
+import { deadlineExpired } from "@usine/task-authority";
 
 export { executeDeliveryRun } from "./delivery-run.js";
 
@@ -97,7 +97,7 @@ export async function admitTask(
       repository,
       stateDirectory,
       deadlineEpochMs: persistedDeadlineEpochMs,
-      environment: policy.capabilities,
+      credentialFreeGit: policy.capabilities.credentialFreeGit,
       gitAuthor: policy.gitAuthor,
     });
     const session = new CodexCodingSession();

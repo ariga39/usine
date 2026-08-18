@@ -1,8 +1,25 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
-import type { CapabilityEnvironments, GitAuthor } from "./runtime-policy.js";
-import { remainingUntil } from "./remaining-until.js";
+import { remainingUntil } from "@usine/task-authority";
+
+const PORTABLE_ENVIRONMENT_KEYS = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "PATHEXT",
+] as const;
+
+export interface GitAuthor {
+  name: string;
+  email: string;
+}
 
 export interface WriterWorkspace {
   taskId: string;
@@ -22,8 +39,21 @@ export interface WorkspaceOptions {
   repository: string;
   stateDirectory: string;
   deadlineEpochMs: number;
-  environment: CapabilityEnvironments;
+  credentialFreeGit: NodeJS.ProcessEnv;
   gitAuthor: GitAuthor;
+}
+
+export function credentialFreeGitEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const portable: NodeJS.ProcessEnv = {};
+  for (const key of PORTABLE_ENVIRONMENT_KEYS) {
+    if (environment[key] !== undefined) portable[key] = environment[key];
+  }
+  return {
+    ...portable,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
 }
 
 export class CandidateWorkspace {
@@ -146,7 +176,7 @@ export class CandidateWorkspace {
 
   private async git(args: string[]): Promise<string> {
     const result = await execa("git", args, {
-      env: this.options.environment.credentialFreeGit,
+      env: this.options.credentialFreeGit,
       extendEnv: false,
       timeout: remainingUntil(this.options.deadlineEpochMs),
       reject: true,

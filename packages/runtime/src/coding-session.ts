@@ -1,6 +1,5 @@
-import type { TaskContract } from "@usine/task-authority";
+import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { explicitWorkerEnvironment } from "./runtime-policy.js";
-import { remainingUntil } from "./remaining-until.js";
 import { z } from "zod";
 
 export {

@@ -7,12 +7,12 @@ import type {
   ReviewVerdict,
   TaskContract,
 } from "@usine/task-authority";
+import { remainingUntil } from "@usine/task-authority";
 import {
   forgeGitEnvironment,
   type CapabilityEnvironments,
   type ForgePolicy,
 } from "./runtime-policy.js";
-import { remainingUntil } from "./remaining-until.js";
 
 function statusOf(error: unknown): number | undefined {
   return typeof error === "object" && error !== null && "status" in error

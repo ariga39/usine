@@ -3,8 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
-import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
+import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "usine-candidate-"));
@@ -27,7 +26,7 @@ describe("Candidate Workspace", () => {
       repository: input.repository,
       stateDirectory: join(input.root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
-      environment: capabilityEnvironments(process.env),
+      credentialFreeGit: credentialFreeGitEnvironment(process.env),
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
     const first = await workspace.prepareWriter("task", 1, input.baseSha);
@@ -45,7 +44,7 @@ describe("Candidate Workspace", () => {
       repository: input.repository,
       stateDirectory: join(input.root, "state"),
       deadlineEpochMs: Date.now() + 30_000,
-      environment: capabilityEnvironments({
+      credentialFreeGit: credentialFreeGitEnvironment({
         ...process.env,
         GIT_AUTHOR_NAME: "ambient author",
         GIT_AUTHOR_EMAIL: "ambient-author@example.invalid",

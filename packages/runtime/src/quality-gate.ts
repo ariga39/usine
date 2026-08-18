@@ -1,11 +1,10 @@
 import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
-import { CandidateWorkspace } from "./candidate-workspace.js";
+import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "./coding-session.js";
 import { reviewerOutputSchema } from "./role-output.js";
-import type { CheckResult, ReviewVerdict } from "@usine/task-authority";
+import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
 import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
-import { remainingUntil } from "./remaining-until.js";
 
 const CHECK_STREAM_LIMIT = 16_384;
 
