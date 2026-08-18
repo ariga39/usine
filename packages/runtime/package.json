@@ -11,30 +11,6 @@
     "./contract": {
       "types": "./src/contract.ts",
       "import": "./dist/contract.mjs"
-    },
-    "./task-authority": {
-      "types": "./src/task-authority.ts",
-      "import": "./dist/task-authority.mjs"
-    },
-    "./candidate-workspace": {
-      "types": "./src/candidate-workspace.ts",
-      "import": "./dist/candidate-workspace.mjs"
-    },
-    "./coding-session": {
-      "types": "./src/coding-session.ts",
-      "import": "./dist/coding-session.mjs"
-    },
-    "./quality-gate": {
-      "types": "./src/quality-gate.ts",
-      "import": "./dist/quality-gate.mjs"
-    },
-    "./forge-delivery": {
-      "types": "./src/forge-delivery.ts",
-      "import": "./dist/forge-delivery.mjs"
-    },
-    "./delivery-run": {
-      "types": "./src/delivery-run.ts",
-      "import": "./dist/delivery-run.mjs"
     }
   },
   "scripts": {
