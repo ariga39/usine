@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import type { TaskContract } from "./contract.js";
 import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
+import { implementerOutputSchema } from "./role-output.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { TaskAuthority, type CheckResult, type TaskResult } from "./task-authority.js";
@@ -24,16 +25,6 @@ export interface DeliveryRunServices {
   quality: QualityGate;
   forge: ForgeDelivery;
 }
-
-const implementerSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["status", "summary"],
-  properties: {
-    status: { type: "string", enum: ["proposed", "blocked"] },
-    summary: { type: "string" },
-  },
-};
 
 function blockTask(
   authority: TaskAuthority,
@@ -97,9 +88,9 @@ async function runCodingAttempt(
     reasoningEffort: "high",
     sandbox: "workspace-write",
     deadlineEpochMs: reservation.result.deadlineEpochMs,
-    outputSchema: implementerSchema,
+    outputSchema: implementerOutputSchema,
   });
-  if (observation.status !== "completed") {
+  if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
     return {
       status: "failed",
@@ -107,30 +98,13 @@ async function runCodingAttempt(
       reason: `implementer failed: ${observation.failure ?? observation.summary}`,
     };
   }
-  const output =
-    typeof observation.output === "string"
-      ? (() => {
-          try {
-            return JSON.parse(observation.output) as { status?: string; summary?: string };
-          } catch {
-            return {};
-          }
-        })()
-      : (observation.output as { status?: string; summary?: string } | null);
-  if (output?.status === "blocked") {
+  const output = observation.output;
+  if (output.status === "blocked") {
     await services.workspace.quarantine(workspace);
     return {
       status: "failed",
       result: reservation.result,
-      reason: `implementer blocked: ${output.summary ?? "no reason"}`,
-    };
-  }
-  if (!output || output.status !== "proposed" || typeof output.summary !== "string") {
-    await services.workspace.quarantine(workspace);
-    return {
-      status: "failed",
-      result: reservation.result,
-      reason: "implementer returned invalid terminal observation",
+      reason: `implementer blocked: ${output.summary}`,
     };
   }
   try {
