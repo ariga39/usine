@@ -1,6 +1,6 @@
 ---
 status: current
-updated: 2026-08-17
+updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
 
@@ -21,7 +21,9 @@ read active Issue / PR / unresolved review threads
         ↓
 inspect branch + base SHA + status + diff
         ↓
-restate current outcome and next observable action
+identify active falsifier + eligible task class + cluster owner
+        ↓
+restate why the task is eligible and its next observable action
 ```
 
 如果 summary、旧 handoff、自然语言记忆和 Git/Issue 不一致，以 Git、Issue 和 canonical docs 为准。先报告冲突，再继续；不依靠猜测补全。
@@ -35,7 +37,13 @@ restate current outcome and next observable action
 - hook 丢失只意味着少一次提醒，不能让流程失去恢复能力；
 - 方向发生重大变化或同一工作经历多次 compact 时，优先生成短 handoff 并开新 session，不无限延长已被旧假设污染的 thread。
 
-Handoff 放在临时 `.tasks/HANDOFF.md`，只记录：当前 Issue/PR、branch/base/head、已完成的可验证事实、未完成 outcome、blocker、下一条命令或动作。重要决定必须先进入 `DECISIONS.md` 或 Issue，不能只留在 handoff。
+Handoff 放在临时 `.tasks/HANDOFF.md`，只记录：当前 Issue/PR、branch/base/head、已完成的可验证事实、未完成 outcome、active falsifier、eligible task class、behavior-cluster owner、blocker、下一条命令或动作。重要决定必须先进入 `DECISIONS.md` 或 Issue，不能只留在 handoff。
+
+### 两次失败留下的控制约束
+
+第一次实现把未知 seam 过早写成详细 package/interface/test contract，得到局部完整但距离交付很远的 admission。第二次实现把最短纵切、小 PR、测试全绿和文件变短提升为控制指标，第一个纵切形成 runtime/test monolith，后续任务只能机械搬移或继续补丁。两次失败的共同原因不是模型、TDD、monorepo 或 Herdr 单独失效，而是没有角色对 behavior cluster 的 module depth、seam 和 change locality 负责，且局部 Issue acceptance 可以覆盖全局证伪证据。
+
+因此 compact 后不加载外部历史报告或旧 task tree，但必须从本 corpus 恢复四项约束：未知 seam 不事前过度规定；纵切不能成为 monolith 豁免；active falsifier 控制调度资格；小 PR、绿测试、文件和提交数量都只是 evidence，不是 outcome。
 
 ### Context 与模型配置边界
 
@@ -47,20 +55,20 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 
 除空仓库 root commit 外，不在 main 直接开发。
 
-1. 创建一个有明确 outcome、scope、non-goals、acceptance 和 `first_merge_checkpoint` 的 GitHub Issue。Outcome 必须是最小可独立使用、验证和回滚的行为；更大的 product milestone 通过后续串行 Issue/PR 继续，不得成为一次大 PR 的理由。
+1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 必须是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚；更大的 product milestone 通过后续串行 Issue/PR 继续，不得成为一次大 PR 的理由。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
 3. 每个 branch 只实现一个 Issue。实现 agent 只写该任务声明的 surfaces。
-4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。
+4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
 5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
-6. scoped review/fix 在同一 PR 收敛；checks 与 fresh semantic verdict 通过后由 orchestrator 自动 merge，并继续下一项已授权 Issue，不等待用户监督。
+6. scoped review/fix 在同一 PR 收敛；coherent outcome、checks、spec/correctness verdict 和适用的 design verdict 全部通过后由 orchestrator 自动 merge，并继续下一项 eligible Issue，不等待用户监督。
 
-GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、验收、`first_merge_checkpoint` 证据与停止条件；它被 gitignore，不积累成第二套任务系统。
+GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、active falsifier 状态、behavior-cluster owner、draft checkpoint、merge gate 与停止条件；它被 gitignore，不积累成第二套任务系统。
 
 ## 3. 有界并排开发
 
-当前 checkpoint active 时，主编排者只运行串行 implementation。完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR；这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
+当前 `stop_and_redesign` checkpoint 不运行 implementation。Reviewed module decision 恢复 implementation eligibility 后，先串行运行；完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
 
-在完成 representative executable code task 与 induced live coordinator restart recovery 之前，实施必须串行。两项上限只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备并行开发能力的声明。
+恢复 implementation 后，在完成 representative executable code task 与 induced live coordinator restart recovery 之前必须串行。两项上限只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备并行开发能力的声明。
 
 只有满足以下条件才并排：
 
@@ -82,12 +90,30 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：每个 Issue 新建一个 Herdr pane 和新 Codex agent，并通过 `-p usine-implementer` 启动；profile 固定 GPT-5.6 Luna high、default service tier、workspace-write，禁止 fast；Issue 的 first merge checkpoint 合并后释放该 agent/pane，绝不跨 Issue 复用 implementer；
+- implementation：当前暂停；Issue #65 已证伪 Herdr/transcript bridge 的 liveness claim，在 module design 与 salvage/rewrite decision 合并前不得启动第三次实现或选择替代 launcher。未来边界仍须保留 fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast 的 role policy，除非新 decision 明确 supersede；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
-- 仅当 Herdr 本身不可用时，才直接运行 `codex exec -p usine-implementer`；authentication、permission、model 或 profile failure 不得绕过既定 launcher，也不得静默退回默认模型或 fast。
+- 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
 
-## 4. Library-first，而不是 abstraction-first
+## 4. Falsifier、任务优先级与设计责任
+
+任务不是 flat backlog。调度顺序固定为：
+
+```text
+active falsifier / safety-authority defect
+> accepted-outcome critical path
+> representative real task
+> measured bottleneck
+> cleanup / aesthetics
+```
+
+高优先级 failure class 未解除时，低优先级 Issue 不 eligible；不能以局部 acceptance、non-goal、测试全绿或“本 PR 只做移动”绕过。一个 falsifier 只能由其 decision 指定的真实 evidence 解除。方向审计发现 blocker 后，必须同步改变 eligible queue，而不是只生成更多 flat Issues。
+
+每个 active behavior cluster 指定一名临时 design owner。Owner 维护一个小的 module map、external interface、internal seams、interface-level tests、待删除旧 code/tests，以及 PR slice 的 coherence；不要求 owner 亲自实现全部 PR，但 ownership 必须明确交接。
+
+以下事件触发一次独立 design review，而不是每个 PR 都做架构审批：首次实现 behavior cluster；新增 package/interface；同一大文件连续三个 PR 被修改；同一 policy 在三个位置出现；真实 falsifier 要求改变 transport/lifecycle。Design reviewer 可以跨当前 Issue non-goals，只回答 seam、interface depth、caller knowledge、change locality 和 replacement/deletion plan。Spec/correctness reviewer 仍回答当前功能和回归；两个 verdict 不能互相替代。
+
+## 5. Library-first，而不是 abstraction-first
 
 在编写 scheduler、queue、retry、migration、ORM、GitHub auth、process runner、logging、schema validation 或测试容器代码前：
 
@@ -108,27 +134,29 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 - 普通 library package 可使用 tsdown 默认 external dependency 行为；包含 DBOS workflow/runtime registry 的 package 必须使用 `unbundle: true`，保持逐模块输出，不得把 workflow bundle 到单文件。
 - 初期直接使用 pnpm workspace scripts 编排 checks/build。只有观测到 monorepo task latency 或 cache 成为瓶颈时，才考虑 Turborepo、Nx 或另一层 build orchestrator。
 
-## 5. 纵切优先与复杂度预算
+## 6. 纵切优先与复杂度预算
 
 每个 PR 应尽量完成一个可从公共入口观察到的行为。内部基础工作只有在下一条纵切直接使用它时才单独存在。
 
-默认选择最小可合并 PR，而不是把一条路线的所有后续能力塞进一次“大而全”交付。若一个 diff 已经包含多个可独立验证、可独立回滚的 outcome，应拆成串行小 Issue/PR；不要用 stacked-PR 管理本身制造新的协调负担。
+默认选择最小 coherent PR，而不是把一条路线的所有后续能力塞进一次“大而全”交付。若一个 diff 已经包含多个可独立验证、可独立回滚的 outcome，应拆成串行小 Issue/PR；不要用 stacked-PR 管理本身制造新的协调负担。小并不等于 mergeable：package/file movement、机械等价和行数下降只有在删除旧 seam、减少 caller knowledge 或显著集中 future change 时才构成 outcome。
 
-`first_merge_checkpoint` 是确定性切分点：一旦它的 scoped tests/checks 通过，必须先 commit、push、开 PR、focused review 和 merge；later recovery mode、相邻 adapter 或更完整 product milestone 进入下一 Issue。Reviewer 只能用当前 Issue acceptance 和 canonical invariant 阻塞该 PR；不使当前 claim 失真的 concern 必须另开 Issue，不能延长当前 branch。
+Draft checkpoint 与 merge gate 分离：第一处 scoped green 必须先 commit、push、开 draft PR，使工作可见且可恢复；它不自动授权 merge。只有 Issue 的 coherent module behavior 或 user-observable behavior 完成，且适用的 spec/correctness 与 design gate 都通过，才可 merge。相邻独立 outcome 仍进入下一 Issue；但 active falsifier、module-depth blocker 和使当前 seam 不值得继续承载行为的 finding 不能降级为 later concern。
 
 出现以下情况时停止扩张，先提交 decision note 或缩小方案：
 
 - 为当前 Issue 新增第二种 runtime、forge、database 或 sandbox adapter；
 - 创建没有当前生产 caller 的通用 interface；
 - 测试数量增长，但 Issue 的端到端状态没有前进；
-- first merge checkpoint 已 green，但代码仍只在本地或 reviewer 正按最终 milestone 扩大当前 PR；
+- draft checkpoint 已 green，但代码仍只在本地；
+- merge claim 只有文件变短、物理移动、测试数量或机械等价 evidence；
+- active falsifier 存在，而当前任务不 characterize、delete、replace 或 repair 它；
 - reviewer 要求证明部署威胁模型之外的敌对环境；
 - 一个修复引入新的 task tree 才能解释它；
 - agent 连续长时间 reasoning 而没有 tool call、diff、测试结果或其他可验证进展。
 
 对容易无限规划的模型，bootstrap 任务必须缩成一个可落地制品；若约十分钟或约 8k reasoning tokens 仍无 action，终止 run，保留诊断并用更小 task 或更果断的模型重启。不要继续为已经失去收敛性的 session 付 token。
 
-## 6. 测试哲学
+## 7. 测试哲学
 
 TDD 是工具，不是宗教：
 
@@ -137,14 +165,15 @@ TDD 是工具，不是宗教：
 - subprocess、Git、database 和 forge：大多数测试通过 adapter fake，保留少量真实 integration；
 - 测试公共行为和 authority boundary，不锁死内部函数、SQL 文本、migration catalog 或每一种想象中的 hostile fixture；
 - 发现真实 failure class 后再增加对应测试，不预付无限 threat matrix。
+- 建立深 module 后，新 behavior tests 穿过其 interface；adapter wire fixtures 单独验证协议；CLI end-to-end 只保留少量主路径与恢复路径。新 interface tests 覆盖旧行为后必须删除锁定旧 shallow implementation 的 tests，不把 fake modes 永久叠加到一个 suite。
 
 一个绿测试不能证明用户 outcome，测试套件也不能代替独立 review。反过来，reviewer 不负责解释 pipeline 失败；机器失败先聚合给 implementer。
 
-## 7. Review 与 clean-room 预算
+## 8. Review 与 clean-room 预算
 
 Review 要求高于实现，但 review 本身也必须有 scope 和成本预算。
 
-- 设计、架构、权限、安全和跨模块 PR 使用 fresh reviewer；普通局部 PR 可按风险选择 focused reviewer。
+- Spec/correctness review 与 design review 是不同 verdict。前者检查 Issue outcome、canonical invariants、回归与 exact SHA；后者只在上一节触发条件出现时检查 seam、depth、caller knowledge、locality 与删除计划。
 - 给 reviewer 完整 codebase 访问，但只提供 canonical docs、Issue、candidate diff 和相关 evidence；不要把作者 chat、全部历史 archive 和旧任务文档塞入 context。
 - 第一次 review 检查 Issue outcome、canonical invariants、回归和明显缺口。
 - 修复后只做 delta review：验证原 findings、修改 surfaces 和新回归。只有 correctness/security/authority blocker 可以扩大范围；其它建议进入新 Issue。
@@ -167,13 +196,13 @@ Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续
 
 1. 主编排者在临时 clean-room 目录准备有界 evidence packet：四份 canonical 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
 2. 审计者必须是未参与当前设计/实现的 fresh session。设计方向审计默认只看 packet；若需要验证“代码确实这样工作”的 claim，再提供 exact SHA 的只读 checkout，而不是作者 worktree。
-3. Prompt 固定要求主动挑战所选机制：如果今天只从用户 outcome 出发是否仍会选择同一路线、最便宜的可信替代方案是什么、哪些复杂度可以删除、是否重复实现了 library、开发是否真实可并排、什么证据会证伪当前路线、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。审计可以跨越当前 Issue non-goals，报告 deletion、replacement、`correct_before_expansion` 或 `stop_and_redesign` 建议。
+3. Prompt 固定要求主动挑战所选机制：如果今天只从用户 outcome 出发是否仍会选择同一路线、最便宜的可信替代方案是什么、哪些复杂度可以删除、是否重复实现了 library、开发是否真实可并排、什么证据会证伪当前路线、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。Evidence packet 必须包含上次失败的 causal chain、已 falsified approach、仍有效的 module/seam evidence、曾误导的 proxy metrics，以及新方案如何避免相同 mechanism。审计可以跨越当前 Issue non-goals，报告 deletion、replacement、`correct_before_expansion` 或 `stop_and_redesign` 建议。
 4. 报告输出 `continue`、`correct_before_expansion` 或 `stop_and_redesign`，并把 finding 区分为 direction blocker、current-PR defect 和 later concern。
 5. 主编排者必须把 direction blocker 映射到当前 PR 修订、一个新 Issue 或用户 decision。完成后最多做一次 focused delta audit；later concern 不得无限延长当前 checkpoint。
 
 Self-review、普通 code review、更多测试或一份主编排者总结都不能代替该 checkpoint。默认只用一个匹配能力的独立审计者；只有高风险分歧无法裁决时才增加第二视角，避免审计本身成为 quota 黑洞。
 
-## 8. 文档生命周期
+## 9. 文档生命周期
 
 不复制旧任务树和旧实现报告。本仓库从零开始，历史 clean-room archive 保存在仓库外，只用于追溯，不参与 agent 默认 context。
 
