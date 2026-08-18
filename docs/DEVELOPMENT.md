@@ -10,31 +10,27 @@ issue: https://github.com/ariga39/usine/issues/1
 
 ## 1. 权威文档与恢复顺序
 
-只有 `AGENTS.md`、`docs/DESIGN.md`、本文和 `docs/DECISIONS.md` 可以定义当前方向。`docs/agent-software-factory/codex-unattended-development-harness.md` 是从外部 harness 选择性提炼的简短操作指南，primary development orchestrator 每次 bootstrap/compact 后必须完整读取；它不是第五份设计权威，也不导入外部 harness 的完整命令、工具版本或流程。它与 canonical files、active Issue 或 Git state 冲突时以后者为准。README 只做导航和诚实的实现状态说明。Issue/PR 定义一项具体开发工作的授权范围，但不能静默推翻 canonical design。
+只有 `AGENTS.md`、`docs/DESIGN.md`、本文和 `docs/DECISIONS.md` 可以定义当前方向。`AGENTS.md` 是短入口，后三份文档是 canonical design authority；README 和 `.agents/skills/` 只做导航或提供按需方法。Issue/PR 定义一项具体开发工作的授权范围，但不能静默推翻 canonical design。
 
 任何 agent 在以下时刻必须重新执行 context bootstrap：新 session、compact 后、从其他 agent 接手、用户纠偏后、切换 Issue 或工作树后：
 
 ```text
-read AGENTS + DESIGN + DEVELOPMENT + DECISIONS
-        ↓
-primary orchestrator reads unattended-development harness
-        ↓
-read active Issue / PR / unresolved review threads
+read AGENTS + active Issue / PR / unresolved review threads
         ↓
 inspect branch + base SHA + status + diff
         ↓
-identify active falsifier + eligible task class + cluster owner
+read canonical sections relevant to the behavior
         ↓
-restate why the task is eligible and its next observable action
+identify owner + active falsifier + next observable outcome
 ```
 
-如果 summary、旧 handoff、自然语言记忆和 Git/Issue 不一致，以 Git、Issue 和 canonical docs 为准。先报告冲突，再继续；不依靠猜测补全。
+若方向、authority、architecture expansion 或 canonical conflict 无法从相关章节解释，再完整读取对应 canonical 文档；不要把每项普通工作变成全量 corpus 加载。如果 summary、旧 handoff、自然语言记忆和 Git/Issue 不一致，以 Git、Issue 和 canonical docs 为准。先报告冲突，再继续；不依靠猜测补全。
 
 ### Compact 后的机械提醒
 
 仓库规则是正确性的第一层；Codex hook 是低成本提醒层：
 
-- `PostCompact` 应提醒主 agent 重新读取四份 canonical 文档、repository unattended-development harness、当前 Issue/PR 和 Git 状态；
+- `PostCompact` 应提醒主 agent 重新读取 `AGENTS.md`、当前 Issue/PR、Git 状态和当前行为所需的 canonical sections；
 - hook 不自动修改文件、不总结设计，也不把旧 session summary 提升为权威；
 - hook 丢失只意味着少一次提醒，不能让流程失去恢复能力；
 - 方向发生重大变化或同一工作经历多次 compact 时，优先生成短 handoff 并开新 session，不无限延长已被旧假设污染的 thread。
@@ -59,12 +55,12 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 
 1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。Issue #76 授权其后唯一一次 full-refactor Issue/PR：用小提交逐 cluster 替换并删除旧 seam，不拆成会固化过渡接口的新 backlog；这不是以后大 PR 的通用先例。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
-3. 每个 branch 只实现一个 Issue。实现 agent 只写该任务声明的 surfaces。
+3. 每个 branch 只实现一个 Issue。Outcome owner 可以修改交付 coherent behavior 所需的每个内部 layer；只有真实 permission、security、external authority 或 independent concurrent ownership boundary 才能形成 writable restriction。
 4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
 5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
 6. scoped review/fix 在同一 PR 收敛；coherent outcome、checks、spec/correctness verdict 和适用的 design verdict 全部通过后由 orchestrator 自动 merge，并继续下一项 eligible Issue，不等待用户监督。
 
-GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、目标、允许写入范围、non-goals、active falsifier 状态、behavior-cluster owner、draft checkpoint、merge gate 与停止条件；它被 gitignore，不积累成第二套任务系统。
+GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、observable outcome、authority limits、non-goals、active falsifier、behavior-cluster owner、draft checkpoint、merge gate 与停止条件；它被 gitignore，不积累成第二套任务系统。使用 `.agents/skills/write-behavior-task/` 编写投影，不以预测的文件、函数、layer 或实现步骤替代 outcome ownership。
 
 所有 committed files 与 GitHub durable surfaces 都必须使用 repository-relative paths 或明确占位符；不得写入本地绝对路径、用户名、home-directory name、hostname 或其它 machine-specific identifier。运行所需的本地路径只允许留在未提交的 `.tasks/` 或进程参数中，任何复制到 Issue、PR、review/comment 或 completion evidence 的内容都必须先清理。
 
@@ -94,7 +90,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：只允许 Issue #76 后的一个 full-refactor task；fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 deployment/task constraint，不是跨模块 runtime type。Provider-neutral Coding Session 的当前 production adapter使用 Codex SDK；Herdr/transcript 不参与 completion authority；
+- product implementation：fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 deployment/task constraint，不是跨模块 runtime type。Provider-neutral Coding Session 的当前 production adapter使用 Codex SDK；Herdr/transcript 不参与 completion authority；repository-agent constitution、orchestration policy 与其 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product implementation 委派；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
 - 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
@@ -198,7 +194,7 @@ Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续
 
 审计程序：
 
-1. 主编排者在临时 clean-room 目录准备有界 evidence packet：四份 canonical 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
+1. 主编排者在临时 clean-room 目录准备有界 evidence packet：`AGENTS.md`、三份 canonical design 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
 2. 审计者必须是未参与当前设计/实现的 fresh session。设计方向审计默认只看 packet；若需要验证“代码确实这样工作”的 claim，再提供 exact SHA 的只读 checkout，而不是作者 worktree。
 3. Prompt 固定要求主动挑战所选机制：如果今天只从用户 outcome 出发是否仍会选择同一路线、最便宜的可信替代方案是什么、哪些复杂度可以删除、是否重复实现了 library、开发是否真实可并排、什么证据会证伪当前路线、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。Evidence packet 必须包含上次失败的 causal chain、已 falsified approach、仍有效的 module/seam evidence、曾误导的 proxy metrics，以及新方案如何避免相同 mechanism。审计可以跨越当前 Issue non-goals，报告 deletion、replacement、`correct_before_expansion` 或 `stop_and_redesign` 建议。
 4. 报告输出 `continue`、`correct_before_expansion` 或 `stop_and_redesign`，并把 finding 区分为 direction blocker、current-PR defect 和 later concern。
@@ -215,7 +211,7 @@ Self-review、普通 code review、更多测试或一份主编排者总结都不
 - 开发流程变化：修改本文和必要的 `AGENTS.md`；
 - 一项具体工作：GitHub Issue/PR；
 - 临时 prompt、checkpoint、handoff：`.tasks/`，不提交；
-- primary orchestrator 选择性提炼的恢复/交付约束、task templates 与 review schema：`docs/agent-software-factory/`；不复制完整外部 harness，且必须服从 canonical files 与 active Issue/Git；
+- 可复用的 task、design、simplification、checks、prose 与 review 方法：`.agents/skills/`；按需加载，不能成为设计权威或复制 canonical policy；
 - 研究笔记和 benchmark 原始输出：只在当前 decision 需要时作为 PR evidence，不成为新的权威设计。
 
-每次 compact 后重读的是这套小 corpus，而不是不断增长的历史。文档的价值在于降低恢复成本和防止漂移，不以数量衡量。
+每次 compact 后先恢复短入口、live Issue/Git 与当前行为需要的 canonical sections，而不是不断增长的历史。文档的价值在于降低恢复成本和防止漂移，不以数量衡量。

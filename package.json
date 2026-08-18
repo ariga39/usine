@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "corepack pnpm --recursive --if-present build",
+    "check:links": "node scripts/check-markdown-links.mjs",
     "db:generate": "corepack pnpm --filter @usine/runtime db:generate",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
