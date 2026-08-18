@@ -134,7 +134,7 @@ active falsifier / safety-authority defect
 
 ### TypeScript 工具链
 
-- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、`vp test` 和 `vp run --filter '@usine/cli...' build`。根 `vite.config.ts` 是 format、lint、type-check 和 test 的唯一配置入口；六个产品 package、runtime 和 CLI 各自的 package-local `vite.config.ts` 提供 `pack` entry，产品 package 另声明自己的 package-local test include。
+- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、package-local `vp test` 和 `vp run --filter '@usine/cli...' build`；完整根测试命令是 `corepack pnpm test`。它先运行根 public-seam suite，再递归运行每个声明 `test` script 的 workspace package；没有测试的 package 不需要 placeholder。根 `vite.config.ts` 是 format、lint、type-check 和根 test 的配置入口；六个产品 package、runtime 和 CLI 各自的 package-local `vite.config.ts` 提供 `pack` entry，产品 package 另声明自己的 package-local test include。
 - `vp check` 通过 type-aware/type-check 路径独立执行 TypeScript 静态检查，并继续覆盖根 `tsconfig.json` 的 `tests/**/*.ts`；packaging 成功不能替代 type-check。
 - Vite+ 内置并锁定 Oxlint、Oxfmt、Vitest 和 tsdown。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter/build orchestrator。
 - 普通 library package 使用 Vite+ `pack` 的默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，CLI 的 unbundle 保持其 executable/import contract。
