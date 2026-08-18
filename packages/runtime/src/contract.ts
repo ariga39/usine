@@ -6,12 +6,16 @@ function isMachineSpecificAbsolutePath(value: string): boolean {
   return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:/.test(value);
 }
 
+function hasParentDirectorySegment(value: string): boolean {
+  return /(?:^|[\\/])\.\.(?:$|[\\/])/.test(value);
+}
+
 const repositoryPath = z
   .string()
   .min(1)
-  .refine((value) => !isMachineSpecificAbsolutePath(value), {
+  .refine((value) => !isMachineSpecificAbsolutePath(value) && !hasParentDirectorySegment(value), {
     message:
-      "must be a repository-relative path; POSIX absolute, Windows drive-qualified, and UNC paths are not allowed",
+      "must be a repository-relative path; absolute and parent-directory paths are not allowed",
   });
 
 export const taskContractSchema = z
