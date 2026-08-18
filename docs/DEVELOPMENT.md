@@ -57,7 +57,7 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 
 除空仓库 root commit 外，不在 main 直接开发。
 
-1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 必须是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚；更大的 product milestone 通过后续串行 Issue/PR 继续，不得成为一次大 PR 的理由。
+1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。Issue #76 授权其后唯一一次 full-refactor Issue/PR：用小提交逐 cluster 替换并删除旧 seam，不拆成会固化过渡接口的新 backlog；这不是以后大 PR 的通用先例。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
 3. 每个 branch 只实现一个 Issue。实现 agent 只写该任务声明的 surfaces。
 4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
@@ -70,7 +70,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ## 3. 有界并排开发
 
-当前 `stop_and_redesign` checkpoint 不运行 implementation。Reviewed module decision 恢复 implementation eligibility 后，先串行运行；完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
+当前 classification 是 `correct_before_expansion`。只允许一个 full-refactor implementation PR 串行运行；完成 representative executable code task 与 induced live coordinator restart recovery 后，最多同时拥有两个 active implementation PR。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。
 
 恢复 implementation 后，在完成 representative executable code task 与 induced live coordinator restart recovery 之前必须串行。两项上限只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备并行开发能力的声明。
 
@@ -94,7 +94,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：当前暂停；Issue #65 已证伪 Herdr/transcript bridge 的 liveness claim，在 module design 与 salvage/rewrite decision 合并前不得启动第三次实现或选择替代 launcher。未来边界仍须保留 fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast 的 role policy，除非新 decision 明确 supersede；
+- implementation：只允许 Issue #76 后的一个 full-refactor task；fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Production coding lifecycle 使用 Codex SDK；Herdr/transcript 不参与 completion authority；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
 - 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
