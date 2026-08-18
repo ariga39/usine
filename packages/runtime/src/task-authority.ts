@@ -100,6 +100,15 @@ export function hashTaskContract(rawContract: string): string {
 export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
 
+  async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {
+    const row = await this.database.query.taskRuns.findFirst({
+      where: eq(taskRuns.taskId, taskId),
+    });
+    if (!row) return null;
+    if (row.contractHash !== contractHash) throw new Error("admitted contract is immutable");
+    return TaskAuthority.withDurableFields(row.result as TaskResult, row.deadlineAt);
+  }
+
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
     if (typeof database.select === "function") {
       const rows = await database

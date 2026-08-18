@@ -26,8 +26,6 @@ export async function admitTask(
 ): Promise<TaskResult> {
   const databaseUrl = process.env.USINE_DATABASE_URL;
   if (!databaseUrl) throw new Error("USINE_DATABASE_URL is required");
-  const deadlineEpochMs = Date.now() + contract.budget.maxElapsedMs;
-  const repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
   await applyMigrations(databaseUrl);
   const stateDirectory = process.env.USINE_STATE_DIR ?? ".usine";
   const contractHash = hashTaskContract(rawContract);
@@ -37,6 +35,9 @@ export async function admitTask(
   const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
   const authority = new TaskAuthority(database);
   try {
+    const existing = await authority.lookupExisting(contract.id, contractHash);
+    const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
+    const repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
     // Admission is the single source of the first deadline.  On recovery this
     // reads task_runs.deadline_at instead of extending the budget in process.
     const admitted = await authority.admit({
