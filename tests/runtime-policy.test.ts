@@ -70,4 +70,26 @@ describe("runtime composition", () => {
       ),
     ).toThrow("loopback");
   });
+
+  test("retains the production GitHub App authentication policy without test credentials", () => {
+    const policy = runtimePolicyFromEnvironment(
+      {
+        USINE_GITHUB_APP_SLUG: "usine-app",
+        USINE_GITHUB_APP_ID: "123",
+        USINE_GITHUB_INSTALLATION_ID: "456",
+        USINE_GITHUB_PRIVATE_KEY_PATH: "app.pem",
+        USINE_GITHUB_GIT_URL: "https://github.com/owner/repo.git",
+      },
+      { owner: "owner", name: "repo" },
+    );
+
+    expect(policy.forge).toEqual({
+      mode: "app",
+      appSlug: "usine-app",
+      appId: "123",
+      installationId: 456,
+      privateKeyPath: "app.pem",
+      gitUrl: "https://github.com/owner/repo.git",
+    });
+  });
 });
