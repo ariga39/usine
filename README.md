@@ -6,24 +6,29 @@ Usine 是一个面向自主软件交付的确定性协调器。它的目标不�
 
 Herdr/transcript lifecycle 曾被真实 settled-without-observation failure证伪，现已从 production correctness path 删除。Issue #76 选择以 provider-neutral Coding Session 包住当前 Codex SDK adapter；Issue #80 的实现随后完成六个行为模块，并通过两个 executable TypeScript delivery：正常路径形成 reviewed PR；第二条路径在 durable activation 后 SIGKILL coordinator，以同一 Task ID 重启并用 fresh fence/workspace 完成交付。
 
-运行需要 Node 24、pnpm、Git、Codex CLI 和 GitHub App 配置。状态默认写入目标仓库外的用户状态目录，也可用 `USINE_STATE_DIR` 覆盖；通过 GitHub App 环境配置运行 CLI：
+运行需要 Node 24、pnpm、Git、Codex 和 GitHub App 配置。状态默认写入目标仓库外的用户状态目录，也可用 `USINE_STATE_DIR` 覆盖；通过 GitHub App 环境配置运行 CLI：
 
 ```sh
 vp install
 vp run --filter '@usine/cli...' build
-USINE_GITHUB_APP_ID=... \
-USINE_GITHUB_INSTALLATION_ID=... \
-USINE_GITHUB_APP_SLUG=... \
-USINE_GITHUB_PRIVATE_KEY_PATH=/path/to/app.pem \
-USINE_GIT_AUTHOR_NAME="Release Bot" \
-USINE_GIT_AUTHOR_EMAIL=release@example.invalid \
-USINE_IMPLEMENTER_MODEL=gpt-5.6-luna \
-USINE_IMPLEMENTER_PROFILE=usine-implementer \
-USINE_REVIEWER_MODEL=gpt-5.6-sol \
-node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
+USINE_GITHUB_APP_ID=123456 \
+USINE_GITHUB_INSTALLATION_ID=123456 \
+USINE_GITHUB_APP_SLUG=example-app \
+USINE_GITHUB_PRIVATE_KEY_PATH=./app-private-key.pem \
+USINE_GIT_AUTHOR_NAME="Example Automation" \
+USINE_GIT_AUTHOR_EMAIL=automation@example.invalid \
+node apps/cli/dist/cli.mjs run ./committed-task-contract.json
 ```
 
-`USINE_GIT_AUTHOR_NAME` 与 `USINE_GIT_AUTHOR_EMAIL` 是必需配置；它们共同固定 host 最终 candidate commit 的 author 和 committer identity。
+完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG`、`USINE_GITHUB_PRIVATE_KEY_PATH`、`USINE_GIT_AUTHOR_NAME` 与 `USINE_GIT_AUTHOR_EMAIL`。前四项用于 GitHub App 认证；后两项共同固定 host 最终 candidate commit 的 author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
+
+以下配置是可选覆盖；省略时使用 production 默认值：
+
+- `USINE_STATE_DIR`：状态目录，默认位于用户状态目录下的 `usine` 子目录；
+- `USINE_IMPLEMENTER_MODEL`：implementer 模型，默认使用内置 role policy；
+- `USINE_REVIEWER_MODEL`：reviewer 模型，默认使用内置 role policy；
+- `USINE_REVIEWER_REASONING_EFFORT`：reviewer reasoning effort，默认使用内置 role policy；
+- `USINE_GITHUB_GIT_URL`：forge Git URL，默认由 Task Contract 的 repository owner/name 组成。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `vp test`, and `vp run --filter '@usine/cli...' build`. `vp check`
