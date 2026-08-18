@@ -96,6 +96,18 @@ export function hashTaskContract(rawContract: string): string {
 export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
 
+  private static async currentTask(database: AuthorityDatabase, taskId: string) {
+    if (typeof database.select === "function") {
+      const rows = await database
+        .select()
+        .from(taskRuns)
+        .where(eq(taskRuns.taskId, taskId))
+        .for("update");
+      return rows[0];
+    }
+    return database.query.taskRuns.findFirst({ where: eq(taskRuns.taskId, taskId) });
+  }
+
   async admit(input: AuthorityInput): Promise<TaskResult> {
     const existing = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, input.contract.id),
@@ -162,32 +174,47 @@ export class TaskAuthority {
   }
 
   async save(result: TaskResult): Promise<TaskResult> {
-    const current = await this.database.query.taskRuns.findFirst({
-      where: eq(taskRuns.taskId, result.taskId),
-    });
-    if (!current) throw new Error("task is not admitted");
-    if (current.contractHash !== result.contractHash)
-      throw new Error("admitted contract is immutable");
-    const lease = await this.database.query.repositoryLeases.findFirst({
-      where: eq(repositoryLeases.repositoryIdentity, result.writer.repositoryIdentity),
-    });
-    if (!lease || lease.taskId !== result.taskId || lease.generation !== result.writer.generation)
-      throw new Error("repository writer lease is stale");
-    const prior = current.result as TaskResult;
-    if (
-      result.candidateFence !== null &&
-      result.candidateFence < prior.evidence.implementerActivations &&
-      result.candidateSha !== prior.candidateSha
-    )
-      throw new Error("stale candidate observation");
-    if (!canTransition(prior.state, result.state)) {
-      throw new Error(`illegal task state transition: ${prior.state} -> ${result.state}`);
-    }
-    await this.database
-      .update(taskRuns)
-      .set({ state: result.state, result, updatedAt: new Date() })
-      .where(eq(taskRuns.taskId, result.taskId));
-    return result;
+    const persist = async (database: AuthorityDatabase): Promise<TaskResult> => {
+      const current = await TaskAuthority.currentTask(database, result.taskId);
+      if (!current) throw new Error("task is not admitted");
+      if (current.contractHash !== result.contractHash)
+        throw new Error("admitted contract is immutable");
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, result.writer.repositoryIdentity),
+      });
+      if (!lease || lease.taskId !== result.taskId || lease.generation !== result.writer.generation)
+        throw new Error("repository writer lease is stale");
+      const prior = current.result as TaskResult;
+      if (
+        result.candidateFence !== null &&
+        result.candidateFence < prior.evidence.implementerActivations &&
+        result.candidateSha !== prior.candidateSha
+      )
+        throw new Error("stale candidate observation");
+      if (!canTransition(prior.state, result.state)) {
+        throw new Error(`illegal task state transition: ${prior.state} -> ${result.state}`);
+      }
+      await database
+        .update(taskRuns)
+        .set({ state: result.state, result, updatedAt: new Date() })
+        .where(eq(taskRuns.taskId, result.taskId));
+      if (result.state === "reviewed_pr" || result.state === "blocked") {
+        await database
+          .delete(repositoryLeases)
+          .where(
+            and(
+              eq(repositoryLeases.repositoryIdentity, result.writer.repositoryIdentity),
+              eq(repositoryLeases.taskId, result.taskId),
+              eq(repositoryLeases.generation, result.writer.generation),
+            ),
+          );
+      }
+      return result;
+    };
+    const database = this.database as AuthorityDatabase & {
+      transaction?: <T>(callback: (transaction: AuthorityDatabase) => Promise<T>) => Promise<T>;
+    };
+    return database.transaction ? database.transaction(persist) : persist(this.database);
   }
 
   async reserveActivation(
@@ -197,9 +224,7 @@ export class TaskAuthority {
     const reserve = async (
       database: AuthorityDatabase,
     ): Promise<{ result: TaskResult; activation: number }> => {
-      const current = await database.query.taskRuns.findFirst({
-        where: eq(taskRuns.taskId, taskId),
-      });
+      const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
       const prior = current.result as TaskResult;
       const activation = prior.evidence.implementerActivations + 1;
@@ -242,10 +267,5 @@ export class TaskAuthority {
       throw new Error("candidate base is stale");
     }
     if (!/^[0-9a-f]{40}$/.test(fact.sha)) throw new Error("candidate SHA is not exact");
-  }
-
-  static invalidateEvidence(result: TaskResult, candidateSha: string): TaskResult {
-    if (result.candidateSha !== candidateSha) return result;
-    return { ...result, check: null, review: null, delivery: null, state: "candidate" };
   }
 }

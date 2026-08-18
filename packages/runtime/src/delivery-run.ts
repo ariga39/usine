@@ -14,8 +14,6 @@ export interface DeliveryRunInput {
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementerModel: string;
-  reviewerModel: string;
-  reviewerReasoningEffort: string;
   stopAfterAdmitted: boolean;
 }
 

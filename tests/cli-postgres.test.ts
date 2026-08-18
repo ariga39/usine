@@ -8,6 +8,7 @@ describe("CLI/PostgreSQL admission seam", () => {
   test.runIf(Boolean(process.env.USINE_TEST_DATABASE_URL))(
     "freezes a committed contract before activation",
     async () => {
+      const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
       const root = await mkdtemp(join(tmpdir(), "usine-admission-"));
       const repository = join(root, "repository");
       await mkdir(repository);
@@ -26,7 +27,7 @@ describe("CLI/PostgreSQL admission seam", () => {
         contractPath,
         JSON.stringify({
           id: taskId,
-          repository: { path: repository, owner: "example", name: taskId },
+          repository: { path: ".", owner: "example", name: taskId },
           baseSha,
           instructions: "No activation",
           acceptance: ["Admission is durable"],
@@ -45,7 +46,8 @@ describe("CLI/PostgreSQL admission seam", () => {
       );
       await execa("git", ["add", "task.json"], { cwd: repository });
       await execa("git", ["commit", "-m", "authorize"], { cwd: repository });
-      const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", contractPath], {
+      const run = await execa("node", [cliPath, "run", "task.json"], {
+        cwd: repository,
         env: {
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_STATE_DIR: join(root, "state"),
@@ -53,7 +55,7 @@ describe("CLI/PostgreSQL admission seam", () => {
         },
         reject: false,
       });
-      expect(run.exitCode).toBe(75);
+      expect(run.exitCode, run.stderr).toBe(75);
       expect(JSON.parse(run.stdout)).toMatchObject({
         taskId,
         state: "admitted",

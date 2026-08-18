@@ -67,8 +67,6 @@ const result = await executeDeliveryRun(
     repositoryIdentity: "recovery/" + taskId,
     deadlineEpochMs: Date.now() + 60000,
     implementerModel: "test",
-    reviewerModel: "test",
-    reviewerReasoningEffort: "low",
     stopAfterAdmitted: false,
   },
   { authority, workspace, session, quality, forge },

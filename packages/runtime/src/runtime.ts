@@ -53,8 +53,6 @@ export async function admitTask(
     repositoryIdentity,
     deadlineEpochMs,
     implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
-    reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
-    reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
   };
   try {
