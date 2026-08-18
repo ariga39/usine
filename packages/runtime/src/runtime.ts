@@ -1,11 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
 import { and, eq } from "drizzle-orm";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { execa } from "execa";
 import { App, Octokit } from "octokit";
@@ -24,11 +22,14 @@ import {
 } from "@usine/review-extractor";
 import type { ReviewerVerdict } from "@usine/review-extractor";
 import type { TaskContract } from "./contract.js";
+import { applyMigrations } from "./apply-migrations.js";
 import { httpStatus } from "./http-status.js";
 import { processTimedOut } from "./process-timed-out.js";
 import { projectCheckEnvironment } from "./project-check-environment.js";
-import { remainingUntil } from "./remaining-until.js";
+import { readCanonicalCorpus } from "./read-canonical-corpus.js";
+import { readTargetRules } from "./read-target-rules.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
+import { verifyCommittedContract } from "./verify-committed-contract.js";
 
 interface CheckResult {
   sha: string;
@@ -118,15 +119,6 @@ const implementerJsonSchema = {
   },
 };
 
-const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
-const coordinatorRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const canonicalDocumentPaths = [
-  "AGENTS.md",
-  "docs/DESIGN.md",
-  "docs/DEVELOPMENT.md",
-  "docs/DECISIONS.md",
-] as const;
-
 function operationTimeout(input: WorkflowInput, maximum = Number.POSITIVE_INFINITY): number {
   const remaining = input.deadlineEpochMs - Date.now() - 150;
   if (remaining <= 0) throw new ElapsedBudgetError();
@@ -164,68 +156,6 @@ async function runCredentialFreeGit(
     timeout: operationTimeout(input),
   });
   return { stdout: String(result.stdout) };
-}
-
-async function verifyCommittedContract(
-  contractPath: string,
-  contract: TaskContract,
-  deadlineEpochMs: number,
-): Promise<string> {
-  const repository = await realpath(contract.repository.path);
-  const path = await realpath(contractPath);
-  const relativePath = relative(repository, path);
-  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${sep}`)) {
-    throw new Error("task contract must be a committed file in the authorized repository");
-  }
-
-  await execa("git", ["-C", repository, "ls-files", "--error-unmatch", relativePath], {
-    timeout: remainingUntil(deadlineEpochMs),
-  });
-  const status = await execa(
-    "git",
-    ["-C", repository, "status", "--porcelain", "--", relativePath],
-    { timeout: remainingUntil(deadlineEpochMs) },
-  );
-  if (status.stdout !== "") throw new Error("task contract has uncommitted changes");
-  await execa("git", ["-C", repository, "cat-file", "-e", `${contract.baseSha}^{commit}`], {
-    timeout: remainingUntil(deadlineEpochMs),
-  });
-  await execa("git", ["-C", repository, "merge-base", "--is-ancestor", contract.baseSha, "HEAD"], {
-    timeout: remainingUntil(deadlineEpochMs),
-  });
-  return repository;
-}
-
-async function readCanonicalCorpus(): Promise<Array<{ path: string; contents: string }>> {
-  return Promise.all(
-    canonicalDocumentPaths.map(async (path) => {
-      return { path, contents: await readFile(resolve(coordinatorRoot, path), "utf8") };
-    }),
-  );
-}
-
-async function readTargetRules(
-  repository: string,
-  baseSha: string,
-  deadlineEpochMs: number,
-): Promise<Array<{ path: string; contents: string }>> {
-  const path = "AGENTS.md";
-  const result = await execa("git", ["-C", repository, "show", `${baseSha}:${path}`], {
-    timeout: remainingUntil(deadlineEpochMs),
-    reject: false,
-  });
-  if (result.exitCode !== 0) return [];
-  return [{ path, contents: String(result.stdout) }];
-}
-
-async function applyMigrations(databaseUrl: string): Promise<void> {
-  const pool = new Pool({ connectionString: databaseUrl });
-  try {
-    await migrate(drizzle(pool), { migrationsFolder: migrationsDirectory });
-  } finally {
-    await pool.end();
-  }
-  await DrizzleDataSource.initializeDBOSSchema({ connectionString: databaseUrl });
 }
 
 async function rejectChangedAdmittedContract(
