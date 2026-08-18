@@ -13,7 +13,6 @@ export default defineConfig({
     "src/forge-delivery.ts",
   ],
   format: "esm",
-  unbundle: true,
   dts: true,
   clean: true,
 });

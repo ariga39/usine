@@ -65,13 +65,11 @@ const result = await executeDeliveryRun(
     contractHash: "recovery-hash",
     repository: ".",
     repositoryIdentity: "recovery/" + taskId,
-    stateDirectory: ".usine-recovery",
     deadlineEpochMs: Date.now() + 60000,
     implementerModel: "test",
     reviewerModel: "test",
     reviewerReasoningEffort: "low",
     stopAfterAdmitted: false,
-    crashAfterActivation: false,
   },
   { authority, workspace, session, quality, forge },
 );

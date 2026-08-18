@@ -97,10 +97,6 @@ export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
 
   async admit(input: AuthorityInput): Promise<TaskResult> {
-    return this.admitDirect(input);
-  }
-
-  async admitDirect(input: AuthorityInput): Promise<TaskResult> {
     const existing = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, input.contract.id),
     });
@@ -166,10 +162,6 @@ export class TaskAuthority {
   }
 
   async save(result: TaskResult): Promise<TaskResult> {
-    return this.saveDirect(result);
-  }
-
-  async saveDirect(result: TaskResult): Promise<TaskResult> {
     const current = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, result.taskId),
     });
@@ -199,13 +191,6 @@ export class TaskAuthority {
   }
 
   async reserveActivation(
-    taskId: string,
-    budget: number,
-  ): Promise<{ result: TaskResult; activation: number }> {
-    return this.reserveActivationDirect(taskId, budget);
-  }
-
-  async reserveActivationDirect(
     taskId: string,
     budget: number,
   ): Promise<{ result: TaskResult; activation: number }> {

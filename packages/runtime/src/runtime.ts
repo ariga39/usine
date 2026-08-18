@@ -51,13 +51,11 @@ export async function admitTask(
     contractHash,
     repository,
     repositoryIdentity,
-    stateDirectory,
     deadlineEpochMs,
     implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
     reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
     reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
-    crashAfterActivation: process.env.USINE_CRASH_AFTER === "activation",
   };
   try {
     const result = await executeDeliveryRun(workflowInput, {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { TaskContract } from "./contract.js";
 import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
@@ -12,13 +12,11 @@ export interface DeliveryRunInput {
   contractHash: string;
   repository: string;
   repositoryIdentity: string;
-  stateDirectory: string;
   deadlineEpochMs: number;
   implementerModel: string;
   reviewerModel: string;
   reviewerReasoningEffort: string;
   stopAfterAdmitted: boolean;
-  crashAfterActivation: boolean;
 }
 
 export interface DeliveryRunServices {
@@ -41,17 +39,6 @@ const implementerSchema = {
 
 function failedResult(result: TaskResult, blocker: string): TaskResult {
   return { ...result, state: "blocked", blocker };
-}
-
-async function armSessionCrash(input: DeliveryRunInput): Promise<void> {
-  const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-activation-crash`);
-  try {
-    await readFile(marker, "utf8");
-  } catch {
-    await mkdir(dirname(marker), { recursive: true });
-    await writeFile(marker, "activation checkpointed\n");
-    setTimeout(() => process.kill(process.pid, "SIGKILL"), 50).unref();
-  }
 }
 
 function implementerPrompt(
@@ -95,7 +82,6 @@ async function runCodingAttempt(
     reservation.activation,
     previousSha,
   );
-  if (input.crashAfterActivation) await armSessionCrash(input);
   const observation = await services.session.run({
     role: "implementer",
     workspace: workspace.path,
