@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vp run --filter ./apps/cli... build",
+    "build": "vp run --filter '@usine/cli...' build",
     "check:links": "node scripts/check-markdown-links.mjs",
     "db:generate": "corepack pnpm --filter @usine/runtime db:generate",
     "format": "vp fmt",
