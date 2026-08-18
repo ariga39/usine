@@ -2,6 +2,18 @@ import { z } from "zod";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
 
+function isMachineSpecificAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:/.test(value);
+}
+
+const repositoryPath = z
+  .string()
+  .min(1)
+  .refine((value) => !isMachineSpecificAbsolutePath(value), {
+    message:
+      "must be a repository-relative path; POSIX absolute, Windows drive-qualified, and UNC paths are not allowed",
+  });
+
 export const taskContractSchema = z
   .object({
     id: z
@@ -11,7 +23,7 @@ export const taskContractSchema = z
         "must be a safe durable identifier of at most 128 characters",
       ),
     repository: z.object({
-      path: z.string().min(1),
+      path: repositoryPath,
       owner: z.string().min(1),
       name: z.string().min(1),
     }),
