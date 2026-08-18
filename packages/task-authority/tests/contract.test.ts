@@ -1,4 +1,4 @@
-import { taskContractSchema } from "../packages/runtime/src/contract.js";
+import { taskContractSchema } from "@usine/task-authority";
 import { describe, expect, test } from "vite-plus/test";
 
 const committedContract = {

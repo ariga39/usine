@@ -1,0 +1,27 @@
+{
+  "name": "@usine/coding-session",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "vp pack",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "0.146.0",
+    "@usine/task-authority": "workspace:*",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

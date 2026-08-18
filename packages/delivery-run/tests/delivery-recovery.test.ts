@@ -1,11 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskContract } from "../packages/runtime/src/contract.js";
-import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import {
-  applyTaskFact,
-  type CandidateFact,
-  type TaskResult,
-} from "../packages/runtime/src/task-authority.js";
+import type { TaskContract } from "@usine/task-authority";
+import { executeDeliveryRun } from "../src/delivery-run.js";
+import { applyTaskFact, type CandidateFact, type TaskResult } from "@usine/task-authority";
 
 const sha = "b".repeat(40);
 const implementer = {
@@ -14,16 +10,6 @@ const implementer = {
   reasoningEffort: "high",
   sandbox: "workspace-write" as const,
 };
-const environments = {
-  worker: { CI: "true" },
-  check: { CI: "true" },
-  credentialFreeGit: {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-  },
-};
-
 function contract(id: string): TaskContract {
   return {
     id,
@@ -207,7 +193,6 @@ describe("Delivery Run durable phase recovery", () => {
         repositoryIdentity: `recovery/${id}`,
         deadlineEpochMs: Date.now() + 60_000,
         implementer,
-        environments,
       },
       {
         authority: fake.authority,
@@ -273,7 +258,6 @@ describe("Delivery Run durable phase recovery", () => {
         repositoryIdentity: `recovery/${id}`,
         deadlineEpochMs: Date.now() + 60_000,
         implementer,
-        environments,
       },
       {
         authority: fake.authority,
@@ -395,7 +379,6 @@ describe("Delivery Run durable phase recovery", () => {
           repositoryIdentity: `recovery/${id}`,
           deadlineEpochMs: Date.now() + 60_000,
           implementer,
-          environments,
         },
         servicesFor(fake.authority, quality, forge),
       );
@@ -422,7 +405,6 @@ describe("Delivery Run durable phase recovery", () => {
         // must ignore it in favor of the persisted deadline.
         deadlineEpochMs: Date.now() + 60_000,
         implementer,
-        environments,
       },
       servicesFor(
         fake.authority,
@@ -476,7 +458,6 @@ describe("Delivery Run durable phase recovery", () => {
       repositoryIdentity: `recovery/${id}`,
       deadlineEpochMs: Date.now() + 60_000,
       implementer,
-      environments,
     };
     await expect(
       executeDeliveryRun(

@@ -1,12 +1,15 @@
-import type { TaskContract } from "./contract.js";
-import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
-import { CodexCodingSession } from "./coding-session.js";
-import { implementerOutputSchema } from "./role-output.js";
-import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
-import { QualityGate } from "./quality-gate.js";
-import { TaskAuthority, type CheckResult, type TaskResult } from "./task-authority.js";
-import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
-import { deadlineExpired } from "./remaining-until.js";
+import { CandidateWorkspace, type WriterWorkspace } from "@usine/candidate-workspace";
+import { CodexCodingSession, implementerOutputSchema } from "@usine/coding-session";
+import { DeliveryQuarantineError, ForgeDelivery } from "@usine/forge-delivery";
+import { QualityGate } from "@usine/quality-gate";
+import {
+  deadlineExpired,
+  TaskAuthority,
+  type CheckResult,
+  type TaskContract,
+  type TaskResult,
+} from "@usine/task-authority";
+import type { RolePolicy } from "@usine/coding-session";
 
 export interface DeliveryRunInput {
   contract: TaskContract;
@@ -15,7 +18,6 @@ export interface DeliveryRunInput {
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementer: RolePolicy;
-  environments: CapabilityEnvironments;
 }
 
 export interface DeliveryRunServices {
@@ -89,7 +91,6 @@ async function runCodingAttempt(
     sandbox: input.implementer.sandbox,
     deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerOutputSchema,
-    environment: input.environments.worker,
   });
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);

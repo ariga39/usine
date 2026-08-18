@@ -1,37 +1,23 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { TaskContract } from "./contract.js";
-import { applyMigrations } from "./apply-migrations.js";
-import { CandidateWorkspace } from "./candidate-workspace.js";
-import { CodexCodingSession } from "./coding-session.js";
-import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
-import { ForgeDelivery } from "./forge-delivery.js";
-import { QualityGate } from "./quality-gate.js";
-import { openSqliteDatabase } from "./sqlite-database.js";
-import { TaskAuthority, hashTaskContract, type TaskResult } from "./task-authority.js";
+import {
+  applyMigrations,
+  hashTaskContract,
+  openSqliteDatabase,
+  TaskAuthority,
+  type TaskContract,
+  type TaskResult,
+} from "@usine/task-authority";
+import { CandidateWorkspace } from "@usine/candidate-workspace";
+import { CodexCodingSession } from "@usine/coding-session";
+import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
+import { ForgeDelivery } from "@usine/forge-delivery";
+import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
-import { deadlineExpired } from "./remaining-until.js";
+import { deadlineExpired } from "@usine/task-authority";
 
-export {
-  capabilityEnvironments,
-  explicitWorkerEnvironment,
-  forgeGitEnvironment,
-  runtimePolicyFromEnvironment,
-  type CapabilityEnvironments,
-  type ForgePolicy,
-  type GitAuthor,
-  type RolePolicy,
-  type RuntimePolicy,
-} from "./runtime-policy.js";
-
-export type {
-  CheckResult,
-  DeliveryEffect,
-  ReviewVerdict,
-  TaskResult,
-  TaskState,
-} from "./task-authority.js";
+export { runtimePolicyFromEnvironment, type RuntimePolicy } from "./runtime-policy.js";
 
 export async function admitTask(
   contractPath: string,
@@ -69,7 +55,7 @@ export async function admitTask(
         contractPath,
         contract,
         deadlineEpochMs,
-        policy.capabilities.credentialFreeGit,
+        policy.credentialFreeGitEnvironment,
       );
     } catch (error) {
       if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
@@ -91,22 +77,23 @@ export async function admitTask(
       repository,
       stateDirectory,
       deadlineEpochMs: persistedDeadlineEpochMs,
-      environment: policy.capabilities,
+      credentialFreeGit: policy.credentialFreeGitEnvironment,
       gitAuthor: policy.gitAuthor,
     });
-    const session = new CodexCodingSession();
+    const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
     const quality = new QualityGate({
       workspace,
       session,
       reviewer: policy.roles.reviewer,
-      environment: policy.capabilities,
+      checkEnvironment: policy.checkEnvironment,
+      reviewerEnvironment: policy.workerEnvironment,
       deadlineEpochMs: persistedDeadlineEpochMs,
     });
     const forge = new ForgeDelivery({
       repository,
       deadlineEpochMs: persistedDeadlineEpochMs,
       forge: policy.forge,
-      environment: policy.capabilities,
+      environment: policy.credentialFreeGitEnvironment,
     });
     const workflowInput: DeliveryRunInput = {
       contract,
@@ -115,7 +102,6 @@ export async function admitTask(
       repositoryIdentity,
       deadlineEpochMs: persistedDeadlineEpochMs,
       implementer: policy.roles.implementer,
-      environments: policy.capabilities,
     };
     const result = await executeDeliveryRun(workflowInput, {
       authority,

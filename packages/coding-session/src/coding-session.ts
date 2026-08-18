@@ -1,7 +1,33 @@
-import type { TaskContract } from "./contract.js";
-import { explicitWorkerEnvironment } from "./runtime-policy.js";
-import { remainingUntil } from "./remaining-until.js";
+import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
+
+const PORTABLE_ENVIRONMENT_KEYS = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "PATHEXT",
+] as const;
+
+export interface RolePolicy {
+  role: "implementer" | "reviewer";
+  model: string;
+  reasoningEffort: string;
+  sandbox: "workspace-write" | "read-only";
+}
+
+export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { CI: "true" };
+  for (const key of PORTABLE_ENVIRONMENT_KEYS) {
+    if (environment[key] !== undefined) result[key] = environment[key];
+  }
+  return result;
+}
 
 export {
   implementerOutputSchema,
@@ -23,6 +49,10 @@ export interface SessionRequest<Output = unknown> {
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
+  environment?: NodeJS.ProcessEnv;
+}
+
+export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
 }
 
@@ -76,7 +106,10 @@ function sessionIdFrom(result: unknown): string | null {
 }
 
 export class CodexCodingSession {
-  constructor(private readonly clientFactory?: CodingSessionClientFactory) {}
+  constructor(
+    private readonly clientFactory?: CodingSessionClientFactory,
+    private readonly options: CodingSessionOptions = { environment: process.env },
+  ) {}
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
     let remaining: number;
@@ -143,7 +176,7 @@ export class CodexCodingSession {
       Codex: new (options?: Record<string, unknown>) => CodingSessionClient;
     };
     return new sdk.Codex({
-      env: explicitWorkerEnvironment(request.environment),
+      env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
       config: {
         model_reasoning_effort: request.reasoningEffort,
         service_tier: "default",

@@ -3,14 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
-import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import type { WriterWorkspace } from "../packages/runtime/src/candidate-workspace.js";
-import { approvalAttestationBody, ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
-import { openSqliteDatabase } from "../packages/runtime/src/sqlite-database.js";
-import { TaskAuthority } from "../packages/runtime/src/task-authority.js";
-import { taskContractSchema, type TaskContract } from "../packages/runtime/src/contract.js";
-import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
+import {
+  applyMigrations,
+  openSqliteDatabase,
+  TaskAuthority,
+  taskContractSchema,
+  type TaskContract,
+} from "@usine/task-authority";
+import type { WriterWorkspace } from "@usine/candidate-workspace";
+import { ForgeDelivery } from "@usine/forge-delivery";
+import { executeDeliveryRun } from "../src/delivery-run.js";
 
 const baseSha = "a".repeat(40);
 
@@ -167,7 +169,7 @@ function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDeliver
       apiUrl,
       gitUrl,
     },
-    environment: capabilityEnvironments(process.env),
+    environment: process.env,
   });
 }
 
@@ -186,19 +188,6 @@ const approvedReview = {
   summary: "approved",
   findings: [],
 };
-
-async function withControlledFetch<T>(
-  state: ForgeServerState,
-  action: (apiUrl: string) => Promise<T>,
-): Promise<T> {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = controlledFetch(state);
-  try {
-    return await action("http://127.0.0.1:8787");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-}
 
 describe.sequential("Forge Delivery controlled protocol", () => {
   test("drives Delivery Run from durable candidate/check/review facts through one branch, PR, and attestation", async () => {
@@ -232,7 +221,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
         reasoningEffort: "high",
         sandbox: "workspace-write" as const,
       },
-      environments: capabilityEnvironments(process.env),
     };
 
     const originalFetch = globalThis.fetch;
@@ -315,102 +303,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     }
   }, 30_000);
 
-  test("reconciles lost PR and attestation responses without duplicate effects", async () => {
-    const fixture = await repositoryFixture();
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: null,
-      pullRequests: [],
-      comments: [],
-      failAfterPullRequestCreate: true,
-      failAfterCommentCreate: true,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-    const task = contract("forge-recovery");
-    const check = { ...passingCheck, sha: fixture.candidateSha };
-    const review = { ...approvedReview, sha: fixture.candidateSha };
-
-    await withControlledFetch(state, async (apiUrl) => {
-      const result = await forge(fixture.repository, apiUrl, fixture.remote).deliver(
-        task,
-        fixture.candidateSha,
-        check,
-        review,
-      );
-      expect(result).toMatchObject({ sha: fixture.candidateSha, prNumber: 1, attestationId: "7" });
-    });
-
-    expect(await git(fixture.remote, "rev-parse", "refs/heads/agent/forge-e2e")).toBe(
-      fixture.candidateSha,
-    );
-    expect(await readFile(join(fixture.remote, "update-count"), "utf8")).toBe("1\n");
-    expect(state.pullRequestCreates).toBe(1);
-    expect(state.commentCreates).toBe(1);
-  }, 30_000);
-
-  test("quarantines a conflicting branch head before any Git update", async () => {
-    const fixture = await repositoryFixture();
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: "c".repeat(40),
-      pullRequests: [],
-      comments: [],
-      failAfterPullRequestCreate: false,
-      failAfterCommentCreate: false,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-    const task = contract("forge-conflict");
-    await expect(
-      withControlledFetch(state, (apiUrl) =>
-        forge(fixture.repository, apiUrl, fixture.remote).deliver(
-          task,
-          fixture.candidateSha,
-          { ...passingCheck, sha: fixture.candidateSha },
-          { ...approvedReview, sha: fixture.candidateSha },
-        ),
-      ),
-    ).rejects.toThrow("conflicting head");
-    await expect(readFile(join(fixture.remote, "update-count"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-  });
-
-  test("quarantines a closed PR that already targets the approved candidate", async () => {
-    const fixture = await repositoryFixture();
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: fixture.candidateSha,
-      pullRequests: [
-        {
-          number: 1,
-          state: "closed",
-          head: { sha: fixture.candidateSha },
-          html_url: "http://example.invalid/pull/1",
-        },
-      ],
-      comments: [],
-      failAfterPullRequestCreate: false,
-      failAfterCommentCreate: false,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-    await expect(
-      withControlledFetch(state, (apiUrl) =>
-        forge(fixture.repository, apiUrl, fixture.remote).deliver(
-          contract("forge-closed"),
-          fixture.candidateSha,
-          { ...passingCheck, sha: fixture.candidateSha },
-          { ...approvedReview, sha: fixture.candidateSha },
-        ),
-      ),
-    ).rejects.toThrow("closed delivery PR");
-  });
-
   test("durably quarantines a closed PR before creating a missing branch", async () => {
     const fixture = await repositoryFixture();
     const state: ForgeServerState = {
@@ -451,7 +343,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
         reasoningEffort: "high",
         sandbox: "workspace-write" as const,
       },
-      environments: capabilityEnvironments(process.env),
     };
     const admitted = await authority.admit({
       contract: task,
@@ -508,123 +399,4 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       globalThis.fetch = originalFetch;
     }
   }, 30_000);
-
-  test("quarantines duplicate matching PRs without creating another PR", async () => {
-    const fixture = await repositoryFixture();
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: fixture.candidateSha,
-      pullRequests: [
-        {
-          number: 1,
-          state: "open",
-          head: { sha: fixture.candidateSha },
-          html_url: "http://example.invalid/pull/1",
-        },
-        {
-          number: 2,
-          state: "open",
-          head: { sha: fixture.candidateSha },
-          html_url: "http://example.invalid/pull/2",
-        },
-      ],
-      comments: [],
-      failAfterPullRequestCreate: false,
-      failAfterCommentCreate: false,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-
-    await expect(
-      withControlledFetch(state, (apiUrl) =>
-        forge(fixture.repository, apiUrl, fixture.remote).deliver(
-          contract("forge-duplicate-pr"),
-          fixture.candidateSha,
-          { ...passingCheck, sha: fixture.candidateSha },
-          { ...approvedReview, sha: fixture.candidateSha },
-        ),
-      ),
-    ).rejects.toThrow("multiple delivery PRs");
-    expect(state.pullRequestCreates).toBe(0);
-    expect(state.commentCreates).toBe(0);
-  });
-
-  test("quarantines an open PR with a conflicting head instead of creating another PR", async () => {
-    const fixture = await repositoryFixture();
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: fixture.candidateSha,
-      pullRequests: [
-        {
-          number: 1,
-          state: "open",
-          head: { sha: "d".repeat(40) },
-          html_url: "http://example.invalid/pull/1",
-        },
-      ],
-      comments: [],
-      failAfterPullRequestCreate: false,
-      failAfterCommentCreate: false,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-
-    await expect(
-      withControlledFetch(state, (apiUrl) =>
-        forge(fixture.repository, apiUrl, fixture.remote).deliver(
-          contract("forge-pr-conflict"),
-          fixture.candidateSha,
-          { ...passingCheck, sha: fixture.candidateSha },
-          { ...approvedReview, sha: fixture.candidateSha },
-        ),
-      ),
-    ).rejects.toThrow("conflicting head");
-    expect(state.pullRequestCreates).toBe(0);
-  });
-
-  test("quarantines a marker-matching attestation with the wrong App/Bot identity", async () => {
-    const fixture = await repositoryFixture();
-    const task = contract("forge-identity");
-    const check = { ...passingCheck, sha: fixture.candidateSha };
-    const review = { ...approvedReview, sha: fixture.candidateSha };
-    const state: ForgeServerState = {
-      candidateSha: fixture.candidateSha,
-      headSha: fixture.candidateSha,
-      pullRequests: [
-        {
-          number: 1,
-          state: "open",
-          head: { sha: fixture.candidateSha },
-          html_url: "http://example.invalid/pull/1",
-        },
-      ],
-      comments: [
-        {
-          id: 8,
-          body: approvalAttestationBody(task, fixture.candidateSha, check, review),
-          performed_via_github_app: { slug: "different-app" },
-          user: { type: "Bot" },
-        },
-      ],
-      failAfterPullRequestCreate: false,
-      failAfterCommentCreate: false,
-      pullRequestCreates: 0,
-      commentCreates: 0,
-      requests: [],
-    };
-
-    await expect(
-      withControlledFetch(state, (apiUrl) =>
-        forge(fixture.repository, apiUrl, fixture.remote).deliver(
-          task,
-          fixture.candidateSha,
-          check,
-          review,
-        ),
-      ),
-    ).rejects.toThrow("App/Bot");
-    expect(state.commentCreates).toBe(0);
-  });
 });

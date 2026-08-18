@@ -2,7 +2,13 @@ allowBuilds:
   esbuild: true
 
 packages:
+  - packages/candidate-workspace
+  - packages/coding-session
+  - packages/delivery-run
+  - packages/forge-delivery
+  - packages/quality-gate
   - apps/cli
+  - packages/task-authority
   - packages/runtime
 
 catalog:

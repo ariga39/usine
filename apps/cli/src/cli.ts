@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { contractIssues, taskContractSchema } from "@usine/runtime/contract";
+import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
 import { admitTask, runtimePolicyFromEnvironment } from "@usine/runtime";
 
 async function main(): Promise<void> {

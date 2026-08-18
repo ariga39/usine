@@ -1,32 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-
-const PORTABLE_ENVIRONMENT_KEYS = [
-  "PATH",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "SYSTEMROOT",
-  "COMSPEC",
-  "PATHEXT",
-] as const;
-
-const WORKER_FORBIDDEN_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"] as const;
-
-export interface RolePolicy {
-  role: "implementer" | "reviewer";
-  model: string;
-  reasoningEffort: string;
-  sandbox: "workspace-write" | "read-only";
-}
-
-export interface GitAuthor {
-  name: string;
-  email: string;
-}
+import { credentialFreeGitEnvironment, type GitAuthor } from "@usine/candidate-workspace";
+import { explicitWorkerEnvironment, type RolePolicy } from "@usine/coding-session";
+import type { ForgePolicy } from "@usine/forge-delivery";
 
 const defaultRolePolicies = {
   implementer: {
@@ -43,29 +19,6 @@ const defaultRolePolicies = {
   },
 };
 
-export type ForgePolicy =
-  | {
-      mode: "test";
-      appSlug: string;
-      token: string;
-      apiUrl: string;
-      gitUrl: string;
-    }
-  | {
-      mode: "app";
-      appSlug: string;
-      appId: string;
-      installationId: number;
-      privateKeyPath: string;
-      gitUrl: string;
-    };
-
-export interface CapabilityEnvironments {
-  worker: NodeJS.ProcessEnv;
-  check: NodeJS.ProcessEnv;
-  credentialFreeGit: NodeJS.ProcessEnv;
-}
-
 export interface RuntimePolicy {
   stateDirectory: string;
   stopAfterAdmitted: boolean;
@@ -75,7 +28,9 @@ export interface RuntimePolicy {
     reviewer: RolePolicy;
   };
   forge: ForgePolicy | null;
-  capabilities: CapabilityEnvironments;
+  workerEnvironment: NodeJS.ProcessEnv;
+  checkEnvironment: NodeJS.ProcessEnv;
+  credentialFreeGitEnvironment: NodeJS.ProcessEnv;
 }
 
 export function runtimePolicyFromEnvironment(
@@ -103,13 +58,16 @@ export function runtimePolicyFromEnvironment(
 
   const gitAuthor = parseGitAuthor(environment);
   const forge = parseForgePolicy(environment, stopAfterAdmitted, repository);
+  const workerEnvironment = explicitWorkerEnvironment(environment);
   return {
     stateDirectory,
     stopAfterAdmitted,
     gitAuthor,
     roles,
     forge,
-    capabilities: capabilityEnvironments(environment),
+    workerEnvironment,
+    checkEnvironment: workerEnvironment,
+    credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
   };
 }
 
@@ -124,52 +82,6 @@ function parseGitAuthor(environment: NodeJS.ProcessEnv): GitAuthor {
     throw new Error(`Git author identity requires ${missing.join(" and ")}`);
   }
   return { name, email };
-}
-
-export function capabilityEnvironments(environment: NodeJS.ProcessEnv): CapabilityEnvironments {
-  const portable = portableEnvironment(environment);
-  const safe = { CI: "true", ...portable };
-  return {
-    worker: { ...safe },
-    check: { ...safe },
-    credentialFreeGit: {
-      ...portable,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_TERMINAL_PROMPT: "0",
-    },
-  };
-}
-
-export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { CI: "true", ...environment };
-  for (const key of Object.keys(result)) {
-    if (key.startsWith("USINE_") || WORKER_FORBIDDEN_KEYS.some((forbidden) => forbidden === key))
-      delete result[key];
-  }
-  return result;
-}
-
-export function forgeGitEnvironment(
-  environments: CapabilityEnvironments,
-  token: string,
-  gitUrl: string,
-): NodeJS.ProcessEnv {
-  const result = { ...environments.credentialFreeGit };
-  if (gitUrl.startsWith("https://github.com/")) {
-    result.GIT_CONFIG_COUNT = "1";
-    result.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
-    result.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
-  }
-  return result;
-}
-
-function portableEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = {};
-  for (const key of PORTABLE_ENVIRONMENT_KEYS) {
-    if (environment[key] !== undefined) result[key] = environment[key];
-  }
-  return result;
 }
 
 function parseForgePolicy(

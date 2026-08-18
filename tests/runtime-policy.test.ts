@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { runtimePolicyFromEnvironment } from "../packages/runtime/src/runtime.js";
+import { runtimePolicyFromEnvironment } from "@usine/runtime";
 
 describe("runtime composition", () => {
   test("validates deployment inputs once and derives capability-safe values", () => {
@@ -49,11 +49,11 @@ describe("runtime composition", () => {
         gitUrl: "http://127.0.0.1:8787/owner/repo.git",
       },
     });
-    expect(policy.capabilities.worker).toMatchObject({ CI: "true", PATH: "/portable/bin" });
-    expect(policy.capabilities.worker).not.toHaveProperty("OPENAI_API_KEY");
-    expect(policy.capabilities.worker).not.toHaveProperty("GITHUB_TOKEN");
-    expect(policy.capabilities.check).toEqual(policy.capabilities.worker);
-    expect(policy.capabilities.credentialFreeGit).toMatchObject({
+    expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
+    expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
+    expect(policy.workerEnvironment).not.toHaveProperty("GITHUB_TOKEN");
+    expect(policy.checkEnvironment).toEqual(policy.workerEnvironment);
+    expect(policy.credentialFreeGitEnvironment).toMatchObject({
       PATH: "/portable/bin",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",

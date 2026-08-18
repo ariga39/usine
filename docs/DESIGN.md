@@ -1,7 +1,7 @@
 ---
 status: current
-design_version: 0.5
-updated: 2026-08-18
+design_version: 0.6
+updated: 2026-08-19
 issue: https://github.com/ariga39/usine/issues/1
 ---
 
@@ -147,7 +147,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 
 ## 8. 深模块与 library-first 边界
 
-模块是行为边界，不预先等同于 npm package。V0 只有六个生产模块；CLI 是 composition root，不算第七个 module：
+模块是行为边界，并由六个真实 pnpm workspace package 物理执行：`@usine/task-authority`、`@usine/delivery-run`、`@usine/coding-session`、`@usine/candidate-workspace`、`@usine/quality-gate` 和 `@usine/forge-delivery`。CLI 与 `@usine/runtime` 只负责组合，不是第七个行为 module：
 
 | 模块 | 隐藏的 policy | 外部 caller 只知道 | 允许的内部 seams 与 change locality |
 |---|---|---|---|
@@ -158,7 +158,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 | **Quality Gate** | 分别产生 project check 与 fresh exact-SHA review facts，并聚合 findings | `check(candidate, contract)` 返回 exact-SHA Check Result；`review(candidate, contract, check)` 返回 fresh exact-SHA Review Verdict | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
 | **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` | Octokit 与 credential-scoped Git push；不运行 candidate code，也不能制造 semantic approval |
 
-依赖只向产品 policy 内侧流动：CLI 组合 Delivery Run；Delivery Run 独占 activation/retry/budget policy并使用其余五个接口；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral SessionRef，不传递 Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。需要独立发布、独立 caller 或独立 deployment 前，这些模块留在少量 workspace package 内，不以 package 数量证明设计。
+依赖只向产品 policy 内侧流动：CLI/runtime 组合 Delivery Run；Delivery Run 独占 activation/retry/budget policy 并使用其余五个 package；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。依赖图必须有向无环，生产代码和测试只能使用声明依赖的 package exports，不能穿透其它 package 的 `src` 或 `dist`。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral SessionRef，不传递 Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。每个 package 必须拥有真实 caller 与有意义的 policy；共享 option/type 归消费它的 module，Delivery Run 不接收无关的 environment 或 credential capability bundle。
 
 ### 8.1 Coding Session 的最小 contract
 
@@ -195,12 +195,12 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 |---|---|
 | **salvage unchanged** | Task Contract Zod shape；immutable exact-SHA evidence vocabulary；one-writer/repository identity；credential-free host commit与 ancestry/clean checks；GitHub probe-before-retry、head quarantine 和 attestation identity algorithms |
 | **salvage behind a new seam** | Drizzle schema/migrations与 durable lifecycle facts进入 Task Authority/Delivery Run；worktree helpers进入 Candidate Workspace；project-check environment进入 Quality Gate；Octokit/Git delivery进入 Forge Delivery；CLI 只保留 parse、invoke、exit projection |
-| **delete/replace** | `runtime.ts` composition monolith；`@usine/agent-runtime` shallow helper package；`@usine/review-extractor` whole rendered-transcript second-model path；全部 production Herdr pane/prompt/read/get/close；manual Codex JSONL/session parser、output artifact instruction和 fallback branch；把 Usine 自身 canonical corpus塞给 target implementer；`record://` production branch；one-function physical decomposition；动态 scattered env reads |
+| **delete/replace** | `runtime.ts` 中被删除的 behavior-module ownership 与旧 multi-entry build surface；`@usine/agent-runtime` shallow helper package；`@usine/review-extractor` whole rendered-transcript second-model path；全部 production Herdr pane/prompt/read/get/close；manual Codex JSONL/session parser、output artifact instruction和 fallback branch；把 Usine 自身 canonical corpus塞给 target implementer；`record://` production branch；one-function physical decomposition；动态 scattered env reads |
 | **one characterization decides** | Codex SDK 对 Luna/high/default-tier/no-fast、controlled env、structured implementer/reviewer output 与 AbortSignal 的 config parity；现有 read-only MCP/capability 的具体接入配置；restart 后 fresh retry 与 optional thread resume 的成本差异。Characterization 可以替换 adapter/config，不取消 Coding Session 或其它必要模块 |
 
 测试也 replace 而不是 layer：删除 `fake-herdr` 及其 command-count/mode matrix；删除 transcript line-wrap/extractor suite；把 1500 行 CLI suite 拆为 Task Authority reducer/persistence tests、Coding Session SDK-adapter contract tests、Candidate/Quality tests、Forge reconciliation tests和至多两条 CLI/SQLite end-to-end。新 adapter fake 发 typed SDK events，不复刻 CLI/pane 实现；旧 test claim 被新 module behavior 覆盖后在同一 full-refactor PR 删除。
 
-按当前文件的保守 deletion floor，两个 shallow packages 约 150 行 source、`fake-herdr` 约 220 行、`runtime.ts` 中 Herdr/transcript/manual lifecycle 分支约 350 行会直接消失；CLI suite 中对应 command-count、line-wrap、fallback mode cases 也整体替换，预计再删除数百行。该估算只证明 clean boundary 有真实删除空间，不把净行数作为 merge gate。六个 module 是本 PR 的 target map，不是六个预定 package：live caller 若证明某个 boundary 不隐藏 policy，重构 PR应合并或删除它；未经新的 design evidence 不得增加第七个。
+按当前文件的保守 deletion floor，两个 shallow packages 约 150 行 source、`fake-herdr` 约 220 行、旧 `runtime.ts` 中 Herdr/transcript/manual lifecycle 分支约 350 行会直接消失；CLI suite 中对应 command-count、line-wrap、fallback mode cases 也整体替换，预计再删除数百行。该估算只证明 clean boundary 有真实删除空间，不把净行数作为 merge gate。Issue #116 将六个 module map 固定为六个实际 package；若未来 live evidence 要改变 boundary，必须更新 design/decision 并保持 package exports、声明依赖和无环图，不得借 runtime 私有 route 恢复旧 ownership，也不得无证据增加第七个行为 package。
 
 ### 8.4 Clean implementation decision and counterargument
 
