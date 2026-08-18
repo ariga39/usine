@@ -1,10 +1,10 @@
-import type { TaskContract } from "./contract.js";
+import type { TaskContract } from "@usine/task-authority";
 import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { implementerOutputSchema } from "./role-output.js";
 import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
-import { TaskAuthority, type CheckResult, type TaskResult } from "./task-authority.js";
+import { TaskAuthority, type CheckResult, type TaskResult } from "@usine/task-authority";
 import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "./remaining-until.js";
 

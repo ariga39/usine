@@ -10,7 +10,8 @@
     "build": "vp pack"
   },
   "dependencies": {
-    "@usine/runtime": "workspace:*"
+    "@usine/runtime": "workspace:*",
+    "@usine/task-authority": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "latest",

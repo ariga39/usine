@@ -1,11 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskContract } from "../packages/runtime/src/contract.js";
+import type { TaskContract } from "@usine/task-authority";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import {
-  applyTaskFact,
-  type CandidateFact,
-  type TaskResult,
-} from "../packages/runtime/src/task-authority.js";
+import { applyTaskFact, type CandidateFact, type TaskResult } from "@usine/task-authority";
 
 const sha = "b".repeat(40);
 const implementer = {

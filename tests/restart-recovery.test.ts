@@ -3,15 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
+import { applyMigrations } from "@usine/task-authority";
 
 const childSource = String.raw`
 import { writeFile } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
-import { drizzle } from "./packages/runtime/node_modules/drizzle-orm/sqlite-proxy/index.js";
-import { executeDeliveryRun } from "./packages/runtime/dist/delivery-run.mjs";
-import { TaskAuthority } from "./packages/runtime/dist/task-authority.mjs";
-import { repositoryLeases, taskRuns } from "./packages/runtime/dist/schema.mjs";
+import { executeDeliveryRun } from "@usine/runtime";
+import { openSqliteDatabase, TaskAuthority } from "@usine/task-authority";
 
 const marker = process.env.USINE_RECOVERY_MARKER;
 const mode = process.env.USINE_RECOVERY_MODE;
@@ -32,19 +29,8 @@ const contract = {
   authorization: { source: "recovery test", delivery: true },
   delivery: { baseBranch: "main", branch: "agent/recovery", issue: 1, title: "recovery", body: "recovery" },
 };
-const client = new DatabaseSync(databasePath, { timeout: 5000 });
-const database = drizzle(async (query, params, method) => {
-  const statement = client.prepare(query);
-  statement.setReturnArrays(true);
-  const values = params;
-  if (method === "run") {
-    statement.run(...values);
-    return { rows: [] };
-  }
-  if (method === "get") return { rows: statement.get(...values) };
-  return { rows: statement.all(...values) };
-}, { schema: { repositoryLeases, taskRuns } });
-const authority = new TaskAuthority(database);
+const databaseHandle = openSqliteDatabase(databasePath);
+const authority = new TaskAuthority(databaseHandle.database);
 const workspace = {
   quarantinePriorWriters: async (_taskId, activation) => {
     if (activation > 1) await writeFile(marker, "prior writer quarantined\\n");
@@ -114,7 +100,7 @@ try {
 if (!staleRejected) throw new Error("stale candidate was accepted");
 await writeFile(marker + ".result", JSON.stringify(result));
 console.log(JSON.stringify({ ...result, staleRejected }));
-client.close();
+databaseHandle.close();
 `;
 
 describe("SQLite coordinator restart recovery", () => {

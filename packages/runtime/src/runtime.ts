@@ -1,17 +1,23 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { TaskContract } from "./contract.js";
-import { applyMigrations } from "./apply-migrations.js";
+import {
+  applyMigrations,
+  hashTaskContract,
+  openSqliteDatabase,
+  TaskAuthority,
+  type TaskContract,
+  type TaskResult,
+} from "@usine/task-authority";
 import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
-import { openSqliteDatabase } from "./sqlite-database.js";
-import { TaskAuthority, hashTaskContract, type TaskResult } from "./task-authority.js";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "./remaining-until.js";
+
+export { executeDeliveryRun } from "./delivery-run.js";
 
 export {
   capabilityEnvironments,
@@ -31,7 +37,7 @@ export type {
   ReviewVerdict,
   TaskResult,
   TaskState,
-} from "./task-authority.js";
+} from "@usine/task-authority";
 
 export async function admitTask(
   contractPath: string,

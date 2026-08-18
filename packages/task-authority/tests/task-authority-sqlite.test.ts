@@ -2,10 +2,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
-import { openSqliteDatabase } from "../packages/runtime/src/sqlite-database.js";
-import type { TaskContract } from "../packages/runtime/src/contract.js";
-import { TaskAuthority, type TaskResult } from "../packages/runtime/src/task-authority.js";
+import {
+  applyMigrations,
+  openSqliteDatabase,
+  TaskAuthority,
+  type TaskContract,
+  type TaskResult,
+} from "@usine/task-authority";
 
 const handles: Array<{ close: () => void }> = [];
 

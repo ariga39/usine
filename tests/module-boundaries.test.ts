@@ -9,12 +9,8 @@ import {
   reviewerOutputSchema,
 } from "../packages/runtime/src/coding-session.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
-import {
-  applyTaskFact,
-  canTransition,
-  type TaskResult,
-} from "../packages/runtime/src/task-authority.js";
-import type { TaskContract } from "../packages/runtime/src/contract.js";
+import { applyTaskFact, canTransition, type TaskResult } from "@usine/task-authority";
+import type { TaskContract } from "@usine/task-authority";
 import { CandidateWorkspace } from "../packages/runtime/src/candidate-workspace.js";
 import { QualityGate } from "../packages/runtime/src/quality-gate.js";
 import { ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";

@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { applyMigrations } from "../packages/runtime/src/apply-migrations.js";
+import {
+  applyMigrations,
+  openSqliteDatabase,
+  TaskAuthority,
+  taskContractSchema,
+  type TaskContract,
+} from "@usine/task-authority";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
 import type { WriterWorkspace } from "../packages/runtime/src/candidate-workspace.js";
 import { approvalAttestationBody, ForgeDelivery } from "../packages/runtime/src/forge-delivery.js";
-import { openSqliteDatabase } from "../packages/runtime/src/sqlite-database.js";
-import { TaskAuthority } from "../packages/runtime/src/task-authority.js";
-import { taskContractSchema, type TaskContract } from "../packages/runtime/src/contract.js";
 import { capabilityEnvironments } from "../packages/runtime/src/runtime-policy.js";
 
 const baseSha = "a".repeat(40);

@@ -1,8 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { execa } from "execa";
 import { App, Octokit } from "octokit";
-import type { TaskContract } from "./contract.js";
-import type { CheckResult, DeliveryEffect, ReviewVerdict } from "./task-authority.js";
+import type {
+  CheckResult,
+  DeliveryEffect,
+  ReviewVerdict,
+  TaskContract,
+} from "@usine/task-authority";
 import {
   forgeGitEnvironment,
   type CapabilityEnvironments,

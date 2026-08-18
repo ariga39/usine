@@ -1,9 +1,9 @@
 import { execa } from "execa";
-import type { TaskContract } from "./contract.js";
+import type { TaskContract } from "@usine/task-authority";
 import { CandidateWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { reviewerOutputSchema } from "./role-output.js";
-import type { CheckResult, ReviewVerdict } from "./task-authority.js";
+import type { CheckResult, ReviewVerdict } from "@usine/task-authority";
 import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
 import { remainingUntil } from "./remaining-until.js";
 

@@ -7,26 +7,20 @@
     ".": {
       "types": "./src/runtime.ts",
       "import": "./dist/runtime.mjs"
-    },
-    "./contract": {
-      "types": "./src/contract.ts",
-      "import": "./dist/contract.mjs"
     }
   },
   "scripts": {
-    "build": "vp pack",
-    "db:generate": "drizzle-kit generate"
+    "build": "vp pack"
   },
   "dependencies": {
     "@openai/codex-sdk": "0.146.0",
-    "drizzle-orm": "latest",
+    "@usine/task-authority": "workspace:*",
     "execa": "latest",
     "octokit": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
-    "drizzle-kit": "latest",
     "typescript": "latest",
     "vite": "catalog:",
     "vite-plus": "catalog:"

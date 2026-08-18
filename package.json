@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vp run --filter '@usine/cli...' build",
     "check:links": "node scripts/check-markdown-links.mjs",
-    "db:generate": "corepack pnpm --filter @usine/runtime db:generate",
+    "db:generate": "corepack pnpm --filter @usine/task-authority db:generate",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
     "lint": "vp lint",
@@ -15,6 +15,8 @@
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@usine/runtime": "workspace:*",
+    "@usine/task-authority": "workspace:*",
     "execa": "latest",
     "typescript": "latest",
     "vite": "catalog:",

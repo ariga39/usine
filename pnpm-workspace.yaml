@@ -3,6 +3,7 @@ allowBuilds:
 
 packages:
   - apps/cli
+  - packages/task-authority
   - packages/runtime
 
 catalog:
