@@ -43,14 +43,6 @@ function failedResult(result: TaskResult, blocker: string): TaskResult {
   return { ...result, state: "blocked", blocker };
 }
 
-export function nextActivation(
-  result: Pick<TaskResult, "evidence">,
-  budget: number,
-): number | null {
-  const activation = result.evidence.implementerActivations + 1;
-  return activation > budget ? null : activation;
-}
-
 async function armSessionCrash(input: DeliveryRunInput): Promise<void> {
   const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-activation-crash`);
   try {

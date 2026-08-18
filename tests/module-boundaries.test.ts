@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vitest";
 import { CodexCodingSession, workerEnvironment } from "../packages/runtime/src/coding-session.js";
-import { nextActivation } from "../packages/runtime/src/delivery-run.js";
 import { approvalAttestationBody } from "../packages/runtime/src/forge-delivery.js";
 import { parseReviewObservation } from "../packages/runtime/src/quality-gate.js";
 import { canTransition } from "../packages/runtime/src/task-authority.js";
@@ -220,18 +219,6 @@ describe("module contracts", () => {
         { sha, verdict: "changes_requested", summary: "fix", findings: ["fix"] },
       ),
     ).rejects.toThrow("exact-SHA semantic approval");
-  });
-
-  test("Delivery Run stops activating after the bounded budget", () => {
-    const evidence = {
-      workflowId: "module-test",
-      implementerActivations: 1,
-      reviewCycles: 0,
-      changesRequestedBatches: 0,
-      restartRecoveries: 0,
-    };
-    expect(nextActivation({ evidence }, 2)).toBe(2);
-    expect(nextActivation({ evidence: { ...evidence, implementerActivations: 2 } }, 2)).toBeNull();
   });
 });
 
