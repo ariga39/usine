@@ -94,6 +94,8 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 所有 delegated repository implementer/reviewer session 必须由 primary orchestrator 在 `HERDR_ENV=1` 的会话中通过 Herdr 启动、prompt、inspect 和 wait；不得以 native/internal subagent API 替代。Herdr state 只是观察证据，不授予 Git、Issue、check、review 或 completion authority。Herdr 不可用时报告 development-environment blocker，不静默切换 launcher。
 
+Repository-agent constitution、orchestration policy 与 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product-code implementation 委派。
+
 - product-code implementation：fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 repository-development constraint；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
