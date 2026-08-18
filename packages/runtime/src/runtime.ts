@@ -12,7 +12,7 @@ import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "./delivery-run.js";
 import { ForgeDelivery } from "./forge-delivery.js";
-import { QualityGate } from "./quality-gate.js";
+import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "@usine/task-authority";

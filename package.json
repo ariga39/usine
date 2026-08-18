@@ -17,6 +17,7 @@
     "@types/node": "latest",
     "@usine/candidate-workspace": "workspace:*",
     "@usine/coding-session": "workspace:*",
+    "@usine/quality-gate": "workspace:*",
     "@usine/runtime": "workspace:*",
     "@usine/task-authority": "workspace:*",
     "execa": "latest",

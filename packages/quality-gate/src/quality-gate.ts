@@ -1,9 +1,8 @@
 import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession, reviewerOutputSchema } from "@usine/coding-session";
+import { CodexCodingSession, reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
 import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
-import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -19,7 +18,8 @@ export interface QualityGateOptions {
   workspace: CandidateWorkspace;
   session: CodexCodingSession;
   reviewer: RolePolicy;
-  environment: CapabilityEnvironments;
+  checkEnvironment: NodeJS.ProcessEnv;
+  reviewerEnvironment: NodeJS.ProcessEnv;
   deadlineEpochMs: number;
 }
 
@@ -48,7 +48,7 @@ export class QualityGate {
         try {
           result = await execa("sh", ["-c", contract.projectCheck.command], {
             cwd: path,
-            env: this.options.environment.check,
+            env: this.options.checkEnvironment,
             extendEnv: false,
             timeout,
             reject: false,
@@ -109,7 +109,7 @@ export class QualityGate {
           sandbox: this.options.reviewer.sandbox,
           deadlineEpochMs: this.options.deadlineEpochMs,
           outputSchema: reviewerOutputSchema,
-          environment: this.options.environment.worker,
+          environment: this.options.reviewerEnvironment,
         });
         if (observation.status !== "completed" || !observation.output)
           return {

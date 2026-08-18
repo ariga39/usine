@@ -4,6 +4,7 @@ allowBuilds:
 packages:
   - packages/candidate-workspace
   - packages/coding-session
+  - packages/quality-gate
   - apps/cli
   - packages/task-authority
   - packages/runtime

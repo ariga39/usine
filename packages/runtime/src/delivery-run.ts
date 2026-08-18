@@ -1,7 +1,7 @@
 import { CandidateWorkspace, type WriterWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession, implementerOutputSchema } from "@usine/coding-session";
 import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
-import { QualityGate } from "./quality-gate.js";
+import { QualityGate } from "@usine/quality-gate";
 import {
   deadlineExpired,
   TaskAuthority,
