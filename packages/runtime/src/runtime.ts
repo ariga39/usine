@@ -46,11 +46,10 @@ export async function admitTask(
     }
     const blockExpiredExisting = async (): Promise<TaskResult> => {
       if (!existing) throw new Error("cannot expire a task before admission");
-      const blocked = await authority.save({
-        ...existing,
-        state: "blocked",
-        blocker: "elapsed budget exhausted",
-      });
+      const blocked = await authority.block(
+        { taskId: existing.taskId, revision: existing.revision },
+        "elapsed budget exhausted",
+      );
       await writeTaskResult(stateDirectory, blocked);
       return blocked;
     };

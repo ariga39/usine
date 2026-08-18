@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { TaskContract } from "../packages/runtime/src/contract.js";
 import { executeDeliveryRun } from "../packages/runtime/src/delivery-run.js";
-import type { TaskResult } from "../packages/runtime/src/task-authority.js";
+import { applyTaskFact, type TaskResult } from "../packages/runtime/src/task-authority.js";
 
 const sha = "b".repeat(40);
 
@@ -57,13 +57,29 @@ function persistedResult(state: TaskResult["state"], id: string): TaskResult {
 function fakeAuthority(initial: TaskResult) {
   let stored = initial;
   let implementerActivations = 0;
+  const transition = async (
+    observation: { taskId: string; revision: number },
+    fact: Parameters<typeof applyTaskFact>[1],
+  ) => {
+    if (observation.taskId !== stored.taskId || observation.revision !== stored.revision)
+      throw new Error("stale task revision");
+    stored = { ...applyTaskFact(stored, fact), revision: stored.revision + 1 };
+    return stored;
+  };
   const authority = {
     admit: async () => stored,
-    save: async (next: TaskResult) => {
-      if (next.revision !== stored.revision) throw new Error("stale task revision");
-      stored = { ...next, revision: stored.revision + 1 };
-      return stored;
-    },
+    recordCheck: (observation: { taskId: string; revision: number }, check: TaskResult["check"]) =>
+      transition(observation, { type: "check", check: check! }),
+    recordReview: (
+      observation: { taskId: string; revision: number },
+      review: TaskResult["review"],
+    ) => transition(observation, { type: "review", review: review! }),
+    recordDelivery: (
+      observation: { taskId: string; revision: number },
+      delivery: TaskResult["delivery"],
+    ) => transition(observation, { type: "delivery", delivery: delivery! }),
+    block: (observation: { taskId: string; revision: number }, blocker: string) =>
+      transition(observation, { type: "blocked", blocker }),
     reserveActivation: async () => {
       implementerActivations += 1;
       stored = {
@@ -231,7 +247,7 @@ describe("Delivery Run durable phase recovery", () => {
         calls += 1;
         if (!effectObserved) {
           // The external PR/comment write happened, but the coordinator lost
-          // the response before it could save reviewed_pr.
+          // the response before it could persist reviewed_pr.
           effectObserved = true;
           throw new Error("response lost after effect");
         }

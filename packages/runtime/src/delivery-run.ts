@@ -35,8 +35,12 @@ const implementerSchema = {
   },
 };
 
-function failedResult(result: TaskResult, blocker: string): TaskResult {
-  return { ...result, state: "blocked", blocker };
+function blockTask(
+  authority: TaskAuthority,
+  result: TaskResult,
+  blocker: string,
+): Promise<TaskResult> {
+  return authority.block({ taskId: result.taskId, revision: result.revision }, blocker);
 }
 
 function implementerPrompt(
@@ -127,15 +131,18 @@ async function runCodingAttempt(
   }
   try {
     const candidate = await services.workspace.freeze(workspace, previousSha);
-    services.authority.acceptCandidate(reservation.result, {
-      sha: candidate.sha,
-      baseSha: candidate.baseSha,
-      generation: reservation.result.writer.generation,
-      fence: workspace.fence,
-    });
+    const accepted = await services.authority.recordCandidate(
+      { taskId: reservation.result.taskId, revision: reservation.result.revision },
+      {
+        sha: candidate.sha,
+        baseSha: candidate.baseSha,
+        generation: reservation.result.writer.generation,
+        fence: workspace.fence,
+      },
+    );
     return {
       status: "succeeded",
-      result: reservation.result,
+      result: accepted,
       candidate: { ...candidate, workspace },
     };
   } catch (error) {
@@ -161,7 +168,7 @@ export async function executeDeliveryRun(
   });
   if (result.state === "reviewed_pr" || result.state === "blocked") return result;
   if (Date.now() >= result.deadlineEpochMs)
-    return services.authority.save(failedResult(result, "elapsed budget exhausted"));
+    return blockTask(services.authority, result, "elapsed budget exhausted");
   if (input.stopAfterAdmitted) return result;
 
   // This is intentionally a reducer over the durable result.  A restart must
@@ -169,7 +176,7 @@ export async function executeDeliveryRun(
   // worker process or start from the contract base again.
   for (;;) {
     if (Date.now() >= result.deadlineEpochMs)
-      return services.authority.save(failedResult(result, "elapsed budget exhausted"));
+      return blockTask(services.authority, result, "elapsed budget exhausted");
 
     if (result.state === "admitted" || result.state === "checked" || result.state === "reviewed") {
       const checkFailed = result.state === "checked" && result.check?.status === "failed";
@@ -183,17 +190,16 @@ export async function executeDeliveryRun(
           result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles ||
           result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
         )
-          return services.authority.save(
-            failedResult(result, "review changes requested after recovery budget was exhausted"),
+          return blockTask(
+            services.authority,
+            result,
+            "review changes requested after recovery budget was exhausted",
           );
         // This marker is durable, so a restart cannot count the same finding
         // batch twice before activating its repair writer.
-        result = await services.authority.save({
-          ...result,
-          evidence: {
-            ...result.evidence,
-            changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
-          },
+        result = await services.authority.recordRepairBatch({
+          taskId: result.taskId,
+          revision: result.revision,
         });
         continue;
       }
@@ -207,8 +213,10 @@ export async function executeDeliveryRun(
         try {
           attempt = await runCodingAttempt(input, services, previousSha, findings);
         } catch (error) {
-          return services.authority.save(
-            failedResult(result, error instanceof Error ? error.message : String(error)),
+          return blockTask(
+            services.authority,
+            result,
+            error instanceof Error ? error.message : String(error),
           );
         }
         result = attempt.result;
@@ -217,21 +225,10 @@ export async function executeDeliveryRun(
             result.evidence.implementerActivations >=
             input.contract.budget.maxImplementerActivations
           )
-            return services.authority.save(failedResult(result, attempt.reason));
+            return blockTask(services.authority, result, attempt.reason);
           continue;
         }
         const candidate = attempt.candidate;
-        result = await services.authority.save({
-          ...result,
-          state: "candidate",
-          candidateSha: candidate.sha,
-          candidateFence: candidate.workspace.fence,
-          check: null,
-          review: null,
-          delivery: null,
-          blocker: null,
-          activeActivation: null,
-        });
         await services.workspace.quarantine(candidate.workspace);
         continue;
       }
@@ -239,12 +236,10 @@ export async function executeDeliveryRun(
 
     if (result.state === "candidate" || result.state === "checked") {
       if (result.state === "checked" && !result.check)
-        return services.authority.save(failedResult(result, "checked phase has no check fact"));
+        return blockTask(services.authority, result, "checked phase has no check fact");
       if (result.state === "checked" && result.check?.status === "failed") continue;
       if (!result.candidateSha)
-        return services.authority.save(
-          failedResult(result, `${result.state} phase has no exact SHA`),
-        );
+        return blockTask(services.authority, result, `${result.state} phase has no exact SHA`);
       if (result.state === "candidate")
         await services.workspace.quarantinePriorWriters(input.contract.id, Number.MAX_SAFE_INTEGER);
       const cycle = Math.min(
@@ -255,37 +250,35 @@ export async function executeDeliveryRun(
       try {
         evaluation = await services.quality.evaluate(input.contract, result.candidateSha, cycle);
       } catch (error) {
-        return services.authority.save(
-          failedResult(result, error instanceof Error ? error.message : String(error)),
+        return blockTask(
+          services.authority,
+          result,
+          error instanceof Error ? error.message : String(error),
         );
       }
-      result = await services.authority.save({
-        ...result,
-        state: "checked",
-        check: evaluation.check,
-        review: null,
-      });
+      result = await services.authority.recordCheck(
+        { taskId: result.taskId, revision: result.revision },
+        evaluation.check,
+      );
       if (evaluation.check.status !== "passed") continue;
-      result = await services.authority.save({
-        ...result,
-        state: "reviewed",
-        review: evaluation.review,
-        evidence: { ...result.evidence, reviewCycles: cycle },
-      });
+      result = await services.authority.recordReview(
+        { taskId: result.taskId, revision: result.revision },
+        evaluation.review,
+      );
       continue;
     }
 
     if (result.state === "reviewed") {
       if (!result.review || !result.check || !result.candidateSha)
-        return services.authority.save(failedResult(result, "reviewed phase is incomplete"));
+        return blockTask(services.authority, result, "reviewed phase is incomplete");
       if (result.review.verdict === "inconclusive")
-        return services.authority.save(
-          failedResult(result, `review inconclusive: ${result.review.summary}`),
+        return blockTask(
+          services.authority,
+          result,
+          `review inconclusive: ${result.review.summary}`,
         );
       if (result.review.verdict === "changes_requested") {
-        return services.authority.save(
-          failedResult(result, "review repair reducer did not advance"),
-        );
+        return blockTask(services.authority, result, "review repair reducer did not advance");
       }
       // ForgeDelivery probes before every effect, so a restart after an
       // uncertain PR/comment write reconciles the same approved bundle.  Keep
@@ -297,10 +290,13 @@ export async function executeDeliveryRun(
         result.check,
         result.review,
       );
-      return services.authority.save({ ...result, state: "reviewed_pr", delivery });
+      return services.authority.recordDelivery(
+        { taskId: result.taskId, revision: result.revision },
+        delivery,
+      );
     }
 
-    return services.authority.save(failedResult(result, "unknown durable task phase"));
+    return blockTask(services.authority, result, "unknown durable task phase");
   }
 }
 
