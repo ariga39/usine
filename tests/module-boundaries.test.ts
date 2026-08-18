@@ -231,3 +231,31 @@ test("CLI keeps invalid contract input at the public parse boundary", async () =
   expect(run.exitCode).toBe(2);
   expect(run.stderr).toContain("invalid_task_contract");
 });
+
+test("CLI exposes the package version without task setup", async () => {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "version"], {
+    reject: false,
+    stripFinalNewline: false,
+    env: {
+      ...process.env,
+      USINE_DATABASE_URL: undefined,
+      GITHUB_TOKEN: undefined,
+      GH_TOKEN: undefined,
+    },
+  });
+
+  expect(run.exitCode).toBe(0);
+  expect(run.stdout).toBe('{"version":"0.1.0"}\n');
+  expect(run.stderr).toBe("");
+});
+
+test("CLI preserves invalid usage behavior", async () => {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs"], {
+    reject: false,
+    stripFinalNewline: false,
+  });
+
+  expect(run.exitCode).toBe(2);
+  expect(run.stdout).toBe("");
+  expect(run.stderr).toBe('{"error":"usage","usage":"usine run <task-contract.json>"}\n');
+});

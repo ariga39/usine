@@ -6,6 +6,11 @@ import { admitTask } from "@usine/runtime";
 
 async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
+  if (command === "version" && !contractPath) {
+    process.stdout.write(`${JSON.stringify({ version: "0.1.0" })}\n`);
+    return;
+  }
+
   if (command !== "run" || !contractPath) {
     process.stderr.write(
       `${JSON.stringify({ error: "usage", usage: "usine run <task-contract.json>" })}\n`,
