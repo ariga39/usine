@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
@@ -72,7 +72,7 @@ describe("CLI/PostgreSQL admission seam", () => {
     async () => {
       const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
       const maxElapsedMs = 4_000;
-      const { repository, root } = await admissionFixture(maxElapsedMs);
+      const { repository, root, taskId } = await admissionFixture(maxElapsedMs);
       const env = {
         USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
         USINE_STATE_DIR: join(root, "state"),
@@ -92,8 +92,45 @@ describe("CLI/PostgreSQL admission seam", () => {
         reject: false,
       });
 
-      expect(restarted.exitCode).toBe(1);
-      expect(restarted.stderr).toContain("elapsed budget exhausted");
+      expect(restarted.exitCode, restarted.stderr).toBe(75);
+      const blocked = JSON.parse(restarted.stdout);
+      expect(blocked).toMatchObject({
+        taskId,
+        state: "blocked",
+        blocker: "elapsed budget exhausted",
+      });
+
+      const terminalRestart = await execa("node", [cliPath, "run", "task.json"], {
+        cwd: repository,
+        env,
+        reject: false,
+      });
+      expect(terminalRestart.exitCode, terminalRestart.stderr).toBe(75);
+      expect(JSON.parse(terminalRestart.stdout)).toEqual(blocked);
+
+      const successorId = `${taskId}-successor`;
+      const original = JSON.parse(await readFile(join(repository, "task.json"), "utf8"));
+      const successor = {
+        ...original,
+        id: successorId,
+        delivery: {
+          ...original.delivery,
+          branch: `agent/${successorId}`,
+        },
+      };
+      await writeFile(join(repository, "successor.json"), JSON.stringify(successor));
+      await execa("git", ["add", "successor.json"], { cwd: repository });
+      await execa("git", ["commit", "-m", "authorize successor"], { cwd: repository });
+      const successorRun = await execa("node", [cliPath, "run", "successor.json"], {
+        cwd: repository,
+        env,
+        reject: false,
+      });
+      expect(successorRun.exitCode, successorRun.stderr).toBe(75);
+      expect(JSON.parse(successorRun.stdout)).toMatchObject({
+        taskId: successorId,
+        state: "admitted",
+      });
     },
     30_000,
   );

@@ -37,7 +37,28 @@ export async function admitTask(
   try {
     const existing = await authority.lookupExisting(contract.id, contractHash);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
-    const repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
+    if (existing?.state === "reviewed_pr" || existing?.state === "blocked") {
+      await writeTaskResult(stateDirectory, existing);
+      return existing;
+    }
+    const blockExpiredExisting = async (): Promise<TaskResult> => {
+      if (!existing) throw new Error("cannot expire a task before admission");
+      const blocked = await authority.save({
+        ...existing,
+        state: "blocked",
+        blocker: "elapsed budget exhausted",
+      });
+      await writeTaskResult(stateDirectory, blocked);
+      return blocked;
+    };
+    if (existing && Date.now() >= deadlineEpochMs) return await blockExpiredExisting();
+    let repository: string;
+    try {
+      repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
+    } catch (error) {
+      if (existing && Date.now() >= deadlineEpochMs) return await blockExpiredExisting();
+      throw error;
+    }
     // Admission is the single source of the first deadline.  On recovery this
     // reads task_runs.deadline_at instead of extending the budget in process.
     const admitted = await authority.admit({
