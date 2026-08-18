@@ -17,13 +17,7 @@ import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "@usine/task-authority";
 
-export { executeDeliveryRun } from "@usine/delivery-run";
-
 export { runtimePolicyFromEnvironment, type RuntimePolicy } from "./runtime-policy.js";
-export { forgeGitEnvironment } from "@usine/forge-delivery";
-export type { ForgePolicy } from "@usine/forge-delivery";
-export type { GitAuthor } from "@usine/candidate-workspace";
-export { explicitWorkerEnvironment } from "@usine/coding-session";
 
 export type {
   CheckResult,
