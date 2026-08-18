@@ -45,7 +45,7 @@ Handoff 放在临时 `.tasks/HANDOFF.md`，只记录：当前 Issue/PR、branch/
 
 ### Context 与模型配置边界
 
-Context window 和 model catalog 会随客户端、账户和供应商变化，不属于 canonical architecture。主编排者可以在 task-local profile 中选择当前支持且成本可接受的较大 window；implementer 和 reviewer 使用 role-sized context，不继承主编排 thread。具体 model slug、window 数值、订阅容量和 benchmark 结论只进入本地配置或当前 Issue evidence，并在客户端/model 升级后重新验证。
+Context window 和 model catalog 会随客户端、账户和供应商变化，不属于 canonical architecture。主编排者可以在 task-local profile 中选择当前支持且成本可接受的较大 window；implementer 和 reviewer 使用 role-sized context，不继承主编排 thread。具体 model slug、provider、reasoning、service tier、window 数值、订阅容量和 benchmark 结论只进入本地用户配置或短期运行 evidence，不进入 repository 或 GitHub durable surface，并在客户端/model 升级后重新验证。
 
 更大的 window 只是性能优化，可能同时保留更多过期讨论并增加输入成本。原则恢复始终依赖 canonical files + GitHub/Git bootstrap；policy 保持单一来源，不靠重复 prompt 或固定模型参数维持。
 
@@ -88,7 +88,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 每项工作仍须明确 objective、non-goals、可验证进展、最终停止条件和真正需要暂停的 blocker。状态汇报不是停止；只有 acceptance 已验证，或确实出现新的 product/authority decision、不可逆外部选择或缺失必要输入时才找用户。
 
-### Role model routing
+### Role session routing
 
 本节只约束我们如何开发 Usine repository，不改变 Usine 产品的 Coding Session：产品 runtime 继续使用 canonical design 选择的 Codex SDK adapter，Herdr 不进入 product correctness path。
 
@@ -96,9 +96,9 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 Repository-agent constitution、orchestration policy 与 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product-code implementation 委派。
 
-- product-code implementation：fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 repository-development constraint；
-- semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
-- bounded research：需要独立 read-only evidence 时可用 Terra；
+- product-code implementation：fresh worker、isolated workspace-write checkout、无 delivery credentials；
+- semantic review：fresh session、只读 exact candidate、不继承 implementer chat；
+- bounded research：需要独立 evidence 时使用 fresh read-only session；
 - 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
 
 ## 4. Falsifier、任务优先级与设计责任
