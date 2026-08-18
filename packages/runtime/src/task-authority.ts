@@ -70,6 +70,11 @@ export interface AuthorityInput {
   deadlineEpochMs: number;
 }
 
+export interface DurableAuthorityTransactions {
+  admit(input: AuthorityInput): Promise<TaskResult>;
+  save(result: TaskResult): Promise<TaskResult>;
+}
+
 type AuthorityDatabase = NodePgDatabase<{
   repositoryLeases: typeof repositoryLeases;
   taskRuns: typeof taskRuns;
@@ -93,9 +98,17 @@ export function hashTaskContract(rawContract: string): string {
 }
 
 export class TaskAuthority {
-  constructor(private readonly database: AuthorityDatabase) {}
+  constructor(
+    private readonly database: AuthorityDatabase,
+    private readonly durable?: DurableAuthorityTransactions,
+  ) {}
 
   async admit(input: AuthorityInput): Promise<TaskResult> {
+    if (this.durable) return this.durable.admit(input);
+    return this.admitDirect(input);
+  }
+
+  async admitDirect(input: AuthorityInput): Promise<TaskResult> {
     const existing = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, input.contract.id),
     });
@@ -160,6 +173,11 @@ export class TaskAuthority {
   }
 
   async save(result: TaskResult): Promise<TaskResult> {
+    if (this.durable) return this.durable.save(result);
+    return this.saveDirect(result);
+  }
+
+  async saveDirect(result: TaskResult): Promise<TaskResult> {
     const current = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, result.taskId),
     });

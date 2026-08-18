@@ -18,6 +18,7 @@ export interface DeliveryRunInput {
   implementerModel: string;
   reviewerModel: string;
   reviewerReasoningEffort: string;
+  stopAfterAdmitted: boolean;
   crashAfterActivation: boolean;
 }
 
@@ -51,14 +52,14 @@ export function nextActivation(
   return activation > budget ? null : activation;
 }
 
-async function crashOnce(input: DeliveryRunInput): Promise<void> {
+async function armSessionCrash(input: DeliveryRunInput): Promise<void> {
   const marker = resolve(input.stateDirectory, "recovery", `${input.contract.id}-activation-crash`);
   try {
     await readFile(marker, "utf8");
   } catch {
     await mkdir(dirname(marker), { recursive: true });
     await writeFile(marker, "activation checkpointed\n");
-    process.kill(process.pid, "SIGKILL");
+    setTimeout(() => process.kill(process.pid, "SIGKILL"), 50).unref();
   }
 }
 
@@ -94,6 +95,7 @@ export async function executeDeliveryRun(
       }),
     { name: "admit-task" },
   );
+  if (input.stopAfterAdmitted) return result;
   let previousSha = input.contract.baseSha;
   let findings: string[] = [];
   for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
@@ -110,14 +112,12 @@ export async function executeDeliveryRun(
         }),
       { name: `activate-implementer-${activation}` },
     );
-    if (input.crashAfterActivation)
-      await DBOS.runStep(() => crashOnce(input), { name: `crash-after-activation-${activation}` });
-
     const workspace = await services.workspace.prepareWriter(
       input.contract.id,
       activation,
       previousSha,
     );
+    if (input.crashAfterActivation) await armSessionCrash(input);
     const observation = await DBOS.runStep(
       () =>
         services.session.run({
