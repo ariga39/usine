@@ -51,7 +51,7 @@ export interface TaskResult {
   delivery: DeliveryEffect | null;
   blocker: string | null;
   activeActivation: number | null;
-  writer: { repository: string; repositoryIdentity: string; generation: number };
+  writer: { repository: string; repositoryIdentity: string };
   evidence: {
     implementerActivations: number;
     reviewCycles: number;
@@ -63,7 +63,6 @@ export interface TaskResult {
 export interface CandidateFact {
   sha: string;
   baseSha: string;
-  generation: number;
   fence: number;
 }
 
@@ -117,8 +116,6 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
     case "candidate": {
       if (!canTransition(result.state, "candidate"))
         throw new Error(`illegal task state transition: ${result.state} -> candidate`);
-      if (fact.candidate.generation !== result.writer.generation)
-        throw new Error("candidate belongs to a stale writer generation");
       if (
         fact.candidate.fence <= 0 ||
         !Number.isSafeInteger(fact.candidate.fence) ||
@@ -214,8 +211,9 @@ export class TaskAuthority {
       where: eq(taskRuns.taskId, taskId),
     });
     if (!row) return null;
-    if (row.contractHash !== contractHash) throw new Error("admitted contract is immutable");
-    return TaskAuthority.withDurableFields(row.result as TaskResult, row.deadlineAt);
+    const result = TaskAuthority.withDurableFields(row.result as TaskResult);
+    if (result.contractHash !== contractHash) throw new Error("admitted contract is immutable");
+    return result;
   }
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
@@ -226,8 +224,9 @@ export class TaskAuthority {
     row: typeof taskRuns.$inferSelect,
     input: AuthorityInput,
   ): TaskResult {
-    if (row.contractHash !== input.contractHash) throw new Error("admitted contract is immutable");
-    const result = TaskAuthority.withDurableFields(row.result as TaskResult, row.deadlineAt);
+    const result = TaskAuthority.withDurableFields(row.result as TaskResult);
+    if (result.contractHash !== input.contractHash)
+      throw new Error("admitted contract is immutable");
     if (result.writer.repositoryIdentity !== input.repositoryIdentity)
       throw new Error("task repository identity is immutable");
     return result;
@@ -245,7 +244,6 @@ export class TaskAuthority {
         .values({
           repositoryIdentity: input.repositoryIdentity,
           taskId: input.contract.id,
-          generation: 1,
         })
         .onConflictDoNothing()
         .returning();
@@ -279,7 +277,6 @@ export class TaskAuthority {
         writer: {
           repository: input.repository,
           repositoryIdentity: input.repositoryIdentity,
-          generation: lease.generation,
         },
         evidence: {
           implementerActivations: 0,
@@ -290,12 +287,6 @@ export class TaskAuthority {
       };
       await database.insert(taskRuns).values({
         taskId: result.taskId,
-        contractHash: result.contractHash,
-        contract: input.contract,
-        repository: input.repository,
-        state: result.state,
-        writerGeneration: lease.generation,
-        deadlineAt: new Date(input.deadlineEpochMs),
         result,
       });
       return result;
@@ -307,15 +298,12 @@ export class TaskAuthority {
     const persist = async (database: AuthorityDatabase): Promise<TaskResult> => {
       const current = await TaskAuthority.currentTask(database, observation.taskId);
       if (!current) throw new Error("task is not admitted");
-      const prior = TaskAuthority.withDurableFields(
-        current.result as TaskResult,
-        current.deadlineAt,
-      );
+      const prior = TaskAuthority.withDurableFields(current.result as TaskResult);
       if (observation.revision !== prior.revision) throw new Error("stale task revision");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
       });
-      if (!lease || lease.taskId !== prior.taskId || lease.generation !== prior.writer.generation)
+      if (!lease || lease.taskId !== prior.taskId)
         throw new Error("repository writer lease is stale");
       const next = applyTaskFact(prior, fact);
       const saved: TaskResult = {
@@ -325,7 +313,7 @@ export class TaskAuthority {
       };
       await database
         .update(taskRuns)
-        .set({ state: saved.state, result: saved, updatedAt: new Date() })
+        .set({ result: saved, updatedAt: new Date() })
         .where(eq(taskRuns.taskId, observation.taskId));
       if (saved.state === "reviewed_pr" || saved.state === "blocked") {
         await database
@@ -334,7 +322,6 @@ export class TaskAuthority {
             and(
               eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
               eq(repositoryLeases.taskId, prior.taskId),
-              eq(repositoryLeases.generation, prior.writer.generation),
             ),
           );
       }
@@ -376,16 +363,13 @@ export class TaskAuthority {
     ): Promise<{ result: TaskResult; activation: number }> => {
       const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
-      const prior = TaskAuthority.withDurableFields(
-        current.result as TaskResult,
-        current.deadlineAt,
-      );
+      const prior = TaskAuthority.withDurableFields(current.result as TaskResult);
       if (prior.state === "reviewed_pr" || prior.state === "blocked")
         throw new Error("task is terminal");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
       });
-      if (!lease || lease.taskId !== prior.taskId || lease.generation !== prior.writer.generation)
+      if (!lease || lease.taskId !== prior.taskId)
         throw new Error("repository writer lease is stale");
       const activation = prior.evidence.implementerActivations + 1;
       if (activation > budget) throw new Error("implementer activation budget exhausted");
@@ -402,7 +386,7 @@ export class TaskAuthority {
       };
       await database
         .update(taskRuns)
-        .set({ state: result.state, result, updatedAt: new Date() })
+        .set({ result, updatedAt: new Date() })
         .where(eq(taskRuns.taskId, taskId));
       return { result, activation };
     };
@@ -422,17 +406,10 @@ export class TaskAuthority {
     return database.transaction(callback, { behavior: "immediate" });
   }
 
-  private static withDurableFields(result: TaskResult, deadlineAt: Date | number): TaskResult {
-    const persistedDeadline =
-      deadlineAt instanceof Date
-        ? deadlineAt.getTime()
-        : typeof deadlineAt === "number"
-          ? deadlineAt
-          : result.deadlineEpochMs;
+  private static withDurableFields(result: TaskResult): TaskResult {
     return {
       ...result,
       revision: Number.isSafeInteger(result.revision) ? result.revision : 0,
-      deadlineEpochMs: persistedDeadline ?? Date.now(),
     };
   }
 }

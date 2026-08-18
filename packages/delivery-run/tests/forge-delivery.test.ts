@@ -357,7 +357,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       {
         sha: fixture.candidateSha,
         baseSha: fixture.actualBaseSha,
-        generation: admitted.writer.generation,
         fence: activation.activation,
       },
     );

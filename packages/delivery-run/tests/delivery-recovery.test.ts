@@ -49,7 +49,7 @@ function persistedResult(state: TaskResult["state"], id: string): TaskResult {
     delivery: null,
     blocker: null,
     activeActivation: null,
-    writer: { repository: ".", repositoryIdentity: `recovery/${id}`, generation: 1 },
+    writer: { repository: ".", repositoryIdentity: `recovery/${id}` },
     evidence: {
       implementerActivations: state === "admitted" ? 0 : 1,
       reviewCycles: state === "reviewed" ? 1 : 0,

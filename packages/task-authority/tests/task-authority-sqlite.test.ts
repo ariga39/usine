@@ -1,4 +1,6 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
@@ -68,7 +70,6 @@ async function terminalResult(
     {
       sha: candidateSha,
       baseSha: "a".repeat(40),
-      generation: admitted.writer.generation,
       fence: reservation.activation,
     },
   );
@@ -100,6 +101,113 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("migrates an admitted V0 lifecycle row into the result-only authority schema", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "usine-authority-v0-"));
+    const path = join(directory, "state.sqlite");
+    const v0Migration = await readFile(
+      new URL("../drizzle/0000_polite_ken_ellis.sql", import.meta.url),
+      "utf8",
+    );
+    const migrationHash = createHash("sha256").update(v0Migration).digest("hex");
+    const deadlineEpochMs = Date.now() + 30_000;
+    const oldResult = {
+      taskId: "authority-v0-migration",
+      contractHash: "authority-v0-hash",
+      revision: 2,
+      deadlineEpochMs,
+      state: "candidate",
+      candidateSha: "b".repeat(40),
+      candidateFence: 1,
+      check: null,
+      review: null,
+      delivery: null,
+      blocker: null,
+      activeActivation: null,
+      writer: {
+        repository: ".",
+        repositoryIdentity: "authority/v0-migration",
+        generation: 1,
+      },
+      evidence: {
+        implementerActivations: 1,
+        reviewCycles: 0,
+        changesRequestedBatches: 0,
+        restartRecoveries: 0,
+      },
+    };
+    const client = new DatabaseSync(path);
+    client.exec(`
+      CREATE TABLE __drizzle_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        hash TEXT NOT NULL,
+        created_at NUMERIC
+      );
+      INSERT INTO __drizzle_migrations (hash, created_at)
+      VALUES ('${migrationHash}', 1787063395038);
+      CREATE TABLE repository_leases (
+        repository_identity TEXT PRIMARY KEY NOT NULL,
+        task_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX repository_leases_task_id_unique ON repository_leases (task_id);
+      CREATE TABLE task_runs (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        contract_hash TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        state TEXT NOT NULL,
+        writer_generation INTEGER NOT NULL,
+        deadline_at INTEGER NOT NULL,
+        result TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO task_runs (
+        task_id, contract_hash, contract, repository, state, writer_generation,
+        deadline_at, result, created_at, updated_at
+      ) VALUES (
+        'authority-v0-migration', 'authority-v0-hash', '{}', '.', 'candidate', 1,
+        ${deadlineEpochMs}, '${JSON.stringify(oldResult)}', ${deadlineEpochMs}, ${deadlineEpochMs}
+      );
+      INSERT INTO repository_leases (repository_identity, task_id, generation, created_at)
+      VALUES ('authority/v0-migration', 'authority-v0-migration', 1, ${deadlineEpochMs});
+    `);
+    client.close();
+
+    await applyMigrations(path);
+    const migrated = authorityAt(path);
+    await expect(
+      migrated.lookupExisting("authority-v0-migration", "authority-v0-hash"),
+    ).resolves.toEqual({
+      ...oldResult,
+      writer: {
+        repository: ".",
+        repositoryIdentity: "authority/v0-migration",
+      },
+    });
+
+    const inspection = new DatabaseSync(path);
+    const taskColumns = inspection.prepare("PRAGMA table_info(task_runs)").all() as Array<{
+      name: string;
+    }>;
+    const leaseColumns = inspection.prepare("PRAGMA table_info(repository_leases)").all() as Array<{
+      name: string;
+    }>;
+    inspection.close();
+    expect(taskColumns.map(({ name }) => name)).toEqual([
+      "task_id",
+      "result",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(leaseColumns.map(({ name }) => name)).toEqual([
+      "repository_identity",
+      "task_id",
+      "created_at",
+    ]);
+  });
+
   test("accepts a candidate fact without accepting a caller-owned durable snapshot", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
@@ -120,7 +228,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       {
         sha: "b".repeat(40),
         baseSha: contract.baseSha,
-        generation: reservation.result.writer.generation,
         fence: reservation.activation,
       },
     );
@@ -162,7 +269,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         {
           sha: "b".repeat(40),
           baseSha: contract.baseSha,
-          generation: first.result.writer.generation,
           fence: first.activation,
         },
       ),
@@ -179,7 +285,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         {
           sha: "c".repeat(40),
           baseSha: contract.baseSha,
-          generation: second.result.writer.generation,
           fence: first.activation,
         },
       ),
@@ -190,7 +295,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       {
         sha: "b".repeat(40),
         baseSha: contract.baseSha,
-        generation: second.result.writer.generation,
         fence: second.activation,
       },
     );
@@ -227,7 +331,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       {
         sha: "b".repeat(40),
         baseSha: contract.baseSha,
-        generation: first.result.writer.generation,
         fence: first.activation,
       },
     );
@@ -248,7 +351,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       {
         sha: "c".repeat(40),
         baseSha: "b".repeat(40),
-        generation: second.result.writer.generation,
         fence: second.activation,
       },
     );

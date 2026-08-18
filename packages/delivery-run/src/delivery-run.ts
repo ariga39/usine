@@ -116,7 +116,6 @@ async function runCodingAttempt(
       {
         sha: candidate.sha,
         baseSha: candidate.baseSha,
-        generation: reservation.result.writer.generation,
         fence: workspace.fence,
       },
     );

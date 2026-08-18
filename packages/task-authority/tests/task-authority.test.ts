@@ -25,7 +25,7 @@ describe("Task Authority module contract", () => {
       delivery: null,
       blocker: null,
       activeActivation: 1,
-      writer: { repository: "/repo", repositoryIdentity: "owner/repo", generation: 1 },
+      writer: { repository: "/repo", repositoryIdentity: "owner/repo" },
       evidence: {
         implementerActivations: 1,
         reviewCycles: 0,
@@ -35,7 +35,7 @@ describe("Task Authority module contract", () => {
     };
     const candidate = applyTaskFact(admitted, {
       type: "candidate",
-      candidate: { sha, baseSha: sha, generation: 1, fence: 1 },
+      candidate: { sha, baseSha: sha, fence: 1 },
     });
     expect(candidate).toMatchObject({
       state: "candidate",
@@ -45,7 +45,7 @@ describe("Task Authority module contract", () => {
     expect(() =>
       applyTaskFact(admitted, {
         type: "candidate",
-        candidate: { sha, baseSha: sha, generation: 1, fence: 0 },
+        candidate: { sha, baseSha: sha, fence: 0 },
       }),
     ).toThrow("stale");
   });
