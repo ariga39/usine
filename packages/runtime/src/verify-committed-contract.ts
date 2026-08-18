@@ -1,0 +1,35 @@
+import { realpath } from "node:fs/promises";
+import { relative, sep } from "node:path";
+import { execa } from "execa";
+import type { TaskContract } from "./contract.js";
+import { remainingUntil } from "./remaining-until.js";
+
+export async function verifyCommittedContract(
+  contractPath: string,
+  contract: TaskContract,
+  deadlineEpochMs: number,
+): Promise<string> {
+  const repository = await realpath(contract.repository.path);
+  const path = await realpath(contractPath);
+  const relativePath = relative(repository, path);
+  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${sep}`)) {
+    throw new Error("task contract must be a committed file in the authorized repository");
+  }
+
+  await execa("git", ["-C", repository, "ls-files", "--error-unmatch", relativePath], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
+  const status = await execa(
+    "git",
+    ["-C", repository, "status", "--porcelain", "--", relativePath],
+    { timeout: remainingUntil(deadlineEpochMs) },
+  );
+  if (status.stdout !== "") throw new Error("task contract has uncommitted changes");
+  await execa("git", ["-C", repository, "cat-file", "-e", `${contract.baseSha}^{commit}`], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
+  await execa("git", ["-C", repository, "merge-base", "--is-ancestor", contract.baseSha, "HEAD"], {
+    timeout: remainingUntil(deadlineEpochMs),
+  });
+  return repository;
+}
