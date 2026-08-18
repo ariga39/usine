@@ -1,15 +1,16 @@
-import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/sqlite-proxy/migrator";
 import { fileURLToPath } from "node:url";
-import { Pool } from "pg";
+import { openSqliteDatabase } from "./sqlite-database.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../drizzle", import.meta.url));
 
-export async function applyMigrations(databaseUrl: string): Promise<void> {
-  const pool = new Pool({ connectionString: databaseUrl });
+export async function applyMigrations(databasePath: string): Promise<void> {
+  const handle = openSqliteDatabase(databasePath);
   try {
-    await migrate(drizzle(pool), { migrationsFolder: migrationsDirectory });
+    await handle.exclusiveTransaction(() =>
+      migrate(handle.database, handle.migrate, { migrationsFolder: migrationsDirectory }),
+    );
   } finally {
-    await pool.end();
+    handle.close();
   }
 }

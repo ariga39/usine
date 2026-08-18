@@ -46,12 +46,10 @@
     "drizzle-orm": "latest",
     "execa": "latest",
     "octokit": "latest",
-    "pg": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
-    "@types/pg": "latest",
     "drizzle-kit": "latest",
     "typescript": "latest",
     "vite": "catalog:",

@@ -56,7 +56,6 @@ export function workerEnvironment(request: Pick<SessionRequest, "environment">):
   }
   // Delivery and coordinator credentials never enter a coding worker.
   for (const key of [
-    "USINE_DATABASE_URL",
     "USINE_STATE_DIR",
     "USINE_GITHUB_TEST_TOKEN",
     "USINE_GITHUB_APP_ID",
