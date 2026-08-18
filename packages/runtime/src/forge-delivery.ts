@@ -16,6 +16,8 @@ function statusOf(error: unknown): number | undefined {
     : undefined;
 }
 
+class DeliveryQuarantineError extends Error {}
+
 interface ForgeClient {
   octokit: InstanceType<typeof Octokit>;
   token: string;
@@ -62,6 +64,7 @@ export class ForgeDelivery {
         return await this.reconcile(contract, sha, check, review);
       } catch (error) {
         lastError = error;
+        if (error instanceof DeliveryQuarantineError) throw error;
         const status = statusOf(error);
         if (
           status !== undefined &&
@@ -122,7 +125,11 @@ export class ForgeDelivery {
     } catch (error) {
       if (statusOf(error) !== 404) throw error;
     }
-    if (observedHead !== sha) {
+    if (observedHead !== null && observedHead !== sha)
+      throw new DeliveryQuarantineError(
+        `delivery branch ${branch} has conflicting head ${observedHead}; delivery quarantined`,
+      );
+    if (observedHead === null) {
       const gitUrl = this.options.forge.gitUrl;
       const env = forgeGitEnvironment(this.options.environment, client.token, gitUrl);
       await execa(
@@ -147,13 +154,18 @@ export class ForgeDelivery {
       per_page: 100,
       request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
     });
-    const existing = pullRequests.data.find((pr) => pr.head.sha === sha);
+    const matching = pullRequests.data.filter((pr) => pr.head.sha === sha);
+    if (matching.length > 1)
+      throw new DeliveryQuarantineError(
+        `multiple delivery PRs target candidate ${sha}; delivery quarantined`,
+      );
+    const existing = matching[0];
     if (existing && existing.state !== "open")
-      throw new Error(
+      throw new DeliveryQuarantineError(
         `closed delivery PR #${existing.number} already targets candidate ${sha}; delivery quarantined`,
       );
     if (!existing && pullRequests.data.length > 0)
-      throw new Error(
+      throw new DeliveryQuarantineError(
         `open delivery PR #${pullRequests.data[0]?.number ?? "unknown"} has a conflicting head; delivery quarantined`,
       );
     const pullRequest =
@@ -170,7 +182,12 @@ export class ForgeDelivery {
           request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
         })
       ).data;
+    if (pullRequest.state !== "open" || pullRequest.head.sha !== sha)
+      throw new DeliveryQuarantineError(
+        `delivery PR #${pullRequest.number} does not target the approved open head; delivery quarantined`,
+      );
     const body = approvalAttestationBody(contract, sha, check, review);
+    const marker = `<!-- usine-approval:${contract.id}:${sha} -->`;
     const comments = await client.octokit.paginate(client.octokit.rest.issues.listComments, {
       owner,
       repo,
@@ -178,15 +195,29 @@ export class ForgeDelivery {
       per_page: 100,
       request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
     });
-    const attestation =
-      comments.find(
-        (comment) =>
-          comment.body === body &&
-          (comment as typeof comment & { performed_via_github_app?: { slug?: string } })
-            .performed_via_github_app?.slug === client.appSlug &&
-          comment.user?.type === "Bot",
-      ) ??
-      (
+    const marked = comments.filter((comment) => comment.body?.includes(marker));
+    if (marked.length > 1)
+      throw new DeliveryQuarantineError(
+        `multiple approval attestations exist for candidate ${sha}; delivery quarantined`,
+      );
+    const existingAttestation = marked[0];
+    let attestation = existingAttestation;
+    if (existingAttestation) {
+      const app = (
+        existingAttestation as typeof existingAttestation & {
+          performed_via_github_app?: { slug?: string };
+        }
+      ).performed_via_github_app;
+      if (
+        existingAttestation.body !== body ||
+        app?.slug !== client.appSlug ||
+        existingAttestation.user?.type !== "Bot"
+      )
+        throw new DeliveryQuarantineError(
+          `approval attestation identity does not match delivery App/Bot; delivery quarantined`,
+        );
+    } else {
+      attestation = (
         await client.octokit.rest.issues.createComment({
           owner,
           repo,
@@ -195,6 +226,19 @@ export class ForgeDelivery {
           request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
         })
       ).data;
+      const app = (
+        attestation as typeof attestation & { performed_via_github_app?: { slug?: string } }
+      ).performed_via_github_app;
+      if (
+        attestation.body !== body ||
+        app?.slug !== client.appSlug ||
+        attestation.user?.type !== "Bot"
+      )
+        throw new DeliveryQuarantineError(
+          `created approval attestation identity does not match delivery App/Bot; delivery quarantined`,
+        );
+    }
+    if (!attestation) throw new DeliveryQuarantineError("approval attestation was not observed");
     return {
       sha,
       effect: "github",
