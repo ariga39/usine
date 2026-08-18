@@ -182,6 +182,7 @@ export async function executeDeliveryRun(
   // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
   for (;;) {
+    if (result.state === "blocked") return result;
     if (deadlineExpired(result.deadlineEpochMs))
       return blockTask(services.authority, result, "elapsed budget exhausted");
 
