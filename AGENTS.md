@@ -10,8 +10,9 @@ Before planning, editing, reviewing, or delegating work:
 2. Read `docs/DESIGN.md`, `docs/DEVELOPMENT.md`, and `docs/DECISIONS.md` completely.
 3. Read the active GitHub Issue and, when present, its PR and unresolved review threads.
 4. Inspect the current branch, base SHA, working tree, and diff.
+5. Identify any active route falsifier, the highest eligible task class, the active behavior cluster and its design owner. Restate why the proposed work is eligible before acting.
 
-Repeat these four steps after context compaction, session replacement, handoff, or any user correction that changes direction. A summary from an earlier context is navigation aid, not authority. If repository state and a summary disagree, repository state wins and the discrepancy must be reported.
+Repeat these five steps after context compaction, session replacement, handoff, or any user correction that changes direction. A summary from an earlier context is navigation aid, not authority. If repository state and a summary disagree, repository state wins and the discrepancy must be reported.
 
 ## Product guardrails
 
@@ -21,14 +22,15 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - Preserve one active writer per repository, isolated writable workspaces, immutable candidate SHAs, independent exact-SHA review, and credential separation.
 - Prefer mature libraries and platform primitives. Custom infrastructure requires evidence that an existing dependency cannot satisfy the need.
 - Lightweight bounded semantic transforms (classification, extraction, normalization, and short summaries) call a configured schema-constrained OpenAI-compatible API directly; do not route them through Herdr, Codex, or OpenCode agent runtimes unless repository, tool, or session capabilities are actually required.
+- Module quality is part of the outcome. A boundary must hide policy, reduce caller knowledge, or concentrate future change; package count, file count, line count, test count, and mechanical equivalence are not architecture evidence.
 - Add architecture only when a current requirement crosses an existing boundary. Deferred ideas re-enter through an observed trigger and a new decision, not speculative placeholders.
 
 ## Development guardrails
 
 - No implementation work without a GitHub Issue, an isolated branch/worktree, and an explicit PR-sized outcome. The empty-repository bootstrap commit is the sole exception.
-- One completed task produces one PR, but a product milestone may span many tasks/PRs. Each Issue must authorize the smallest independently useful, testable, and revertible outcome; never interpret “complete vertical” as a requirement for one large PR.
-- The current checkpoint remains serial: only one implementation task may be active under one orchestrator. After representative executable code task plus induced live coordinator restart recovery evidence, at most two implementation tasks may be active; they must have independent ownership and non-overlapping writable surfaces; otherwise serialize them.
-- Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file and must name `first_merge_checkpoint` plus its evidence. Command-line prompts only point to that file. `.tasks/` is never design authority.
+- One completed task produces one PR, but a product milestone may span many tasks/PRs. Each Issue must authorize the smallest coherent module behavior or user-observable behavior that is independently useful, testable, and revertible; never interpret “complete vertical” as a requirement for one large PR.
+- The current `stop_and_redesign` checkpoint permits no implementation task. After a reviewed module decision restores implementation eligibility, only one implementation task may be active until representative executable code task plus induced live coordinator restart recovery evidence exists; afterward at most two may be active with independent ownership and non-overlapping writable surfaces.
+- Substantive delegated instructions live in a temporary `.tasks/<issue>-<role>.md` file and must name the early draft checkpoint, merge gate, active falsifier status, and behavior-cluster owner. Command-line prompts only point to that file. `.tasks/` is never design authority.
 - Use test-first development for stable contracts, invariants, and bug reproductions. For uncertain integrations, establish the thinnest observable vertical behavior first and add tests around the behavior; do not pre-specify internals through hundreds of seam tests.
 - Review the diff against the Issue and canonical design. After fixes, request a delta review. New non-blocking concerns become separate Issues instead of extending the current PR indefinitely.
 - Do not commit secrets, tokens, private keys, generated agent transcripts, local checkpoints, or historical clean-room archives.
@@ -45,11 +47,16 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 ## Autonomous rapid iteration
 
 - The user is not the routine supervisor. Authorized work does not wait for the user to send `/goal`, “continue,” review, merge, or next-task confirmation. The orchestrator owns continuation and only asks for a genuine product/authority decision, unavailable required input, or an irreversible external choice outside existing scope.
-- Prefer small commits and small PRs that each move one observable outcome. Push and open a draft PR at the first checkable state; keep subsequent fix commits visible. After scoped checks and fresh semantic review pass, merge and continue to the next authorized Issue without a human approval queue.
-- The first merge checkpoint dominates later acceptance. Once its scoped evidence is green, stop implementing adjacent seams or later failure modes, push/merge that checkpoint, and continue the larger milestone through a new Issue. A local green checkpoint without a remote PR is a drift condition, not progress.
+- Prefer small commits and small PRs that each move one observable outcome. Push and open a draft PR at the first checkable state; keep subsequent fix commits visible. Early green evidence authorizes publication, not merge.
+- Merge only when the PR delivers its coherent module behavior or user-observable behavior and passes its applicable spec/correctness and design gates. Pure movement is mergeable only when it deletes an old seam, reduces interface knowledge, or demonstrably concentrates change locality. After the merge gate passes, merge and continue without a human approval queue.
 - Process, compliance, planning, and review are tools, not outcomes. They may block early iteration only when they expose a concrete correctness, security/authority, destructive-action, or product-direction risk. Non-blocking concerns become later Issues.
 - User corrections update canonical documents or the active Issue promptly. The user may inspect occasionally and redirect work, but is not required to supervise normal progress.
-- Every implementation Issue starts a newly created Herdr pane and a new Codex agent using `-p usine-implementer` (GPT-5.6 Luna high, `service_tier = "default"`, no fast). Never reuse an implementer agent across Issues; release only the agent/pane created for that Issue after its merge checkpoint lands. Fresh semantic review uses Sol, and bounded read-only research may use Terra. Direct `codex exec -p usine-implementer` is allowed only when Herdr itself is unavailable; authentication, permission, model, or profile failures must not bypass this route.
+
+## Current route stop
+
+- Issue #65 triggered the documented settled-without-observation falsifier for the Herdr/transcript bridge. The previous `correct_before_expansion` route is superseded: ordinary product implementation, cleanup, package movement, concurrency, and runtime substitution are ineligible.
+- The next eligible work is a bounded module-design and salvage-versus-rewrite decision for the existing behavior clusters. Do not choose a launcher or begin a third implementation before that decision is reviewed and merged.
+- Preserve the requested implementer policy—fresh worker, GPT-5.6 Luna high, `service_tier = "default"`, no fast, isolated workspace—when evaluating a future runtime boundary, but do not treat Herdr, hooks, transcripts, or any replacement platform as preselected.
 
 ## Independent direction audits
 
@@ -59,6 +66,13 @@ Repeat these four steps after context compaction, session replacement, handoff, 
 - The audit must use a bounded evidence packet and must not inherit author chat or the historical task archive. It must actively challenge the selected mechanism and may cross current Issue non-goals to recommend deletion, replacement, `correct_before_expansion`, or `stop_and_redesign`. Code claims may be checked in a read-only checkout. Details and budget are defined in `docs/DEVELOPMENT.md`.
 - A direction audit blocks expansion, not useful work on an already-safe path. Resolve blocking findings or record an explicit user decision before crossing the checkpoint; summaries and ordinary PR review cannot waive it.
 
+## Task eligibility and design authority
+
+- Dispatch priority is: active falsifier or safety/authority defect; accepted-outcome critical path; representative real task; measured bottleneck; cleanup or aesthetics. A lower class is ineligible while an unresolved higher class blocks the route.
+- A local Issue, passing test, small diff, or non-goal cannot waive an active global falsifier. Clearing a falsifier requires the evidence named by the decision that activated it.
+- Each active behavior cluster has one temporary design owner responsible for its module map, external interface, internal seams, test placement, deletion plan, and coherent PR slices. Ownership may transfer explicitly; it may not disappear between Issues.
+- Run a separate design review when first implementing a behavior cluster, adding a package/interface, changing a falsified transport or lifecycle, modifying the same large file in three consecutive PRs, or finding the same policy in three places. It may cross local Issue non-goals to judge depth, locality, and replacement; spec/correctness review cannot substitute for it.
+
 ## Drift stop rule
 
 Stop and re-read the canonical documents before continuing when any of these occurs:
@@ -66,7 +80,9 @@ Stop and re-read the canonical documents before continuing when any of these occ
 - work no longer advances the Issue's user-visible outcome;
 - a new package, service, table, abstraction, or generalized interface is proposed without a current caller;
 - review repeatedly expands beyond the changed seam;
-- a first merge checkpoint is green locally but has not been pushed as a remote PR;
+- a draft checkpoint is green locally but has not been pushed as a remote PR;
+- an active falsifier exists but the selected task does not characterize, delete, replace, or repair it;
+- a proposed merge relies on file shortening, physical movement, or test count without a coherent behavior or locality improvement;
 - an agent spends substantial time planning without making an observable change;
 - context has compacted and the current objective cannot be restated from durable artifacts.
 

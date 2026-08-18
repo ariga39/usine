@@ -1,6 +1,6 @@
 ---
 status: current
-design_version: 0.1
+design_version: 0.2
 updated: 2026-08-18
 issue: https://github.com/ariga39/usine/issues/1
 ---
@@ -69,15 +69,15 @@ credential-scoped GitHub delivery
 reviewed PR + explicit approval attestation
 ```
 
-这张图描述选定的最小目标，不是已经实现全部能力的声明。Issue #12 / PR #38 的第一次 live self-hosted reviewed delivery 已验证一条单 writer 纵切：一个 Task、一个 repository、Herdr Luna implementation、project check、fresh Sol reviewer 的 exact-SHA approval、协调器通过 AI SDK 对 rendered transcript 做的 bounded extraction、一个 GitHub App PR 及其 exact-SHA attestation，以及 exact-SHA merged delivery。仍未验证的是 representative executable code task，以及 live coordinator restart recovery；因此 DBOS + PostgreSQL 的决定性 live recovery 价值仍须通过 induced restart 证明。
+这张图描述产品目标，不是对当前实现路线的接受声明。Issue #12 / PR #38 只验证了一条弱样本连接路径：一个写文档的 Task 能组成 candidate、check、review 和 GitHub delivery evidence。它没有验证 representative executable code task、module locality 或 live coordinator restart recovery。
 
-Rendered-transcript extraction 目前是把 reviewer 输出接入协调器的 bounded compatibility bridge，而不是新的 authority boundary。若再次出现 slow/inconclusive extraction、需要 provider-specific branching、另一个普通任务仍需修复这条基础设施，或 manual-free restart recovery 失败，这条 bridge 即被证伪并须重新评估。
+Issue #65 随后在普通任务中复现 Herdr agent settled、没有 prompt/observation、协调器不能继续；这正是此前 decision 定义的 route falsifier。局部 pure-move acceptance 仍被合并，进一步证明 task selection 与 merge gate 本身也失效。此前 `correct_before_expansion` 判断因此被 supersede；当前分类是 `stop_and_redesign`。
 
-clean-room classification 为 `correct_before_expansion`：可以继续 bounded useful single-writer tasks，但在 representative executable code task 加上 induced live coordinator restart recovery 之前，不扩大 concurrency、authority、runtime/forge count、distribution、generalized architecture 或 automatic-merge product authority。第一条纵切和当前 continuation 仍只运行一个 Task、一个 repository 和一个 writer。
+第三次实现、普通 cleanup、package/file movement、并发、runtime 替换和新基础设施当前都暂停。下一项 eligible work 是从真实目标为现有 behavior clusters 设计不超过约 5–7 个候选深模块，为最关键 cluster 比较至少两种 external interface，并估算 current code/tests 中哪些 salvage、哪些删除重写；随后用 reviewed decision 选择 salvage 或 clean implementation。该设计不能恢复第一版 task decomposition 或预先规定未知内部实现。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
-Activation coupling 很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确的 next owner。系统借此保留 Raft 体验中“有序激发”的优点；只有 representative executable code task 和 induced live coordinator restart recovery 都有证据后，才允许不同项目 lane 并行。
+Activation coupling 仍应很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确 next owner。但 Herdr、hook、transcript、App Server 或替代平台都不是预选机制；新的 module decision 必须先定义 coordinator 需要的最小 runtime contract，再用代表性任务选择或删除 adapter。
 
 ## 4. 权威与状态
 
@@ -114,7 +114,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-第一条完整纵切和当前 continuation 串行运行一个 Task。代表性 executable code task 与 induced live coordinator restart recovery 都有证据后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
+当前 `stop_and_redesign` checkpoint 不运行 implementation。Reviewed module decision 恢复 eligibility 后先串行运行一个 Task；代表性 executable code task 与 induced live coordinator restart recovery 都有证据后，最先允许的并发分片才是项目：不同 repository 可以同时推进，同一 repository 只有一个有效 write generation。每个 generation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -143,9 +143,11 @@ Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activ
 
 不向新 agent 倾倒整个历史 chat、旧任务树或全部研究 archive。实现者在一个连贯 run 内可以保持 warm；reviewer 默认 fresh；recovery agent 读取最后有效 checkpoint，而不是重放所有对话。长期向量记忆只有在这些 artifact 无法支撑重复恢复、且有实际遗漏数据时才考虑。
 
+Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 canonical corpus 必须保留：两次失败的 causal chain、已 falsified route、仍有效的 evidence、曾误导的 proxy metrics，以及当前 eligible work。这样可以删除旧代码而不重复相同的控制机制。
+
 ## 8. 深模块与 library-first 边界
 
-以下是职责边界，不预先等同于 npm package。只有当边界能让两个任务独立开发或隐藏真实复杂度时才拆 package：
+以下是需要在下一项 module-design task 中验证的 behavior clusters，不是当前 package map，也不预先等同于 npm package。只有当边界能隐藏 policy、降低 caller knowledge、集中 change locality 或允许真正独立开发时才成立：
 
 - **admission**：验证并冻结 Task Contract；
 - **coordination**：DBOS workflow 与 gate policy；
@@ -153,6 +155,8 @@ Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activ
 - **quality**：project checks、review verdict 与 finding aggregation；
 - **delivery**：GitHub App、PR/attestation/effect reconciliation；
 - **operations**：首条纵切所需的配置、预算/kill switch 和最小可诊断日志。
+
+当前 `runtime.ts`、CLI integration suite 和 one-function files 不是被接受的 module decomposition。Design owner 必须从真实 callers 出发为最关键 cluster 比较至少两种 interface，并明确旧 seam、ambient configuration 和 implementation-coupled tests 的删除计划。纵切可以穿过多个深 module；它不能成为把所有行为塞进一个 composition function 或一个测试文件的豁免。
 
 默认依赖选择：
 
@@ -174,4 +178,4 @@ Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析�
 
 首条纵切只记录能回答核心优化目标的事实：是否形成 accepted outcome、human activation、端到端时间、成本、返修次数和 blocker。观察到具体瓶颈后再增加诊断指标，不预建通用 metrics surface，也不设置 10、30、50、100、300 之间的人工阶段门。
 
-在 representative executable code task 与 induced live coordinator restart recovery 都得到证据后，提高容量的默认顺序是增加互不冲突的项目 lane，而不是增加单个 task 内的 agent 发言者。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。
+当前先完成 module design 与 salvage/rewrite decision。恢复 implementation 后，第一项 evidence 必须是 representative executable code task，而非文档复制或 fixture-only task；随后才验证 induced live coordinator restart recovery。两者都得到证据且没有再次触发 route falsifier 后，才讨论增加互不冲突的项目 lane。只有单主机资源、DBOS queue 或 forge API 成为实测瓶颈时，才讨论更多 runner、分布式部署或 forge 替代。
