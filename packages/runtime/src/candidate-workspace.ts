@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
 
@@ -75,6 +75,26 @@ export class CandidateWorkspace {
     await this.git(["-C", this.options.repository, "worktree", "add", "--detach", path, baseSha]);
     this.fences.set(taskId, fence);
     return { taskId, activation, fence, path, baseSha };
+  }
+
+  async quarantinePriorWriters(taskId: string, activation: number): Promise<void> {
+    const directory = resolve(this.options.stateDirectory, "workspaces", taskId);
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const priorActivation = Number(entry.split("-", 1)[0]);
+      if (
+        Number.isSafeInteger(priorActivation) &&
+        priorActivation > 0 &&
+        priorActivation < activation
+      ) {
+        await this.removeWorktree(resolve(directory, entry));
+      }
+    }
   }
 
   async freeze(workspace: WriterWorkspace, previousSha: string): Promise<FrozenCandidate> {
