@@ -133,12 +133,14 @@ async function runCodingAttempt(
           }
         })()
       : (observation.output as { status?: string; summary?: string } | null);
-  if (output?.status === "blocked")
+  if (output?.status === "blocked") {
+    await services.workspace.quarantine(workspace);
     return {
       status: "failed",
       result: reservation.result,
       reason: `implementer blocked: ${output.summary ?? "no reason"}`,
     };
+  }
   if (!output || output.status !== "proposed" || typeof output.summary !== "string") {
     await services.workspace.quarantine(workspace);
     return {
@@ -213,7 +215,12 @@ export async function executeDeliveryRun(
       blocker: null,
       activeActivation: null,
     });
-    const evaluation = await services.quality.evaluate(input.contract, candidate.sha, cycle);
+    let evaluation: Awaited<ReturnType<QualityGate["evaluate"]>>;
+    try {
+      evaluation = await services.quality.evaluate(input.contract, candidate.sha, cycle);
+    } finally {
+      await services.workspace.quarantine(candidate.workspace);
+    }
     result = await services.authority.save({
       ...result,
       state: "checked",
