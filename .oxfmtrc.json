@@ -1,4 +1,0 @@
-{
-  "ignorePatterns": ["AGENTS.md", "README.md", "docs/**"],
-  "printWidth": 100
-}

@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2023",
-    "types": ["node", "vitest/globals"]
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "*.ts"]
 }

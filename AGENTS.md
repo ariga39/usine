@@ -10,7 +10,7 @@ The design authorities are [DESIGN](docs/DESIGN.md), [DEVELOPMENT](docs/DEVELOPM
 
 Read the active Issue, its PR and unresolved review threads, then inspect the branch, base SHA, status, and complete diff. Read the canonical sections relevant to the behavior and identify its owner, active falsifier, and next observable outcome before editing. Repeat after compaction, handoff, worktree/Issue changes, or user direction corrections. Repository and GitHub facts override summaries and agent claims.
 
-One outcome owns one Issue, isolated branch/worktree, and coherent PR. Use [write-behavior-task](.agents/skills/write-behavior-task/SKILL.md) to frame work by observable behavior, authority, evidence, and stopping condition—not by file, function, or layer checklists. The outcome owner may revise every internal layer needed for coherence unless a real permission, safety, or independent-ownership boundary forbids it.
+One outcome owns one Issue, isolated branch/worktree, and coherent PR. Place linked worktrees outside every existing package workspace so the parent workspace cannot capture tool or dependency resolution. Use [write-behavior-task](.agents/skills/write-behavior-task/SKILL.md) to frame work by observable behavior, authority, evidence, and stopping condition—not by file, function, or layer checklists. The outcome owner may revise every internal layer needed for coherence unless a real permission, safety, or independent-ownership boundary forbids it.
 
 Publish the first checkable state as a small commit and draft PR; continue visible checkpoint commits until the Issue gate passes. Green commands and a PR are evidence, not completion.
 
@@ -27,12 +27,12 @@ Keep one writer per repository, isolated workspaces, immutable candidate SHAs, i
 ## Commands
 
 ```sh
-corepack pnpm exec vitest run <test-file>
-corepack pnpm format:check
-corepack pnpm lint
-corepack pnpm typecheck
-corepack pnpm build
-corepack pnpm test
+vp test run <test-file>
+vp fmt --check
+vp lint
+vp check --no-fmt --no-lint
+vp run --filter '@usine/cli...' build
+vp test
 corepack pnpm check:links
 ```
 

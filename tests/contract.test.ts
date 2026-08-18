@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { taskContractSchema } from "../packages/runtime/src/contract.js";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "vite-plus/test";
 
 const committedContract = JSON.parse(
   readFileSync(new URL("../task.json", import.meta.url), "utf8"),

@@ -9,8 +9,8 @@ Herdr/transcript lifecycle 曾被真实 settled-without-observation failure证�
 运行需要 Node 24、pnpm、Git、Codex CLI 和 PostgreSQL。安装依赖并构建后，通过数据库和 GitHub App 环境配置运行 CLI：
 
 ```sh
-pnpm install
-pnpm build
+vp install
+vp run --filter '@usine/cli...' build
 USINE_DATABASE_URL=postgresql://... \
 USINE_GITHUB_APP_ID=... \
 USINE_GITHUB_INSTALLATION_ID=... \
@@ -21,6 +21,11 @@ USINE_IMPLEMENTER_PROFILE=usine-implementer \
 USINE_REVIEWER_MODEL=gpt-5.6-sol \
 node apps/cli/dist/cli.mjs run /path/to/committed-task-contract.json
 ```
+
+Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
+`vp check --no-fmt --no-lint`, `vp test`, and `vp run --filter '@usine/cli...' build`. `vp check`
+combines formatting, linting, and type-checking; the root TypeScript project
+continues to include `tests/**/*.ts` in that static coverage.
 
 首条纵切只面向受信任的私有仓库。项目检查使用最小显式环境并在 disposable checkout 中运行，但当前仍共享 host 的网络与文件系统权限；更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex sandbox 不足时进入。
 

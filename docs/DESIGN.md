@@ -218,8 +218,7 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 - `@openai/codex-sdk`：唯一 coding-agent lifecycle；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：协调器拥有的 schema-constrained 轻量语义 transform；
 - Pino：结构化日志；
 - Vitest：公共行为测试，Testcontainers 仅用于必要的真实 PostgreSQL integration；
-- tsdown：所有 workspace package 的 TypeScript build；
-- oxlint + oxfmt：仓库唯一的 lint 与 format 工具；TypeScript `--noEmit` 独立负责 typecheck。
+- Vite+：workspace 唯一的 format、lint、type-check、test 与 package command/config surface；其内部使用 tsdown、Oxlint、Oxfmt 与 Vitest；`vp check` 的 type-check 独立于 `vp pack`。
 
 Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析结构化结果；不实现 Git object plumbing。原始 SQL 只允许用于 ORM 无法表达且有实际性能/一致性证据的局部语句，并必须在 PR 中说明原因。不得用手写 trigger/catalog fingerprint 模拟 ORM 或 migration engine，也不得把 deterministic reconciler扩张成通用 scheduler、queue 或 workflow engine。
 
