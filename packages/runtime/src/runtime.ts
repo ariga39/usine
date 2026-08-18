@@ -6,7 +6,9 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
+  type TaskProgress,
   type TaskResult,
+  taskProgressFromResult,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "@usine/coding-session";
@@ -24,6 +26,7 @@ export async function admitTask(
   rawContract: string,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
+  onProgress?: (progress: TaskProgress) => void,
 ): Promise<TaskResult> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
@@ -37,6 +40,13 @@ export async function admitTask(
   const database = handle.database;
   const authority = new TaskAuthority(database);
   try {
+    const reportProgress = (result: TaskResult): void => {
+      try {
+        onProgress?.(taskProgressFromResult(result));
+      } catch {
+        // Progress is an observation only; a failed sink cannot alter authority.
+      }
+    };
     const existing = await authority.lookupExisting(contract.id, contractHash);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
     if (existing?.state === "reviewed_pr" || existing?.state === "blocked") return existing;
@@ -46,6 +56,7 @@ export async function admitTask(
         { taskId: existing.taskId, revision: existing.revision },
         "elapsed budget exhausted",
       );
+      reportProgress(blocked);
       return blocked;
     };
     if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
@@ -109,6 +120,7 @@ export async function admitTask(
       session,
       quality,
       forge,
+      onProgress,
     });
     return result;
   } finally {

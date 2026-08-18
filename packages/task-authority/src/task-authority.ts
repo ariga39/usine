@@ -60,6 +60,26 @@ export interface TaskResult {
   };
 }
 
+export interface TaskProgress {
+  event: "progress";
+  taskId: string;
+  revision: number;
+  state: TaskState;
+  activeActivation: number | null;
+  candidateSha: string | null;
+}
+
+export function taskProgressFromResult(result: TaskResult): TaskProgress {
+  return {
+    event: "progress",
+    taskId: result.taskId,
+    revision: result.revision,
+    state: result.state,
+    activeActivation: result.activeActivation,
+    candidateSha: result.candidateSha,
+  };
+}
+
 export interface CandidateFact {
   sha: string;
   baseSha: string;

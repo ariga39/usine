@@ -7,7 +7,9 @@ import {
   TaskAuthority,
   type CheckResult,
   type TaskContract,
+  type TaskProgress,
   type TaskResult,
+  taskProgressFromResult,
 } from "@usine/task-authority";
 import type { RolePolicy } from "@usine/coding-session";
 
@@ -26,14 +28,28 @@ export interface DeliveryRunServices {
   session: CodexCodingSession;
   quality: QualityGate;
   forge: ForgeDelivery;
+  onProgress?: (progress: TaskProgress) => void;
 }
 
-function blockTask(
-  authority: TaskAuthority,
+function reportProgress(services: DeliveryRunServices, result: TaskResult): void {
+  try {
+    services.onProgress?.(taskProgressFromResult(result));
+  } catch {
+    // Progress is an observation only; a failed sink cannot alter authority.
+  }
+}
+
+async function blockTask(
+  services: DeliveryRunServices,
   result: TaskResult,
   blocker: string,
 ): Promise<TaskResult> {
-  return authority.block({ taskId: result.taskId, revision: result.revision }, blocker);
+  const blocked = await services.authority.block(
+    { taskId: result.taskId, revision: result.revision },
+    blocker,
+  );
+  reportProgress(services, blocked);
+  return blocked;
 }
 
 function implementerPrompt(
@@ -75,6 +91,7 @@ async function runCodingAttempt(
     input.contract.id,
     input.contract.budget.maxImplementerActivations,
   );
+  reportProgress(services, reservation.result);
   await services.workspace.quarantinePriorWriters(input.contract.id, reservation.activation);
   const workspace = await services.workspace.prepareWriter(
     input.contract.id,
@@ -119,6 +136,7 @@ async function runCodingAttempt(
         fence: workspace.fence,
       },
     );
+    reportProgress(services, accepted);
     return {
       status: "succeeded",
       result: accepted,
@@ -146,18 +164,14 @@ async function activateImplementer(
   try {
     attempt = await runCodingAttempt(input, services, previousSha, check, findings);
   } catch (error) {
-    return blockTask(
-      services.authority,
-      result,
-      error instanceof Error ? error.message : String(error),
-    );
+    return blockTask(services, result, error instanceof Error ? error.message : String(error));
   }
   if (attempt.status === "failed") {
     if (
       attempt.result.evidence.implementerActivations >=
       input.contract.budget.maxImplementerActivations
     )
-      return blockTask(services.authority, attempt.result, attempt.reason);
+      return blockTask(services, attempt.result, attempt.reason);
     return attempt.result;
   }
   await services.workspace.quarantine(attempt.candidate.workspace);
@@ -176,53 +190,75 @@ export async function executeDeliveryRun(
     deadlineEpochMs: input.deadlineEpochMs,
   });
   if (result.state === "reviewed_pr" || result.state === "blocked") return result;
+  let lastProgressRevision = result.revision;
+  const runServices: DeliveryRunServices = services.onProgress
+    ? {
+        ...services,
+        onProgress: (progress) => {
+          if (progress.revision <= lastProgressRevision) return;
+          lastProgressRevision = progress.revision;
+          services.onProgress?.(progress);
+        },
+      }
+    : services;
   if (deadlineExpired(result.deadlineEpochMs))
-    return blockTask(services.authority, result, "elapsed budget exhausted");
+    return blockTask(runServices, result, "elapsed budget exhausted");
   // This is intentionally a reducer over the durable result.  A restart must
   // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
   for (;;) {
     if (result.state === "blocked") return result;
     if (deadlineExpired(result.deadlineEpochMs))
-      return blockTask(services.authority, result, "elapsed budget exhausted");
+      return blockTask(runServices, result, "elapsed budget exhausted");
 
     if (result.state === "admitted") {
-      result = await activateImplementer(input, services, result, input.contract.baseSha, null, []);
+      result = await activateImplementer(
+        input,
+        runServices,
+        result,
+        input.contract.baseSha,
+        null,
+        [],
+      );
       continue;
     }
 
     if (result.state === "candidate") {
       if (!result.candidateSha)
-        return blockTask(services.authority, result, "candidate phase has no exact SHA");
-      await services.workspace.quarantinePriorWriters(input.contract.id, Number.MAX_SAFE_INTEGER);
+        return blockTask(runServices, result, "candidate phase has no exact SHA");
+      await runServices.workspace.quarantinePriorWriters(
+        input.contract.id,
+        Number.MAX_SAFE_INTEGER,
+      );
       const cycle = Math.min(
         input.contract.budget.maxReviewCycles,
         Math.max(1, result.evidence.reviewCycles + 1),
       );
       let check: CheckResult;
       try {
-        check = await services.quality.check(input.contract, result.candidateSha, cycle);
+        check = await runServices.quality.check(input.contract, result.candidateSha, cycle);
       } catch (error) {
         return blockTask(
-          services.authority,
+          runServices,
           result,
           error instanceof Error ? error.message : String(error),
         );
       }
-      result = await services.authority.recordCheck(
+      result = await runServices.authority.recordCheck(
         { taskId: result.taskId, revision: result.revision },
         check,
       );
+      reportProgress(runServices, result);
       continue;
     }
 
     if (result.state === "checked") {
       if (!result.check || !result.candidateSha)
-        return blockTask(services.authority, result, "checked phase is incomplete");
+        return blockTask(runServices, result, "checked phase is incomplete");
       if (result.check.status === "failed") {
         result = await activateImplementer(
           input,
-          services,
+          runServices,
           result,
           result.candidateSha,
           result.check,
@@ -236,7 +272,7 @@ export async function executeDeliveryRun(
       );
       let review: Awaited<ReturnType<QualityGate["review"]>>;
       try {
-        review = await services.quality.review(
+        review = await runServices.quality.review(
           input.contract,
           result.candidateSha,
           result.check,
@@ -244,21 +280,22 @@ export async function executeDeliveryRun(
         );
       } catch (error) {
         return blockTask(
-          services.authority,
+          runServices,
           result,
           error instanceof Error ? error.message : String(error),
         );
       }
-      result = await services.authority.recordReview(
+      result = await runServices.authority.recordReview(
         { taskId: result.taskId, revision: result.revision },
         review,
       );
+      reportProgress(runServices, result);
       continue;
     }
 
     if (result.state === "reviewed") {
       if (!result.review || !result.check || !result.candidateSha)
-        return blockTask(services.authority, result, "reviewed phase is incomplete");
+        return blockTask(runServices, result, "reviewed phase is incomplete");
       if (result.review.verdict === "changes_requested") {
         if (
           result.evidence.changesRequestedBatches > result.evidence.reviewCycles ||
@@ -266,7 +303,7 @@ export async function executeDeliveryRun(
           result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
         )
           return blockTask(
-            services.authority,
+            runServices,
             result,
             "review changes requested after recovery budget was exhausted",
           );
@@ -274,27 +311,32 @@ export async function executeDeliveryRun(
         // batch twice before activating its repair writer.
         const candidateSha = result.candidateSha;
         const findings = result.review.findings;
-        if (result.evidence.changesRequestedBatches < result.evidence.reviewCycles)
-          result = await services.authority.recordRepairBatch({
+        if (result.evidence.changesRequestedBatches < result.evidence.reviewCycles) {
+          result = await runServices.authority.recordRepairBatch({
             taskId: result.taskId,
             revision: result.revision,
           });
-        result = await activateImplementer(input, services, result, candidateSha, null, findings);
+          reportProgress(runServices, result);
+        }
+        result = await activateImplementer(
+          input,
+          runServices,
+          result,
+          candidateSha,
+          null,
+          findings,
+        );
         continue;
       }
       if (result.review.verdict === "inconclusive")
-        return blockTask(
-          services.authority,
-          result,
-          `review inconclusive: ${result.review.summary}`,
-        );
+        return blockTask(runServices, result, `review inconclusive: ${result.review.summary}`);
       // ForgeDelivery probes before every effect, so a restart after an
       // uncertain PR/comment write reconciles the same approved bundle.  Keep
       // the approved review durable if delivery throws; the next run retries
       // this exact bundle without another implementer.
       let delivery: Awaited<ReturnType<ForgeDelivery["deliver"]>>;
       try {
-        delivery = await services.forge.deliver(
+        delivery = await runServices.forge.deliver(
           input.contract,
           result.candidateSha,
           result.check,
@@ -302,15 +344,17 @@ export async function executeDeliveryRun(
         );
       } catch (error) {
         if (error instanceof DeliveryQuarantineError)
-          return blockTask(services.authority, result, error.message);
+          return blockTask(runServices, result, error.message);
         throw error;
       }
-      return services.authority.recordDelivery(
+      const delivered = await runServices.authority.recordDelivery(
         { taskId: result.taskId, revision: result.revision },
         delivery,
       );
+      reportProgress(runServices, delivered);
+      return delivered;
     }
 
-    return blockTask(services.authority, result, "unknown durable task phase");
+    return blockTask(runServices, result, "unknown durable task phase");
   }
 }
