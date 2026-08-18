@@ -31,9 +31,10 @@ node apps/cli/dist/cli.mjs run ./committed-task-contract.json
 - `USINE_GITHUB_GIT_URL`：forge Git URL，默认由 Task Contract 的 repository owner/name 组成。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
-`vp check --no-fmt --no-lint`, `vp test`, and `vp run --filter '@usine/cli...' build`. `vp check`
-combines formatting, linting, and type-checking; the root TypeScript project
-continues to include `tests/**/*.ts` in that static coverage.
+`vp check --no-fmt --no-lint`, `corepack pnpm test`, and `vp run --filter '@usine/cli...' build`.
+The root `corepack pnpm test` command runs the root public-seam suite and every workspace package
+that declares a `test` script. `vp check` combines formatting, linting, and type-checking; the
+root TypeScript project continues to include `tests/**/*.ts` in that static coverage.
 
 首条纵切只面向受信任的私有仓库。项目检查使用最小显式环境并在 disposable checkout 中运行，但当前仍共享 host 的网络与文件系统权限；更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex sandbox 不足时进入。
 

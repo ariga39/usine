@@ -32,7 +32,7 @@ vp fmt --check
 vp lint
 vp check --no-fmt --no-lint
 vp run --filter '@usine/cli...' build
-vp test
+corepack pnpm test
 corepack pnpm check:links
 ```
 
