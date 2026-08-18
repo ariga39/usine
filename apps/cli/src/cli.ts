@@ -2,7 +2,7 @@
 
 import { readFile } from "node:fs/promises";
 import { contractIssues, taskContractSchema } from "@usine/runtime/contract";
-import { admitTask } from "@usine/runtime";
+import { admitTask, runtimePolicyFromEnvironment } from "@usine/runtime";
 
 async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
@@ -37,9 +37,10 @@ async function main(): Promise<void> {
   }
 
   try {
-    const result = await admitTask(contractPath, rawContract, parsed.data);
+    const policy = runtimePolicyFromEnvironment(process.env, parsed.data.repository);
+    const result = await admitTask(contractPath, rawContract, parsed.data, policy);
     process.stdout.write(`${JSON.stringify(result)}\n`);
-    if (process.env.USINE_STOP_AFTER === "admitted") process.exitCode = 75;
+    if (policy.stopAfterAdmitted) process.exitCode = 75;
   } catch (error) {
     process.stderr.write(`${JSON.stringify({ error: "run_failed", message: String(error) })}\n`);
     process.exitCode = 1;

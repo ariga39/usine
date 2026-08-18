@@ -1,6 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { TaskContract } from "./contract.js";
 import { applyMigrations } from "./apply-migrations.js";
 import { CandidateWorkspace } from "./candidate-workspace.js";
@@ -11,6 +10,19 @@ import { QualityGate } from "./quality-gate.js";
 import { openSqliteDatabase } from "./sqlite-database.js";
 import { TaskAuthority, hashTaskContract, type TaskResult } from "./task-authority.js";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
+import type { RuntimePolicy } from "./runtime-policy.js";
+import { deadlineExpired } from "./remaining-until.js";
+
+export {
+  capabilityEnvironments,
+  explicitWorkerEnvironment,
+  forgeGitEnvironment,
+  runtimePolicyFromEnvironment,
+  type CapabilityEnvironments,
+  type ForgePolicy,
+  type RolePolicy,
+  type RuntimePolicy,
+} from "./runtime-policy.js";
 
 export type {
   CheckResult,
@@ -24,10 +36,10 @@ export async function admitTask(
   contractPath: string,
   rawContract: string,
   contract: TaskContract,
+  suppliedPolicy: RuntimePolicy,
 ): Promise<TaskResult> {
-  const userStateDirectory =
-    process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
-  const stateDirectory = process.env.USINE_STATE_DIR ?? join(userStateDirectory, "usine");
+  const policy = suppliedPolicy;
+  const stateDirectory = policy.stateDirectory;
   await mkdir(stateDirectory, { recursive: true });
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   await applyMigrations(databasePath);
@@ -53,12 +65,17 @@ export async function admitTask(
       await writeTaskResult(stateDirectory, blocked);
       return blocked;
     };
-    if (existing && Date.now() >= deadlineEpochMs) return await blockExpiredExisting();
+    if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
     let repository: string;
     try {
-      repository = await verifyCommittedContract(contractPath, contract, deadlineEpochMs);
+      repository = await verifyCommittedContract(
+        contractPath,
+        contract,
+        deadlineEpochMs,
+        policy.capabilities.credentialFreeGit,
+      );
     } catch (error) {
-      if (existing && Date.now() >= deadlineEpochMs) return await blockExpiredExisting();
+      if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
       throw error;
     }
     // Admission is the single source of the first deadline.  On recovery this
@@ -71,28 +88,39 @@ export async function admitTask(
       deadlineEpochMs,
     });
     const persistedDeadlineEpochMs = admitted.deadlineEpochMs;
+    if (policy.stopAfterAdmitted) {
+      await writeTaskResult(stateDirectory, admitted);
+      return admitted;
+    }
+    if (!policy.forge) throw new Error("GitHub App credentials are required");
     const workspace = new CandidateWorkspace({
       repository,
       stateDirectory,
       deadlineEpochMs: persistedDeadlineEpochMs,
+      environment: policy.capabilities,
     });
     const session = new CodexCodingSession();
     const quality = new QualityGate({
       workspace,
       session,
-      reviewerModel: process.env.USINE_REVIEWER_MODEL ?? "gpt-5.6-sol",
-      reviewerReasoningEffort: process.env.USINE_REVIEWER_REASONING_EFFORT ?? "low",
+      reviewer: policy.roles.reviewer,
+      environment: policy.capabilities,
       deadlineEpochMs: persistedDeadlineEpochMs,
     });
-    const forge = new ForgeDelivery({ repository, deadlineEpochMs: persistedDeadlineEpochMs });
+    const forge = new ForgeDelivery({
+      repository,
+      deadlineEpochMs: persistedDeadlineEpochMs,
+      forge: policy.forge,
+      environment: policy.capabilities,
+    });
     const workflowInput: DeliveryRunInput = {
       contract,
       contractHash,
       repository,
       repositoryIdentity,
       deadlineEpochMs: persistedDeadlineEpochMs,
-      implementerModel: process.env.USINE_IMPLEMENTER_MODEL ?? "gpt-5.6-luna",
-      stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
+      implementer: policy.roles.implementer,
+      environments: policy.capabilities,
     };
     const result = await executeDeliveryRun(workflowInput, {
       authority,

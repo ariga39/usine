@@ -3,17 +3,17 @@ import { execa } from "execa";
 import { App, Octokit } from "octokit";
 import type { TaskContract } from "./contract.js";
 import type { CheckResult, DeliveryEffect, ReviewVerdict } from "./task-authority.js";
+import {
+  forgeGitEnvironment,
+  type CapabilityEnvironments,
+  type ForgePolicy,
+} from "./runtime-policy.js";
+import { remainingUntil } from "./remaining-until.js";
 
 function statusOf(error: unknown): number | undefined {
   return typeof error === "object" && error !== null && "status" in error
     ? Number((error as { status: unknown }).status)
     : undefined;
-}
-
-function timeoutUntil(deadlineEpochMs: number): number {
-  const remaining = deadlineEpochMs - Date.now() - 100;
-  if (remaining <= 0) throw new Error("elapsed budget exhausted");
-  return Math.max(1, remaining);
 }
 
 interface ForgeClient {
@@ -25,6 +25,8 @@ interface ForgeClient {
 export interface ForgeDeliveryOptions {
   repository: string;
   deadlineEpochMs: number;
+  forge: ForgePolicy;
+  environment: CapabilityEnvironments;
 }
 
 export function approvalAttestationBody(
@@ -71,7 +73,7 @@ export class ForgeDelivery {
           throw error;
         if (attempt < 3)
           await new Promise((resolve) =>
-            setTimeout(resolve, Math.min(100, timeoutUntil(this.options.deadlineEpochMs))),
+            setTimeout(resolve, remainingUntil(this.options.deadlineEpochMs, 100)),
           );
       }
     }
@@ -79,30 +81,23 @@ export class ForgeDelivery {
   }
 
   private async client(): Promise<ForgeClient> {
-    const appSlug = process.env.USINE_GITHUB_APP_SLUG;
-    if (!appSlug) throw new Error("USINE_GITHUB_APP_SLUG is required");
-    const testToken = process.env.USINE_GITHUB_TEST_TOKEN;
-    const apiUrl = process.env.USINE_GITHUB_API_URL;
-    if (testToken) {
-      if (!apiUrl || !/^http:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(apiUrl))
-        throw new Error("test GitHub token is restricted to loopback API URL");
+    const forge = this.options.forge;
+    if (forge.mode === "test") {
       return {
-        octokit: new Octokit({ auth: testToken, baseUrl: apiUrl }),
-        token: testToken,
-        appSlug,
+        octokit: new Octokit({ auth: forge.token, baseUrl: forge.apiUrl }),
+        token: forge.token,
+        appSlug: forge.appSlug,
       };
     }
-    const appId = process.env.USINE_GITHUB_APP_ID;
-    const installationId = Number(process.env.USINE_GITHUB_INSTALLATION_ID);
-    const privateKeyPath = process.env.USINE_GITHUB_PRIVATE_KEY_PATH;
-    if (!appId || !Number.isSafeInteger(installationId) || !privateKeyPath)
-      throw new Error("GitHub App credentials are required");
-    const app = new App({ appId, privateKey: await readFile(privateKeyPath, "utf8") });
-    const octokit = await app.getInstallationOctokit(installationId);
+    const app = new App({
+      appId: forge.appId,
+      privateKey: await readFile(forge.privateKeyPath, "utf8"),
+    });
+    const octokit = await app.getInstallationOctokit(forge.installationId);
     const auth = (await octokit.auth({ type: "installation" })) as { token?: unknown };
     if (typeof auth.token !== "string")
       throw new Error("GitHub App did not produce an installation token");
-    return { octokit, token: auth.token, appSlug };
+    return { octokit, token: auth.token, appSlug: forge.appSlug };
   }
 
   private async reconcile(
@@ -121,20 +116,15 @@ export class ForgeDelivery {
           owner,
           repo,
           ref: `heads/${branch}`,
-          request: { timeout: timeoutUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
         })
       ).data.object.sha;
     } catch (error) {
       if (statusOf(error) !== 404) throw error;
     }
     if (observedHead !== sha) {
-      const gitUrl = process.env.USINE_GITHUB_GIT_URL ?? `https://github.com/${owner}/${repo}.git`;
-      const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-      if (gitUrl.startsWith("https://github.com/")) {
-        env.GIT_CONFIG_COUNT = "1";
-        env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
-        env.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${client.token}`).toString("base64")}`;
-      }
+      const gitUrl = this.options.forge.gitUrl;
+      const env = forgeGitEnvironment(this.options.environment, client.token, gitUrl);
       await execa(
         "git",
         [
@@ -145,7 +135,7 @@ export class ForgeDelivery {
           gitUrl,
           `${sha}:refs/heads/${branch}`,
         ],
-        { env, timeout: timeoutUntil(this.options.deadlineEpochMs) },
+        { env, extendEnv: false, timeout: remainingUntil(this.options.deadlineEpochMs) },
       );
     }
     const pullRequests = await client.octokit.rest.pulls.list({
@@ -155,7 +145,7 @@ export class ForgeDelivery {
       base: baseBranch,
       state: "all",
       per_page: 100,
-      request: { timeout: timeoutUntil(this.options.deadlineEpochMs), retries: 0 },
+      request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
     });
     const existing = pullRequests.data.find((pr) => pr.head.sha === sha);
     if (existing && existing.state !== "open")
@@ -177,7 +167,7 @@ export class ForgeDelivery {
           title: contract.delivery.title,
           body: `${contract.delivery.body}\n\nCloses #${contract.delivery.issue}`,
           draft: false,
-          request: { timeout: timeoutUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
         })
       ).data;
     const body = approvalAttestationBody(contract, sha, check, review);
@@ -186,7 +176,7 @@ export class ForgeDelivery {
       repo,
       issue_number: pullRequest.number,
       per_page: 100,
-      request: { timeout: timeoutUntil(this.options.deadlineEpochMs), retries: 0 },
+      request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
     });
     const attestation =
       comments.find(
@@ -202,7 +192,7 @@ export class ForgeDelivery {
           repo,
           issue_number: pullRequest.number,
           body,
-          request: { timeout: timeoutUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
         })
       ).data;
     return {

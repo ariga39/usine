@@ -1,4 +1,6 @@
 import type { TaskContract } from "./contract.js";
+import { explicitWorkerEnvironment } from "./runtime-policy.js";
+import { remainingUntil } from "./remaining-until.js";
 import { z } from "zod";
 
 export {
@@ -17,12 +19,12 @@ export interface SessionRequest<Output = unknown> {
   contract: TaskContract;
   prompt: string;
   model: string;
-  reasoningEffort?: string;
+  reasoningEffort: string;
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
   continuation?: string | null;
-  environment?: NodeJS.ProcessEnv;
+  environment: NodeJS.ProcessEnv;
 }
 
 export interface SessionObservation<T = unknown> {
@@ -45,37 +47,6 @@ export interface CodingSessionClient {
 }
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<CodingSessionClient>;
-
-export function workerEnvironment(request: Pick<SessionRequest, "environment">): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { CI: "true", ...request.environment };
-  for (const key of [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-  ]) {
-    if (process.env[key] !== undefined && result[key] === undefined) result[key] = process.env[key];
-  }
-  // Delivery and coordinator credentials never enter a coding worker.
-  for (const key of [
-    "USINE_STATE_DIR",
-    "USINE_GITHUB_TEST_TOKEN",
-    "USINE_GITHUB_APP_ID",
-    "USINE_GITHUB_INSTALLATION_ID",
-    "USINE_GITHUB_PRIVATE_KEY_PATH",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "OPENAI_API_KEY",
-  ])
-    delete result[key];
-  return result;
-}
 
 function outputFrom(result: unknown): unknown {
   if (!result || typeof result !== "object") return result;
@@ -110,8 +81,10 @@ export class CodexCodingSession {
   constructor(private readonly clientFactory?: CodingSessionClientFactory) {}
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
-    const remaining = request.deadlineEpochMs - Date.now() - 100;
-    if (remaining <= 0)
+    let remaining: number;
+    try {
+      remaining = remainingUntil(request.deadlineEpochMs);
+    } catch {
       return {
         status: "failed",
         sessionId: null,
@@ -120,6 +93,7 @@ export class CodexCodingSession {
         summary: "elapsed budget exhausted",
         failure: "elapsed budget exhausted",
       };
+    }
     const abortSignal = AbortSignal.timeout(remaining);
     try {
       const client = await this.createClient(request);
@@ -178,9 +152,9 @@ export class CodexCodingSession {
       Codex: new (options?: Record<string, unknown>) => CodingSessionClient;
     };
     return new sdk.Codex({
-      env: workerEnvironment(request),
+      env: explicitWorkerEnvironment(request.environment),
       config: {
-        model_reasoning_effort: request.reasoningEffort ?? "high",
+        model_reasoning_effort: request.reasoningEffort,
         service_tier: "default",
       },
     });
