@@ -27,6 +27,7 @@ export interface SessionObservation<T = unknown> {
 }
 
 interface Thread {
+  id?: string | null;
   run(prompt: string, options?: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -70,16 +71,12 @@ export class CodexCodingSession {
     try {
       const sdk = (await import("@openai/codex-sdk")) as unknown as { Codex: new (options?: Record<string, unknown>) => CodexClient };
       const client = new sdk.Codex({
-        config: {
-          model: request.model,
-          model_reasoning_effort: request.reasoningEffort ?? "high",
-          service_tier: "default",
-          sandbox_mode: request.sandbox,
-          cwd: request.workspace,
-          shell_environment_policy: { type: "whitelist", variables: Object.keys(environmentFor(request)) },
-        },
+        env: environmentFor(request),
+        config: { model_reasoning_effort: request.reasoningEffort ?? "high", service_tier: "default" },
       });
-      const thread = request.continuation && client.resumeThread ? client.resumeThread(request.continuation) : client.startThread({ model: request.model, sandboxMode: request.sandbox, workingDirectory: request.workspace });
+      const thread = request.continuation && client.resumeThread
+        ? client.resumeThread(request.continuation, { model: request.model, sandboxMode: request.sandbox, workingDirectory: request.workspace })
+        : client.startThread({ model: request.model, sandboxMode: request.sandbox, workingDirectory: request.workspace });
       const result = await thread.run(request.prompt, {
         signal: abortSignal,
         outputSchema: request.outputSchema,
@@ -88,7 +85,7 @@ export class CodexCodingSession {
       const output = outputFrom(result) as T;
       return {
         status: "completed",
-        sessionId: sessionIdFrom(result),
+        sessionId: thread.id ?? sessionIdFrom(result),
         output,
         usage: usageFrom(result),
         summary: "coding session completed",

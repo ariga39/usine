@@ -60,12 +60,14 @@ export class QualityGate {
   async evaluate(contract: TaskContract, sha: string, cycle: number): Promise<QualityEvaluation> {
     const check = await this.options.workspace.withCheckout(`check-${contract.id}-${cycle}`, sha, async (path) => {
       let result;
+      const remaining = this.options.deadlineEpochMs - Date.now() - 100;
+      if (remaining <= 0) return { sha, status: "failed" as const, command: contract.projectCheck.command, exitCode: 124, stdout: "", stderr: "elapsed budget exhausted" };
       try {
         result = await execa("sh", ["-c", contract.projectCheck.command], {
           cwd: path,
           env: checkEnvironment(),
           extendEnv: false,
-          timeout: Math.min(contract.projectCheck.timeoutMs, this.options.deadlineEpochMs - Date.now()),
+          timeout: Math.min(contract.projectCheck.timeoutMs, remaining),
           reject: false,
         });
       } catch (error) {

@@ -163,7 +163,9 @@ export class TaskAuthority {
 
   acceptCandidate(result: TaskResult, fact: CandidateFact): void {
     if (fact.generation !== result.writer.generation) throw new Error("candidate belongs to a stale writer generation");
-    if (fact.fence <= 0 || !Number.isSafeInteger(fact.fence)) throw new Error("candidate fence is invalid");
+    if (fact.fence <= 0 || !Number.isSafeInteger(fact.fence) || fact.fence !== result.evidence.implementerActivations) {
+      throw new Error("candidate fence is stale");
+    }
     // A candidate may descend from the contract base or the prior candidate used for repair.
     // The workspace adapter proves ancestry; authority only rejects a stale repair parent.
     if (result.candidateSha && fact.baseSha !== result.candidateSha) {
