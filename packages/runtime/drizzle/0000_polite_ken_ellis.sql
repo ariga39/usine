@@ -2,10 +2,10 @@ CREATE TABLE `repository_leases` (
 	`repository_identity` text PRIMARY KEY NOT NULL,
 	`task_id` text NOT NULL,
 	`generation` integer NOT NULL,
-	`created_at` integer DEFAULT (unixepoch() * 1000) NOT NULL,
-	CONSTRAINT `repository_leases_task_id_unique` UNIQUE(`task_id`)
+	`created_at` integer DEFAULT (unixepoch() * 1000) NOT NULL
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `repository_leases_task_id_unique` ON `repository_leases` (`task_id`);--> statement-breakpoint
 CREATE TABLE `task_runs` (
 	`task_id` text PRIMARY KEY NOT NULL,
 	`contract_hash` text NOT NULL,
