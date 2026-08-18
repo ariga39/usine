@@ -2,7 +2,7 @@ import type { TaskContract } from "./contract.js";
 import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { implementerOutputSchema } from "./role-output.js";
-import { ForgeDelivery } from "./forge-delivery.js";
+import { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { TaskAuthority, type CheckResult, type TaskResult } from "./task-authority.js";
 import type { CapabilityEnvironments, RolePolicy } from "./runtime-policy.js";
@@ -291,12 +291,19 @@ export async function executeDeliveryRun(
       // uncertain PR/comment write reconciles the same approved bundle.  Keep
       // the approved review durable if delivery throws; the next run retries
       // this exact bundle without another implementer.
-      const delivery = await services.forge.deliver(
-        input.contract,
-        result.candidateSha,
-        result.check,
-        result.review,
-      );
+      let delivery: Awaited<ReturnType<ForgeDelivery["deliver"]>>;
+      try {
+        delivery = await services.forge.deliver(
+          input.contract,
+          result.candidateSha,
+          result.check,
+          result.review,
+        );
+      } catch (error) {
+        if (error instanceof DeliveryQuarantineError)
+          return blockTask(services.authority, result, error.message);
+        throw error;
+      }
       return services.authority.recordDelivery(
         { taskId: result.taskId, revision: result.revision },
         delivery,

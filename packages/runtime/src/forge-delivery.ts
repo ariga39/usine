@@ -16,7 +16,7 @@ function statusOf(error: unknown): number | undefined {
     : undefined;
 }
 
-class DeliveryQuarantineError extends Error {}
+export class DeliveryQuarantineError extends Error {}
 
 interface ForgeClient {
   octokit: InstanceType<typeof Octokit>;
@@ -125,26 +125,6 @@ export class ForgeDelivery {
     } catch (error) {
       if (statusOf(error) !== 404) throw error;
     }
-    if (observedHead !== null && observedHead !== sha)
-      throw new DeliveryQuarantineError(
-        `delivery branch ${branch} has conflicting head ${observedHead}; delivery quarantined`,
-      );
-    if (observedHead === null) {
-      const gitUrl = this.options.forge.gitUrl;
-      const env = forgeGitEnvironment(this.options.environment, client.token, gitUrl);
-      await execa(
-        "git",
-        [
-          "-C",
-          this.options.repository,
-          "push",
-          `--force-with-lease=refs/heads/${branch}:${observedHead ?? ""}`,
-          gitUrl,
-          `${sha}:refs/heads/${branch}`,
-        ],
-        { env, extendEnv: false, timeout: remainingUntil(this.options.deadlineEpochMs) },
-      );
-    }
     const pullRequests = await client.octokit.rest.pulls.list({
       owner,
       repo,
@@ -168,6 +148,26 @@ export class ForgeDelivery {
       throw new DeliveryQuarantineError(
         `open delivery PR #${pullRequests.data[0]?.number ?? "unknown"} has a conflicting head; delivery quarantined`,
       );
+    if (observedHead !== null && observedHead !== sha)
+      throw new DeliveryQuarantineError(
+        `delivery branch ${branch} has conflicting head ${observedHead}; delivery quarantined`,
+      );
+    if (observedHead === null) {
+      const gitUrl = this.options.forge.gitUrl;
+      const env = forgeGitEnvironment(this.options.environment, client.token, gitUrl);
+      await execa(
+        "git",
+        [
+          "-C",
+          this.options.repository,
+          "push",
+          `--force-with-lease=refs/heads/${branch}:${observedHead ?? ""}`,
+          gitUrl,
+          `${sha}:refs/heads/${branch}`,
+        ],
+        { env, extendEnv: false, timeout: remainingUntil(this.options.deadlineEpochMs) },
+      );
+    }
     const pullRequest =
       existing ??
       (

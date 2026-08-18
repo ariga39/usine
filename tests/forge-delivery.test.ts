@@ -411,6 +411,145 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     ).rejects.toThrow("closed delivery PR");
   });
 
+  test("durably quarantines a closed PR before creating a missing branch", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: null,
+      pullRequests: [
+        {
+          number: 1,
+          state: "closed",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = taskContractSchema.parse({
+      ...contract("forge-closed-public"),
+      baseSha: fixture.actualBaseSha,
+    });
+    const databasePath = join(fixture.root, "state.sqlite");
+    await applyMigrations(databasePath);
+    const database = openSqliteDatabase(databasePath);
+    const authority = new TaskAuthority(database.database);
+    const input = {
+      contract: task,
+      contractHash: "forge-closed-public-contract",
+      repository: fixture.repository,
+      repositoryIdentity: "owner/repo",
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer: {
+        role: "implementer" as const,
+        model: "test",
+        reasoningEffort: "high",
+        sandbox: "workspace-write" as const,
+      },
+      environments: capabilityEnvironments(process.env),
+    };
+    const admitted = await authority.admit({
+      contract: task,
+      contractHash: input.contractHash,
+      repository: fixture.repository,
+      repositoryIdentity: input.repositoryIdentity,
+      deadlineEpochMs: input.deadlineEpochMs,
+    });
+    const activation = await authority.reserveActivation(task.id, 1);
+    const candidate = await authority.recordCandidate(
+      { taskId: admitted.taskId, revision: activation.result.revision },
+      {
+        sha: fixture.candidateSha,
+        baseSha: fixture.actualBaseSha,
+        generation: admitted.writer.generation,
+        fence: activation.activation,
+      },
+    );
+    const checked = await authority.recordCheck(
+      { taskId: candidate.taskId, revision: candidate.revision },
+      { ...passingCheck, sha: fixture.candidateSha },
+    );
+    const reviewed = await authority.recordReview(
+      { taskId: checked.taskId, revision: checked.revision },
+      { ...approvedReview, sha: fixture.candidateSha },
+    );
+    expect(reviewed.state).toBe("reviewed");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = controlledFetch(state);
+    try {
+      const forgeDelivery = forge(fixture.repository, "http://127.0.0.1:8787", fixture.remote);
+      const services = {
+        authority,
+        workspace: {},
+        session: {},
+        quality: {},
+        forge: forgeDelivery,
+      } as never;
+      const result = await executeDeliveryRun(input, services);
+
+      expect(result.state).toBe("blocked");
+      expect(result.blocker).toContain("closed delivery PR");
+      await expect(readFile(join(fixture.remote, "update-count"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      const requestsAfterFirstRun = state.requests.length;
+      const restarted = await executeDeliveryRun(input, services);
+      expect(restarted).toEqual(result);
+      expect(state.requests).toHaveLength(requestsAfterFirstRun);
+    } finally {
+      database.close();
+      globalThis.fetch = originalFetch;
+    }
+  }, 30_000);
+
+  test("quarantines duplicate matching PRs without creating another PR", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+        {
+          number: 2,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/2",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+
+    await expect(
+      withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote).deliver(
+          contract("forge-duplicate-pr"),
+          fixture.candidateSha,
+          { ...passingCheck, sha: fixture.candidateSha },
+          { ...approvedReview, sha: fixture.candidateSha },
+        ),
+      ),
+    ).rejects.toThrow("multiple delivery PRs");
+    expect(state.pullRequestCreates).toBe(0);
+    expect(state.commentCreates).toBe(0);
+  });
+
   test("quarantines an open PR with a conflicting head instead of creating another PR", async () => {
     const fixture = await repositoryFixture();
     const state: ForgeServerState = {
