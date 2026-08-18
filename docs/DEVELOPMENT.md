@@ -94,7 +94,7 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：只允许 Issue #76 后的一个 full-refactor task；fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Production coding lifecycle 使用 Codex SDK；Herdr/transcript 不参与 completion authority；
+- implementation：只允许 Issue #76 后的一个 full-refactor task；fresh worker、GPT-5.6 Luna high、default service tier、workspace-write、禁止 fast。Model slug 是当前用户指定的 deployment/task constraint，不是跨模块 runtime type。Provider-neutral Coding Session 的当前 production adapter使用 Codex SDK；Herdr/transcript 不参与 completion authority；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
 - 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。

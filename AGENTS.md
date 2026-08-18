@@ -56,9 +56,9 @@ Repeat these six steps after context compaction, session replacement, handoff, o
 
 ## Current route correction
 
-- Issue #65's settled-without-observation falsifier remains active. Issue #76 selected a Codex SDK-backed `clean_implementation` around six deep modules; Herdr panes, prompt settlement, hooks, and rendered transcripts are not production completion authority.
+- Issue #65's settled-without-observation falsifier remains active. Issue #76 selected a `clean_implementation` around a provider-neutral Coding Session port whose only current production adapter is Codex SDK; Herdr panes, prompt settlement, hooks, and rendered transcripts are not production completion authority.
 - Classification is `correct_before_expansion`. Exactly one full-refactor implementation task may run serially, in one PR with small visible commits. Do not recreate the closed backlog, preserve transitional seams as separate PRs, add a second runtime/forge/lane, or build a custom agent runtime.
-- The refactor must preserve a fresh GPT-5.6 Luna high/default-tier/no-fast implementer in an isolated workspace. It clears the falsifier only with a representative executable task and induced live coordinator restart during an active coding session; design, fixture-only evidence, file splitting, or green unit tests do not clear it.
+- The refactor must build all six required modules in one PR and preserve a fresh GPT-5.6 Luna high/default-tier/no-fast implementer in an isolated workspace. Characterize the SDK early enough to replace a bad adapter without protecting sunk cost, but do not make that characterization a prerequisite for restructuring the other required modules. The final merge gate requires a representative executable task and induced live coordinator restart proving fenced retry, structured terminal evidence, environment separation, and no orphan authority; design, fixture-only evidence, file splitting, or green unit tests do not clear it.
 
 ## Independent direction audits
 

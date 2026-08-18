@@ -15,9 +15,9 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-003 | TypeScript、Node 24、pnpm monorepo | 与 Codex/DBOS/Octokit 生态一致；monorepo 便于建立明确 module ownership 和并排 worktree。 |
 | D-004 | 使用 DBOS TypeScript SDK + PostgreSQL 提供 durable workflow、queue、timer 和 restart recovery | 不再手写 scheduler、outbox、retry loop 或 SQLite 恢复系统。 |
 | D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并使用 DBOS 官方 Drizzle datasource | 减少原始 SQL、repository boilerplate、migration/transaction 重复实现，同时保留轻量、显式的 TypeScript schema。 |
-| D-006 | V0 的唯一 coding-agent lifecycle 使用官方 `@openai/codex-sdk`；Herdr/transcript route 从 production correctness path 删除。SDK 由一个 Coding Session deep module 封装，保留 fresh worker、GPT-5.6 Luna high、default tier、no fast、isolated workspace 与 controlled environment policy | SDK 已封装 local Codex thread start/resume、structured events/output、sandbox、cwd、config 与 cancellation，能删除 CLI/JSONL/transcript glue而不重建 runtime。Gas City 的 session/runtime 分离和幂等 lifecycle 只作为 donor；Herdr 最多在 observed need 后作为 optional observer/host re-enter，永不授予 completion authority。 |
+| D-006 | V0 的 provider-neutral Coding Session port 当前只有一个 production adapter：官方 `@openai/codex-sdk`。Herdr/transcript route 从 production correctness path 删除；不预建 provider registry或第二 adapter。当前 adapter 保留 fresh worker、GPT-5.6 Luna high、default tier、no fast、isolated workspace 与 controlled environment policy | SDK 已封装 local Codex thread start/resume、structured events/output、sandbox、cwd、config 与 cancellation，能删除 CLI/JSONL/transcript glue而不重建 runtime。Gas City 的 session/runtime 分离和幂等 lifecycle 只作为 donor；未来 runtime 由实证触发后在同一 port替换，Herdr 最多作为 optional observer/host re-enter，永不授予 completion authority。 |
 | D-007 | Coordinator-owned classification、extraction、normalization 和 short summary 使用 `ai` + `@ai-sdk/openai` 对配置的 OpenAI-compatible API 做 schema-constrained 调用；coding-agent lifecycle 使用 D-006 的 Codex SDK。API key 只留在 coordinator，轻量 transform、agent prose、provider success 和 process exit 都不授予 task authority | 成熟 provider 删除自定义 HTTP/parsing glue；轻量 semantic transform 不需要 repository/tool/session runtime，rendered transcript、hook 或 terminal state也不是 lifecycle bridge。 |
-| D-008 | 当前 classification 为 `correct_before_expansion`：只允许一个串行 full-refactor implementation task。它必须用 representative executable code task 与 agent activation 中途的 induced live coordinator restart 清除 Issue #65 falsifier；此前不增加第二 lane、runtime 或 authority | 设计已经选择 replacement route，但没有用真实执行证明 liveness。先让一次完整 accepted outcome 证伪或支持新 seam，再扩容。 |
+| D-008 | 当前 classification 为 `correct_before_expansion`：只允许一个串行 full-refactor implementation task，完成 Coding Session、Task Authority、Delivery Run、Candidate Workspace、Quality Gate 和 Forge Delivery。SDK characterization 尽早运行但不阻塞其它必要模块重构；representative executable task 与 activation 中途 induced restart 的 fenced retry 是整个 PR 的 merge gate | 用户确认目标架构不因 adapter 验证而改变。早期 characterization 用于低成本替换错误 adapter；最终 live evidence清除 falsifier，此前不增加第二 lane/runtime/authority。 |
 | D-009 | Candidate、checks、review verdict 和投影出的 attestation 全部绑定 immutable exact SHA | 防止 stale evidence 和“agent 说完成了”成为交付依据。 |
 | D-010 | Reviewer 必须 fresh、可读取完整 codebase，并提交 explicit verdict；exact-SHA `approved` verdict 是 semantic approval，review run 完成与批准是两个事实 | 保留独立判断；delivery executor 只能投影 verdict，不能制造批准。需要 GitHub 原生 approval 时使用不同于 PR author/delivery identity 的 reviewer capability。 |
 | D-011 | GitHub 是当前 forge/delivery surface；使用 Octokit + GitHub App 短期 installation token | 现有 private repos 已安装 App；不再把凭据和 API 轮换手写到每个 agent。 |
@@ -35,7 +35,7 @@ issue: https://github.com/ariga39/usine/issues/1
 
 当前 classification 为 `correct_before_expansion`。Issue #76 选择围绕 Codex SDK 与六个 deep modules 的 `clean_implementation`，但 Issue #65 route falsifier 仍 active。
 
-当前只允许一个 full-refactor Issue/PR；不得并发、恢复旧 backlog或扩大 authority/runtime/forge。其 merge gate 必须包含 representative executable task 和 activation 中途 induced coordinator restart 的真实 evidence；不得用设计文档、fixture-only task、文件拆分或测试数量代替。若 SDK 无法满足 role policy、structured turn evidence、credential separation 或 restart retry，回到 `stop_and_redesign`，不得补写自制 runtime。
+当前只允许一个 full-refactor Issue/PR；不得并发、恢复旧 backlog或扩大 authority/runtime/forge。其 merge gate 必须包含 representative executable task 和 activation 中途 induced coordinator restart 的真实 evidence；不得用设计文档、fixture-only task、文件拆分或测试数量代替。若 SDK 无法满足 role policy、structured turn evidence、credential separation 或 restart retry，在同一 Coding Session port 替换成熟 adapter；六个目标模块不因此取消，也不得补写自制 runtime。
 
 ## 已确定的依赖方向
 
@@ -60,7 +60,7 @@ Domain policy 不 import DBOS、Drizzle、Git、GitHub、subprocess 或 HTTP imp
 
 | 事项 | 当前状态 | Re-entry trigger |
 |---|---|---|
-| ACP runtime protocol | 延期 | Codex CLI subprocess 无法可靠 resume/observe，或 ACP 已有稳定实现并能删除现有 adapter 的实质复杂度。 |
+| ACP runtime protocol | 延期 | Codex SDK/Coding Session adapter 无法可靠 resume/observe，或 ACP 已有稳定实现并能删除当前 adapter 的实质复杂度。 |
 | OpenCode runtime adapter | 延期 | 必需模型无法通过 Codex Responses provider 使用，或 Codex adapter 成为可测的成本/能力瓶颈。 |
 | Stop hook continuation | 非 authority 的可选优化 | DBOS 外层恢复已正确，且运行数据表明 warm continuation 能显著降低延迟/token；hook 仍不得创建 generation。 |
 | 自动 merge | 后续 narrow adapter | reviewed PR exact-head gate 与 delivery reconciliation 已稳定，且 GitHub App 身份/权限已验证。 |

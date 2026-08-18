@@ -67,11 +67,12 @@ Push and open a draft PR at the first checkable state. Merge only after the cohe
 
 ## Current route
 
-The repository is classified `stop_and_redesign`. Issue #65 falsified the Herdr/transcript lifecycle route. Until the reviewed module and salvage/rewrite decision in Issue #76 merges:
+The repository is classified `correct_before_expansion`. Issue #65 falsified the Herdr/transcript lifecycle route; Issue #76 replaces it with a provider-neutral Coding Session port whose only current production adapter is Codex SDK.
 
-- do not start product implementation;
-- do not select a replacement launcher or transport;
-- do not perform cleanup, package/file movement, concurrency, or authority expansion;
-- preserve the future worker policy of a fresh Luna/high/default-tier/no-fast worker in an isolated workspace without treating any launcher as preselected.
+- run exactly one full-refactor implementation Issue/PR with small visible commits;
+- complete all six required product modules without recreating the closed implementation backlog;
+- characterize the current SDK adapter early, but do not make adapter validation a prerequisite for restructuring the other required modules;
+- preserve a fresh Luna/high/default-tier/no-fast worker in an isolated workspace;
+- do not add a second runtime, forge, implementation lane, custom agent supervisor, or authority expansion.
 
-Issue #76 must define the minimum coordinator-to-worker contract and the exact representative evidence required to clear the active falsifier. Completing design alone does not clear it.
+The refactor's merge gate requires a representative executable task and an induced coordinator restart during an active coding session, with fenced retry, one repository publish authority, structured terminal evidence, exact-SHA review, and reconciled delivery. Completing design, module movement, or fixture tests alone does not clear the falsifier.

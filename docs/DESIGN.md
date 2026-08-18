@@ -151,22 +151,31 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 
 | 模块 | 隐藏的 policy | 外部 caller 只知道 | 允许的内部 seams 与 change locality |
 |---|---|---|---|
-| **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、exact-SHA evidence invalidation | `admit`、读取当前 Run、提交一个被验证的领域事实 | 纯 reducer + Drizzle persistence；不 import DBOS、Git、Codex、GitHub 或 subprocess |
+| **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、接受或拒绝领域事实、exact-SHA evidence invalidation | `admit`、读取当前 Run、提交一个待验证领域事实 | 纯 reducer + Drizzle persistence；独占 stale-evidence acceptance policy，不 import DBOS、Git、Codex、GitHub 或 subprocess |
 | **Delivery Run** | DBOS checkpoint 顺序、activation/review budget、retry、restart recovery、next action | `run(authorized contract)` 返回 durable task result | DBOS workflow 和 operation handlers 集中在这里；它不解析 agent stream、不拼 Git argv、不调用 Octokit endpoint |
-| **Coding Session** | role/model/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 typed observation | 默认使用官方 Codex SDK；SDK event、thread ID、structured output 和 optional read-only MCP 都在此边界内，agent result 永不授予 task terminal authority |
+| **Coding Session** | role/model/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | 当前唯一 production adapter 使用官方 Codex SDK；SDK event、thread ID、structured output 和 optional read-only MCP 都留在 adapter 内，agent result 永不授予 task terminal authority |
 | **Candidate Workspace** | isolated writer worktree、credential-free Git、host-side commit/finalize、ancestry/cleanliness、disposable exact-SHA checkout | prepare writer、freeze Candidate、以 SHA 提供 disposable checkout | 系统 Git CLI 的窄 argv adapter；不拥有 retry、review 或 delivery policy |
-| **Quality Gate** | project-check execution、fresh exact-SHA review、finding aggregation、stale evidence rejection | `evaluate(candidate, contract)` 返回 check + review facts | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；check failure 作为 evidence 返回下一次 implementer activation，而不是立即把 Task 永久 block |
+| **Quality Gate** | 一次 candidate evaluation 内的 project check、fresh exact-SHA review 与 finding aggregation | `evaluate(candidate, contract)` 返回 check + review facts | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
 | **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` | Octokit 与 credential-scoped Git push；不运行 candidate code，也不能制造 semantic approval |
 
-依赖只向产品 policy 内侧流动：CLI 组合 Delivery Run；Delivery Run 使用其余五个接口；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict 和 Delivery Effect，不传递 Herdr pane、Codex argv、Octokit response 或 DBOS context。需要独立发布、独立 caller 或独立 deployment 前，这些模块留在少量 workspace package 内，不以 package 数量证明设计。
+依赖只向产品 policy 内侧流动：CLI 组合 Delivery Run；Delivery Run 独占 activation/retry/budget policy并使用其余五个接口；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral SessionRef，不传递 Herdr pane、Codex thread/event/argv、Octokit response 或 DBOS context。需要独立发布、独立 caller 或独立 deployment 前，这些模块留在少量 workspace package 内，不以 package 数量证明设计。
 
 ### 8.1 Coding Session 的最小 contract
 
-Coordinator 只提供：role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline，以及可选 continuation identity。Coding Session 只返回：Codex thread identity、可验证的 turn terminal status、schema-valid role output、usage/progress observation 和 typed failure。它必须支持 AbortSignal/timeout，并允许 host 用受控 environment 和 config 注入只读 capabilities。
+Coordinator 只提供：role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline，以及可选 provider-neutral continuation identity。Coding Session 只返回：opaque session identity、可验证的 turn terminal status、schema-valid role output、usage/progress observation 和 typed failure。它必须支持 cancellation/timeout，并允许 host 用受控 environment 和 config 注入只读 capabilities。当前 Codex adapter 在边界内把 SessionRef 映射到 thread ID、把 AbortSignal 映射到 SDK turn、把 SDK events 映射为 observation；其它模块看不到这些类型。
 
 Candidate SHA、workspace cleanliness、project checks、review freshness、delivery eligibility 和 Task terminal state都不由该 contract 决定。Codex `turn.completed` 是一次 semantic worker attempt 的完成证据，不是 Task 完成。
 
 Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。补充的 live read-only Issue/repository context 通过 deployment-owned MCP capability 提供：使用与 delivery App 分离的 read-only credential、tool allowlist 和 Codex shell environment policy，credential 不进入 worker shell。MCP 不可用时，完整 Task Contract 仍足以执行；worker 不自行实现 GitHub API client，也不因无法读取 GitHub 而等待用户。
+
+对 critical seam 比较两种 external contract：
+
+| Contract shape | Caller knowledge | 决定 |
+|---|---|---|
+| **Task-oriented turn port**：`run(request) -> typed observation`，continuation 是 opaque optional hint | role、workspace、deadline、schema 和 domain output；不知道 process、pane、event protocol 或 provider command | **选择**。它让 SDK 吞掉 session lifecycle，Delivery Run 只根据 durable domain fact retry；当前只有一个 Codex adapter。 |
+| **Session supervisor handle**：`start / observe / prompt / interrupt / resume / stop` | caller 必须拥有 session state、event ordering、process cleanup 和 provider error mapping | 拒绝。它会把 Gas City/Herdr 的通用 runtime surface重新搬进 coordinator，并诱发自写 supervisor；只有同时出现第二个 runtime 和交互式 session caller 才 re-enter。 |
+
+这个 port 是替换边界，不是预建 provider framework：没有 registry、dynamic router、capability matrix或第二个 production/fake provider。未来只有在真实证据触发时才替换当前 adapter或增加一个 adapter，并复用同一 behavior contract；Task Authority、Delivery Run、Candidate、Quality 和 Forge 不随 provider 改变。
 
 ### 8.2 Reuse strategy decision
 
@@ -178,7 +187,7 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 | [Gas City runtime/session design](https://github.com/gastownhall/gascity/blob/main/engdocs/architecture/session.md) + Herdr | stable session identity、idempotent stop、runtime/session bookkeeping 分离、provider conformance ideas | 作为 donor，不采用通用 provider。Gas City 需要多个交互式 runtime，Usine 当前只有一个 coding runtime。Herdr pane、prompt settlement、screen state 和 rendered transcript 从 production correctness path 删除；未来若 operator observation 成为实测需要，只能作为 Coding Session 内的可选 host/observer，不能成为 completion evidence。 |
 | [AgentRouter](https://github.com/perixtar/AgentRouter) / [Cezar](https://github.com/open-mercato/cezar) | persisted run/event、sandbox、multi-provider examples、worktree/event UI patterns | 不采用。前者仍为 alpha 且引入 Daytona/R2/第二套 Postgres control plane，后者主要是本地 cockpit；两者都复制 DBOS/Forge ownership。只借鉴公开的 event mapping、credential separation 和 worktree examples。 |
 
-选择 Codex SDK 而不是更薄的 direct `codex exec`，因为 SDK 已经封装同一官方 CLI 的 structured lifecycle，能删除手写 parsing 并保留本地 Codex authentication/economics。Named profile 不是 module contract；实现者的 fresh Luna/high/default-tier/no-fast policy 通过 explicit model、reasoning 和 config 固定。若 characterization 证明 SDK 无法维持这些设置、无法隔离 environment 或无法产生完整 turn terminal evidence，才降级为 direct exec 或进入 App Server decision。
+选择 Codex SDK 作为当前 adapter，而不是更薄的 direct `codex exec`，因为 SDK 已经封装同一官方 CLI 的 structured lifecycle，能删除手写 parsing 并保留本地 Codex authentication/economics。Named profile 和 model slug 都不是 module contract；fresh/high/default-tier/no-fast 是当前 role property，当前用户指定的 Luna slug保留在 deployment/task policy。若 characterization 证明 SDK 无法维持这些设置、无法隔离 environment 或无法产生完整 turn terminal evidence，才降级为 direct exec、替换 adapter 或进入 App Server decision。
 
 ### 8.3 Salvage and deletion boundary
 
@@ -187,17 +196,17 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 | **salvage unchanged** | Task Contract Zod shape；immutable exact-SHA evidence vocabulary；one-writer/repository identity；credential-free host commit与 ancestry/clean checks；GitHub probe-before-retry、head quarantine 和 attestation identity algorithms |
 | **salvage behind a new seam** | Drizzle schema/migrations与 DBOS workflow facts进入 Task Authority/Delivery Run；worktree helpers进入 Candidate Workspace；project-check environment进入 Quality Gate；Octokit/Git delivery进入 Forge Delivery；CLI 只保留 parse、invoke、exit projection |
 | **delete/replace** | `runtime.ts` composition monolith；`@usine/agent-runtime` shallow helper package；`@usine/review-extractor` whole rendered-transcript second-model path；全部 production Herdr pane/prompt/read/get/close；manual Codex JSONL/session parser、output artifact instruction和 fallback branch；把 Usine 自身 canonical corpus塞给 target implementer；`record://` production branch；one-function physical decomposition；动态 scattered env reads |
-| **one characterization decides** | Codex SDK 对 Luna/high/default-tier/no-fast、controlled env、structured implementer/reviewer output、AbortSignal，以及 host-configured read-only MCP 的实际 config parity；restart 后 fresh retry 与 optional thread resume 的成本差异 |
+| **one characterization decides** | Codex SDK 对 Luna/high/default-tier/no-fast、controlled env、structured implementer/reviewer output 与 AbortSignal 的 config parity；现有 read-only MCP/capability 的具体接入配置；restart 后 fresh retry 与 optional thread resume 的成本差异。Characterization 可以替换 adapter/config，不取消 Coding Session 或其它必要模块 |
 
 测试也 replace 而不是 layer：删除 `fake-herdr` 及其 command-count/mode matrix；删除 transcript line-wrap/extractor suite；把 1500 行 CLI suite 拆为 Task Authority reducer/persistence tests、Coding Session SDK-adapter contract tests、Candidate/Quality tests、Forge reconciliation tests和至多两条 CLI/PostgreSQL end-to-end。新 adapter fake 发 typed SDK events，不复刻 CLI/pane 实现；旧 test claim 被新 module behavior 覆盖后在同一 full-refactor PR 删除。
 
-按当前文件的保守 deletion floor，两个 shallow packages 约 150 行 source、`fake-herdr` 约 220 行、`runtime.ts` 中 Herdr/transcript/manual lifecycle 分支约 350 行会直接消失；CLI suite 中对应 command-count、line-wrap、fallback mode cases 也整体替换，预计再删除数百行。该估算只证明 clean boundary 有真实删除空间，不把净行数作为 merge gate。
+按当前文件的保守 deletion floor，两个 shallow packages 约 150 行 source、`fake-herdr` 约 220 行、`runtime.ts` 中 Herdr/transcript/manual lifecycle 分支约 350 行会直接消失；CLI suite 中对应 command-count、line-wrap、fallback mode cases 也整体替换，预计再删除数百行。该估算只证明 clean boundary 有真实删除空间，不把净行数作为 merge gate。六个 module 是本 PR 的 target map，不是六个预定 package：live caller 若证明某个 boundary 不隐藏 policy，重构 PR应合并或删除它；未经新的 design evidence 不得增加第七个。
 
 ### 8.4 Clean implementation decision and counterargument
 
 决定为 **`clean_implementation`**，含义是围绕成熟 SDK 和上述六个 caller-owned boundary 重组生产代码与测试；不是从零重写 agent runtime，也不是丢弃已验证的 Git/DBOS/GitHub invariants。当前 monolith 让局部迁移继续继承错误 caller knowledge，保留它再逐个抽函数会让旧 tests 和 transport details 支配新接口，删除收益不足。
 
-反对这一选择的最强论据是：一次 full refactor 会同时触碰 hard-won DBOS replay、Git candidate 和 GitHub uncertain-effect recovery，产生难以定位的回归；增量 strangler 更安全。该风险用同一 PR 内小而可运行的提交控制：先建立 module-level characterization，逐 cluster 搬入并删除旧入口，每个提交保持 build/checkable，最后才删除 monolith与旧 fakes。不能用“仍在同一 PR”豁免 exact-SHA review；但也不把这次结构 reset 再拆成会重新固化过渡 seam 的 backlog。
+反对这一选择的最强论据是：一次 full refactor 会同时触碰 hard-won DBOS replay、Git candidate 和 GitHub uncertain-effect recovery，产生难以定位的回归；增量 strangler 更安全。用户已经明确决定目标架构需要 Coding Session 和其它五个模块，并选择一个完整重构 PR而不是重建 backlog。风险通过 PR 内小而可运行的提交控制：尽早 characterise task-oriented Coding Session，若 Codex SDK 不合格就替换该 adapter而不保护沉没成本；同时按模块迁移 hard-won policy，建立新 interface coverage 后删除旧入口，最后删除 monolith与旧 fakes。真实 executable task 与 hard-kill/restart是整个重构的最终 merge gate，不是其它必要模块开始重构的前置许可。不能用“仍在同一 PR”豁免 exact-SHA review。
 
 反对整个路线的更强论据是：AgentRouter 或 Gas City 已经覆盖 agent session、event、retry、workspace 和多 provider，Usine 继续维护 DBOS coordinator 可能仍在重复基础设施。现有证据暂不支持整套替换：AgentRouter 自称 alpha，并要求 Daytona、R2 与自己的 Postgres run control；Gas City 的通用交互式 provider/runtime 远大于当前单 Codex caller，且不提供 Usine 的 immutable candidate、exact-SHA semantic gate 与 GitHub uncertain-effect authority。选择 Codex SDK 的目标正是把差异缩到这几项产品 policy；若 full-refactor 后自有代码仍主要是 session/process/event plumbing，而不是 authority、quality gate 和 delivery reconciliation，这将直接证伪本决定，应改为采用成熟 control plane 而非继续自建。
 
@@ -226,4 +235,6 @@ Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析�
 1. 用 Usine 在一个 private target repository 完成一项真实 executable TypeScript change（修改 production behavior、更新真实 test、运行目标项目原生 check），形成 immutable Candidate、fresh exact-SHA approval 和 reviewed PR；文档复制、fixture script 或只改测试不合格。
 2. 对同一类任务，在 Coding Session 已记录 activation、尚未形成 terminal role output 时强制终止 coordinator；以同一 contract/workflow ID 重启。DBOS 必须恢复同一 writer generation，可 fresh retry 或复用已验证 thread identity，最终只形成一个有效 Candidate/PR/attestation，且没有 orphan writer 或 stale evidence。
 
-这两条证据才清除 Issue #65 lifecycle falsifier。完成后 classification 才可进入 `continue`，并讨论不同 repository 的第二条 lane。若 SDK characterization 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，full-refactor PR 在扩张前回到 `stop_and_redesign` 并重新比较 direct exec、App Server 或成熟 runtime；不得悄悄补一个新的 agent runtime。
+Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 取得 monotonic fence token 和独立 workspace；Task Authority 只接受当前 token 冻结的 Candidate。旧进程即使短暂存活也只能写旧 workspace，其 output/Candidate 被拒绝并 quarantine，随后由 host cleanup。Restart 恢复同一 Task/repository lease，但 fresh retry 使用新的 activation token；“同一 writer generation”表示只有一个 Task 拥有 repository publish authority，不表示两个进程并发共享目录或 Candidate 权限。Warm thread resume 只是 characterization 后的成本优化，不是 correctness requirement。
+
+这两条证据才清除 Issue #65 lifecycle falsifier。完成后 classification 才可进入 `continue`，并讨论不同 repository 的第二条 lane。若 SDK characterization 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，替换 Coding Session adapter并重新比较 direct exec、App Server 或成熟 runtime；其它五个产品模块的目标架构不因此取消。不得悄悄补一个新的 agent runtime。
