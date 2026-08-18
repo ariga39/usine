@@ -41,6 +41,7 @@ export interface TaskResult {
   contractHash: string;
   state: TaskState;
   candidateSha: string | null;
+  candidateFence: number | null;
   check: CheckResult | null;
   review: ReviewVerdict | null;
   delivery: DeliveryEffect | null;
@@ -48,7 +49,6 @@ export interface TaskResult {
   activeActivation: number | null;
   writer: { repository: string; repositoryIdentity: string; generation: number };
   evidence: {
-    workflowId: string;
     implementerActivations: number;
     reviewCycles: number;
     changesRequestedBatches: number;
@@ -69,11 +69,6 @@ export interface AuthorityInput {
   repository: string;
   repositoryIdentity: string;
   deadlineEpochMs: number;
-}
-
-export interface DurableAuthorityTransactions {
-  admit(input: AuthorityInput): Promise<TaskResult>;
-  save(result: TaskResult): Promise<TaskResult>;
 }
 
 type AuthorityDatabase = NodePgDatabase<{
@@ -99,13 +94,9 @@ export function hashTaskContract(rawContract: string): string {
 }
 
 export class TaskAuthority {
-  constructor(
-    private readonly database: AuthorityDatabase,
-    private readonly durable?: DurableAuthorityTransactions,
-  ) {}
+  constructor(private readonly database: AuthorityDatabase) {}
 
   async admit(input: AuthorityInput): Promise<TaskResult> {
-    if (this.durable) return this.durable.admit(input);
     return this.admitDirect(input);
   }
 
@@ -143,6 +134,7 @@ export class TaskAuthority {
       contractHash: input.contractHash,
       state: "admitted",
       candidateSha: null,
+      candidateFence: null,
       check: null,
       review: null,
       delivery: null,
@@ -154,7 +146,6 @@ export class TaskAuthority {
         generation: lease.generation,
       },
       evidence: {
-        workflowId: input.contract.id,
         implementerActivations: 0,
         reviewCycles: 0,
         changesRequestedBatches: 0,
@@ -175,7 +166,6 @@ export class TaskAuthority {
   }
 
   async save(result: TaskResult): Promise<TaskResult> {
-    if (this.durable) return this.durable.save(result);
     return this.saveDirect(result);
   }
 
@@ -186,7 +176,18 @@ export class TaskAuthority {
     if (!current) throw new Error("task is not admitted");
     if (current.contractHash !== result.contractHash)
       throw new Error("admitted contract is immutable");
+    const lease = await this.database.query.repositoryLeases.findFirst({
+      where: eq(repositoryLeases.repositoryIdentity, result.writer.repositoryIdentity),
+    });
+    if (!lease || lease.taskId !== result.taskId || lease.generation !== result.writer.generation)
+      throw new Error("repository writer lease is stale");
     const prior = current.result as TaskResult;
+    if (
+      result.candidateFence !== null &&
+      result.candidateFence < prior.evidence.implementerActivations &&
+      result.candidateSha !== prior.candidateSha
+    )
+      throw new Error("stale candidate observation");
     if (!canTransition(prior.state, result.state)) {
       throw new Error(`illegal task state transition: ${prior.state} -> ${result.state}`);
     }
@@ -195,6 +196,49 @@ export class TaskAuthority {
       .set({ state: result.state, result, updatedAt: new Date() })
       .where(eq(taskRuns.taskId, result.taskId));
     return result;
+  }
+
+  async reserveActivation(
+    taskId: string,
+    budget: number,
+  ): Promise<{ result: TaskResult; activation: number }> {
+    return this.reserveActivationDirect(taskId, budget);
+  }
+
+  async reserveActivationDirect(
+    taskId: string,
+    budget: number,
+  ): Promise<{ result: TaskResult; activation: number }> {
+    const reserve = async (
+      database: AuthorityDatabase,
+    ): Promise<{ result: TaskResult; activation: number }> => {
+      const current = await database.query.taskRuns.findFirst({
+        where: eq(taskRuns.taskId, taskId),
+      });
+      if (!current) throw new Error("task is not admitted");
+      const prior = current.result as TaskResult;
+      const activation = prior.evidence.implementerActivations + 1;
+      if (activation > budget) throw new Error("implementer activation budget exhausted");
+      const result: TaskResult = {
+        ...prior,
+        evidence: {
+          ...prior.evidence,
+          implementerActivations: activation,
+          restartRecoveries:
+            prior.evidence.restartRecoveries + (prior.activeActivation != null ? 1 : 0),
+        },
+        activeActivation: activation,
+      };
+      await database
+        .update(taskRuns)
+        .set({ state: result.state, result, updatedAt: new Date() })
+        .where(eq(taskRuns.taskId, taskId));
+      return { result, activation };
+    };
+    const database = this.database as AuthorityDatabase & {
+      transaction?: <T>(callback: (transaction: AuthorityDatabase) => Promise<T>) => Promise<T>;
+    };
+    return database.transaction ? database.transaction(reserve) : reserve(this.database);
   }
 
   acceptCandidate(result: TaskResult, fact: CandidateFact): void {

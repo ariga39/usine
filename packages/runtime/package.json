@@ -43,8 +43,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dbos-inc/dbos-sdk": "latest",
-    "@dbos-inc/drizzle-datasource": "latest",
     "@openai/codex-sdk": "0.146.0",
     "drizzle-orm": "latest",
     "execa": "latest",

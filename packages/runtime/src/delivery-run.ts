@@ -1,8 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { DBOS } from "@dbos-inc/dbos-sdk";
 import type { TaskContract } from "./contract.js";
-import { CandidateWorkspace } from "./candidate-workspace.js";
+import { CandidateWorkspace, type WriterWorkspace } from "./candidate-workspace.js";
 import { CodexCodingSession } from "./coding-session.js";
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
@@ -80,149 +79,146 @@ function implementerPrompt(
   ].join("\n");
 }
 
+type CodingAttempt =
+  | {
+      status: "succeeded";
+      result: TaskResult;
+      candidate: { sha: string; baseSha: string; workspace: WriterWorkspace };
+    }
+  | { status: "failed"; result: TaskResult; reason: string };
+
+async function runCodingAttempt(
+  input: DeliveryRunInput,
+  services: DeliveryRunServices,
+  previousSha: string,
+  findings: string[],
+): Promise<CodingAttempt> {
+  const reservation = await services.authority.reserveActivation(
+    input.contract.id,
+    input.contract.budget.maxImplementerActivations,
+  );
+  await services.workspace.quarantinePriorWriters(input.contract.id, reservation.activation);
+  const workspace = await services.workspace.prepareWriter(
+    input.contract.id,
+    reservation.activation,
+    previousSha,
+  );
+  if (input.crashAfterActivation) await armSessionCrash(input);
+  const observation = await services.session.run({
+    role: "implementer",
+    workspace: workspace.path,
+    contract: input.contract,
+    prompt: implementerPrompt(input, previousSha, findings),
+    model: input.implementerModel,
+    reasoningEffort: "high",
+    sandbox: "workspace-write",
+    deadlineEpochMs: input.deadlineEpochMs,
+    outputSchema: implementerSchema,
+  });
+  if (observation.status !== "completed") {
+    await services.workspace.quarantine(workspace);
+    return {
+      status: "failed",
+      result: reservation.result,
+      reason: `implementer failed: ${observation.failure ?? observation.summary}`,
+    };
+  }
+  const output =
+    typeof observation.output === "string"
+      ? (() => {
+          try {
+            return JSON.parse(observation.output) as { status?: string; summary?: string };
+          } catch {
+            return {};
+          }
+        })()
+      : (observation.output as { status?: string; summary?: string } | null);
+  if (output?.status === "blocked")
+    return {
+      status: "failed",
+      result: reservation.result,
+      reason: `implementer blocked: ${output.summary ?? "no reason"}`,
+    };
+  if (!output || output.status !== "proposed" || typeof output.summary !== "string") {
+    await services.workspace.quarantine(workspace);
+    return {
+      status: "failed",
+      result: reservation.result,
+      reason: "implementer returned invalid terminal observation",
+    };
+  }
+  try {
+    const candidate = await services.workspace.freeze(workspace, previousSha);
+    services.authority.acceptCandidate(reservation.result, {
+      sha: candidate.sha,
+      baseSha: candidate.baseSha,
+      generation: reservation.result.writer.generation,
+      fence: workspace.fence,
+    });
+    return {
+      status: "succeeded",
+      result: reservation.result,
+      candidate: { ...candidate, workspace },
+    };
+  } catch (error) {
+    await services.workspace.quarantine(workspace);
+    return {
+      status: "failed",
+      result: reservation.result,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function executeDeliveryRun(
   input: DeliveryRunInput,
   services: DeliveryRunServices,
 ): Promise<TaskResult> {
-  let result = await DBOS.runStep(
-    () =>
-      services.authority.admit({
-        contract: input.contract,
-        contractHash: input.contractHash,
-        repository: input.repository,
-        repositoryIdentity: input.repositoryIdentity,
-        deadlineEpochMs: input.deadlineEpochMs,
-      }),
-    { name: "admit-task" },
-  );
+  let result = await services.authority.admit({
+    contract: input.contract,
+    contractHash: input.contractHash,
+    repository: input.repository,
+    repositoryIdentity: input.repositoryIdentity,
+    deadlineEpochMs: input.deadlineEpochMs,
+  });
+  if (result.state === "reviewed_pr" || result.state === "blocked") return result;
   if (input.stopAfterAdmitted) return result;
   let previousSha = input.contract.baseSha;
   let findings: string[] = [];
-  let recoveryActivation: number | null = null;
-  const activeActivation = result.activeActivation ?? null;
-  if (activeActivation !== null) {
-    const staleActivation = activeActivation;
-    result = await DBOS.runStep(
-      () =>
-        services.authority.save({
-          ...result,
-          evidence: {
-            ...result.evidence,
-            implementerActivations: staleActivation + 1,
-            restartRecoveries: result.evidence.restartRecoveries + 1,
-          },
-          activeActivation: staleActivation + 1,
-        }),
-      { name: `recover-inflight-activation-${staleActivation}` },
-    );
-    recoveryActivation = result.activeActivation;
-  }
   for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
-    const activation =
-      recoveryActivation ?? nextActivation(result, input.contract.budget.maxImplementerActivations);
-    recoveryActivation = null;
-    if (activation === null)
-      return services.authority.save(
-        failedResult(result, "implementer activation budget exhausted"),
-      );
-    result = await DBOS.runStep(
-      () =>
-        services.authority.save({
-          ...result,
-          evidence: { ...result.evidence, implementerActivations: activation },
-          activeActivation: activation,
-        }),
-      { name: `activate-implementer-${activation}` },
-    );
-    const workspace = await services.workspace.prepareWriter(
-      input.contract.id,
-      activation,
-      previousSha,
-    );
-    if (input.crashAfterActivation) await armSessionCrash(input);
-    const observation = await DBOS.runStep(
-      () =>
-        services.session.run({
-          role: "implementer",
-          workspace: workspace.path,
-          contract: input.contract,
-          prompt: implementerPrompt(input, previousSha, findings),
-          model: input.implementerModel,
-          reasoningEffort: "high",
-          sandbox: "workspace-write",
-          deadlineEpochMs: input.deadlineEpochMs,
-          outputSchema: implementerSchema,
-        }),
-      { name: `implementer-session-${activation}` },
-    );
-    if (observation.status !== "completed") {
-      await services.workspace.quarantine(workspace);
-      if (activation >= input.contract.budget.maxImplementerActivations)
-        return services.authority.save(
-          failedResult(result, `implementer failed: ${observation.failure ?? observation.summary}`),
-        );
-      continue;
-    }
-    const output =
-      typeof observation.output === "string"
-        ? (() => {
-            try {
-              return JSON.parse(observation.output) as { status?: string; summary?: string };
-            } catch {
-              return {};
-            }
-          })()
-        : (observation.output as { status?: string; summary?: string } | null);
-    if (output?.status === "blocked")
-      return services.authority.save(
-        failedResult(result, `implementer blocked: ${output.summary ?? "no reason"}`),
-      );
-    if (!output || output.status !== "proposed" || typeof output.summary !== "string") {
-      await services.workspace.quarantine(workspace);
-      if (activation >= input.contract.budget.maxImplementerActivations)
-        return services.authority.save(
-          failedResult(result, "implementer returned invalid terminal observation"),
-        );
-      continue;
-    }
-
-    let candidate;
+    let attempt: Awaited<ReturnType<typeof runCodingAttempt>>;
     try {
-      candidate = await services.workspace.freeze(workspace, previousSha);
-      services.authority.acceptCandidate(result, {
-        sha: candidate.sha,
-        baseSha: candidate.baseSha,
-        generation: result.writer.generation,
-        fence: workspace.fence,
-      });
+      attempt = await runCodingAttempt(input, services, previousSha, findings);
     } catch (error) {
-      await services.workspace.quarantine(workspace);
       return services.authority.save(
         failedResult(result, error instanceof Error ? error.message : String(error)),
       );
     }
-    result = await DBOS.runStep(
-      () =>
-        services.authority.save({
-          ...result,
-          state: "candidate",
-          candidateSha: candidate.sha,
-          check: null,
-          review: null,
-          delivery: null,
-          blocker: null,
-          activeActivation: null,
-        }),
-      { name: `freeze-candidate-${activation}` },
-    );
-    const evaluation = await DBOS.runStep(
-      () => services.quality.evaluate(input.contract, candidate.sha, cycle),
-      { name: `quality-gate-${cycle}` },
-    );
-    result = await DBOS.runStep(
-      () => services.authority.save({ ...result, state: "checked", check: evaluation.check }),
-      { name: `save-check-${cycle}` },
-    );
+    result = attempt.result;
+    const activation = result.evidence.implementerActivations;
+    if (attempt.status === "failed") {
+      if (result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations)
+        return services.authority.save(failedResult(result, attempt.reason));
+      continue;
+    }
+    const candidate = attempt.candidate;
+    result = await services.authority.save({
+      ...result,
+      state: "candidate",
+      candidateSha: candidate.sha,
+      candidateFence: candidate.workspace.fence,
+      check: null,
+      review: null,
+      delivery: null,
+      blocker: null,
+      activeActivation: null,
+    });
+    const evaluation = await services.quality.evaluate(input.contract, candidate.sha, cycle);
+    result = await services.authority.save({
+      ...result,
+      state: "checked",
+      check: evaluation.check,
+    });
     if (evaluation.check.status !== "passed") {
       findings = [evaluation.check.stderr || "project check failed"];
       previousSha = candidate.sha;
@@ -232,26 +228,18 @@ export async function executeDeliveryRun(
         );
       continue;
     }
-    result = await DBOS.runStep(
-      () =>
-        services.authority.save({
-          ...result,
-          state: "reviewed",
-          review: evaluation.review,
-          evidence: { ...result.evidence, reviewCycles: cycle },
-        }),
-      { name: `save-review-${cycle}` },
-    );
+    result = await services.authority.save({
+      ...result,
+      state: "reviewed",
+      review: evaluation.review,
+      evidence: { ...result.evidence, reviewCycles: cycle },
+    });
     if (evaluation.review.verdict === "approved") {
-      const delivery = await DBOS.runStep(
-        () =>
-          services.forge.deliver(
-            input.contract,
-            candidate.sha,
-            evaluation.check,
-            evaluation.review,
-          ),
-        { name: "forge-delivery" },
+      const delivery = await services.forge.deliver(
+        input.contract,
+        candidate.sha,
+        evaluation.check,
+        evaluation.review,
       );
       return services.authority.save({ ...result, state: "reviewed_pr", delivery });
     }

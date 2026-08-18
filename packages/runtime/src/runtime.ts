@@ -1,6 +1,5 @@
-import { DBOS } from "@dbos-inc/dbos-sdk";
-import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
-import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import type { TaskContract } from "./contract.js";
 import { applyMigrations } from "./apply-migrations.js";
 import { CandidateWorkspace } from "./candidate-workspace.js";
@@ -9,12 +8,7 @@ import { executeDeliveryRun, writeTaskResult, type DeliveryRunInput } from "./de
 import { ForgeDelivery } from "./forge-delivery.js";
 import { QualityGate } from "./quality-gate.js";
 import { repositoryLeases, taskRuns } from "./schema.js";
-import {
-  TaskAuthority,
-  hashTaskContract,
-  type AuthorityInput,
-  type TaskResult,
-} from "./task-authority.js";
+import { TaskAuthority, hashTaskContract, type TaskResult } from "./task-authority.js";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 
 export type {
@@ -39,28 +33,9 @@ export async function admitTask(
   const contractHash = hashTaskContract(rawContract);
   const repositoryIdentity =
     `${contract.repository.owner}/${contract.repository.name}`.toLowerCase();
-  type Database = NodePgDatabase<{
-    repositoryLeases: typeof repositoryLeases;
-    taskRuns: typeof taskRuns;
-  }>;
-  const dataSource = new DrizzleDataSource<Database>(
-    "usine-domain",
-    { connectionString: databaseUrl },
-    { repositoryLeases, taskRuns },
-  );
-  const directAuthority = new TaskAuthority(dataSource.client);
-  const admitTransaction = dataSource.registerTransaction(
-    (input: AuthorityInput) => directAuthority.admitDirect(input),
-    { name: "admitTask" },
-  );
-  const saveTransaction = dataSource.registerTransaction(
-    (result: TaskResult) => directAuthority.saveDirect(result),
-    { name: "saveTaskResult" },
-  );
-  const authority = new TaskAuthority(dataSource.client, {
-    admit: admitTransaction,
-    save: saveTransaction,
-  });
+  const pool = new Pool({ connectionString: databaseUrl });
+  const database = drizzle(pool, { schema: { repositoryLeases, taskRuns } });
+  const authority = new TaskAuthority(database);
   const workspace = new CandidateWorkspace({ repository, stateDirectory, deadlineEpochMs });
   const session = new CodexCodingSession();
   const quality = new QualityGate({
@@ -84,24 +59,17 @@ export async function admitTask(
     stopAfterAdmitted: process.env.USINE_STOP_AFTER === "admitted",
     crashAfterActivation: process.env.USINE_CRASH_AFTER === "activation",
   };
-  DBOS.setConfig({
-    name: "usine",
-    systemDatabaseUrl: databaseUrl,
-    applicationVersion: "0.1.0",
-    logLevel: "warn",
-  });
-  await DBOS.launch();
   try {
-    const workflow = DBOS.registerWorkflow(
-      async (input: DeliveryRunInput) =>
-        executeDeliveryRun(input, { authority, workspace, session, quality, forge }),
-      { name: "deliveryRun" },
-    );
-    const handle = await DBOS.startWorkflow(workflow, { workflowID: contract.id })(workflowInput);
-    const result = await handle.getResult();
+    const result = await executeDeliveryRun(workflowInput, {
+      authority,
+      workspace,
+      session,
+      quality,
+      forge,
+    });
     await writeTaskResult(stateDirectory, result);
     return result;
   } finally {
-    await DBOS.shutdown({ deregister: true });
+    await pool.end();
   }
 }

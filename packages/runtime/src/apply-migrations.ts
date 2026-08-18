@@ -1,4 +1,3 @@
-import { DrizzleDataSource } from "@dbos-inc/drizzle-datasource";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { fileURLToPath } from "node:url";
@@ -13,5 +12,4 @@ export async function applyMigrations(databaseUrl: string): Promise<void> {
   } finally {
     await pool.end();
   }
-  await DrizzleDataSource.initializeDBOSSchema({ connectionString: databaseUrl });
 }
