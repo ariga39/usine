@@ -98,8 +98,29 @@ export async function executeDeliveryRun(
   if (input.stopAfterAdmitted) return result;
   let previousSha = input.contract.baseSha;
   let findings: string[] = [];
+  let recoveryActivation: number | null = null;
+  const activeActivation = result.activeActivation ?? null;
+  if (activeActivation !== null) {
+    const staleActivation = activeActivation;
+    result = await DBOS.runStep(
+      () =>
+        services.authority.save({
+          ...result,
+          evidence: {
+            ...result.evidence,
+            implementerActivations: staleActivation + 1,
+            restartRecoveries: result.evidence.restartRecoveries + 1,
+          },
+          activeActivation: staleActivation + 1,
+        }),
+      { name: `recover-inflight-activation-${staleActivation}` },
+    );
+    recoveryActivation = result.activeActivation;
+  }
   for (let cycle = 1; cycle <= input.contract.budget.maxReviewCycles; cycle += 1) {
-    const activation = nextActivation(result, input.contract.budget.maxImplementerActivations);
+    const activation =
+      recoveryActivation ?? nextActivation(result, input.contract.budget.maxImplementerActivations);
+    recoveryActivation = null;
     if (activation === null)
       return services.authority.save(
         failedResult(result, "implementer activation budget exhausted"),
@@ -109,6 +130,7 @@ export async function executeDeliveryRun(
         services.authority.save({
           ...result,
           evidence: { ...result.evidence, implementerActivations: activation },
+          activeActivation: activation,
         }),
       { name: `activate-implementer-${activation}` },
     );
@@ -189,6 +211,7 @@ export async function executeDeliveryRun(
           review: null,
           delivery: null,
           blocker: null,
+          activeActivation: null,
         }),
       { name: `freeze-candidate-${activation}` },
     );

@@ -45,6 +45,7 @@ export interface TaskResult {
   review: ReviewVerdict | null;
   delivery: DeliveryEffect | null;
   blocker: string | null;
+  activeActivation: number | null;
   writer: { repository: string; repositoryIdentity: string; generation: number };
   evidence: {
     workflowId: string;
@@ -146,6 +147,7 @@ export class TaskAuthority {
       review: null,
       delivery: null,
       blocker: null,
+      activeActivation: null,
       writer: {
         repository: input.repository,
         repositoryIdentity: input.repositoryIdentity,

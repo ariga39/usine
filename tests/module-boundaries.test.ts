@@ -61,7 +61,8 @@ describe("module contracts", () => {
   });
 
   test("Task Authority persists immutable admission and rejects stale fences", async () => {
-    const authority = new TaskAuthority(fakeAuthorityDatabase() as never);
+    const database = fakeAuthorityDatabase();
+    const authority = new TaskAuthority(database as never);
     const admitted = await authority.admit({
       contract,
       contractHash: "hash",
@@ -69,6 +70,19 @@ describe("module contracts", () => {
       repositoryIdentity: "owner/repo",
       deadlineEpochMs: Date.now() + 10_000,
     });
+    const reserved = await authority.save({
+      ...admitted,
+      activeActivation: 1,
+      evidence: { ...admitted.evidence, implementerActivations: 1 },
+    });
+    const restarted = await new TaskAuthority(database as never).admit({
+      contract,
+      contractHash: "hash",
+      repository: "/repo",
+      repositoryIdentity: "owner/repo",
+      deadlineEpochMs: Date.now() + 10_000,
+    });
+    expect(restarted.activeActivation).toBe(reserved.activeActivation);
     await expect(
       authority.admit({
         contract,
@@ -79,10 +93,7 @@ describe("module contracts", () => {
       }),
     ).rejects.toThrow("immutable");
     expect(() =>
-      authority.acceptCandidate(
-        { ...admitted, evidence: { ...admitted.evidence, implementerActivations: 1 } },
-        { sha, baseSha: sha, generation: 1, fence: 0 },
-      ),
+      authority.acceptCandidate(restarted, { sha, baseSha: sha, generation: 1, fence: 0 }),
     ).toThrow("stale");
   });
 
