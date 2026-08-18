@@ -25,10 +25,12 @@ if (process.env.USINE_CODEX_ROLE === "reviewer" && args[0] === "exec" && !review
 const outputIndex = args.findIndex((arg) => arg === "-o" || arg === "--output-last-message");
 const outputPath = args[outputIndex + 1];
 if (!outputPath) throw new Error("missing structured output path");
+const prompt = args.at(-1) ?? "";
 const lifecycle = ["thread.started", "turn.started", "turn.completed"];
+const emittedLifecycle = prompt.includes("Omit turn.completed") ? lifecycle.slice(0, 2) : lifecycle;
 await appendFile(
   join(dirname(outputPath), "codex-invocations.jsonl"),
-  `${JSON.stringify({ args, lifecycle, role: process.env.USINE_CODEX_ROLE })}\n`,
+  `${JSON.stringify({ args, lifecycle: emittedLifecycle, role: process.env.USINE_CODEX_ROLE })}\n`,
 );
 if (args.includes("--sandbox") && args.includes("--approve-for-me")) {
   throw new Error("--sandbox cannot be combined with --approve-for-me");
@@ -46,7 +48,6 @@ for (const key of [
 ]) {
   if (process.env[key]) throw new Error(`secret leaked to ${process.env.USINE_CODEX_ROLE}: ${key}`);
 }
-const prompt = args.at(-1) ?? "";
 if (process.env.USINE_CODEX_ROLE === "implementer") {
   if (!prompt.includes("Frozen Task Contract JSON:")) {
     throw new Error("implementer prompt is missing the frozen Task Contract JSON");
@@ -230,7 +231,7 @@ if (process.env.USINE_CODEX_ROLE === "implementer") {
     JSON.stringify({ status: "proposed", summary: "Implemented fixture" }),
   );
   process.stdout.write(
-    `${lifecycle
+    `${emittedLifecycle
       .map((type) =>
         JSON.stringify({
           type,

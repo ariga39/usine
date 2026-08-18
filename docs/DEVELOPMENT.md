@@ -82,10 +82,10 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ### Role model routing
 
-- implementation：每个 Issue 新建一个 Herdr pane 和新 Codex agent，并通过 `-p usine-implementer` 启动；profile 固定 GPT-5.6 Luna high、default service tier、workspace-write，禁止 fast；Issue 的 first merge checkpoint 合并后释放该 agent/pane，绝不跨 Issue 复用 implementer；
+- implementation：开发 Usine 的每个 Issue 必须新建 Herdr pane 和 fresh Codex agent，通过 `-p usine-implementer` 使用 GPT-5.6 Luna high、default service tier、workspace-write，禁止 fast；Herdr 是本仓库开发流程的 launcher 和 operator observation UI，SessionStart Hook 可报告内部 session identity，但 pane state 和 prompt wait 不是 individual-turn completion authority；Issue 的 first merge checkpoint 合并后释放该 agent/pane，绝不跨 Issue 复用 implementer。产品 runtime implementer activation 使用 direct `codex exec` JSONL；
 - semantic review：fresh Sol session，只读 exact candidate，不继承 implementer chat；
 - bounded research：需要独立 read-only evidence 时可用 Terra；
-- 仅当 Herdr 本身不可用时，才直接运行 `codex exec -p usine-implementer`；authentication、permission、model 或 profile failure 不得绕过既定 launcher，也不得静默退回默认模型或 fast。
+- direct implementer JSONL 必须提供 turn-scoped lifecycle evidence；authentication、permission、model 或 profile failure 不得静默退回默认模型或 fast。Reviewer transport remains Herdr-backed.
 
 ## 4. Library-first，而不是 abstraction-first
 

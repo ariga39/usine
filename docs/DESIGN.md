@@ -71,6 +71,8 @@ reviewed PR + explicit approval attestation
 
 这张图描述选定的最小目标，不是已经实现全部能力的声明。Issue #12 / PR #38 的第一次 live self-hosted reviewed delivery 已验证一条单 writer 纵切：一个 Task、一个 repository、Herdr Luna implementation、project check、fresh Sol reviewer 的 exact-SHA approval、协调器通过 AI SDK 对 rendered transcript 做的 bounded extraction、一个 GitHub App PR 及其 exact-SHA attestation，以及 exact-SHA merged delivery。仍未验证的是 representative executable code task，以及 live coordinator restart recovery；因此 DBOS + PostgreSQL 的决定性 live recovery 价值仍须通过 induced restart 证明。
 
+Issue #69 supersedes the old product implementer transport claim in D-006/D-007: product runtime implementer activation uses direct `codex exec` with machine-readable JSONL turn evidence and schema-constrained final output, even when Herdr is installed. Herdr remains available as an optional operator observation UI. Its SessionStart Hook can report internal session identity and transcript location, and its pane state can distinguish working, idle, and blocked; the narrower gap is that pane state and prompt wait are not authority for completion of an individual Codex turn. Reviewer transport remains Herdr-backed.
+
 Rendered-transcript extraction 目前是把 reviewer 输出接入协调器的 bounded compatibility bridge，而不是新的 authority boundary。若再次出现 slow/inconclusive extraction、需要 provider-specific branching、另一个普通任务仍需修复这条基础设施，或 manual-free restart recovery 失败，这条 bridge 即被证伪并须重新评估。
 
 clean-room classification 为 `correct_before_expansion`：可以继续 bounded useful single-writer tasks，但在 representative executable code task 加上 induced live coordinator restart recovery 之前，不扩大 concurrency、authority、runtime/forge count、distribution、generalized architecture 或 automatic-merge product authority。第一条纵切和当前 continuation 仍只运行一个 Task、一个 repository 和一个 writer。

@@ -147,7 +147,12 @@ afterAll(async () => {
   );
 });
 
-async function createFallbackFixture(directory: string, taskId: string, maxElapsedMs = 60_000) {
+async function createFallbackFixture(
+  directory: string,
+  taskId: string,
+  maxElapsedMs = 60_000,
+  instructions = "Create delivered.txt.",
+) {
   const repository = join(directory, "repository");
   const stateDirectory = join(directory, "state");
   await mkdir(repository);
@@ -165,7 +170,7 @@ async function createFallbackFixture(directory: string, taskId: string, maxElaps
       id: taskId,
       repository: { path: repository, owner: "example", name: taskId },
       baseSha,
-      instructions: "Create delivered.txt.",
+      instructions,
       acceptance: ["The fixture check passes."],
       nonGoals: [],
       projectCheck: { command: "test -f delivered.txt", timeoutMs: 10_000 },
@@ -192,10 +197,12 @@ describe("usine run", () => {
       const directory = await mkdtemp(join(tmpdir(), "usine-direct-codex-"));
       const taskId = `direct-codex-${Date.now()}`;
       const fixture = await createFallbackFixture(directory, taskId);
+      const herdrLog = join(directory, "herdr.jsonl");
       const run = await execa("node", [cliPath, "run", fixture.contractPath], {
         env: {
           USINE_CODEX_BIN: fakeCodexPath,
           USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_HERDR_LOG: herdrLog,
           USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
           USINE_DELIVERY_MODE: "record",
           USINE_STATE_DIR: fixture.stateDirectory,
@@ -232,6 +239,51 @@ describe("usine run", () => {
         ]),
         lifecycle: ["thread.started", "turn.started", "turn.completed"],
         role: "implementer",
+      });
+      const herdrEvents = currentTaskHerdrEvents(
+        (await readFile(herdrLog, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+        taskId,
+      );
+      expect(herdrEvents.filter((event) => event.type === "split")).toHaveLength(1);
+      const reviewerStarts = herdrEvents.filter(
+        (event) => event.type === "start" && event.command.includes("gpt-5.6-sol"),
+      );
+      expect(reviewerStarts).toHaveLength(1);
+      expect(herdrEvents.some((event) => event.command.includes("gpt-5.6-luna"))).toBe(false);
+    },
+    30_000,
+  );
+
+  test.runIf(process.env.USINE_TEST_DATABASE_URL)(
+    "does not create a candidate when direct Codex omits turn.completed",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "usine-direct-codex-incomplete-"));
+      const taskId = `direct-codex-incomplete-${Date.now()}`;
+      const fixture = await createFallbackFixture(
+        directory,
+        taskId,
+        60_000,
+        "Omit turn.completed.",
+      );
+      const run = await execa("node", [cliPath, "run", fixture.contractPath], {
+        env: {
+          USINE_CODEX_BIN: fakeCodexPath,
+          USINE_HERDR_BIN: fakeHerdrPath,
+          USINE_DATABASE_URL: process.env.USINE_TEST_DATABASE_URL,
+          USINE_DELIVERY_MODE: "record",
+          USINE_STATE_DIR: fixture.stateDirectory,
+        },
+        reject: false,
+      });
+
+      expect(run.exitCode, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({
+        state: "blocked",
+        candidateSha: null,
+        blocker: expect.stringContaining("incomplete JSONL lifecycle"),
       });
     },
     30_000,
