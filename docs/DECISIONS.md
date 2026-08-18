@@ -27,7 +27,7 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
 | D-016 | 旧实现、旧 slice/task tree 和历史设计不进入新仓库 | 避免以兼容和取舍判断继续消耗注意力；clean-room archive 仅作外部历史证据。 |
 | D-017 | Canonical design、第一条完整纵切后的扩展，以及重大 authority/scale 扩大前必须经过 fresh clean-room 方向审计；审计 finding 必须改变 task eligibility，而不只是生成 backlog | 主编排者不能独立证明自己没有在 compact、局部优化或实现细节中失去原目标；方向 blocker 若不能暂停错误任务，就没有控制权。 |
-| D-018 | 统一使用 tsdown 编译、oxlint lint、oxfmt format；TypeScript 只执行独立的 `--noEmit` typecheck | 使用快速、低配置的工具链并避免 ESLint/Prettier/tsup 并存；build 成功不能冒充类型检查。 |
+| D-018 | Vite+ 0.2.9 是 workspace 的统一命令与配置 surface：`vp fmt`、`vp lint`、`vp check`、`vp test` 和 `vp pack`；root `vite.config.ts` 的 type-aware/type-check 仍独立于 packaging，并覆盖 `tests/**/*.ts` | 使用官方 Vite+ monorepo/migration path，删除 Oxlint、Oxfmt、Vitest 与 tsdown 的 split config/command wiring；`vp pack` 成功不能冒充 `vp check` 的类型检查。 |
 | D-019 | 通常每个 Issue/PR 交付最小 coherent module behavior；当前 full-refactor 是显式一次性例外，不能派生新 implementation backlog。其 small commits 必须逐步建立新 module behavior并删除旧 seam，最终 merge gate 仍是代表性 live delivery + restart recovery，而非文件变短或机械等价 | 用户要求一次处理当前结构债；保留可见小提交但不让过渡 package/interface成为长期设计。 |
 | D-020 | Task eligibility 顺序为 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；局部 Issue/non-goal 不能 waive 全局 falsifier | 第二次实现证明 flat backlog 会自动偏向最容易闭合、最低价值的机械任务。 |
 | D-021 | 每个 active behavior cluster 有一个临时 design owner；首次 cluster、新 package/interface、连续三次修改同一大文件、三处重复 policy 或 falsified lifecycle change 触发独立 design review。Design verdict 与 spec/correctness verdict 分离 | Module map、interface depth、test placement 和 deletion plan 需要跨 Issue 的持续责任，不能期待局部 reviewer 从被禁止的 scope 中恢复架构。 |
@@ -46,8 +46,8 @@ Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementa
 - [PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)：row-level lock 与 transaction-scoped concurrency control；
 - [PostgreSQL transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html)：并发 transaction 的可见性与冲突语义；
 - [Drizzle ORM and Kit](https://orm.drizzle.team/docs/kit-overview)：类型安全 schema、query 与 code-first SQL migration；
-- [tsdown](https://tsdown.dev/guide/)：TypeScript build 与 bundleless compilation；
-- [Oxlint](https://oxc.rs/docs/guide/usage/linter.html) 与 [Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html)：lint 与 format；
+- [Vite+](https://viteplus.dev/guide/)：统一的 workspace runtime、format、lint、type-check、test 与 package command/config surface；
+- [Vite+ migration and monorepo guides](https://viteplus.dev/guide/migrate)：官方依赖 pin、pnpm workspace 与 package-local `pack` 配置规则；
 - [GitHub App authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app)：App JWT 和 installation token；
 - [GitHub pull request approval](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews)：PR author 不能批准自己的 PR；平台 approval 与 Usine semantic verdict 必须区分；
 - [Octokit](https://github.com/octokit/octokit.js#readme)：App installation authentication strategy 与 API client。

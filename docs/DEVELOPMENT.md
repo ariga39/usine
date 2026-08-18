@@ -54,7 +54,7 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 除空仓库 root commit 外，不在 main 直接开发。
 
 1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。Issue #76 授权其后唯一一次 full-refactor Issue/PR：用小提交逐 cluster 替换并删除旧 seam，不拆成会固化过渡接口的新 backlog；这不是以后大 PR 的通用先例。
-2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。
+2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。Linked worktree 必须位于任何现有 package workspace 之外；嵌套 worktree 会让 pnpm/Vite+ 把父 workspace 的依赖和工具误认作当前 checkout。
 3. 每个 branch 只实现一个 Issue。Outcome owner 可以修改交付 coherent behavior 所需的每个内部 layer；只有真实 permission、security、external authority 或 independent concurrent ownership boundary 才能形成 writable restriction。
 4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
 5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
@@ -134,11 +134,11 @@ active falsifier / safety-authority defect
 
 ### TypeScript 工具链
 
-- 根 workspace 统一提供 `lint`（oxlint）、`format`/`format:check`（oxfmt）、`typecheck`（TypeScript `--noEmit`）和 `build`（tsdown）；实现 PR 的默认 checks 复用这些命令。
-- oxlint 与 oxfmt 使用各自一份 root config。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter。
-- tsdown 是唯一的 emit/build 工具，但不是 typechecker。Build 和 typecheck 是两个独立信号；不得因为 tsdown 成功而省略 `typecheck`。
-- 普通 library package 使用 tsdown 默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，不为已经删除的 framework 保留 build 特例。
-- 初期直接使用 pnpm workspace scripts 编排 checks/build。只有观测到 monorepo task latency 或 cache 成为瓶颈时，才考虑 Turborepo、Nx 或另一层 build orchestrator。
+- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、`vp test` 和 `vp run --filter '@usine/cli...' build`。根 `vite.config.ts` 是 format、lint、type-check 和 test 的唯一配置入口；package-local `vite.config.ts` 只保留 CLI 与 runtime 各自的 `pack` entry。
+- `vp check` 通过 type-aware/type-check 路径独立执行 TypeScript 静态检查，并继续覆盖根 `tsconfig.json` 的 `tests/**/*.ts`；packaging 成功不能替代 type-check。
+- Vite+ 内置并锁定 Oxlint、Oxfmt、Vitest 和 tsdown。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter/build orchestrator。
+- 普通 library package 使用 Vite+ `pack` 的默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，CLI 的 unbundle 保持其 executable/import contract。
+- `vp run --filter '@usine/cli...' build` 只使用 pnpm workspace 的现有依赖图顺序执行 runtime 与 CLI 的 `vp pack`；没有额外 task cache 或第二套 monorepo orchestrator。
 
 ## 6. 纵切优先与复杂度预算
 
