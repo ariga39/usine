@@ -18,6 +18,10 @@ const repositoryPath = z
       "must be a repository-relative path; absolute and parent-directory paths are not allowed",
   });
 
+const repositoryIdentity = z.string().min(1).refine((value) => value.trim().length > 0, {
+  message: "must not be blank",
+});
+
 export const taskContractSchema = z
   .object({
     id: z
@@ -28,8 +32,8 @@ export const taskContractSchema = z
       ),
     repository: z.object({
       path: repositoryPath,
-      owner: z.string().min(1),
-      name: z.string().min(1),
+      owner: repositoryIdentity,
+      name: repositoryIdentity,
     }),
     baseSha: sha,
     instructions: z.string().min(1),
