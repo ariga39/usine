@@ -1,4 +1,4 @@
-import { writeFile, mkdtemp } from "node:fs/promises";
+import { access, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
@@ -44,5 +44,44 @@ test.each([{ field: "owner" as const }, { field: "name" as const }])(
     expect(run.exitCode).toBe(2);
     expect(run.stderr).toContain('"error":"invalid_task_contract"');
     expect(run.stderr).toContain(`"path":"repository.${field}"`);
+  },
+);
+
+test.each([{ field: "baseBranch" as const }, { field: "branch" as const }])(
+  "CLI rejects whitespace-only delivery $field before admission",
+  async ({ field }) => {
+    const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));
+    const path = join(directory, "invalid-delivery-branch.json");
+    const stateDirectory = join(directory, "state");
+    const contract = {
+      id: "cli-delivery-branch-test",
+      repository: { path: ".", owner: "example", name: "usine" },
+      baseSha: "a".repeat(40),
+      instructions: "Validate delivery branch handling.",
+      acceptance: ["Whitespace-only delivery branch values are rejected."],
+      nonGoals: [],
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
+      authorization: { source: "test", delivery: true },
+      delivery: {
+        baseBranch: "main",
+        branch: "agent/cli-delivery-branch-test",
+        issue: 1,
+        title: "Contract test",
+        body: "Contract test",
+      },
+    };
+    contract.delivery[field] = " \t\n ";
+    await writeFile(path, JSON.stringify(contract));
+
+    const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], {
+      env: { USINE_STATE_DIR: stateDirectory },
+      reject: false,
+    });
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('"error":"invalid_task_contract"');
+    expect(run.stderr).toContain(`"path":"delivery.${field}"`);
+    await expect(access(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
