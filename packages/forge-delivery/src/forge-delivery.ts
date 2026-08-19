@@ -124,6 +124,8 @@ export class ForgeDelivery {
         [
           "-C",
           this.options.repository,
+          "-c",
+          "core.hooksPath=/dev/null",
           "push",
           `--force-with-lease=refs/heads/${branch}:${observedHead ?? ""}`,
           gitUrl,
