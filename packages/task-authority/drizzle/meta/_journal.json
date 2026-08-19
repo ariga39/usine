@@ -15,6 +15,13 @@
       "when": 1787087271743,
       "tag": "0001_naive_unicorn",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787148334269,
+      "tag": "0002_spotty_raider",
+      "breakpoints": true
     }
   ]
 }

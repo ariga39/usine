@@ -1,18 +1,46 @@
+import { readFile, mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir } from "node:fs/promises";
 import { Effect, Fiber, FiberMap } from "effect";
-import { contractIssues, taskContractSchema, type TaskContract } from "@usine/task-authority";
-import { admitTask, executeAdmittedTask, lookupTaskStatus, type RuntimePolicy } from "./runtime.js";
+import {
+  applyMigrations,
+  contractIssues,
+  openSqliteDatabase,
+  TaskAuthority,
+  taskContractSchema,
+  type TaskContract,
+  type TaskExecutionInput,
+  type TaskResult,
+} from "@usine/task-authority";
+import {
+  admitTask,
+  executeAdmittedTask,
+  lookupRestartableTasks,
+  lookupTaskStatus,
+  runtimePolicyFromEnvironment,
+  stateDirectoryFromEnvironment,
+  type RuntimePolicy,
+} from "./runtime.js";
 
 export interface TaskSubmission {
   contractPath: string;
   repositoryPath: string;
-  rawContract: string;
-  contract: TaskContract;
 }
 
-export interface UsineServerOptions {
+export interface ServerExecutionContext {
+  input: TaskExecutionInput;
+  contract: TaskContract;
+  result: TaskResult;
+  authority: TaskAuthority;
   policy: RuntimePolicy;
+  signal: AbortSignal;
+}
+
+export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskResult>;
+
+export interface UsineServerOptions {
+  environment: NodeJS.ProcessEnv;
+  execute?: ServerExecution;
   host?: string;
   port?: number;
 }
@@ -24,29 +52,35 @@ export interface RunningUsineServer {
   close(): Promise<void>;
 }
 
+interface AdmittedTask {
+  input: TaskExecutionInput;
+  contract: TaskContract;
+  result: TaskResult;
+}
+
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
-  await mkdir(options.policy.stateDirectory, { recursive: true });
+  const stateDirectory = stateDirectoryFromEnvironment(options.environment);
+  await mkdir(stateDirectory, { recursive: true });
+  await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
 
   let resolveReady: (server: RunningUsineServer) => void = () => undefined;
   let rejectReady: (error: unknown) => void = () => undefined;
-  const ready = new Promise<RunningUsineServer>((resolve, reject) => {
-    resolveReady = resolve;
+  const ready = new Promise<RunningUsineServer>((resolveReadyValue, reject) => {
+    resolveReady = resolveReadyValue;
     rejectReady = reject;
   });
 
   const program = Effect.scoped(
     Effect.gen(function* () {
       const runTask = yield* FiberMap.makeRuntime<never, string>();
-      let launchTask: (submission: TaskSubmission) => void = () => undefined;
+      let launchTask: (task: AdmittedTask) => void = () => undefined;
       const server = yield* Effect.acquireRelease(
         Effect.tryPromise({
           try: () =>
             listen(host, port, async (request, response) => {
-              await handleRequest(request, response, options.policy, (submission) => {
-                launchTask(submission);
-              });
+              await handleRequest(request, response, options.environment, launchTask);
             }),
           catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
         }),
@@ -57,23 +91,14 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           }).pipe(Effect.ignore),
       );
 
-      launchTask = (submission) => {
+      launchTask = (task) => {
         runTask(
-          submission.contract.id,
+          task.result.taskId,
           Effect.tryPromise({
-            try: () =>
-              executeAdmittedTask(
-                submission.contractPath,
-                submission.repositoryPath,
-                submission.rawContract,
-                submission.contract,
-                options.policy,
-              ),
+            try: (signal) =>
+              executeServerTask(task, options.environment, stateDirectory, options.execute, signal),
             catch: (cause) => cause,
-          }).pipe(
-            Effect.asVoid,
-            Effect.catch(() => Effect.void),
-          ),
+          }).pipe(Effect.asVoid),
           { onlyIfMissing: true },
         );
       };
@@ -85,6 +110,15 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         close: async () => undefined,
       };
       resolveReady(running);
+
+      const restartable = yield* Effect.tryPromise({
+        try: () => lookupRestartableTasks(stateDirectory),
+        catch: (cause) => cause,
+      });
+      for (const task of restartable) {
+        const contract = parseContract(task.input.rawContract);
+        launchTask({ input: task.input, contract, result: task.result });
+      }
       yield* Effect.never;
     }),
   );
@@ -95,15 +129,80 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       ),
     ),
   );
-  const running = await ready.catch((error) => {
-    throw error;
-  });
+  const running = await ready;
   return {
     ...running,
     close: async () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
     },
   };
+}
+
+async function executeServerTask(
+  task: AdmittedTask,
+  environment: NodeJS.ProcessEnv,
+  stateDirectory: string,
+  execute: ServerExecution | undefined,
+  signal: AbortSignal,
+): Promise<TaskResult> {
+  let policy: RuntimePolicy;
+  try {
+    policy = runtimePolicyFromEnvironment(environment, task.contract.repository);
+  } catch (error) {
+    return blockPersistedTask(stateDirectory, task.result.taskId, error);
+  }
+  if (!execute) {
+    return executeAdmittedTask(task.input, task.contract, policy, undefined, signal);
+  }
+
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath);
+  const authority = new TaskAuthority(handle.database);
+  try {
+    const current = await authority.lookup(task.result.taskId);
+    if (!current || current.state === "reviewed_pr" || current.state === "blocked") {
+      return current ?? task.result;
+    }
+    try {
+      return await execute({
+        input: task.input,
+        contract: task.contract,
+        result: current,
+        authority,
+        policy,
+        signal,
+      });
+    } catch (error) {
+      const latest = await authority.lookup(current.taskId);
+      if (!latest || latest.state === "reviewed_pr" || latest.state === "blocked") throw error;
+      return authority.block(
+        { taskId: latest.taskId, revision: latest.revision },
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  } finally {
+    handle.close();
+  }
+}
+
+async function blockPersistedTask(
+  stateDirectory: string,
+  taskId: string,
+  error: unknown,
+): Promise<TaskResult> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  const authority = new TaskAuthority(handle.database);
+  try {
+    const current = await authority.lookup(taskId);
+    if (!current) throw new Error(`cannot block missing task ${taskId}: ${String(error)}`);
+    if (current.state === "reviewed_pr" || current.state === "blocked") return current;
+    return authority.block(
+      { taskId: current.taskId, revision: current.revision },
+      error instanceof Error ? error.message : String(error),
+    );
+  } finally {
+    handle.close();
+  }
 }
 
 interface BoundServer {
@@ -148,13 +247,14 @@ function close(server: BoundServer): Promise<void> {
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  policy: RuntimePolicy,
-  launch: (submission: TaskSubmission) => void,
+  environment: NodeJS.ProcessEnv,
+  launch: (task: AdmittedTask) => void,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
+  const stateDirectory = stateDirectoryFromEnvironment(environment);
   if (request.method === "GET" && taskId) {
-    const result = await lookupTaskStatus(policy.stateDirectory, decodeURIComponent(taskId));
+    const result = await lookupTaskStatus(stateDirectory, decodeURIComponent(taskId));
     if (!result) {
       response.statusCode = 404;
       writeJson(response, { message: "task not found" });
@@ -166,15 +266,22 @@ async function handleRequest(
 
   if (request.method === "POST" && url.pathname === "/v1/tasks") {
     const submission = parseSubmission(await readBody(request));
+    const rawContract = await readFile(submission.contractPath, "utf8");
+    const contract = parseContract(rawContract);
+    const policy = runtimePolicyFromEnvironment(environment, contract.repository);
     const result = await admitTask(
       submission.contractPath,
       submission.repositoryPath,
-      submission.rawContract,
-      submission.contract,
+      rawContract,
+      contract,
       policy,
     );
     if (!policy.stopAfterAdmitted && result.state !== "reviewed_pr" && result.state !== "blocked") {
-      launch(submission);
+      launch({
+        input: { ...submission, rawContract },
+        contract,
+        result,
+      });
     }
     writeJson(response, result);
     return;
@@ -197,23 +304,25 @@ function parseSubmission(body: string): TaskSubmission {
     !("contractPath" in parsed) ||
     typeof parsed.contractPath !== "string" ||
     !("repositoryPath" in parsed) ||
-    typeof parsed.repositoryPath !== "string" ||
-    !("rawContract" in parsed) ||
-    typeof parsed.rawContract !== "string" ||
-    !("contract" in parsed)
+    typeof parsed.repositoryPath !== "string"
   ) {
     throw new Error("task submission shape is invalid");
   }
-  const contract = taskContractSchema.safeParse(parsed.contract);
-  if (!contract.success) {
-    throw new Error(`invalid task contract: ${JSON.stringify(contractIssues(contract.error))}`);
+  return { contractPath: parsed.contractPath, repositoryPath: parsed.repositoryPath };
+}
+
+function parseContract(rawContract: string): TaskContract {
+  let input: unknown;
+  try {
+    input = JSON.parse(rawContract);
+  } catch {
+    throw new Error("task contract must be JSON");
   }
-  return {
-    contractPath: parsed.contractPath,
-    repositoryPath: parsed.repositoryPath,
-    rawContract: parsed.rawContract,
-    contract: contract.data,
-  };
+  const parsed = taskContractSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(`invalid task contract: ${JSON.stringify(contractIssues(parsed.error))}`);
+  }
+  return parsed.data;
 }
 
 function readBody(request: IncomingMessage): Promise<string> {

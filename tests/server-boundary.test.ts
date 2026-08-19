@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { runtimePolicyFromEnvironment, startUsineServer } from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -51,16 +51,16 @@ describe("CLI/server boundary", () => {
     await execa("git", ["add", "task.json"], { cwd: repository });
     await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
 
-    const policy = runtimePolicyFromEnvironment(
-      {
+    const server = await startUsineServer({
+      environment: {
         USINE_STATE_DIR: stateDirectory,
         USINE_STOP_AFTER: "admitted",
         USINE_GIT_AUTHOR_NAME: "Release Bot",
         USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
       },
-      contract.repository,
-    );
-    const server = await startUsineServer({ policy, host: "127.0.0.1", port: 0 });
+      host: "127.0.0.1",
+      port: 0,
+    });
 
     try {
       const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");

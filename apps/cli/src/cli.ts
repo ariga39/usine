@@ -3,7 +3,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
-import { runtimePolicyFromEnvironment, startUsineServer } from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
 import { submitTask, taskStatus } from "./server-client.js";
 
 export async function main(): Promise<void> {
@@ -15,12 +15,8 @@ export async function main(): Promise<void> {
       return;
     }
     try {
-      const policy = runtimePolicyFromEnvironment(process.env, {
-        owner: process.env.USINE_REPOSITORY_OWNER?.trim() || "local",
-        name: process.env.USINE_REPOSITORY_NAME?.trim() || "local",
-      });
       const server = await startUsineServer({
-        policy,
+        environment: process.env,
         host: process.env.USINE_SERVER_HOST?.trim() || "127.0.0.1",
         port: Number(process.env.USINE_SERVER_PORT || 8787),
       });
@@ -106,8 +102,6 @@ export async function main(): Promise<void> {
     const result = await submitTask(serverUrl(), {
       contractPath: resolve(contractPath),
       repositoryPath: await realpath(parsed.data.repository.path),
-      rawContract,
-      contract: parsed.data,
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {

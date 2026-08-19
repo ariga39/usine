@@ -6,6 +6,7 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
+  type TaskExecutionInput,
   type TaskProgress,
   type TaskResult,
   taskProgressFromResult,
@@ -24,6 +25,7 @@ export {
   stateDirectoryFromEnvironment,
   type RuntimePolicy,
 } from "./runtime-policy.js";
+export type { TaskExecutionInput } from "@usine/task-authority";
 
 export async function lookupTaskStatus(
   stateDirectory: string,
@@ -40,6 +42,24 @@ export async function lookupTaskStatus(
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).lookup(taskId);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupRestartableTasks(
+  stateDirectory: string,
+): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).listRestartable();
   } finally {
     handle.close();
   }
@@ -100,12 +120,15 @@ export async function admitTask(
     }
     // Admission is the single source of the first deadline.  On recovery this
     // reads the durable result deadline instead of extending the budget in process.
-    const admitted = await authority.admit({
-      contract,
-      contractHash,
-      repositoryIdentity,
-      deadlineEpochMs,
-    });
+    const admitted = await authority.admit(
+      {
+        contract,
+        contractHash,
+        repositoryIdentity,
+        deadlineEpochMs,
+      },
+      { contractPath, repositoryPath, rawContract },
+    );
     reportProgress(admitted);
     if (deadlineExpired(admitted.deadlineEpochMs)) {
       const blocked = await authority.block(
@@ -122,41 +145,40 @@ export async function admitTask(
 }
 
 export async function executeAdmittedTask(
-  contractPath: string,
-  repositoryPath: string,
-  rawContract: string,
+  input: TaskExecutionInput,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
   onProgress?: (progress: TaskProgress) => void,
+  signal?: AbortSignal,
 ): Promise<TaskResult> {
+  if (signal?.aborted) throw new Error("task execution was aborted");
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
   await mkdir(stateDirectory, { recursive: true });
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   await applyMigrations(databasePath);
-  const contractHash = hashTaskContract(rawContract);
-  const repositoryIdentity =
-    `${contract.repository.owner}/${contract.repository.name}`.toLowerCase();
   const handle = openSqliteDatabase(databasePath);
   const database = handle.database;
+  const authority = new TaskAuthority(database);
   try {
-    const authority = new TaskAuthority(database);
-    const existing = await authority.lookupExisting(contract.id, contractHash);
+    const existing = await authority.lookup(contract.id);
     if (!existing) throw new Error("task is not admitted");
     if (existing.state === "reviewed_pr" || existing.state === "blocked") return existing;
+    if (hashTaskContract(input.rawContract) !== existing.contractHash)
+      throw new Error("persisted task contract bytes do not match admission");
     const forgePolicy = policy.forge;
     if (!forgePolicy) throw new Error("GitHub App credentials are required");
     const repository = await verifyCommittedContract(
-      contractPath,
-      repositoryPath,
+      input.contractPath,
+      input.repositoryPath,
       contract,
       existing.deadlineEpochMs,
       policy.credentialFreeGitEnvironment,
     );
     return await executeWithServices({
       contract,
-      contractHash,
-      repositoryIdentity,
+      contractHash: existing.contractHash,
+      repositoryIdentity: existing.writer.repositoryIdentity,
       repository,
       policy,
       forgePolicy,
@@ -164,6 +186,22 @@ export async function executeAdmittedTask(
       deadlineEpochMs: existing.deadlineEpochMs,
       onProgress,
     });
+  } catch (error) {
+    const current = await authority.lookup(contract.id);
+    if (current && current.state !== "reviewed_pr" && current.state !== "blocked") {
+      const blocker = error instanceof Error ? error.message : String(error);
+      const blocked = await authority.block(
+        { taskId: current.taskId, revision: current.revision },
+        blocker,
+      );
+      try {
+        onProgress?.(taskProgressFromResult(blocked));
+      } catch {
+        // Progress is an observation only; a failed sink cannot alter authority.
+      }
+      return blocked;
+    }
+    throw error;
   } finally {
     handle.close();
   }
@@ -233,6 +271,8 @@ async function executeWithServices(options: {
 export {
   startUsineServer,
   type RunningUsineServer,
+  type ServerExecutionContext,
   type TaskSubmission,
+  type ServerExecution,
   type UsineServerOptions,
 } from "./server.js";

@@ -1,10 +1,8 @@
-import type { TaskContract, TaskResult } from "@usine/task-authority";
+import type { TaskResult } from "@usine/task-authority";
 
 export interface TaskSubmission {
   contractPath: string;
   repositoryPath: string;
-  rawContract: string;
-  contract: TaskContract;
 }
 
 export class ServerClientError extends Error {

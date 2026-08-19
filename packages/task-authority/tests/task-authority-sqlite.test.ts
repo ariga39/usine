@@ -164,6 +164,43 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     inspection.close();
   });
 
+  test("persists restart input in the admitted task row", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-restart-input-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const rawContract = JSON.stringify({ taskId, frozen: true });
+    await authority.admit(
+      {
+        contract: makeContract(taskId),
+        contractHash: "authority-restart-input-hash",
+        repositoryIdentity: `authority/restart-input-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      },
+      {
+        contractPath: "repository/task.json",
+        repositoryPath: "repository",
+        rawContract,
+      },
+    );
+
+    const inspection = new DatabaseSync(path);
+    const row = inspection
+      .prepare(
+        "SELECT contract_path, repository_path, raw_contract FROM task_runs WHERE task_id = ?",
+      )
+      .get(taskId) as {
+      contract_path: string;
+      repository_path: string;
+      raw_contract: string;
+    };
+    inspection.close();
+    expect(row).toEqual({
+      contract_path: "repository/task.json",
+      repository_path: "repository",
+      raw_contract: rawContract,
+    });
+  });
+
   test("migrates an admitted V0 lifecycle row into the result-only authority schema", async () => {
     const directory = await mkdtemp(join(tmpdir(), "usine-authority-v0-"));
     const path = join(directory, "state.sqlite");
@@ -258,7 +295,15 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       .all()
       .map((row) => String(row.name));
     inspection.close();
-    expect(taskColumns).toEqual(["task_id", "result", "created_at", "updated_at"]);
+    expect(taskColumns).toEqual([
+      "task_id",
+      "result",
+      "created_at",
+      "updated_at",
+      "contract_path",
+      "repository_path",
+      "raw_contract",
+    ]);
     expect(leaseColumns).toEqual(["repository_identity", "task_id", "created_at"]);
   });
 
