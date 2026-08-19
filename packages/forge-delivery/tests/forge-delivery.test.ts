@@ -258,6 +258,39 @@ async function withControlledFetch<T>(
 }
 
 describe.sequential("Forge Delivery reconciliation", () => {
+  test("does not execute a repository pre-push hook during credentialed push", async () => {
+    const fixture = await repositoryFixture();
+    const hookMarker = join(fixture.repository, ".git", "pre-push-ran");
+    await writeFile(
+      join(fixture.repository, ".git", "hooks", "pre-push"),
+      `#!/bin/sh\nprintf 'hook ran\\n' > '${hookMarker}'\nexit 1\n`,
+    );
+    await chmod(join(fixture.repository, ".git", "hooks", "pre-push"), 0o755);
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: null,
+      pullRequests: [],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = contract("forge-disable-hooks");
+
+    await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        task,
+        fixture.candidateSha,
+        { ...passingCheck, sha: fixture.candidateSha },
+        { ...approvedReview, sha: fixture.candidateSha },
+      ),
+    );
+
+    await expect(readFile(hookMarker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("reconciles lost PR and attestation responses without duplicate effects", async () => {
     const fixture = await repositoryFixture();
     const state: ForgeServerState = {
