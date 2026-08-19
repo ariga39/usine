@@ -107,7 +107,7 @@ function contract(id: string): TaskContract {
     nonGoals: [],
     projectCheck: { command: "true", timeoutMs: 10_000 },
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
-    authorization: { source: "Issue #100", delivery: true },
+    authorization: { source: "https://github.com/owner/repo/issues/100", delivery: true },
     delivery: {
       baseBranch: "main",
       branch: "agent/forge-e2e",

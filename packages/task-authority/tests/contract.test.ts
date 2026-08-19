@@ -10,7 +10,7 @@ const committedContract = {
   nonGoals: [],
   projectCheck: { command: "true", timeoutMs: 1_000 },
   budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
-  authorization: { source: "test", delivery: true },
+  authorization: { source: "https://github.com/example/usine/issues/1", delivery: true },
   delivery: {
     baseBranch: "main",
     branch: "agent/contract-test",
@@ -93,12 +93,57 @@ describe("Task Contract repository identity", () => {
   });
 
   test("preserves valid repository owner and name values unchanged", () => {
-    const repository = { path: ".", owner: " octocat ", name: " usine-repo " };
-    const result = taskContractSchema.safeParse({ ...committedContract, repository });
+    const repository = { path: ".", owner: "octocat", name: "usine-repo" };
+    const result = taskContractSchema.safeParse({
+      ...committedContract,
+      repository,
+      authorization: {
+        ...committedContract.authorization,
+        source: "https://github.com/octocat/usine-repo/issues/1",
+      },
+    });
 
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.repository).toEqual(repository);
+  });
+});
+
+describe("Task Contract authorization source", () => {
+  test("accepts a matching GitHub Issue URL case-insensitively and preserves it", () => {
+    const source = "https://github.com/Example/USINE/issues/1";
+    const result = taskContractSchema.safeParse({
+      ...committedContract,
+      authorization: { ...committedContract.authorization, source },
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.authorization.source).toBe(source);
+  });
+
+  test.each([
+    { name: "missing", contract: { ...committedContract, authorization: { delivery: true } } },
+    { name: "malformed", source: "github.com/example/usine/issues/1" },
+    { name: "non-GitHub", source: "https://gitlab.com/example/usine/-/issues/1" },
+    { name: "pull-request", source: "https://github.com/example/usine/pull/1" },
+    { name: "query", source: "https://github.com/example/usine/issues/1?tab=comments" },
+    { name: "fragment", source: "https://github.com/example/usine/issues/1#discussion" },
+    { name: "repository mismatch", source: "https://github.com/other/usine/issues/1" },
+    { name: "issue mismatch", source: "https://github.com/example/usine/issues/2" },
+  ])("rejects $name authorization source", ({ contract, source }) => {
+    const result = taskContractSchema.safeParse(
+      contract ?? {
+        ...committedContract,
+        authorization: { ...committedContract.authorization, source },
+      },
+    );
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: ["authorization", "source"] })]),
+    );
   });
 });
 
