@@ -13,6 +13,7 @@ describe("Task Authority module contract", () => {
 
   test("applies legal facts and rejects stale fences without persistence", () => {
     const admitted: TaskResult = {
+      schemaVersion: 1,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,

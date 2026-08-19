@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "drizzle-orm": "latest",
+    "effect": "4.0.0-rc.110",
     "zod": "latest"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { repositoryLeases, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
+import { decodePersistedTaskResult, TASK_RESULT_SCHEMA_VERSION } from "./task-state-schema.js";
 import {
   applyTaskFact,
   type AuthorityInput,
@@ -33,7 +34,7 @@ export class TaskAuthority {
     const row = await this.database.query.taskRuns.findFirst({
       where: eq(taskRuns.taskId, taskId),
     });
-    return row ? TaskAuthority.projectResult(row.result as TaskResult) : null;
+    return row ? decodePersistedTaskResult(row.result) : null;
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {
@@ -51,7 +52,7 @@ export class TaskAuthority {
     row: typeof taskRuns.$inferSelect,
     input: AuthorityInput,
   ): TaskResult {
-    const result = TaskAuthority.projectResult(row.result as TaskResult);
+    const result = decodePersistedTaskResult(row.result);
     if (result.contractHash !== input.contractHash)
       throw new Error("admitted contract is immutable");
     if (result.writer.repositoryIdentity !== input.repositoryIdentity)
@@ -89,6 +90,7 @@ export class TaskAuthority {
       }
 
       const result: TaskResult = {
+        schemaVersion: TASK_RESULT_SCHEMA_VERSION,
         taskId: input.contract.id,
         contractHash: input.contractHash,
         revision: 0,
@@ -124,7 +126,7 @@ export class TaskAuthority {
     const persist = async (database: AuthorityDatabase): Promise<TaskResult> => {
       const current = await TaskAuthority.currentTask(database, observation.taskId);
       if (!current) throw new Error("task is not admitted");
-      const prior = TaskAuthority.projectResult(current.result as TaskResult);
+      const prior = decodePersistedTaskResult(current.result);
       if (observation.revision !== prior.revision) throw new Error("stale task revision");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
@@ -189,7 +191,7 @@ export class TaskAuthority {
     ): Promise<{ result: TaskResult; activation: number }> => {
       const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
-      const prior = TaskAuthority.projectResult(current.result as TaskResult);
+      const prior = decodePersistedTaskResult(current.result);
       if (prior.state === "reviewed_pr" || prior.state === "blocked")
         throw new Error("task is terminal");
       const lease = await database.query.repositoryLeases.findFirst({
@@ -230,13 +232,5 @@ export class TaskAuthority {
     };
     if (!database.transaction) return callback(this.database);
     return database.transaction(callback, { behavior: "immediate" });
-  }
-
-  private static projectResult(result: TaskResult): TaskResult {
-    return {
-      ...result,
-      revision: Number.isSafeInteger(result.revision) ? result.revision : 0,
-      writer: { repositoryIdentity: result.writer.repositoryIdentity },
-    };
   }
 }
