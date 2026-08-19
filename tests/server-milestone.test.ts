@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
+import { codexExecutionIdentityPath } from "@usine/coding-session";
 import { describe, expect, test } from "vite-plus/test";
 
 const fakeCodexExecutable = (hang: boolean): string => String.raw`#!/usr/bin/env node
@@ -19,6 +20,7 @@ let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Role: fresh independent reviewer.");
 if (!reviewer) {
+  await writeFile(join(stateDirectory, "codex.pid"), String(process.pid));
   if (${String(hang)} && activation === 1) {
     const stalePath = join(workspace, "stale-after-loss");
     const releasePath = join(stateDirectory, "release-stale-child");
@@ -502,6 +504,74 @@ describe("server-owned delivery milestone", () => {
       if (!firstStopped) {
         await stopServer(first).catch(() => undefined);
       }
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("blocks recovery rather than grant a writer when launch ownership is incomplete", async () => {
+    const fixtureValue = await fixture("restart");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const first = await startServer(cliPath, fixtureValue, forge, "kill");
+    let codexPid: number | null = null;
+    try {
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "submit",
+        fixtureValue.contractPath,
+        "kill",
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      const oldWorkspace = join(
+        fixtureValue.stateDirectory,
+        "workspaces",
+        fixtureValue.taskId,
+        "1-1",
+      );
+      await writeFile(
+        codexExecutionIdentityPath(fixtureValue.stateDirectory, oldWorkspace),
+        JSON.stringify({ version: 1, state: "starting", workspace: oldWorkspace }),
+      );
+      await stopServer(first, "SIGKILL");
+      const second = await startServer(cliPath, fixtureValue, forge, "complete");
+      try {
+        const follow = await runCli(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          "follow",
+          fixtureValue.taskId,
+        );
+        expect(follow.exitCode, follow.stderr).toBe(0);
+        expect(JSON.parse(follow.stdout)).toMatchObject({
+          state: "blocked",
+          evidence: { implementerActivations: 1, restartRecoveries: 0 },
+        });
+      } finally {
+        await stopServer(second);
+      }
+    } finally {
+      if (codexPid) {
+        try {
+          process.kill(-codexPid, "SIGKILL");
+        } catch (error) {
+          if (
+            typeof error !== "object" ||
+            error === null ||
+            !("code" in error) ||
+            error.code !== "ESRCH"
+          ) {
+            throw error;
+          }
+        }
+      }
+      await stopServer(first).catch(() => undefined);
       await forge.close();
     }
   }, 60_000);

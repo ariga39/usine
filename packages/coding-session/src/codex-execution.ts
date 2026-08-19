@@ -3,12 +3,21 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-interface CodexExecutionIdentity {
+interface StartingCodexExecutionIdentity {
   version: 1;
+  state: "starting";
+  workspace: string;
+}
+
+interface RunningCodexExecutionIdentity {
+  version: 1;
+  state: "running";
   pid: number;
   startedAt: string;
   workspace: string;
 }
+
+type CodexExecutionIdentity = StartingCodexExecutionIdentity | RunningCodexExecutionIdentity;
 
 export function codexExecutionIdentityPath(stateDirectory: string, workspace: string): string {
   const workspaceId = createHash("sha256").update(workspace).digest("hex");
@@ -39,11 +48,12 @@ export async function createCodexLauncher(
 import { spawn, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
+writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, state: "starting", workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
 const child = spawn("codex", process.argv.slice(2), { detached: true, env: process.env, stdio: "inherit" });
 if (!child.pid) throw new Error("Codex process has no PID");
 const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], { encoding: "utf8" }).trim();
 if (!startedAt) throw new Error("Codex process has no start identity");
-writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, pid: child.pid, startedAt, workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
+writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, state: "running", pid: child.pid, startedAt, workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
 child.once("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
 `,
     { mode: 0o755 },
@@ -69,6 +79,11 @@ export async function reapCodexExecution(
     throw error;
   }
   if (identity.workspace !== workspace) throw new Error("Codex execution identity is invalid");
+  if (identity.state === "starting") {
+    throw new Error(
+      "Codex execution identity was interrupted before process ownership was recorded",
+    );
+  }
   let currentStart: string;
   try {
     currentStart = execFileSync("ps", ["-o", "lstart=", "-p", String(identity.pid)], {
@@ -102,15 +117,18 @@ function isCodexExecutionIdentity(value: unknown): value is CodexExecutionIdenti
     value !== null &&
     "version" in value &&
     value.version === 1 &&
-    "pid" in value &&
-    typeof value.pid === "number" &&
-    Number.isSafeInteger(value.pid) &&
-    value.pid >= 2 &&
-    "startedAt" in value &&
-    typeof value.startedAt === "string" &&
-    value.startedAt.length > 0 &&
+    "state" in value &&
+    (value.state === "starting" || value.state === "running") &&
     "workspace" in value &&
-    typeof value.workspace === "string"
+    typeof value.workspace === "string" &&
+    (value.state === "starting" ||
+      ("pid" in value &&
+        typeof value.pid === "number" &&
+        Number.isSafeInteger(value.pid) &&
+        value.pid >= 2 &&
+        "startedAt" in value &&
+        typeof value.startedAt === "string" &&
+        value.startedAt.length > 0))
   );
 }
 

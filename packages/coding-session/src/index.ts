@@ -9,7 +9,7 @@ export {
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
-export { reapCodexExecution } from "./codex-execution.js";
+export { codexExecutionIdentityPath, reapCodexExecution } from "./codex-execution.js";
 export {
   implementerOutputSchema,
   reviewerOutputSchema,
