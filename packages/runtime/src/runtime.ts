@@ -238,7 +238,10 @@ async function executeWithServices(options: {
     gitAuthor: policy.gitAuthor,
     signal: options.signal,
   });
-  const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
+  const session = new CodexCodingSession(undefined, {
+    environment: policy.workerEnvironment,
+    executionStateDirectory: policy.stateDirectory,
+  });
   const quality = new QualityGate({
     workspace,
     session,

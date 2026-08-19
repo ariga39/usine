@@ -14,6 +14,7 @@ import {
   type TaskExecutionInput,
   type TaskResult,
 } from "@usine/task-authority";
+import { reapCodexExecution } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
@@ -170,6 +171,17 @@ async function executeServerTask(
     policy = runtimePolicyFromEnvironment(environment, task.contract.repository);
   } catch (error) {
     return blockPersistedTask(stateDirectory, task.result.taskId, error);
+  }
+  if (task.result.activeActivation !== null) {
+    const activation = task.result.activeActivation;
+    try {
+      await reapCodexExecution(
+        stateDirectory,
+        resolve(stateDirectory, "workspaces", task.result.taskId, `${activation}-${activation}`),
+      );
+    } catch (error) {
+      return blockPersistedTask(stateDirectory, task.result.taskId, error);
+    }
   }
   if (!execute) {
     return executeAdmittedTask(task.input, task.contract, policy, undefined, signal);

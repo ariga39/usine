@@ -9,6 +9,7 @@ import {
 } from "@openai/codex-sdk";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
+import { createCodexLauncher, removeCodexExecutionIdentity } from "./codex-execution.js";
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -64,6 +65,7 @@ export interface SessionRequest<Output = unknown> {
 
 export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
+  executionStateDirectory?: string;
 }
 
 export interface SessionObservation<T = unknown> {
@@ -166,6 +168,10 @@ export class CodexCodingSession {
         summary: failure,
         failure,
       };
+    } finally {
+      if (this.options.executionStateDirectory) {
+        await removeCodexExecutionIdentity(this.options.executionStateDirectory, request.workspace);
+      }
     }
   }
 
@@ -178,7 +184,20 @@ export class CodexCodingSession {
         service_tier: "default",
       },
     };
-    return new Codex(options);
+    if (!this.options.executionStateDirectory) return new Codex(options);
+    const launcher = await createCodexLauncher(
+      this.options.executionStateDirectory,
+      request.workspace,
+    );
+    return new Codex({
+      ...options,
+      codexPathOverride: launcher.launcherPath,
+      env: {
+        ...options.env,
+        USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
+        USINE_CODEX_WORKSPACE: request.workspace,
+      },
+    });
   }
 }
 
