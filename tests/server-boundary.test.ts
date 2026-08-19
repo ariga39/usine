@@ -86,7 +86,7 @@ describe("CLI/server boundary", () => {
         env: { USINE_SERVER_URL: server.url },
       });
       const observed = JSON.parse(status.stdout);
-      expect(observed).toEqual(submitted);
+      expect(observed).toMatchObject({ ...submitted, history: [] });
     } finally {
       await server.close();
     }
