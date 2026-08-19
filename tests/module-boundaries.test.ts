@@ -13,6 +13,50 @@ test("CLI keeps invalid contract input at the public parse boundary", async () =
   expect(run.stderr).toContain("invalid_task_contract");
 });
 
+test.each([
+  { name: "missing", omitSource: true },
+  { name: "malformed", source: "github.com/example/usine/issues/1" },
+  { name: "non-GitHub", source: "https://gitlab.com/example/usine/-/issues/1" },
+  { name: "pull-request", source: "https://github.com/example/usine/pull/1" },
+  { name: "query", source: "https://github.com/example/usine/issues/1?tab=comments" },
+  { name: "fragment", source: "https://github.com/example/usine/issues/1#discussion" },
+  { name: "repository mismatch", source: "https://github.com/other/usine/issues/1" },
+  { name: "issue mismatch", source: "https://github.com/example/usine/issues/2" },
+])("CLI rejects $name authorization source before admission", async ({ omitSource, source }) => {
+  const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));
+  const path = join(directory, "invalid-authorization-source.json");
+  const stateDirectory = join(directory, "state");
+  const contract = {
+    id: "cli-authorization-source-test",
+    repository: { path: ".", owner: "example", name: "usine" },
+    baseSha: "a".repeat(40),
+    instructions: "Validate authorization source handling.",
+    acceptance: ["Authorization source mismatches are rejected before admission."],
+    nonGoals: [],
+    projectCheck: { command: "true", timeoutMs: 1_000 },
+    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
+    authorization: omitSource ? { delivery: true } : { source, delivery: true },
+    delivery: {
+      baseBranch: "main",
+      branch: "agent/cli-authorization-source-test",
+      issue: 1,
+      title: "Contract test",
+      body: "Contract test",
+    },
+  };
+  await writeFile(path, JSON.stringify(contract));
+
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], {
+    env: { USINE_STATE_DIR: stateDirectory },
+    reject: false,
+  });
+
+  expect(run.exitCode).toBe(2);
+  expect(run.stderr).toContain('"error":"invalid_task_contract"');
+  expect(run.stderr).toContain('"path":"authorization.source"');
+  await expect(access(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test.each([{ field: "owner" as const }, { field: "name" as const }])(
   "CLI rejects whitespace-only repository $field before admission",
   async ({ field }) => {
@@ -27,7 +71,7 @@ test.each([{ field: "owner" as const }, { field: "name" as const }])(
       nonGoals: [],
       projectCheck: { command: "true", timeoutMs: 1_000 },
       budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
-      authorization: { source: "test", delivery: true },
+      authorization: { source: "https://github.com/example/usine/issues/1", delivery: true },
       delivery: {
         baseBranch: "main",
         branch: "agent/cli-contract-test",
@@ -62,7 +106,7 @@ test.each([{ field: "baseBranch" as const }, { field: "branch" as const }])(
       nonGoals: [],
       projectCheck: { command: "true", timeoutMs: 1_000 },
       budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
-      authorization: { source: "test", delivery: true },
+      authorization: { source: "https://github.com/example/usine/issues/1", delivery: true },
       delivery: {
         baseBranch: "main",
         branch: "agent/cli-delivery-branch-test",

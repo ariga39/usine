@@ -27,7 +27,7 @@ async function admissionFixture(maxElapsedMs = 30_000) {
       nonGoals: [],
       projectCheck: { command: "true", timeoutMs: 1000 },
       budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs },
-      authorization: { source: "test issue", delivery: true },
+      authorization: { source: `https://github.com/example/${taskId}/issues/1`, delivery: true },
       delivery: {
         baseBranch: "main",
         branch: `agent/${taskId}`,

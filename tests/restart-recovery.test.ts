@@ -26,7 +26,7 @@ const contract = {
   nonGoals: [],
   projectCheck: { command: "true", timeoutMs: 1000 },
   budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 60000 },
-  authorization: { source: "recovery test", delivery: true },
+  authorization: { source: "https://github.com/recovery/" + taskId + "/issues/1", delivery: true },
   delivery: { baseBranch: "main", branch: "agent/recovery", issue: 1, title: "recovery", body: "recovery" },
 };
 const databaseHandle = openSqliteDatabase(databasePath);

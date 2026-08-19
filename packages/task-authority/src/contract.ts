@@ -18,9 +18,53 @@ const repositoryPath = z
       "must be a repository-relative path; absolute and parent-directory paths are not allowed",
   });
 
-const repositoryIdentity = z.string().min(1).refine((value) => value.trim().length > 0, {
-  message: "must not be blank",
-});
+const repositoryIdentity = z
+  .string()
+  .min(1)
+  .refine((value) => value.trim().length > 0, {
+    message: "must not be blank",
+  });
+
+function isCanonicalGitHubIssueSource(
+  source: unknown,
+  repository: { owner: string; name: string },
+  issue: number,
+): boolean {
+  if (typeof source !== "string") return false;
+
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    return false;
+  }
+
+  if (
+    source !== url.href ||
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return false;
+  }
+
+  const segments = url.pathname.split("/");
+  const [leading, owner, name, kind, number] = segments;
+  return (
+    segments.length === 5 &&
+    leading === "" &&
+    owner !== undefined &&
+    name !== undefined &&
+    kind === "issues" &&
+    number === String(issue) &&
+    owner.toLowerCase() === repository.owner.toLowerCase() &&
+    name.toLowerCase() === repository.name.toLowerCase()
+  );
+}
 
 export const taskContractSchema = z
   .object({
@@ -70,7 +114,24 @@ export const taskContractSchema = z
       body: z.string().min(1),
     }),
   })
-  .strict();
+  .strict()
+  .superRefine((contract, context) => {
+    if (!contract.authorization || !contract.repository || !contract.delivery) return;
+    if (
+      !isCanonicalGitHubIssueSource(
+        contract.authorization.source,
+        contract.repository,
+        contract.delivery.issue,
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["authorization", "source"],
+        message:
+          "must be the canonical HTTPS GitHub Issue URL matching repository and delivery.issue",
+      });
+    }
+  });
 
 export type TaskContract = z.infer<typeof taskContractSchema>;
 

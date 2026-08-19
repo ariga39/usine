@@ -91,7 +91,10 @@ describe("CLI live progress seam", () => {
         nonGoals: [],
         projectCheck: { command: "test -f candidate.txt", timeoutMs: 10_000 },
         budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
-        authorization: { source: "test issue", delivery: true },
+        authorization: {
+          source: `https://github.com/example/${taskId}/issues/126`,
+          delivery: true,
+        },
         delivery: {
           baseBranch: "main",
           branch,
