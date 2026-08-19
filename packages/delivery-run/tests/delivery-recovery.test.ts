@@ -9,7 +9,12 @@ import {
   type TaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
-import { applyTaskFact, type CandidateFact, type TaskResult } from "@usine/task-authority";
+import {
+  applyTaskFact,
+  type CandidateFact,
+  type TaskHistoryRecordInput,
+  type TaskResult,
+} from "@usine/task-authority";
 
 const sha = "b".repeat(40);
 const implementer = {
@@ -71,6 +76,7 @@ function persistedResult(state: TaskResult["state"], id: string): TaskResult {
 function fakeAuthority(initial: TaskResult) {
   let stored = initial;
   let implementerActivations = 0;
+  const history: TaskHistoryRecordInput[] = [];
   const transition = async (
     observation: { taskId: string; revision: number },
     fact: Parameters<typeof applyTaskFact>[1],
@@ -100,6 +106,9 @@ function fakeAuthority(initial: TaskResult) {
     ) => transition(observation, { type: "delivery", delivery: delivery! }),
     block: (observation: { taskId: string; revision: number }, blocker: string) =>
       transition(observation, { type: "blocked", blocker }),
+    appendHistory: async (record: TaskHistoryRecordInput) => {
+      history.push(record);
+    },
     reserveActivation: async () => {
       implementerActivations += 1;
       stored = {
@@ -118,6 +127,7 @@ function fakeAuthority(initial: TaskResult) {
     authority,
     getStored: () => stored,
     getImplementerActivations: () => implementerActivations,
+    getHistory: () => history,
   };
 }
 
@@ -159,6 +169,102 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("records typed observations for all four delivery attempt kinds", async () => {
+    const id = `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("admitted", id));
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "history-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+        reviewer: { ...implementer, role: "reviewer", sandbox: "read-only" },
+      },
+      {
+        authority: fake.authority,
+        workspace: {
+          quarantinePriorWriters: async () => undefined,
+          prepareWriter: async (_taskId, activation, baseSha) => ({
+            taskId: id,
+            activation,
+            path: ".",
+            baseSha,
+          }),
+          freeze: async (writer) => ({ sha, baseSha: writer.baseSha, workspace: writer }),
+          quarantine: async () => undefined,
+        },
+        session: {
+          run: async () => ({
+            status: "completed" as const,
+            output: { status: "proposed" as const, summary: "candidate" },
+            summary: "completed",
+            failure: null,
+            usage: { inputTokens: 12, outputTokens: 7 },
+          }),
+        },
+        quality: {
+          check: async (_contract, candidateSha) => ({
+            sha: candidateSha,
+            status: "passed" as const,
+            command: "true",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          }),
+          review: async (_contract, candidateSha) => ({
+            sha: candidateSha,
+            verdict: "approved" as const,
+            summary: "approved",
+            findings: [],
+          }),
+        },
+        forge: {
+          deliver: async (_contract, candidateSha) => ({
+            sha: candidateSha,
+            effect: "github" as const,
+            prNumber: 80,
+            url: "https://example.invalid/pr/80",
+            attestationId: "history",
+          }),
+        },
+      },
+    );
+
+    expect(result.state).toBe("reviewed_pr");
+    expect(fake.getHistory().map(({ kind }) => kind)).toEqual([
+      "implementer",
+      "project_check",
+      "fresh_review",
+      "forge_delivery",
+    ]);
+    expect(fake.getHistory()[0]).toMatchObject({
+      activation: 1,
+      role: "implementer",
+      model: "test",
+      outcome: "succeeded",
+      tokenUsage: { inputTokens: 12, outputTokens: 7 },
+      candidateSha: sha,
+      candidateFence: 1,
+    });
+    expect(fake.getHistory()[1]).toMatchObject({
+      cycle: 1,
+      outcome: "succeeded",
+      candidateSha: sha,
+      candidateFence: 1,
+    });
+    expect(fake.getHistory()[2]).toMatchObject({
+      cycle: 1,
+      role: "reviewer",
+      outcome: "succeeded",
+      candidateSha: sha,
+    });
+    expect(fake.getHistory()[3]).toMatchObject({
+      outcome: "succeeded",
+      candidateSha: sha,
+    });
+  });
+
   test("stops before recording candidate evidence when cancelled", async () => {
     const id = `cancelled-run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const controller = new AbortController();

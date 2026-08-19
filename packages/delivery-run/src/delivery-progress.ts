@@ -1,5 +1,9 @@
 import type { DeliveryRunServices } from "./delivery-run.js";
-import { taskProgressFromResult, type TaskResult } from "@usine/task-authority";
+import {
+  taskProgressFromResult,
+  type TaskHistoryRecordInput,
+  type TaskResult,
+} from "@usine/task-authority";
 
 export function reportProgress(services: DeliveryRunServices, result: TaskResult): void {
   try {
@@ -7,6 +11,13 @@ export function reportProgress(services: DeliveryRunServices, result: TaskResult
   } catch {
     // Progress is an observation only; a failed sink cannot alter authority.
   }
+}
+
+export async function recordHistory(
+  services: DeliveryRunServices,
+  input: TaskHistoryRecordInput,
+): Promise<void> {
+  await services.authority.appendHistory?.(input);
 }
 
 export async function blockTask(

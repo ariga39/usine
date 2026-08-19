@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import type { TaskResult } from "./task-state.js";
+import type { TaskHistoryRecord, TaskResult, TaskStatus } from "./task-state.js";
 
 export const TASK_RESULT_SCHEMA_VERSION = 1 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
@@ -52,6 +52,42 @@ const deliveryEffect = Schema.Struct({
   url: Schema.String,
   attestationId: Schema.String,
 });
+const historyRecord = Schema.Struct({
+  id: Schema.Natural,
+  taskId: Schema.String,
+  kind: Schema.Literals([
+    "implementer",
+    "project_check",
+    "fresh_review",
+    "forge_delivery",
+    "coordinator_restart",
+    "execution_owner_change",
+  ]),
+  activation: Schema.NullOr(Schema.Natural),
+  cycle: Schema.NullOr(Schema.Natural),
+  role: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  startedAtEpochMs: Schema.Int,
+  endedAtEpochMs: Schema.NullOr(Schema.Int),
+  outcome: Schema.Literals([
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "blocked",
+    "observed",
+  ]),
+  failure: Schema.NullOr(Schema.String),
+  candidateSha: Schema.NullOr(exactSha),
+  candidateFence: Schema.NullOr(Schema.Natural),
+  tokenUsage: Schema.NullOr(
+    Schema.Struct({
+      inputTokens: Schema.optional(Schema.Natural),
+      outputTokens: Schema.optional(Schema.Natural),
+      totalTokens: Schema.optional(Schema.Natural),
+    }),
+  ),
+});
 const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -77,6 +113,11 @@ const taskResultFields = {
 const currentTaskResult = Schema.Struct({
   schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
   ...taskResultFields,
+});
+const currentTaskStatus = Schema.Struct({
+  schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
+  ...taskResultFields,
+  history: Schema.Array(historyRecord),
 });
 
 /** The unversioned result written by the current main branch. */
@@ -138,4 +179,28 @@ export function decodeRawPersistedTaskResult(input: string): TaskResult {
 
 export function decodeCurrentTaskResult(input: unknown): TaskResult {
   return projectDecodedResult(Schema.decodeUnknownSync(currentTaskResult)(input));
+}
+
+export function decodeCurrentTaskStatus(input: unknown): TaskStatus {
+  const decoded = Schema.decodeUnknownSync(currentTaskStatus)(input);
+  const result = projectDecodedResult(decoded);
+  return {
+    ...result,
+    history: decoded.history.map((record): TaskHistoryRecord => ({
+      id: record.id,
+      taskId: record.taskId,
+      kind: record.kind,
+      activation: record.activation,
+      cycle: record.cycle,
+      role: record.role,
+      model: record.model,
+      startedAtEpochMs: record.startedAtEpochMs,
+      endedAtEpochMs: record.endedAtEpochMs,
+      outcome: record.outcome,
+      failure: record.failure,
+      candidateSha: record.candidateSha,
+      candidateFence: record.candidateFence,
+      tokenUsage: record.tokenUsage,
+    })),
+  };
 }

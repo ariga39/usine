@@ -20,6 +20,7 @@ import {
   type TaskHistoryRecordInput,
   type TaskHistoryTokenUsage,
   type TaskResult,
+  type TaskStatus,
 } from "./task-state.js";
 
 export type {
@@ -35,6 +36,7 @@ export type {
   TaskHistoryTokenUsage,
   TaskObservation,
   TaskResult,
+  TaskStatus,
 } from "./task-state.js";
 
 type AuthorityDatabase = RuntimeDatabase;
@@ -129,6 +131,12 @@ export class TaskAuthority {
       candidateFence: row.candidateFence,
       tokenUsage: row.tokenUsage as TaskHistoryTokenUsage | null,
     }));
+  }
+
+  async lookupStatus(taskId: string, limit = MAX_HISTORY_LIMIT): Promise<TaskStatus | null> {
+    const result = await this.lookup(taskId);
+    if (!result) return null;
+    return { ...result, history: await this.listHistory(taskId, limit) };
   }
 
   async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {

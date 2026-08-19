@@ -13,6 +13,7 @@ import {
   type TaskContract,
   type TaskExecutionInput,
   type TaskResult,
+  type TaskStatus,
 } from "@usine/task-authority";
 import { reapCodexExecution } from "@usine/coding-session";
 import {
@@ -287,7 +288,7 @@ async function handleRequest(
   const stateDirectory = stateDirectoryFromEnvironment(environment);
   if (request.method === "GET" && taskId) {
     const requestedTaskId = decodeURIComponent(taskId);
-    let result: TaskResult | null;
+    let result: TaskStatus | null;
     try {
       result = await lookupTaskStatus(stateDirectory, requestedTaskId);
     } catch (error) {

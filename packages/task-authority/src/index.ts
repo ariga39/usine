@@ -3,6 +3,7 @@ export * from "./task-state.js";
 export * from "./task-authority.js";
 export {
   decodeCurrentTaskResult,
+  decodeCurrentTaskStatus,
   TaskStateQuarantinedError,
   isTaskStateQuarantinedError,
 } from "./task-state-schema.js";

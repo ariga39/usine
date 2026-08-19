@@ -2,7 +2,12 @@ import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
 import { reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
-import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
+import {
+  remainingUntil,
+  type CheckResult,
+  type ReviewVerdict,
+  type TaskHistoryTokenUsage,
+} from "@usine/task-authority";
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -23,6 +28,11 @@ export interface QualityGateOptions {
   signal?: AbortSignal;
 }
 
+export interface ReviewAttemptObservation {
+  review: ReviewVerdict;
+  usage: TaskHistoryTokenUsage | null;
+}
+
 interface QualityGateWorkspace {
   withCheckout<T>(purpose: string, sha: string, callback: (path: string) => Promise<T>): Promise<T>;
 }
@@ -33,6 +43,7 @@ interface QualityGateSession {
   ): Promise<
     Pick<SessionObservation<ReviewerOutput>, "status" | "output"> &
       Pick<SessionObservation<ReviewerOutput>, "summary" | "failure">
+      & { usage?: TaskHistoryTokenUsage | null }
   >;
 }
 
@@ -100,6 +111,15 @@ export class QualityGate {
     check: CheckResult,
     cycle: number,
   ): Promise<ReviewVerdict> {
+    return (await this.reviewWithObservation(contract, sha, check, cycle)).review;
+  }
+
+  async reviewWithObservation(
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    cycle: number,
+  ): Promise<ReviewAttemptObservation> {
     if (check.status !== "passed" || check.sha !== sha)
       throw new Error("review requires a passing exact-SHA check");
     return this.options.workspace.withCheckout(
@@ -130,19 +150,25 @@ export class QualityGate {
         });
         if (observation.status !== "completed" || !observation.output)
           return {
-            sha,
-            verdict: "inconclusive",
-            summary: observation.failure ?? observation.summary,
-            findings: [],
+            review: {
+              sha,
+              verdict: "inconclusive",
+              summary: observation.failure ?? observation.summary,
+              findings: [],
+            },
+            usage: observation.usage ?? null,
           };
         if (observation.output.sha !== sha)
           return {
-            sha,
-            verdict: "inconclusive",
-            summary: "review output was stale",
-            findings: [],
+            review: {
+              sha,
+              verdict: "inconclusive",
+              summary: "review output was stale",
+              findings: [],
+            },
+            usage: observation.usage ?? null,
           };
-        return observation.output;
+        return { review: observation.output, usage: observation.usage ?? null };
       },
     );
   }

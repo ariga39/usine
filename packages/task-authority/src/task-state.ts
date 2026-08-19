@@ -154,6 +154,10 @@ export interface TaskHistoryRecord extends TaskHistoryRecordInput {
   id: number;
 }
 
+export interface TaskStatus extends TaskResult {
+  history: TaskHistoryRecord[];
+}
+
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
   candidate: ["candidate", "checked", "blocked"],

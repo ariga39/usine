@@ -9,6 +9,7 @@ import {
   type TaskExecutionInput,
   type TaskProgress,
   type TaskResult,
+  type TaskStatus,
   taskProgressFromResult,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
@@ -30,7 +31,7 @@ export type { TaskExecutionInput } from "@usine/task-authority";
 export async function lookupTaskStatus(
   stateDirectory: string,
   taskId: string,
-): Promise<TaskResult | null> {
+): Promise<TaskStatus | null> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   try {
     await access(databasePath);
@@ -41,7 +42,7 @@ export async function lookupTaskStatus(
 
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
-    return await new TaskAuthority(handle.database).lookup(taskId);
+    return await new TaskAuthority(handle.database).lookupStatus(taskId);
   } finally {
     handle.close();
   }
@@ -263,6 +264,7 @@ async function executeWithServices(options: {
     repositoryIdentity,
     deadlineEpochMs,
     implementer: policy.roles.implementer,
+    reviewer: policy.roles.reviewer,
     signal: options.signal,
   };
   return executeDeliveryRun(workflowInput, {
