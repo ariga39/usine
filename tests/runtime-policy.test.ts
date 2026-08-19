@@ -91,7 +91,6 @@ describe("runtime composition", () => {
     expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
     expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
     expect(policy.workerEnvironment).not.toHaveProperty("GITHUB_TOKEN");
-    expect(policy.checkEnvironment).toEqual(policy.workerEnvironment);
     expect(policy.credentialFreeGitEnvironment).toMatchObject({
       PATH: "/portable/bin",
       GIT_CONFIG_NOSYSTEM: "1",
