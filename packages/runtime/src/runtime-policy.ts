@@ -28,7 +28,6 @@ export interface RuntimePolicy {
   };
   forge: ForgePolicy | null;
   workerEnvironment: NodeJS.ProcessEnv;
-  checkEnvironment: NodeJS.ProcessEnv;
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
 }
 
@@ -70,7 +69,6 @@ export function runtimePolicyFromEnvironment(
     roles,
     forge,
     workerEnvironment,
-    checkEnvironment: workerEnvironment,
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
   };
 }

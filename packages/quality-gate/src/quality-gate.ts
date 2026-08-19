@@ -18,8 +18,7 @@ export interface QualityGateOptions {
   workspace: QualityGateWorkspace;
   session: QualityGateSession;
   reviewer: RolePolicy;
-  checkEnvironment: NodeJS.ProcessEnv;
-  reviewerEnvironment: NodeJS.ProcessEnv;
+  environment: NodeJS.ProcessEnv;
   deadlineEpochMs: number;
   signal?: AbortSignal;
 }
@@ -62,7 +61,7 @@ export class QualityGate {
         try {
           result = await execa("sh", ["-c", contract.projectCheck.command], {
             cwd: path,
-            env: this.options.checkEnvironment,
+            env: this.options.environment,
             extendEnv: false,
             timeout,
             cancelSignal: this.options.signal,
@@ -126,7 +125,7 @@ export class QualityGate {
           sandbox: this.options.reviewer.sandbox,
           deadlineEpochMs: this.options.deadlineEpochMs,
           outputSchema: reviewerOutputSchema,
-          environment: this.options.reviewerEnvironment,
+          environment: this.options.environment,
           signal: this.options.signal,
         });
         if (observation.status !== "completed" || !observation.output)

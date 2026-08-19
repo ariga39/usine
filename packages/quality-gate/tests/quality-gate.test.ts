@@ -12,6 +12,7 @@ const contract = { id: "quality-test" } as TaskContract;
 const testEnvironment = {
   ...credentialFreeGitEnvironment(process.env),
   CI: "true",
+  USINE_CHECK_POLICY: "credential-free",
 };
 
 test("Quality Gate checks a disposable exact-SHA checkout before fresh review", async () => {
@@ -32,7 +33,10 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     instructions: "Review",
     acceptance: ["ready"],
     nonGoals: [],
-    projectCheck: { command: "test -f ready.txt", timeoutMs: 10_000 },
+    projectCheck: {
+      command: 'test -f ready.txt && test "$USINE_CHECK_POLICY" = credential-free',
+      timeoutMs: 10_000,
+    },
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 30_000 },
     authorization: { source: "test", delivery: true },
     delivery: { baseBranch: "main", branch: "agent/test", issue: 1, title: "test", body: "test" },
@@ -45,13 +49,21 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     gitAuthor: { name: "Test", email: "test@example.invalid" },
   });
   let reviewerSchema: unknown;
+  let reviewerEnvironment: NodeJS.ProcessEnv | undefined;
   let sessionStatus: "completed" | "failed" = "completed";
   let reviewerSha = base;
   const gate = new QualityGate({
     workspace,
     session: {
-      run: async ({ outputSchema }: { outputSchema: unknown }) => {
+      run: async ({
+        outputSchema,
+        environment,
+      }: {
+        outputSchema: unknown;
+        environment?: NodeJS.ProcessEnv;
+      }) => {
         reviewerSchema = outputSchema;
+        reviewerEnvironment = environment;
         return {
           status: sessionStatus,
           sessionId: "review",
@@ -68,8 +80,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
       reasoningEffort: "low",
       sandbox: "read-only",
     },
-    checkEnvironment: testEnvironment,
-    reviewerEnvironment: testEnvironment,
+    environment: testEnvironment,
     deadlineEpochMs: Date.now() + 30_000,
   });
   const check = await gate.check(task, base, 1);
@@ -97,6 +108,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   const review = await gate.review(task, base, check, 1);
   expect(review.verdict).toBe("approved");
   expect(reviewerSchema).toBe(reviewerOutputSchema);
+  expect(reviewerEnvironment).toEqual(testEnvironment);
   reviewerSha = "b".repeat(40);
   const staleReview = await gate.review(task, base, check, 1);
   expect(staleReview).toMatchObject({
@@ -132,8 +144,7 @@ test("cancels a running project check subprocess without recording a check fact"
       reasoningEffort: "low",
       sandbox: "read-only",
     },
-    checkEnvironment: testEnvironment,
-    reviewerEnvironment: testEnvironment,
+    environment: testEnvironment,
     deadlineEpochMs: Date.now() + 30_000,
     signal: controller.signal,
   });

@@ -246,8 +246,7 @@ async function executeWithServices(options: {
     workspace,
     session,
     reviewer: policy.roles.reviewer,
-    checkEnvironment: policy.checkEnvironment,
-    reviewerEnvironment: policy.workerEnvironment,
+    environment: policy.workerEnvironment,
     deadlineEpochMs,
     signal: options.signal,
   });
