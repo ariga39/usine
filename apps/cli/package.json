@@ -7,11 +7,13 @@
   },
   "type": "module",
   "scripts": {
-    "build": "vp pack"
+    "build": "vp pack",
+    "test": "vp test"
   },
   "dependencies": {
     "@usine/runtime": "workspace:*",
-    "@usine/task-authority": "workspace:*"
+    "@usine/task-authority": "workspace:*",
+    "effect": "4.0.0-rc.110"
   },
   "devDependencies": {
     "@types/node": "latest",

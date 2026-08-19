@@ -1,4 +1,6 @@
+import { Clock, Duration, Effect } from "effect";
 import type { TaskResult } from "@usine/task-authority";
+import { taskProgressFromResult, type TaskProgress } from "@usine/task-authority";
 
 export interface TaskSubmission {
   contractPath: string;
@@ -30,6 +32,33 @@ export async function taskStatus(serverUrl: string, taskId: string): Promise<Tas
   const response = await fetch(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
   if (response.status === 404) return null;
   return readResponse<TaskResult>(response);
+}
+
+export interface FollowOptions {
+  intervalMs?: number;
+  onProgress?: (progress: TaskProgress) => void;
+}
+
+export async function followTask(
+  serverUrl: string,
+  taskId: string,
+  options: FollowOptions = {},
+): Promise<TaskResult> {
+  const intervalMs = options.intervalMs ?? 100;
+  let lastRevision = -1;
+  while (true) {
+    const result = await taskStatus(serverUrl, taskId);
+    if (!result) throw new ServerClientError(`task not found: ${taskId}`, 404);
+    if (result.revision > lastRevision) {
+      lastRevision = result.revision;
+      options.onProgress?.(taskProgressFromResult(result));
+    }
+    if (result.state === "reviewed_pr" || result.state === "blocked") return result;
+    const remainingMs = result.deadlineEpochMs - (await Effect.runPromise(Clock.currentTimeMillis));
+    if (remainingMs <= 0)
+      throw new ServerClientError("task follow reached its durable deadline", 408);
+    await Effect.runPromise(Effect.sleep(Duration.millis(Math.min(intervalMs, remainingMs))));
+  }
 }
 
 async function request<T>(serverUrl: string, path: string, init: RequestInit): Promise<T> {

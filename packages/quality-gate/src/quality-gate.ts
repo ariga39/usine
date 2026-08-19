@@ -21,6 +21,7 @@ export interface QualityGateOptions {
   checkEnvironment: NodeJS.ProcessEnv;
   reviewerEnvironment: NodeJS.ProcessEnv;
   deadlineEpochMs: number;
+  signal?: AbortSignal;
 }
 
 interface QualityGateWorkspace {
@@ -64,9 +65,12 @@ export class QualityGate {
             env: this.options.checkEnvironment,
             extendEnv: false,
             timeout,
+            cancelSignal: this.options.signal,
             reject: false,
           });
+          if (this.options.signal?.aborted) throw new Error("project check cancelled");
         } catch (error) {
+          if (this.options.signal?.aborted) throw error;
           return {
             sha,
             status: "failed" as const,
@@ -123,6 +127,7 @@ export class QualityGate {
           deadlineEpochMs: this.options.deadlineEpochMs,
           outputSchema: reviewerOutputSchema,
           environment: this.options.reviewerEnvironment,
+          signal: this.options.signal,
         });
         if (observation.status !== "completed" || !observation.output)
           return {

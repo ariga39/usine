@@ -57,6 +57,7 @@ export interface ForgeDeliveryOptions {
   deadlineEpochMs: number;
   forge: ForgePolicy;
   environment: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export interface ForgeClient {

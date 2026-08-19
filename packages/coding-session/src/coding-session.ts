@@ -59,6 +59,7 @@ export interface SessionRequest<Output = unknown> {
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
   environment?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export interface CodingSessionOptions {
@@ -108,7 +109,20 @@ export class CodexCodingSession {
         failure: "elapsed budget exhausted",
       };
     }
-    const abortSignal = AbortSignal.timeout(remaining);
+    const deadlineSignal = AbortSignal.timeout(remaining);
+    const abortSignal = request.signal
+      ? AbortSignal.any([request.signal, deadlineSignal])
+      : deadlineSignal;
+    if (abortSignal.aborted) {
+      return {
+        status: "cancelled",
+        sessionId: null,
+        output: null,
+        usage: null,
+        summary: "coding session cancelled",
+        failure: "coding session cancelled",
+      };
+    }
     try {
       const client = await this.createClient(request);
       const threadOptions: ThreadOptions = {

@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import {
-  startUsineServer,
-  type ServerExecutionContext,
-  type TaskExecutionInput,
-} from "@usine/runtime";
+import { startUsineServer, type ServerExecutionContext } from "@usine/runtime";
 import { submitTask, taskStatus, type TaskSubmission } from "../apps/cli/src/server-client.js";
 import type { TaskContract, TaskResult } from "@usine/task-authority";
 

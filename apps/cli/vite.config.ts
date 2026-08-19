@@ -8,4 +8,7 @@ export default defineConfig({
     dts: true,
     clean: true,
   },
+  test: {
+    include: ["tests/**/*.test.ts"],
+  },
 });

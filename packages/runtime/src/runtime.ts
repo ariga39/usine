@@ -105,9 +105,8 @@ export async function admitTask(
       return blocked;
     };
     if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
-    let repository: string;
     try {
-      repository = await verifyCommittedContract(
+      await verifyCommittedContract(
         contractPath,
         repositoryPath,
         contract,
@@ -187,6 +186,7 @@ export async function executeAdmittedTask(
       onProgress,
     });
   } catch (error) {
+    if (signal?.aborted) throw error;
     const current = await authority.lookup(contract.id);
     if (current && current.state !== "reviewed_pr" && current.state !== "blocked") {
       const blocker = error instanceof Error ? error.message : String(error);
@@ -217,6 +217,7 @@ async function executeWithServices(options: {
   authority: TaskAuthority;
   deadlineEpochMs: number;
   onProgress?: (progress: TaskProgress) => void;
+  signal?: AbortSignal;
 }): Promise<TaskResult> {
   const {
     contract,
@@ -235,6 +236,7 @@ async function executeWithServices(options: {
     deadlineEpochMs,
     credentialFreeGit: policy.credentialFreeGitEnvironment,
     gitAuthor: policy.gitAuthor,
+    signal: options.signal,
   });
   const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
   const quality = new QualityGate({
@@ -244,12 +246,14 @@ async function executeWithServices(options: {
     checkEnvironment: policy.checkEnvironment,
     reviewerEnvironment: policy.workerEnvironment,
     deadlineEpochMs,
+    signal: options.signal,
   });
   const forge = new ForgeDelivery({
     repository,
     deadlineEpochMs,
     forge: forgePolicy,
     environment: policy.credentialFreeGitEnvironment,
+    signal: options.signal,
   });
   const workflowInput: DeliveryRunInput = {
     contract,
@@ -257,6 +261,7 @@ async function executeWithServices(options: {
     repositoryIdentity,
     deadlineEpochMs,
     implementer: policy.roles.implementer,
+    signal: options.signal,
   };
   return executeDeliveryRun(workflowInput, {
     authority,

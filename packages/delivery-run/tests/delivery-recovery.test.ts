@@ -161,6 +161,53 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("stops before recording candidate evidence when cancelled", async () => {
+    const id = `cancelled-run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const controller = new AbortController();
+    const state = fakeAuthority(persistedResult("admitted", id));
+    const input = {
+      contract: contract(id),
+      contractHash: "cancelled-run-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 30_000,
+      implementer,
+      signal: controller.signal,
+    };
+
+    await expect(
+      executeDeliveryRun(input, {
+        ...servicesFor(
+          state.authority,
+          {
+            check: async () => {
+              throw new Error("check should not start");
+            },
+            review: async () => {
+              throw new Error("review should not start");
+            },
+          },
+          {
+            deliver: async () => {
+              throw new Error("delivery should not start");
+            },
+          },
+        ),
+        session: {
+          run: async () => {
+            controller.abort();
+            return {
+              status: "completed" as const,
+              output: { status: "proposed" as const, summary: "candidate" },
+              summary: "completed",
+              failure: null,
+            };
+          },
+        },
+      }),
+    ).rejects.toThrow("task execution cancelled");
+    expect(state.getStored()).toMatchObject({ state: "admitted", candidateSha: null });
+  });
+
   test("returns the first durable blocker after a failed check exhausts activations", async () => {
     const id = `sqlite-terminal-block-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const taskContract = {

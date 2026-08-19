@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@usine/task-authority": "workspace:*",
+    "effect": "4.0.0-rc.110",
     "execa": "latest",
     "octokit": "latest"
   },

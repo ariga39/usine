@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
 import { startUsineServer } from "@usine/runtime";
-import { submitTask, taskStatus } from "./server-client.js";
+import { followTask, submitTask, taskStatus } from "./server-client.js";
 
 export async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
@@ -62,6 +62,28 @@ export async function main(): Promise<void> {
     } catch (error) {
       process.stderr.write(
         `${JSON.stringify({ error: "status_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (command === "follow") {
+    if (!contractPath || process.argv.length > 4) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "usage", usage: "usine follow <task-id>" })}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const result = await followTask(serverUrl(), contractPath, {
+        onProgress: (progress) => process.stderr.write(`${JSON.stringify(progress)}\n`),
+      });
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "follow_failed", message: String(error) })}\n`,
       );
       process.exitCode = 1;
     }
