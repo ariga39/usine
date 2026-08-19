@@ -1,17 +1,45 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
-import type { TaskProgress } from "@usine/task-authority";
-import {
-  admitTask,
-  lookupTaskStatus,
-  runtimePolicyFromEnvironment,
-  stateDirectoryFromEnvironment,
-} from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
+import { followTask, serverUrlFromEnvironment, submitTask, taskStatus } from "./server-client.js";
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
+  if (command === "server") {
+    if (contractPath || process.argv.length > 3) {
+      process.stderr.write(`${JSON.stringify({ error: "usage", usage: "usine server" })}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const server = await startUsineServer({
+        environment: process.env,
+        host: process.env.USINE_SERVER_HOST?.trim() || "127.0.0.1",
+        port: Number(process.env.USINE_SERVER_PORT || 8787),
+      });
+      process.stdout.write(`${JSON.stringify({ event: "server_ready", url: server.url })}\n`);
+      await new Promise<void>((resolve) => {
+        const stop = () => {
+          process.off("SIGINT", stop);
+          process.off("SIGTERM", stop);
+          resolve();
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      });
+      await server.close();
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "server_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (command === "status") {
     if (!contractPath || process.argv.length > 4) {
       process.stderr.write(
@@ -22,10 +50,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      const result = await lookupTaskStatus(
-        stateDirectoryFromEnvironment(process.env),
-        contractPath,
-      );
+      const result = await taskStatus(serverUrlFromEnvironment(process.env), contractPath);
       if (!result) {
         process.stderr.write(
           `${JSON.stringify({ error: "task_not_found", taskId: contractPath })}\n`,
@@ -43,9 +68,31 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command !== "run" || !contractPath) {
+  if (command === "follow") {
+    if (!contractPath || process.argv.length > 4) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "usage", usage: "usine follow <task-id>" })}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const result = await followTask(serverUrlFromEnvironment(process.env), contractPath, {
+        onProgress: (progress) => process.stderr.write(`${JSON.stringify(progress)}\n`),
+      });
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "follow_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (command !== "submit" || !contractPath) {
     process.stderr.write(
-      `${JSON.stringify({ error: "usage", usage: "usine run <task-contract.json>" })}\n`,
+      `${JSON.stringify({ error: "usage", usage: "usine submit <task-contract.json>" })}\n`,
     );
     process.exitCode = 2;
     return;
@@ -74,18 +121,13 @@ async function main(): Promise<void> {
   }
 
   try {
-    const policy = runtimePolicyFromEnvironment(process.env, parsed.data.repository);
-    const result = await admitTask(
-      contractPath,
-      rawContract,
-      parsed.data,
-      policy,
-      (progress: TaskProgress) => process.stderr.write(`${JSON.stringify(progress)}\n`),
-    );
+    const result = await submitTask(serverUrlFromEnvironment(process.env), {
+      contractPath: resolve(contractPath),
+      repositoryPath: await realpath(parsed.data.repository.path),
+    });
     process.stdout.write(`${JSON.stringify(result)}\n`);
-    if (policy.stopAfterAdmitted) process.exitCode = 75;
   } catch (error) {
-    process.stderr.write(`${JSON.stringify({ error: "run_failed", message: String(error) })}\n`);
+    process.stderr.write(`${JSON.stringify({ error: "submit_failed", message: String(error) })}\n`);
     process.exitCode = 1;
   }
 }

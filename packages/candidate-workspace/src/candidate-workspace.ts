@@ -41,6 +41,7 @@ export interface WorkspaceOptions {
   deadlineEpochMs: number;
   credentialFreeGit: NodeJS.ProcessEnv;
   gitAuthor: GitAuthor;
+  signal?: AbortSignal;
 }
 
 export function credentialFreeGitEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -77,7 +78,12 @@ export class CandidateWorkspace {
     );
     await mkdir(dirname(path), { recursive: true });
     await this.removeWorktree(path);
-    await this.git(["-C", this.options.repository, "worktree", "add", "--detach", path, baseSha]);
+    try {
+      await this.git(["-C", this.options.repository, "worktree", "add", "--detach", path, baseSha]);
+    } catch (error) {
+      await this.removeWorktree(path);
+      throw error;
+    }
     this.fences.set(taskId, fence);
     return { taskId, activation, fence, path, baseSha };
   }
@@ -179,6 +185,7 @@ export class CandidateWorkspace {
       env: this.options.credentialFreeGit,
       extendEnv: false,
       timeout: remainingUntil(this.options.deadlineEpochMs),
+      cancelSignal: this.options.signal,
       reject: true,
     });
     return String(result.stdout);

@@ -39,6 +39,7 @@ async function runCodingAttempt(
   check: CheckResult | null,
   findings: string[],
 ): Promise<CodingAttempt> {
+  if (input.signal?.aborted) throw new Error("task execution cancelled");
   const reservation = await services.authority.reserveActivation(
     input.contract.id,
     input.contract.budget.maxImplementerActivations,
@@ -60,7 +61,12 @@ async function runCodingAttempt(
     sandbox: input.implementer.sandbox,
     deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerOutputSchema,
+    signal: input.signal,
   });
+  if (input.signal?.aborted) {
+    await services.workspace.quarantine(workspace);
+    throw new Error("task execution cancelled");
+  }
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
     return {
@@ -95,6 +101,10 @@ async function runCodingAttempt(
       candidate: { ...candidate, workspace },
     };
   } catch (error) {
+    if (input.signal?.aborted) {
+      await services.workspace.quarantine(workspace);
+      throw error;
+    }
     await services.workspace.quarantine(workspace);
     return {
       status: "failed",
@@ -116,6 +126,7 @@ export async function activateImplementer(
   try {
     attempt = await runCodingAttempt(input, services, previousSha, check, findings);
   } catch (error) {
+    if (input.signal?.aborted) throw error;
     return blockTask(services, result, error instanceof Error ? error.message : String(error));
   }
   if (attempt.status === "failed") {

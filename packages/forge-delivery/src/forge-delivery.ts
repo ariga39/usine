@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { Duration, Effect } from "effect";
 import type {
   CheckResult,
   DeliveryEffect,
@@ -49,8 +50,9 @@ export class ForgeDelivery {
         )
           throw error;
         if (attempt < 3)
-          await new Promise((resolve) =>
-            setTimeout(resolve, remainingUntil(this.options.deadlineEpochMs, 100)),
+          await Effect.runPromise(
+            Effect.sleep(Duration.millis(remainingUntil(this.options.deadlineEpochMs, 100))),
+            { signal: this.options.signal },
           );
       }
     }
@@ -73,7 +75,11 @@ export class ForgeDelivery {
           owner,
           repo,
           ref: `heads/${branch}`,
-          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: {
+            timeout: remainingUntil(this.options.deadlineEpochMs),
+            retries: 0,
+            signal: this.options.signal,
+          },
         })
       ).data.object.sha;
     } catch (error) {
@@ -86,7 +92,11 @@ export class ForgeDelivery {
       base: baseBranch,
       state: "all",
       per_page: 100,
-      request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
+      request: {
+        timeout: remainingUntil(this.options.deadlineEpochMs),
+        retries: 0,
+        signal: this.options.signal,
+      },
     });
     const matching = pullRequests.data.filter((pr) => pr.head.sha === sha);
     if (matching.length > 1)
@@ -119,7 +129,12 @@ export class ForgeDelivery {
           gitUrl,
           `${sha}:refs/heads/${branch}`,
         ],
-        { env, extendEnv: false, timeout: remainingUntil(this.options.deadlineEpochMs) },
+        {
+          env,
+          extendEnv: false,
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          cancelSignal: this.options.signal,
+        },
       );
     }
     const pullRequest =
@@ -133,7 +148,11 @@ export class ForgeDelivery {
           title: contract.delivery.title,
           body: `${contract.delivery.body}\n\nCloses #${contract.delivery.issue}`,
           draft: false,
-          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: {
+            timeout: remainingUntil(this.options.deadlineEpochMs),
+            retries: 0,
+            signal: this.options.signal,
+          },
         })
       ).data;
     if (pullRequest.state !== "open" || pullRequest.head.sha !== sha)
@@ -147,7 +166,11 @@ export class ForgeDelivery {
       repo,
       issue_number: pullRequest.number,
       per_page: 100,
-      request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
+      request: {
+        timeout: remainingUntil(this.options.deadlineEpochMs),
+        retries: 0,
+        signal: this.options.signal,
+      },
     });
     const marked = comments.filter((comment) => comment.body?.includes(marker));
     if (marked.length > 1)
@@ -177,7 +200,11 @@ export class ForgeDelivery {
           repo,
           issue_number: pullRequest.number,
           body,
-          request: { timeout: remainingUntil(this.options.deadlineEpochMs), retries: 0 },
+          request: {
+            timeout: remainingUntil(this.options.deadlineEpochMs),
+            retries: 0,
+            signal: this.options.signal,
+          },
         })
       ).data;
       const app = (

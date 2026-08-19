@@ -114,3 +114,37 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     findings: [],
   });
 });
+
+test("cancels a running project check subprocess without recording a check fact", async () => {
+  const controller = new AbortController();
+  const gate = new QualityGate({
+    workspace: {
+      withCheckout: async (_purpose, _sha, callback) => callback(tmpdir()),
+    },
+    session: {
+      run: async () => {
+        throw new Error("reviewer should not start");
+      },
+    },
+    reviewer: {
+      role: "reviewer",
+      model: "reviewer",
+      reasoningEffort: "low",
+      sandbox: "read-only",
+    },
+    checkEnvironment: testEnvironment,
+    reviewerEnvironment: testEnvironment,
+    deadlineEpochMs: Date.now() + 30_000,
+    signal: controller.signal,
+  });
+  const task = {
+    ...contract,
+    projectCheck: {
+      command: "sleep 10",
+      timeoutMs: 20_000,
+    },
+  } as TaskContract;
+  const pending = gate.check(task, "a".repeat(40), 1);
+  setTimeout(() => controller.abort(), 25);
+  await expect(pending).rejects.toThrow();
+});

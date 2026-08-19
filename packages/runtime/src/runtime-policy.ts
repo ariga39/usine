@@ -21,7 +21,6 @@ const defaultRolePolicies = {
 
 export interface RuntimePolicy {
   stateDirectory: string;
-  stopAfterAdmitted: boolean;
   gitAuthor: GitAuthor;
   roles: {
     implementer: RolePolicy;
@@ -47,7 +46,6 @@ export function runtimePolicyFromEnvironment(
   repository: { owner: string; name: string },
   homeDirectory = homedir(),
 ): RuntimePolicy {
-  const stopAfterAdmitted = environment.USINE_STOP_AFTER === "admitted";
   const stateDirectory = stateDirectoryFromEnvironment(environment, homeDirectory);
   const roles = {
     implementer: {
@@ -64,11 +62,10 @@ export function runtimePolicyFromEnvironment(
   };
 
   const gitAuthor = parseGitAuthor(environment);
-  const forge = parseForgePolicy(environment, stopAfterAdmitted, repository);
+  const forge = parseForgePolicy(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
   return {
     stateDirectory,
-    stopAfterAdmitted,
     gitAuthor,
     roles,
     forge,
@@ -93,7 +90,6 @@ function parseGitAuthor(environment: NodeJS.ProcessEnv): GitAuthor {
 
 function parseForgePolicy(
   environment: NodeJS.ProcessEnv,
-  admissionOnly: boolean,
   repository: { owner: string; name: string },
 ): ForgePolicy | null {
   const appSlug = environment.USINE_GITHUB_APP_SLUG?.trim();
@@ -103,7 +99,7 @@ function parseForgePolicy(
     environment.USINE_GITHUB_GIT_URL?.trim() ||
     `https://github.com/${repository.owner}/${repository.name}.git`;
 
-  if (!testToken && admissionOnly && !appSlug && !apiUrl) return null;
+  if (!testToken && !appSlug && !apiUrl) return null;
   if (!appSlug) throw new Error("USINE_GITHUB_APP_SLUG is required");
   if (testToken) {
     if (!apiUrl || !isLoopbackHttpUrl(apiUrl))

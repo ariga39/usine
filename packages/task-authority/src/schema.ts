@@ -4,6 +4,9 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 export const taskRuns = sqliteTable("task_runs", {
   taskId: text("task_id").primaryKey(),
   result: text("result", { mode: "json" }).notNull(),
+  contractPath: text("contract_path"),
+  repositoryPath: text("repository_path"),
+  rawContract: text("raw_contract"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .default(sql`(unixepoch() * 1000)`)
     .notNull(),

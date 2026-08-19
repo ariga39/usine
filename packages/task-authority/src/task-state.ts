@@ -105,6 +105,13 @@ export interface AuthorityInput {
   deadlineEpochMs: number;
 }
 
+/** Local input needed to re-enter an admitted task after a server restart. */
+export interface TaskExecutionInput {
+  contractPath: string;
+  repositoryPath: string;
+  rawContract: string;
+}
+
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
   candidate: ["candidate", "checked", "blocked"],

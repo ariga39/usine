@@ -66,6 +66,9 @@ importers:
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../../packages/task-authority
+      effect:
+        specifier: 4.0.0-rc.110
+        version: 4.0.0-rc.110
     devDependencies:
       '@types/node':
         specifier: latest
@@ -166,6 +169,9 @@ importers:
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
+      effect:
+        specifier: 4.0.0-rc.110
+        version: 4.0.0-rc.110
       execa:
         specifier: latest
         version: 10.0.1
@@ -234,6 +240,9 @@ importers:
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
+      effect:
+        specifier: 4.0.0-rc.110
+        version: 4.0.0-rc.110
       execa:
         specifier: latest
         version: 10.0.1

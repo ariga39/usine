@@ -8,7 +8,7 @@ test("CLI keeps invalid contract input at the public parse boundary", async () =
   const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));
   const path = join(directory, "invalid.json");
   await writeFile(path, "{}");
-  const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], { reject: false });
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], { reject: false });
   expect(run.exitCode).toBe(2);
   expect(run.stderr).toContain("invalid_task_contract");
 });
@@ -46,7 +46,7 @@ test.each([
   };
   await writeFile(path, JSON.stringify(contract));
 
-  const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], {
     env: { USINE_STATE_DIR: stateDirectory },
     reject: false,
   });
@@ -83,7 +83,7 @@ test.each([{ field: "owner" as const }, { field: "name" as const }])(
     contract.repository[field] = " \t\n ";
     await writeFile(path, JSON.stringify(contract));
 
-    const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], { reject: false });
+    const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], { reject: false });
 
     expect(run.exitCode).toBe(2);
     expect(run.stderr).toContain('"error":"invalid_task_contract"');
@@ -118,7 +118,7 @@ test.each([{ field: "baseBranch" as const }, { field: "branch" as const }])(
     contract.delivery[field] = " \t\n ";
     await writeFile(path, JSON.stringify(contract));
 
-    const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", path], {
+    const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], {
       env: { USINE_STATE_DIR: stateDirectory },
       reject: false,
     });
@@ -129,3 +129,11 @@ test.each([{ field: "baseBranch" as const }, { field: "branch" as const }])(
     await expect(access(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
+
+test("CLI does not retain the removed one-shot run command", async () => {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "run", "task.json"], {
+    reject: false,
+  });
+  expect(run.exitCode).toBe(2);
+  expect(run.stderr).toContain('"error":"usage"');
+});

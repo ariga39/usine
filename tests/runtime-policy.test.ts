@@ -65,7 +65,6 @@ describe("runtime composition", () => {
 
     expect(policy).toMatchObject({
       stateDirectory: "/state",
-      stopAfterAdmitted: false,
       gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       roles: {
         implementer: {

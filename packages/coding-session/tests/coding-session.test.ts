@@ -31,6 +31,17 @@ function testClient(
   return client;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolveValue) => {
+    resolve = resolveValue;
+  });
+  return { promise, resolve };
+}
+
 describe("Coding Session", () => {
   test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
@@ -92,6 +103,42 @@ describe("Coding Session", () => {
       },
     });
     expect(requestOptions).not.toHaveProperty("env");
+  });
+
+  test("propagates caller cancellation to the SDK turn", async () => {
+    const controller = new AbortController();
+    const started = deferred<void>();
+    let sdkSignal: AbortSignal | undefined;
+    const session = new CodexCodingSession(async () =>
+      testClient(async (_prompt, options) => {
+        sdkSignal = options?.signal;
+        started.resolve();
+        return new Promise<RunResult>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(new Error("SDK turn aborted")), {
+            once: true,
+          });
+        });
+      }),
+    );
+    const pending = session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      model: "test-model",
+      reasoningEffort: "high",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      environment: { CI: "true" },
+      signal: controller.signal,
+    });
+
+    await started.promise;
+    controller.abort();
+    const observation = await pending;
+    expect(sdkSignal?.aborted).toBe(true);
+    expect(observation).toMatchObject({ status: "cancelled", output: null });
   });
 
   test("preserves the deadline reserve before starting a provider", async () => {

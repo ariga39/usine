@@ -19,6 +19,7 @@
     "@usine/forge-delivery": "workspace:*",
     "@usine/quality-gate": "workspace:*",
     "@usine/task-authority": "workspace:*",
+    "effect": "4.0.0-rc.110",
     "execa": "latest"
   },
   "devDependencies": {

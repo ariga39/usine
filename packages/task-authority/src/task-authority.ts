@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { repositoryLeases, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import { decodePersistedTaskResult, TASK_RESULT_SCHEMA_VERSION } from "./task-state-schema.js";
@@ -11,6 +11,7 @@ import {
   type ReviewVerdict,
   type TaskFact,
   type TaskObservation,
+  type TaskExecutionInput,
   type TaskResult,
 } from "./task-state.js";
 
@@ -21,6 +22,7 @@ export type {
   DeliveryEffect,
   ReviewVerdict,
   TaskFact,
+  TaskExecutionInput,
   TaskObservation,
   TaskResult,
 } from "./task-state.js";
@@ -44,6 +46,37 @@ export class TaskAuthority {
     return result;
   }
 
+  async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
+    const rows = await this.database
+      .select({
+        rawResult: sql<string>`${taskRuns.result}`,
+        contractPath: taskRuns.contractPath,
+        repositoryPath: taskRuns.repositoryPath,
+        rawContract: taskRuns.rawContract,
+      })
+      .from(taskRuns);
+    const restartable: Array<{ result: TaskResult; input: TaskExecutionInput }> = [];
+    for (const row of rows) {
+      let result: TaskResult;
+      try {
+        result = decodePersistedTaskResult(JSON.parse(row.rawResult));
+      } catch {
+        continue;
+      }
+      if (result.state === "reviewed_pr" || result.state === "blocked") continue;
+      if (!row.contractPath || !row.repositoryPath || !row.rawContract) continue;
+      restartable.push({
+        result,
+        input: {
+          contractPath: row.contractPath,
+          repositoryPath: row.repositoryPath,
+          rawContract: row.rawContract,
+        },
+      });
+    }
+    return restartable;
+  }
+
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
     return database.query.taskRuns.findFirst({ where: eq(taskRuns.taskId, taskId) });
   }
@@ -60,12 +93,23 @@ export class TaskAuthority {
     return result;
   }
 
-  async admit(input: AuthorityInput): Promise<TaskResult> {
+  async admit(input: AuthorityInput, executionInput?: TaskExecutionInput): Promise<TaskResult> {
     const admit = async (database: AuthorityDatabase): Promise<TaskResult> => {
       // The task row is immutable.  Lock it when it already exists so a
       // concurrent admission cannot observe a half-updated lifecycle.
       const existing = await TaskAuthority.currentTask(database, input.contract.id);
-      if (existing) return TaskAuthority.existingAdmission(existing, input);
+      if (existing) {
+        if (
+          executionInput &&
+          (!existing.contractPath || !existing.repositoryPath || !existing.rawContract)
+        ) {
+          await database
+            .update(taskRuns)
+            .set(executionInput)
+            .where(eq(taskRuns.taskId, input.contract.id));
+        }
+        return TaskAuthority.existingAdmission(existing, input);
+      }
 
       const inserted = await database
         .insert(repositoryLeases)
@@ -80,7 +124,18 @@ export class TaskAuthority {
         // The lease's unique task ID serializes same-ID admissions. After the
         // conflict wait, the winning task is visible in this transaction.
         const winner = await TaskAuthority.currentTask(database, input.contract.id);
-        if (winner) return TaskAuthority.existingAdmission(winner, input);
+        if (winner) {
+          if (
+            executionInput &&
+            (!winner.contractPath || !winner.repositoryPath || !winner.rawContract)
+          ) {
+            await database
+              .update(taskRuns)
+              .set(executionInput)
+              .where(eq(taskRuns.taskId, input.contract.id));
+          }
+          return TaskAuthority.existingAdmission(winner, input);
+        }
         const occupied = await database.query.repositoryLeases.findFirst({
           where: eq(repositoryLeases.repositoryIdentity, input.repositoryIdentity),
         });
@@ -116,6 +171,7 @@ export class TaskAuthority {
       await database.insert(taskRuns).values({
         taskId: result.taskId,
         result,
+        ...executionInput,
       });
       return result;
     };

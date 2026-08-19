@@ -1,6 +1,6 @@
 ---
 status: current
-design_version: 0.6
+design_version: 0.7
 updated: 2026-08-19
 issue: https://github.com/ariga39/usine/issues/1
 ---
@@ -47,7 +47,11 @@ Usine 的第一个完整产品行为是：接收一项已经授权、边界明�
 authorized task contract
         │
         ▼
-deterministic coordinator
+typed local API
+        │
+        ▼
+server-owned Effect scope
+  deterministic coordinator
   SQLite facts + reconcile loop
         │
         ▼
@@ -87,7 +91,7 @@ Activation coupling 仍应很弱：普通消息不会广播唤醒其他角色；
 
 V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及出现冲突时的有界诊断。轻量的 transcript extraction、classification、normalization 和 short summary 由协调器通过成熟的 `ai` + `@ai-sdk/openai` provider 直接调用配置的 schema-constrained OpenAI-compatible API；除非确实需要 repository、tool 或 session 能力，不通过 Herdr、Codex 或 OpenCode agent runtime。协调器仍负责输入投影、schema 校验、exact-SHA 校验和 lifecycle authority。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
 
-正常推进和恢复使用同一条 deterministic reconcile 路径：读取持久事实与外部 observation，事务性保留一个带稳定 identity 的 next action，执行后再记录 observation。当前单 Task、本地进程 V0 由 CLI 持续调用这个 loop；进程重启后以同一 Task ID 重新进入即可。未来只有出现多个独立 runner、durable delayed scheduling 或数据库 polling 成为实测瓶颈时，才引入成熟 queue/workflow library；V0 不维护第二套 operation-index replay 或 scheduler control plane。
+正常推进和恢复使用同一条 deterministic reconcile 路径：读取持久事实与外部 observation，事务性保留一个带 stable identity 的 next action，执行后再记录 observation。当前单 Task、本地进程 V0 由 persistent local server 持有 Effect scope、task fiber、adapter cancellation 与资源释放；CLI 只通过 loopback typed API 执行 `submit`、`status` 和 `follow`，提交进程退出不改变已 admission 的 task。server 启动时从 SQLite 重新进入 nonterminal Task，不延长 durable deadline，也不维护第二套 operation-index replay 或 scheduler control plane。只有出现多个独立 runner、durable delayed scheduling 或数据库 polling/竞争成为实测瓶颈时，才引入成熟 queue/workflow library。
 
 ### 4.2 最小状态事实
 
@@ -102,7 +106,7 @@ V0 的 LLM 只承担必须依赖语义判断的 Implementer、Reviewer，以及�
 
 ### 4.3 恢复
 
-恢复路径和正常路径相同。协调器重启后读取 SQLite 中的领域状态，再观察进程、workspace、Git 和 GitHub 的当前事实：
+恢复路径和正常路径相同。server 重启后读取 SQLite 中的冻结 Task Contract、执行输入和领域状态，再观察 workspace、Git 和 GitHub 的当前事实：
 
 - 确认已发生的 effect，记录成功；
 - 可证明未发生的 effect，按相同 identity 重试；
@@ -158,7 +162,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 | **Quality Gate** | 分别产生 project check 与 fresh exact-SHA review facts，并聚合 findings | `check(candidate, contract)` 返回 exact-SHA Check Result；`review(candidate, contract, check)` 返回 fresh exact-SHA Review Verdict | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
 | **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` | Octokit 与 credential-scoped Git push；不运行 candidate code，也不能制造 semantic approval |
 
-依赖只向产品 policy 内侧流动：CLI/runtime 组合 Delivery Run；Delivery Run 独占 activation/retry/budget policy 并使用其余五个 package；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。依赖图必须有向无环，生产代码和测试只能使用声明依赖的 package exports，不能穿透其它 package 的 `src` 或 `dist`。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral SessionRef，不传递 Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。每个 package 必须拥有真实 caller 与有意义的 policy；共享 option/type 归消费它的 module，Delivery Run 不接收无关的 environment 或 credential capability bundle。
+依赖只向产品 policy 内侧流动：runtime 中的 local server 组合 Delivery Run 与 adapter，CLI 只依赖 typed server client；Delivery Run 独占 activation/retry/budget policy 并使用其余五个 package；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。依赖图必须有向无环，生产代码和测试只能使用声明依赖的 package exports，不能穿透其它 package 的 `src` 或 `dist`。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral SessionRef，不传递 HTTP request、Effect Fiber、Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。每个 package 必须拥有真实 caller 与有意义的 policy；共享 option/type 归消费它的 module，Delivery Run 不接收无关的 environment 或 credential capability bundle。
 
 ### 8.1 Coding Session 的最小 contract
 
@@ -213,7 +217,7 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 默认依赖选择：
 
 - Node 24 `node:sqlite` + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
-- Zod：现有 Task Contract 外部 JSON/schema 边界；Effect 4 RC Schema：Task Authority 的不可信 durable-state decode boundary，后续仅在当前 caller 能删除重复 validation、错误映射或资源 lifecycle code 时增量采用；
+- Zod：现有 Task Contract 外部 JSON/schema 边界；Effect 4 RC Schema：Task Authority 的不可信 durable-state decode boundary；Effect Scope、FiberMap、Clock、Duration 与 cancellation：local server composition root 的 task lifecycle、资源释放与 deadline-aware waiting。六个领域 package 不机械迁移为 Effect Service/Layer；Promise/SDK/subprocess/HTTP adapter 只在 Effect 边界桥接；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
 - `@openai/codex-sdk`：唯一 coding-agent lifecycle；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：协调器拥有的 schema-constrained 轻量语义 transform；
 - Pino：结构化日志；
@@ -235,4 +239,4 @@ Issue #80 full-refactor 的 merge gate 包含两条已完成的 live evidence：
 
 Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 取得 monotonic fence token 和独立 workspace；Task Authority 只接受当前 token 冻结的 Candidate。旧进程即使短暂存活也只能写旧 workspace，其 output/Candidate 被拒绝并 quarantine，随后由 host cleanup。Restart 恢复同一 Task/repository lease，但 fresh retry 使用新的 activation token；一个 lease 只允许一个 Task 拥有 repository publish authority，不允许两个进程并发共享目录或 Candidate 权限。Warm thread resume 只是 characterization 后的成本优化，不是 correctness requirement。
 
-PR #82 与 PR #83 已分别提供上述正常路径和 induced restart 证据，Issue #65 lifecycle falsifier 已清除，classification 进入 `continue`。这只允许既有 serial path 与最多两个独立项目任务继续，不授权第二 runtime/forge、分布式 runner或自动 merge。若后续 SDK 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，替换 Coding Session adapter并重新比较 direct exec、App Server 或成熟 runtime；其它五个产品模块的目标架构不因此取消。不得悄悄补一个新的 agent runtime。
+PR #82 与 PR #83 已分别提供上述正常路径和 induced restart 证据，Issue #65 lifecycle falsifier 已清除。Issue #153 进一步把 lifecycle owner 从 one-shot CLI 移入 local server：server-hosted milestone fixture 使用 stubbed Codex SDK adapter，以真实 server process、SQLite、Git、project check、fake GitHub API/bare remote、SIGKILL、fresh activation 和 exact delivery effects 验证 submit client 退出后的 delivery 与 restart recovery；这不是 active production Codex turn 的 evidence，也不宣称解决 zombie/orphan SDK process 或 Issue #144。classification 仍为 `continue`。这些证据只允许既有 serial path 与最多两个独立项目任务继续，不授权第二 runtime/forge、分布式 runner或自动 merge。若后续 SDK 缺少 turn terminal evidence、无法执行 role policy/environment separation，或 restart 必须新增自写 supervisor/protocol，替换 Coding Session adapter并重新比较 direct exec、App Server 或成熟 runtime；其它五个产品模块的目标架构不因此取消。不得悄悄补一个新的 agent runtime。

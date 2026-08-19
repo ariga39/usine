@@ -27,6 +27,7 @@ export interface DeliveryRunInput {
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementer: RolePolicy;
+  signal?: AbortSignal;
 }
 
 interface DeliveryRunAuthority {
@@ -91,12 +92,14 @@ export async function executeDeliveryRun(
   input: DeliveryRunInput,
   services: DeliveryRunServices,
 ): Promise<TaskResult> {
+  throwIfAborted(input.signal);
   let result = await services.authority.admit({
     contract: input.contract,
     contractHash: input.contractHash,
     repositoryIdentity: input.repositoryIdentity,
     deadlineEpochMs: input.deadlineEpochMs,
   });
+  throwIfAborted(input.signal);
   if (result.state === "reviewed_pr" || result.state === "blocked") return result;
   let lastProgressRevision = result.revision;
   const runServices: DeliveryRunServices = services.onProgress
@@ -145,7 +148,9 @@ export async function executeDeliveryRun(
       let check: CheckResult;
       try {
         check = await runServices.quality.check(input.contract, result.candidateSha, cycle);
+        throwIfAborted(input.signal);
       } catch (error) {
+        if (input.signal?.aborted) throw error;
         return blockTask(
           runServices,
           result,
@@ -186,7 +191,9 @@ export async function executeDeliveryRun(
           result.check,
           cycle,
         );
+        throwIfAborted(input.signal);
       } catch (error) {
+        if (input.signal?.aborted) throw error;
         return blockTask(
           runServices,
           result,
@@ -250,7 +257,9 @@ export async function executeDeliveryRun(
           result.check,
           result.review,
         );
+        throwIfAborted(input.signal);
       } catch (error) {
+        if (input.signal?.aborted) throw error;
         if (error instanceof DeliveryQuarantineError)
           return blockTask(runServices, result, error.message);
         throw error;
@@ -265,4 +274,8 @@ export async function executeDeliveryRun(
 
     return blockTask(runServices, result, "unknown durable task phase");
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("task execution cancelled");
 }
