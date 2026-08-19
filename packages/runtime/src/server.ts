@@ -8,6 +8,7 @@ import {
   contractIssues,
   openSqliteDatabase,
   TaskAuthority,
+  isTaskStateQuarantinedError,
   taskContractSchema,
   type TaskContract,
   type TaskExecutionInput,
@@ -273,7 +274,18 @@ async function handleRequest(
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
   if (request.method === "GET" && taskId) {
-    const result = await lookupTaskStatus(stateDirectory, decodeURIComponent(taskId));
+    const requestedTaskId = decodeURIComponent(taskId);
+    let result: TaskResult | null;
+    try {
+      result = await lookupTaskStatus(stateDirectory, requestedTaskId);
+    } catch (error) {
+      if (isTaskStateQuarantinedError(error)) {
+        response.statusCode = 503;
+        writeJson(response, { taskId: requestedTaskId, error: error.code });
+        return;
+      }
+      throw error;
+    }
     if (!result) {
       response.statusCode = 404;
       writeJson(response, { message: "task not found" });
