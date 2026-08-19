@@ -8,7 +8,7 @@ import {
   TaskAuthority,
   type TaskContract,
 } from "@usine/task-authority";
-import { executeDeliveryRun } from "../src/delivery-run.js";
+import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
 import { applyTaskFact, type CandidateFact, type TaskResult } from "@usine/task-authority";
 
 const sha = "b".repeat(40);
@@ -121,13 +121,10 @@ function fakeAuthority(initial: TaskResult) {
 }
 
 function servicesFor(
-  authority: ReturnType<typeof fakeAuthority>["authority"],
-  quality: {
-    check: (...args: never[]) => Promise<unknown>;
-    review: (...args: never[]) => Promise<unknown>;
-  },
-  forge: { deliver: (...args: never[]) => Promise<unknown> },
-) {
+  authority: DeliveryRunServices["authority"],
+  quality: DeliveryRunServices["quality"],
+  forge: DeliveryRunServices["forge"],
+): DeliveryRunServices {
   return {
     authority,
     workspace: {
@@ -159,7 +156,7 @@ function servicesFor(
     },
     quality,
     forge,
-  } as never;
+  };
 }
 
 describe("Delivery Run durable phase recovery", () => {
@@ -208,7 +205,7 @@ describe("Delivery Run durable phase recovery", () => {
             path: ".",
             baseSha,
           }),
-          freeze: async (writer: { baseSha: string }) => ({
+          freeze: async (writer) => ({
             sha,
             baseSha: writer.baseSha,
             workspace: writer,
@@ -219,6 +216,8 @@ describe("Delivery Run durable phase recovery", () => {
           run: async () => ({
             status: "completed" as const,
             output: { status: "proposed" as const, summary: "candidate" },
+            summary: "completed",
+            failure: null,
           }),
         },
         quality: {
@@ -239,20 +238,32 @@ describe("Delivery Run durable phase recovery", () => {
             throw new Error("failed candidate must not be delivered");
           },
         },
-      } as never);
+      });
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toBe("implementer activation budget exhausted");
       expect(result.evidence.implementerActivations).toBe(1);
       expect(blockCalls).toBe(1);
 
-      const rerun = await executeDeliveryRun(input, {
-        authority,
-        workspace: {},
-        session: {},
-        quality: {},
-        forge: {},
-      } as never);
+      const rerun = await executeDeliveryRun(
+        input,
+        servicesFor(
+          authority,
+          {
+            check: async () => {
+              throw new Error("terminal task must not be checked");
+            },
+            review: async () => {
+              throw new Error("terminal task must not be reviewed");
+            },
+          },
+          {
+            deliver: async () => {
+              throw new Error("terminal task must not be delivered");
+            },
+          },
+        ),
+      );
       expect(rerun).toEqual(result);
       expect(blockCalls).toBe(1);
 
@@ -274,8 +285,18 @@ describe("Delivery Run durable phase recovery", () => {
     const prompts: string[] = [];
     const checked: string[] = [];
     const sessions = [
-      { status: "completed", output: { status: "proposed", summary: "candidate" } },
-      { status: "completed", output: { status: "blocked", summary: "repair evidence received" } },
+      {
+        status: "completed" as const,
+        output: { status: "proposed" as const, summary: "candidate" },
+        summary: "completed",
+        failure: null,
+      },
+      {
+        status: "completed" as const,
+        output: { status: "blocked" as const, summary: "repair evidence received" },
+        summary: "blocked",
+        failure: null,
+      },
     ];
     const quality = {
       check: async (_contract: TaskContract, candidateSha: string) => {
@@ -317,7 +338,7 @@ describe("Delivery Run durable phase recovery", () => {
             path: ".",
             baseSha,
           }),
-          freeze: async (writer: { baseSha: string }) => ({
+          freeze: async (writer) => ({
             sha,
             baseSha: writer.baseSha,
             workspace: writer,
@@ -325,14 +346,14 @@ describe("Delivery Run durable phase recovery", () => {
           quarantine: async () => undefined,
         },
         session: {
-          run: async ({ prompt }: { prompt: string }) => {
+          run: async ({ prompt }) => {
             prompts.push(prompt);
-            return sessions.shift();
+            return sessions.shift()!;
           },
         },
         quality,
         forge,
-      } as never,
+      },
     );
 
     expect(result.state).toBe("blocked");
@@ -381,7 +402,7 @@ describe("Delivery Run durable phase recovery", () => {
             path: ".",
             baseSha,
           }),
-          freeze: async (writer: { baseSha: string }) => ({
+          freeze: async (writer) => ({
             sha,
             baseSha: writer.baseSha,
             workspace: writer,
@@ -389,9 +410,14 @@ describe("Delivery Run durable phase recovery", () => {
           quarantine: async () => undefined,
         },
         session: {
-          run: async ({ prompt }: { prompt: string }) => {
+          run: async ({ prompt }) => {
             prompts.push(prompt);
-            return { status: "completed", output: { status: "proposed", summary: "repaired" } };
+            return {
+              status: "completed" as const,
+              output: { status: "proposed" as const, summary: "repaired" },
+              summary: "completed",
+              failure: null,
+            };
           },
         },
         quality: {
@@ -428,7 +454,7 @@ describe("Delivery Run durable phase recovery", () => {
             };
           },
         },
-      } as never,
+      },
     );
 
     expect(result.state).toBe("reviewed_pr");

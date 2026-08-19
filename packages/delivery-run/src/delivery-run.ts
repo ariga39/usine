@@ -1,16 +1,23 @@
-import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession } from "@usine/coding-session";
-import { DeliveryQuarantineError, ForgeDelivery } from "@usine/forge-delivery";
-import { QualityGate } from "@usine/quality-gate";
+import type { FrozenCandidate, WriterWorkspace } from "@usine/candidate-workspace";
+import type {
+  ImplementerOutput,
+  RolePolicy,
+  SessionObservation,
+  SessionRequest,
+} from "@usine/coding-session";
+import { DeliveryQuarantineError } from "@usine/forge-delivery";
 import {
   deadlineExpired,
-  TaskAuthority,
+  type AuthorityInput,
+  type CandidateFact,
   type CheckResult,
+  type DeliveryEffect,
+  type ReviewVerdict,
   type TaskContract,
+  type TaskObservation,
   type TaskProgress,
   type TaskResult,
 } from "@usine/task-authority";
-import type { RolePolicy } from "@usine/coding-session";
 import { activateImplementer } from "./coding-activation.js";
 import { blockTask, reportProgress } from "./delivery-progress.js";
 
@@ -22,12 +29,61 @@ export interface DeliveryRunInput {
   implementer: RolePolicy;
 }
 
+interface DeliveryRunAuthority {
+  admit(input: AuthorityInput): Promise<TaskResult>;
+  reserveActivation(
+    taskId: string,
+    budget: number,
+  ): Promise<{ result: TaskResult; activation: number }>;
+  recordCandidate(observation: TaskObservation, candidate: CandidateFact): Promise<TaskResult>;
+  recordCheck(observation: TaskObservation, check: CheckResult): Promise<TaskResult>;
+  recordReview(observation: TaskObservation, review: ReviewVerdict): Promise<TaskResult>;
+  recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
+  recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
+  block(observation: TaskObservation, blocker: string): Promise<TaskResult>;
+}
+
+interface DeliveryRunWorkspace {
+  quarantinePriorWriters(taskId: string, activation: number): Promise<void>;
+  prepareWriter(taskId: string, activation: number, baseSha: string): Promise<WriterWorkspace>;
+  freeze(workspace: WriterWorkspace, previousSha: string): Promise<FrozenCandidate>;
+  quarantine(workspace: WriterWorkspace): Promise<void>;
+}
+
+interface DeliveryRunSession {
+  run(
+    request: SessionRequest<ImplementerOutput>,
+  ): Promise<
+    Pick<SessionObservation<ImplementerOutput>, "status" | "output"> &
+      Pick<SessionObservation<ImplementerOutput>, "summary" | "failure">
+  >;
+}
+
+interface DeliveryRunQuality {
+  check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult>;
+  review(
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    cycle: number,
+  ): Promise<ReviewVerdict>;
+}
+
+interface DeliveryRunForge {
+  deliver(
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    review: ReviewVerdict,
+  ): Promise<DeliveryEffect>;
+}
+
 export interface DeliveryRunServices {
-  authority: TaskAuthority;
-  workspace: CandidateWorkspace;
-  session: CodexCodingSession;
-  quality: QualityGate;
-  forge: ForgeDelivery;
+  authority: DeliveryRunAuthority;
+  workspace: DeliveryRunWorkspace;
+  session: DeliveryRunSession;
+  quality: DeliveryRunQuality;
+  forge: DeliveryRunForge;
   onProgress?: (progress: TaskProgress) => void;
 }
 
@@ -122,7 +178,7 @@ export async function executeDeliveryRun(
         input.contract.budget.maxReviewCycles,
         Math.max(1, result.evidence.reviewCycles + 1),
       );
-      let review: Awaited<ReturnType<QualityGate["review"]>>;
+      let review: Awaited<ReturnType<DeliveryRunQuality["review"]>>;
       try {
         review = await runServices.quality.review(
           input.contract,
@@ -186,7 +242,7 @@ export async function executeDeliveryRun(
       // uncertain PR/comment write reconciles the same approved bundle.  Keep
       // the approved review durable if delivery throws; the next run retries
       // this exact bundle without another implementer.
-      let delivery: Awaited<ReturnType<ForgeDelivery["deliver"]>>;
+      let delivery: Awaited<ReturnType<DeliveryRunForge["deliver"]>>;
       try {
         delivery = await runServices.forge.deliver(
           input.contract,

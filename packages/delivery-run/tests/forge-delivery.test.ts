@@ -12,7 +12,7 @@ import {
 } from "@usine/task-authority";
 import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { ForgeDelivery } from "@usine/forge-delivery";
-import { executeDeliveryRun } from "../src/delivery-run.js";
+import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
 
 const baseSha = "a".repeat(40);
 
@@ -245,8 +245,10 @@ describe.sequential("Forge Delivery controlled protocol", () => {
         },
         session: {
           run: async () => ({
-            status: "completed",
-            output: { status: "proposed", summary: "candidate" },
+            status: "completed" as const,
+            output: { status: "proposed" as const, summary: "candidate" },
+            summary: "completed",
+            failure: null,
           }),
         },
         quality: {
@@ -266,7 +268,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
           }),
         },
         forge: forge(fixture.repository, apiUrl, fixture.remote),
-      } as never);
+      });
 
       expect(result).toMatchObject({
         state: "reviewed_pr",
@@ -371,13 +373,37 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     globalThis.fetch = controlledFetch(state);
     try {
       const forgeDelivery = forge(fixture.repository, "http://127.0.0.1:8787", fixture.remote);
-      const services = {
+      const services: DeliveryRunServices = {
         authority,
-        workspace: {},
-        session: {},
-        quality: {},
+        workspace: {
+          quarantinePriorWriters: async () => {
+            throw new Error("terminal task must not quarantine writers");
+          },
+          prepareWriter: async () => {
+            throw new Error("terminal task must not prepare a writer");
+          },
+          freeze: async () => {
+            throw new Error("terminal task must not freeze a candidate");
+          },
+          quarantine: async () => {
+            throw new Error("terminal task must not quarantine a workspace");
+          },
+        },
+        session: {
+          run: async () => {
+            throw new Error("terminal task must not start a session");
+          },
+        },
+        quality: {
+          check: async () => {
+            throw new Error("terminal task must not check");
+          },
+          review: async () => {
+            throw new Error("terminal task must not review");
+          },
+        },
         forge: forgeDelivery,
-      } as never;
+      };
       const result = await executeDeliveryRun(input, services);
 
       expect(result.state).toBe("blocked");

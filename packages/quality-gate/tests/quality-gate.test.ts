@@ -61,7 +61,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
           failure: sessionStatus === "failed" ? "provider failed" : null,
         };
       },
-    } as never,
+    },
     reviewer: {
       role: "reviewer",
       model: "reviewer",

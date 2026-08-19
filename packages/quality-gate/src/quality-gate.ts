@@ -1,7 +1,7 @@
 import { execa } from "execa";
 import type { TaskContract } from "@usine/task-authority";
-import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession, reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
+import { reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
+import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
 
 const CHECK_STREAM_LIMIT = 16_384;
@@ -15,12 +15,25 @@ function truncateCheckStream(output: string, stream: "stdout" | "stderr"): strin
 }
 
 export interface QualityGateOptions {
-  workspace: CandidateWorkspace;
-  session: CodexCodingSession;
+  workspace: QualityGateWorkspace;
+  session: QualityGateSession;
   reviewer: RolePolicy;
   checkEnvironment: NodeJS.ProcessEnv;
   reviewerEnvironment: NodeJS.ProcessEnv;
   deadlineEpochMs: number;
+}
+
+interface QualityGateWorkspace {
+  withCheckout<T>(purpose: string, sha: string, callback: (path: string) => Promise<T>): Promise<T>;
+}
+
+interface QualityGateSession {
+  run(
+    request: SessionRequest<ReviewerOutput>,
+  ): Promise<
+    Pick<SessionObservation<ReviewerOutput>, "status" | "output"> &
+      Pick<SessionObservation<ReviewerOutput>, "summary" | "failure">
+  >;
 }
 
 export class QualityGate {
