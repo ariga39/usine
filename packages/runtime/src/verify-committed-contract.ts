@@ -6,11 +6,12 @@ import { remainingUntil } from "@usine/task-authority";
 
 export async function verifyCommittedContract(
   contractPath: string,
+  repositoryPath: string,
   contract: TaskContract,
   deadlineEpochMs: number,
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
-  const repository = await realpath(contract.repository.path);
+  const repository = await realpath(repositoryPath);
   const path = await realpath(contractPath);
   const relativePath = relative(repository, path);
   if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${sep}`)) {

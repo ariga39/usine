@@ -47,6 +47,7 @@ export async function lookupTaskStatus(
 
 export async function admitTask(
   contractPath: string,
+  repositoryPath: string,
   rawContract: string,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
@@ -88,6 +89,7 @@ export async function admitTask(
     try {
       repository = await verifyCommittedContract(
         contractPath,
+        repositoryPath,
         contract,
         deadlineEpochMs,
         policy.credentialFreeGitEnvironment,
@@ -104,48 +106,133 @@ export async function admitTask(
       repositoryIdentity,
       deadlineEpochMs,
     });
-    const persistedDeadlineEpochMs = admitted.deadlineEpochMs;
-    if (policy.stopAfterAdmitted) return admitted;
-    if (!policy.forge) throw new Error("GitHub App credentials are required");
-    const workspace = new CandidateWorkspace({
-      repository,
-      stateDirectory,
-      deadlineEpochMs: persistedDeadlineEpochMs,
-      credentialFreeGit: policy.credentialFreeGitEnvironment,
-      gitAuthor: policy.gitAuthor,
-    });
-    const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
-    const quality = new QualityGate({
-      workspace,
-      session,
-      reviewer: policy.roles.reviewer,
-      checkEnvironment: policy.checkEnvironment,
-      reviewerEnvironment: policy.workerEnvironment,
-      deadlineEpochMs: persistedDeadlineEpochMs,
-    });
-    const forge = new ForgeDelivery({
-      repository,
-      deadlineEpochMs: persistedDeadlineEpochMs,
-      forge: policy.forge,
-      environment: policy.credentialFreeGitEnvironment,
-    });
-    const workflowInput: DeliveryRunInput = {
-      contract,
-      contractHash,
-      repositoryIdentity,
-      deadlineEpochMs: persistedDeadlineEpochMs,
-      implementer: policy.roles.implementer,
-    };
-    const result = await executeDeliveryRun(workflowInput, {
-      authority,
-      workspace,
-      session,
-      quality,
-      forge,
-      onProgress,
-    });
-    return result;
+    reportProgress(admitted);
+    if (deadlineExpired(admitted.deadlineEpochMs)) {
+      const blocked = await authority.block(
+        { taskId: admitted.taskId, revision: admitted.revision },
+        "elapsed budget exhausted",
+      );
+      reportProgress(blocked);
+      return blocked;
+    }
+    return admitted;
   } finally {
     handle.close();
   }
 }
+
+export async function executeAdmittedTask(
+  contractPath: string,
+  repositoryPath: string,
+  rawContract: string,
+  contract: TaskContract,
+  suppliedPolicy: RuntimePolicy,
+  onProgress?: (progress: TaskProgress) => void,
+): Promise<TaskResult> {
+  const policy = suppliedPolicy;
+  const stateDirectory = policy.stateDirectory;
+  await mkdir(stateDirectory, { recursive: true });
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  await applyMigrations(databasePath);
+  const contractHash = hashTaskContract(rawContract);
+  const repositoryIdentity =
+    `${contract.repository.owner}/${contract.repository.name}`.toLowerCase();
+  const handle = openSqliteDatabase(databasePath);
+  const database = handle.database;
+  try {
+    const authority = new TaskAuthority(database);
+    const existing = await authority.lookupExisting(contract.id, contractHash);
+    if (!existing) throw new Error("task is not admitted");
+    if (existing.state === "reviewed_pr" || existing.state === "blocked") return existing;
+    const forgePolicy = policy.forge;
+    if (!forgePolicy) throw new Error("GitHub App credentials are required");
+    const repository = await verifyCommittedContract(
+      contractPath,
+      repositoryPath,
+      contract,
+      existing.deadlineEpochMs,
+      policy.credentialFreeGitEnvironment,
+    );
+    return await executeWithServices({
+      contract,
+      contractHash,
+      repositoryIdentity,
+      repository,
+      policy,
+      forgePolicy,
+      authority,
+      deadlineEpochMs: existing.deadlineEpochMs,
+      onProgress,
+    });
+  } finally {
+    handle.close();
+  }
+}
+
+async function executeWithServices(options: {
+  contract: TaskContract;
+  contractHash: string;
+  repositoryIdentity: string;
+  repository: string;
+  policy: RuntimePolicy;
+  forgePolicy: NonNullable<RuntimePolicy["forge"]>;
+  authority: TaskAuthority;
+  deadlineEpochMs: number;
+  onProgress?: (progress: TaskProgress) => void;
+}): Promise<TaskResult> {
+  const {
+    contract,
+    contractHash,
+    repositoryIdentity,
+    repository,
+    policy,
+    forgePolicy,
+    authority,
+    deadlineEpochMs,
+    onProgress,
+  } = options;
+  const workspace = new CandidateWorkspace({
+    repository,
+    stateDirectory: policy.stateDirectory,
+    deadlineEpochMs,
+    credentialFreeGit: policy.credentialFreeGitEnvironment,
+    gitAuthor: policy.gitAuthor,
+  });
+  const session = new CodexCodingSession(undefined, { environment: policy.workerEnvironment });
+  const quality = new QualityGate({
+    workspace,
+    session,
+    reviewer: policy.roles.reviewer,
+    checkEnvironment: policy.checkEnvironment,
+    reviewerEnvironment: policy.workerEnvironment,
+    deadlineEpochMs,
+  });
+  const forge = new ForgeDelivery({
+    repository,
+    deadlineEpochMs,
+    forge: forgePolicy,
+    environment: policy.credentialFreeGitEnvironment,
+  });
+  const workflowInput: DeliveryRunInput = {
+    contract,
+    contractHash,
+    repositoryIdentity,
+    deadlineEpochMs,
+    implementer: policy.roles.implementer,
+  };
+  return executeDeliveryRun(workflowInput, {
+    authority,
+    workspace,
+    session,
+    quality,
+    forge,
+    onProgress,
+  });
+}
+
+export {
+  startUsineServer,
+  type RunningUsineServer,
+  type TaskSubmission,
+  type UsineServerOptions,
+} from "./server.js";
