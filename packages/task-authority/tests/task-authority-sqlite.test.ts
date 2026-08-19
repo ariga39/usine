@@ -9,6 +9,7 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
+  type TaskHistoryRecordInput,
   type TaskResult,
 } from "@usine/task-authority";
 
@@ -101,6 +102,70 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("persists a bounded append-only safe history through the authority path", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const authority = authorityAt(path);
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-history-hash",
+      repositoryIdentity: `authority/history-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    const first: TaskHistoryRecordInput = {
+      taskId,
+      kind: "implementer",
+      activation: 1,
+      cycle: null,
+      role: "implementer",
+      model: "gpt-5.6-luna",
+      startedAtEpochMs: 100,
+      endedAtEpochMs: 150,
+      outcome: "failed",
+      failure: "worker stopped before candidate",
+      candidateSha: null,
+      candidateFence: 1,
+      tokenUsage: { inputTokens: 12, outputTokens: 7 },
+    };
+    const second: TaskHistoryRecordInput = {
+      taskId,
+      kind: "coordinator_restart",
+      activation: null,
+      cycle: null,
+      role: null,
+      model: null,
+      startedAtEpochMs: 200,
+      endedAtEpochMs: 200,
+      outcome: "observed",
+      failure: null,
+      candidateSha: null,
+      candidateFence: null,
+      tokenUsage: null,
+    };
+
+    await expect(authority.appendHistory(first)).resolves.toMatchObject({
+      id: 1,
+      taskId,
+      kind: "implementer",
+      outcome: "failed",
+      tokenUsage: { inputTokens: 12, outputTokens: 7 },
+    });
+    await authority.appendHistory(second);
+
+    const reopened = authorityAt(path);
+    await expect(reopened.listHistory(taskId, 1)).resolves.toMatchObject([
+      { id: 2, kind: "coordinator_restart", outcome: "observed" },
+    ]);
+    await expect(reopened.listHistory(taskId, 10)).resolves.toMatchObject([
+      { id: 1, kind: "implementer", startedAtEpochMs: 100, endedAtEpochMs: 150 },
+      { id: 2, kind: "coordinator_restart", startedAtEpochMs: 200, endedAtEpochMs: 200 },
+    ]);
+    expect(await reopened.lookup(taskId)).toEqual(admitted);
+    const serialized = JSON.stringify(await reopened.listHistory(taskId, 10));
+    expect(serialized).not.toMatch(/prompt|stdout|stderr|credential|transcript|source/i);
+  });
+
   test("quarantines unsupported durable state at the lookup boundary", async () => {
     const path = await makeDatabase();
     const taskId = `authority-unsupported-state-${Date.now()}-${Math.random().toString(16).slice(2)}`;

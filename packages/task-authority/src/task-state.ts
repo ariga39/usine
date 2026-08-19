@@ -112,6 +112,48 @@ export interface TaskExecutionInput {
   rawContract: string;
 }
 
+export type TaskHistoryKind =
+  | "implementer"
+  | "project_check"
+  | "fresh_review"
+  | "forge_delivery"
+  | "coordinator_restart"
+  | "execution_owner_change";
+
+export type TaskHistoryOutcome =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "blocked"
+  | "observed";
+
+export interface TaskHistoryTokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+export interface TaskHistoryRecordInput {
+  taskId: string;
+  kind: TaskHistoryKind;
+  activation: number | null;
+  cycle: number | null;
+  role: string | null;
+  model: string | null;
+  startedAtEpochMs: number;
+  endedAtEpochMs: number | null;
+  outcome: TaskHistoryOutcome;
+  failure: string | null;
+  candidateSha: string | null;
+  candidateFence: number | null;
+  tokenUsage: TaskHistoryTokenUsage | null;
+}
+
+export interface TaskHistoryRecord extends TaskHistoryRecordInput {
+  id: number;
+}
+
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
   candidate: ["candidate", "checked", "blocked"],

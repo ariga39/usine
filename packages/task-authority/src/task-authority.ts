@@ -1,5 +1,5 @@
-import { and, eq, sql } from "drizzle-orm";
-import { repositoryLeases, taskRuns } from "./schema.js";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { repositoryLeases, taskHistory, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
@@ -16,6 +16,9 @@ import {
   type TaskFact,
   type TaskObservation,
   type TaskExecutionInput,
+  type TaskHistoryRecord,
+  type TaskHistoryRecordInput,
+  type TaskHistoryTokenUsage,
   type TaskResult,
 } from "./task-state.js";
 
@@ -27,11 +30,16 @@ export type {
   ReviewVerdict,
   TaskFact,
   TaskExecutionInput,
+  TaskHistoryRecord,
+  TaskHistoryRecordInput,
+  TaskHistoryTokenUsage,
   TaskObservation,
   TaskResult,
 } from "./task-state.js";
 
 type AuthorityDatabase = RuntimeDatabase;
+
+const MAX_HISTORY_LIMIT = 100;
 
 export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
@@ -51,6 +59,76 @@ export class TaskAuthority {
     if (!result) return null;
     if (result.contractHash !== contractHash) throw new Error("admitted contract is immutable");
     return result;
+  }
+
+  async appendHistory(input: TaskHistoryRecordInput): Promise<TaskHistoryRecord> {
+    const append = async (database: AuthorityDatabase): Promise<TaskHistoryRecord> => {
+      const current = await TaskAuthority.currentTask(database, input.taskId);
+      if (!current) throw new Error("task is not admitted");
+      const inserted = await database
+        .insert(taskHistory)
+        .values({
+          taskId: input.taskId,
+          kind: input.kind,
+          activation: input.activation,
+          cycle: input.cycle,
+          role: input.role,
+          model: input.model,
+          startedAtEpochMs: input.startedAtEpochMs,
+          endedAtEpochMs: input.endedAtEpochMs,
+          outcome: input.outcome,
+          failure: input.failure,
+          candidateSha: input.candidateSha,
+          candidateFence: input.candidateFence,
+          tokenUsage: input.tokenUsage,
+        })
+        .returning();
+      const row = inserted[0];
+      if (!row) throw new Error("history record was not persisted");
+      return {
+        id: row.id,
+        taskId: row.taskId,
+        kind: row.kind as TaskHistoryRecord["kind"],
+        activation: row.activation,
+        cycle: row.cycle,
+        role: row.role,
+        model: row.model,
+        startedAtEpochMs: row.startedAtEpochMs,
+        endedAtEpochMs: row.endedAtEpochMs,
+        outcome: row.outcome as TaskHistoryRecord["outcome"],
+        failure: row.failure,
+        candidateSha: row.candidateSha,
+        candidateFence: row.candidateFence,
+        tokenUsage: row.tokenUsage as TaskHistoryTokenUsage | null,
+      };
+    };
+    return this.inTransaction(append);
+  }
+
+  async listHistory(taskId: string, limit = MAX_HISTORY_LIMIT): Promise<TaskHistoryRecord[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_HISTORY_LIMIT);
+    const rows = await this.database
+      .select()
+      .from(taskHistory)
+      .where(eq(taskHistory.taskId, taskId))
+      .orderBy(desc(taskHistory.id))
+      .limit(boundedLimit);
+    return rows.reverse().map((row) => ({
+      id: row.id,
+      taskId: row.taskId,
+      kind: row.kind as TaskHistoryRecord["kind"],
+      activation: row.activation,
+      cycle: row.cycle,
+      role: row.role,
+      model: row.model,
+      startedAtEpochMs: row.startedAtEpochMs,
+      endedAtEpochMs: row.endedAtEpochMs,
+      outcome: row.outcome as TaskHistoryRecord["outcome"],
+      failure: row.failure,
+      candidateSha: row.candidateSha,
+      candidateFence: row.candidateFence,
+      tokenUsage: row.tokenUsage as TaskHistoryTokenUsage | null,
+    }));
   }
 
   async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
