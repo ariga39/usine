@@ -91,7 +91,7 @@ async function runCodingAttempt(
       {
         sha: candidate.sha,
         baseSha: candidate.baseSha,
-        fence: workspace.fence,
+        fence: reservation.activation,
       },
     );
     reportProgress(services, accepted);

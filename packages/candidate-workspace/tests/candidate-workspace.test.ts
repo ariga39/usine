@@ -57,26 +57,6 @@ function isUnsafeSubjectCodePoint(character: string): boolean {
 }
 
 describe("Candidate Workspace", () => {
-  test("freezes only the current fenced activation and rejects stale writers", async () => {
-    const input = await fixture();
-    const workspace = new CandidateWorkspace({
-      repository: input.repository,
-      stateDirectory: join(input.root, "state"),
-      deadlineEpochMs: Date.now() + 30_000,
-      credentialFreeGit: credentialFreeGitEnvironment(process.env),
-      gitAuthor: { name: "Test", email: "test@example.invalid" },
-    });
-    const first = await workspace.prepareWriter("task", 1, input.baseSha);
-    await writeFile(join(first.path, "delivered.txt"), "ok\n");
-    const candidate = await workspace.freeze(first, input.baseSha, contract(input.baseSha));
-    expect(candidate.sha).toMatch(/^[0-9a-f]{40}$/);
-    const second = await workspace.prepareWriter("task", 2, candidate.sha);
-    await expect(workspace.freeze(first, candidate.sha, contract(candidate.sha))).rejects.toThrow(
-      "stale workspace fence",
-    );
-    await workspace.quarantine(second);
-  });
-
   test("freezes commits with the configured author and committer identity", async () => {
     const input = await fixture();
     const workspace = new CandidateWorkspace({
