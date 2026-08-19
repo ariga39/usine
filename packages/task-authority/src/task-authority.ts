@@ -1,7 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import { repositoryLeases, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
-import { decodePersistedTaskResult, TASK_RESULT_SCHEMA_VERSION } from "./task-state-schema.js";
+import {
+  decodePersistedTaskResult,
+  decodeRawPersistedTaskResult,
+  TASK_RESULT_SCHEMA_VERSION,
+} from "./task-state-schema.js";
 import {
   applyTaskFact,
   type AuthorityInput,
@@ -33,10 +37,13 @@ export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
 
   async lookup(taskId: string): Promise<TaskResult | null> {
-    const row = await this.database.query.taskRuns.findFirst({
-      where: eq(taskRuns.taskId, taskId),
-    });
-    return row ? decodePersistedTaskResult(row.result) : null;
+    const rows = await this.database
+      .select({ rawResult: sql<string>`${taskRuns.result}` })
+      .from(taskRuns)
+      .where(eq(taskRuns.taskId, taskId))
+      .limit(1);
+    const row = rows[0];
+    return row ? decodeRawPersistedTaskResult(row.rawResult) : null;
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {
@@ -59,7 +66,7 @@ export class TaskAuthority {
     for (const row of rows) {
       let result: TaskResult;
       try {
-        result = decodePersistedTaskResult(JSON.parse(row.rawResult));
+        result = decodeRawPersistedTaskResult(row.rawResult);
       } catch {
         continue;
       }

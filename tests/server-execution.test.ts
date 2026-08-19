@@ -236,9 +236,11 @@ describe("server-owned execution", () => {
     database.close();
 
     const healthyStarted = deferred<void>();
+    const reentered: string[] = [];
     const second = await startUsineServer({
       environment: environment(stateDirectory),
       execute: async ({ result }) => {
+        reentered.push(result.taskId);
         if (result.taskId === admitted.taskId) healthyStarted.resolve();
         return result;
       },
@@ -246,9 +248,21 @@ describe("server-owned execution", () => {
       port: 0,
     });
     try {
+      const quarantinedResponse = await fetch(
+        new URL(`/v1/tasks/${encodeURIComponent(quarantinedTaskId)}`, second.url),
+      );
+      const quarantinedBody = await quarantinedResponse.text();
+      expect(quarantinedResponse.status).toBe(503);
+      expect(JSON.parse(quarantinedBody)).toEqual({
+        taskId: quarantinedTaskId,
+        error: "task_state_quarantined",
+      });
+
       const corrupt = await taskStatus(second.url, corruptTaskId);
       expect(corrupt?.state).toBe("blocked");
       await healthyStarted.promise;
+      expect((await taskStatus(second.url, admitted.taskId))?.taskId).toBe(admitted.taskId);
+      expect(reentered).toEqual([admitted.taskId]);
     } finally {
       await second.close();
     }

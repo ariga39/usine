@@ -13,6 +13,15 @@ export class TaskStateQuarantinedError extends Error {
   }
 }
 
+export function isTaskStateQuarantinedError(error: unknown): error is TaskStateQuarantinedError {
+  return (
+    error instanceof Error &&
+    error.name === "TaskStateQuarantinedError" &&
+    "code" in error &&
+    error.code === "task_state_quarantined"
+  );
+}
+
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const taskState = Schema.Literals([
   "admitted",
@@ -114,6 +123,14 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
 export function decodePersistedTaskResult(input: unknown): TaskResult {
   try {
     return projectDecodedResult(Schema.decodeUnknownSync(persistedTaskResult)(input));
+  } catch {
+    throw new TaskStateQuarantinedError();
+  }
+}
+
+export function decodeRawPersistedTaskResult(input: string): TaskResult {
+  try {
+    return decodePersistedTaskResult(JSON.parse(input));
   } catch {
     throw new TaskStateQuarantinedError();
   }
