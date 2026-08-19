@@ -16,6 +16,14 @@ import {
   type TaskResult,
 } from "@usine/task-authority";
 
+type HistoryCapabilityIsRequired = DeliveryRunServices["authority"] extends {
+  appendHistory: (input: TaskHistoryRecordInput) => Promise<unknown>;
+}
+  ? true
+  : false;
+const historyCapabilityIsRequired: HistoryCapabilityIsRequired = true;
+void historyCapabilityIsRequired;
+
 const sha = "b".repeat(40);
 const implementer = {
   role: "implementer" as const,
