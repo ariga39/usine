@@ -1,3 +1,4 @@
+import { Codex, type RunResult, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
@@ -9,6 +10,26 @@ import type { TaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
+
+function sdkTurn(finalResponse: string, usage: RunResult["usage"] = null): RunResult {
+  return { items: [], finalResponse, usage };
+}
+
+function testClient(
+  run: (prompt: string, options?: TurnOptions) => Promise<RunResult>,
+  id: string | null = null,
+  onStart?: (options: ThreadOptions) => void,
+): Codex {
+  const client = new Codex();
+  const thread = client.startThread();
+  Object.defineProperty(thread, "id", { configurable: true, value: id });
+  thread.run = run;
+  client.startThread = (options: ThreadOptions = {}) => {
+    onStart?.(options);
+    return thread;
+  };
+  return client;
+}
 
 describe("Coding Session", () => {
   test("passes only the portable worker environment", () => {
@@ -28,16 +49,19 @@ describe("Coding Session", () => {
   });
 
   test("maps SDK terminal output through the task-oriented port", async () => {
-    let requestOptions: Record<string, unknown> | undefined;
-    const session = new CodexCodingSession(async () => ({
-      startThread: () => ({
-        id: "opaque-thread",
-        run: async (_prompt, options) => {
-          requestOptions = options;
-          return { finalResponse: JSON.stringify({ status: "proposed", summary: "done" }) };
-        },
-      }),
-    }));
+    let requestOptions: TurnOptions | undefined;
+    const session = new CodexCodingSession(async () =>
+      testClient(async (_prompt, options) => {
+        requestOptions = options;
+        return sdkTurn(JSON.stringify({ status: "proposed", summary: "done" }), {
+          input_tokens: 12,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 7,
+          reasoning_output_tokens: 3,
+        });
+      }, "opaque-thread"),
+    );
     const observation = await session.run<{ status: string; summary: string }>({
       role: "implementer",
       workspace: ".",
@@ -54,6 +78,7 @@ describe("Coding Session", () => {
       status: "completed",
       sessionId: "opaque-thread",
       output: { status: "proposed" },
+      usage: { inputTokens: 12, outputTokens: 7 },
     });
     expect(requestOptions).toMatchObject({
       outputSchema: {
@@ -99,11 +124,9 @@ describe("Coding Session", () => {
     ["wrong status", JSON.stringify({ status: "finished", summary: "done" })],
     ["missing summary", JSON.stringify({ status: "proposed" })],
   ])("fails closed on implementer output: %s", async (_name, finalResponse) => {
-    const session = new CodexCodingSession(async () => ({
-      startThread: () => ({
-        run: async () => ({ finalResponse }),
-      }),
-    }));
+    const session = new CodexCodingSession(async () =>
+      testClient(async () => sdkTurn(finalResponse)),
+    );
     const observation = await session.run({
       role: "implementer",
       workspace: ".",
@@ -132,11 +155,9 @@ describe("Coding Session", () => {
       JSON.stringify({ sha, verdict: "approved", summary: "ok", findings: [7] }),
     ],
   ])("fails closed on reviewer output: %s", async (_name, finalResponse) => {
-    const session = new CodexCodingSession(async () => ({
-      startThread: () => ({
-        run: async () => ({ finalResponse }),
-      }),
-    }));
+    const session = new CodexCodingSession(async () =>
+      testClient(async () => sdkTurn(finalResponse)),
+    );
     const observation = await session.run({
       role: "reviewer",
       workspace: ".",
