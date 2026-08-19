@@ -118,3 +118,7 @@ export function decodePersistedTaskResult(input: unknown): TaskResult {
     throw new TaskStateQuarantinedError();
   }
 }
+
+export function decodeCurrentTaskResult(input: unknown): TaskResult {
+  return projectDecodedResult(Schema.decodeUnknownSync(currentTaskResult)(input));
+}

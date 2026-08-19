@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { TaskResult } from "@usine/task-authority";
-import { followTask } from "../src/server-client.js";
+import { followTask, ServerClientError, taskStatus } from "../src/server-client.js";
 
 function result(taskId: string, revision: number, state: TaskResult["state"]): TaskResult {
   return {
@@ -28,6 +28,24 @@ function result(taskId: string, revision: number, state: TaskResult["state"]): T
 }
 
 describe("server client follow", () => {
+  test("rejects malformed successful TaskResult responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ taskId: "malformed", state: "admitted" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    try {
+      await expect(taskStatus("http://server.test", "malformed")).rejects.toMatchObject({
+        name: "ServerClientError",
+        status: 200,
+      } satisfies Partial<ServerClientError>);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("uses the durable deadline instead of a default poll-count bound", async () => {
     const taskId = "long-follow-test";
     const originalFetch = globalThis.fetch;

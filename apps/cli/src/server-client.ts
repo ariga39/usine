@@ -1,6 +1,10 @@
 import { Clock, Duration, Effect } from "effect";
-import type { TaskResult } from "@usine/task-authority";
-import { taskProgressFromResult, type TaskProgress } from "@usine/task-authority";
+import {
+  decodeCurrentTaskResult,
+  taskProgressFromResult,
+  type TaskProgress,
+  type TaskResult,
+} from "@usine/task-authority";
 
 export interface TaskSubmission {
   contractPath: string;
@@ -21,7 +25,7 @@ export async function submitTask(
   serverUrl: string,
   submission: TaskSubmission,
 ): Promise<TaskResult> {
-  return request<TaskResult>(serverUrl, "/v1/tasks", {
+  return request(serverUrl, "/v1/tasks", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(submission),
@@ -31,7 +35,7 @@ export async function submitTask(
 export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResult | null> {
   const response = await fetch(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
   if (response.status === 404) return null;
-  return readResponse<TaskResult>(response);
+  return readResponse(response);
 }
 
 export interface FollowOptions {
@@ -61,11 +65,11 @@ export async function followTask(
   }
 }
 
-async function request<T>(serverUrl: string, path: string, init: RequestInit): Promise<T> {
-  return readResponse<T>(await fetch(new URL(path, serverUrl), init));
+async function request(serverUrl: string, path: string, init: RequestInit): Promise<TaskResult> {
+  return readResponse(await fetch(new URL(path, serverUrl), init));
 }
 
-async function readResponse<T>(response: Response): Promise<T> {
+async function readResponse(response: Response): Promise<TaskResult> {
   const body = await response.text();
   let parsed: unknown;
   try {
@@ -83,5 +87,12 @@ async function readResponse<T>(response: Response): Promise<T> {
         : `server request failed (${response.status})`;
     throw new ServerClientError(message, response.status);
   }
-  return parsed as T;
+  try {
+    return decodeCurrentTaskResult(parsed);
+  } catch {
+    throw new ServerClientError(
+      "server returned invalid TaskResult (" + response.status + ")",
+      response.status,
+    );
+  }
 }

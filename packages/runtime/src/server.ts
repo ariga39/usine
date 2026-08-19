@@ -1,4 +1,5 @@
 import { readFile, mkdir } from "node:fs/promises";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Effect, Fiber, FiberMap } from "effect";
@@ -61,6 +62,7 @@ interface AdmittedTask {
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
+  if (!isLoopbackHost(host)) throw new Error("server host must be loopback");
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
@@ -136,6 +138,12 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       await Effect.runPromise(Fiber.interrupt(fiber));
     },
   };
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") return true;
+  return isIP(normalized) === 4 && normalized.startsWith("127.");
 }
 
 async function executeServerTask(

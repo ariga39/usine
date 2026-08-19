@@ -11,6 +11,16 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("CLI/server boundary", () => {
+  test("rejects non-loopback hosts before binding", async () => {
+    await expect(
+      startUsineServer({
+        environment: { USINE_STATE_DIR: join(tmpdir(), "usine-server-boundary-host") },
+        host: "0.0.0.0",
+        port: 0,
+      }),
+    ).rejects.toThrow("loopback");
+  });
+
   test("submits a task to the local server and reads the same durable Task ID", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-boundary-"));
     const repository = join(root, "repository");
