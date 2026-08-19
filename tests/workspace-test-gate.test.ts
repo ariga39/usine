@@ -39,8 +39,9 @@ test("the root test command covers the root suite and declared package test scri
     "@usine/forge-delivery",
     "@usine/quality-gate",
     "@usine/task-authority",
+    "@usine/cli",
   ]);
   expect(
     packages.filter((manifest) => !manifest.scripts?.test).map((manifest) => manifest.name),
-  ).toEqual(["@usine/runtime", "@usine/cli"]);
+  ).toEqual(["@usine/runtime"]);
 });

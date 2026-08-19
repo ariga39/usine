@@ -276,7 +276,7 @@ async function handleRequest(
       contract,
       policy,
     );
-    if (!policy.stopAfterAdmitted && result.state !== "reviewed_pr" && result.state !== "blocked") {
+    if (result.state !== "reviewed_pr" && result.state !== "blocked") {
       launch({
         input: { ...submission, rawContract },
         contract,

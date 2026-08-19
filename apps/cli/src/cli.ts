@@ -90,7 +90,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  if ((command !== "run" && command !== "submit") || !contractPath) {
+  if (command !== "submit" || !contractPath) {
     process.stderr.write(
       `${JSON.stringify({ error: "usage", usage: "usine submit <task-contract.json>" })}\n`,
     );
@@ -127,7 +127,7 @@ export async function main(): Promise<void> {
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    process.stderr.write(`${JSON.stringify({ error: "run_failed", message: String(error) })}\n`);
+    process.stderr.write(`${JSON.stringify({ error: "submit_failed", message: String(error) })}\n`);
     process.exitCode = 1;
   }
 }

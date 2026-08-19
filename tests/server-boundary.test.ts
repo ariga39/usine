@@ -54,10 +54,10 @@ describe("CLI/server boundary", () => {
     const server = await startUsineServer({
       environment: {
         USINE_STATE_DIR: stateDirectory,
-        USINE_STOP_AFTER: "admitted",
         USINE_GIT_AUTHOR_NAME: "Release Bot",
         USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
       },
+      execute: async ({ result }) => result,
       host: "127.0.0.1",
       port: 0,
     });
