@@ -1,7 +1,15 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
-import { remainingUntil } from "@usine/task-authority";
+import { remainingUntil, type TaskContract } from "@usine/task-authority";
+
+const MAX_COMMIT_SUBJECT_LENGTH = 160;
+const ESCAPE_CHARACTER = String.fromCodePoint(0x1b);
+const BELL_CHARACTER = String.fromCodePoint(0x07);
+const ANSI_ESCAPE_SEQUENCE = new RegExp(
+  `${ESCAPE_CHARACTER}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHARACTER}]*(?:${BELL_CHARACTER}|${ESCAPE_CHARACTER}\\\\))`,
+  "gu",
+);
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -42,6 +50,23 @@ export interface WorkspaceOptions {
   credentialFreeGit: NodeJS.ProcessEnv;
   gitAuthor: GitAuthor;
   signal?: AbortSignal;
+}
+
+function normalizeCommitSubjectPart(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(ANSI_ESCAPE_SEQUENCE, "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function commitSubjectForTask(contract: TaskContract): string {
+  const taskId = normalizeCommitSubjectPart(contract.id) || "unknown-task";
+  const outcome = normalizeCommitSubjectPart(contract.delivery.title) || "authorized outcome";
+  const prefix = `#${contract.delivery.issue} [${taskId}]`;
+  const availableOutcomeLength = MAX_COMMIT_SUBJECT_LENGTH - prefix.length - 1;
+  return `${prefix} ${outcome.slice(0, Math.max(0, availableOutcomeLength)).trimEnd()}`;
 }
 
 export function credentialFreeGitEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -108,7 +133,11 @@ export class CandidateWorkspace {
     }
   }
 
-  async freeze(workspace: WriterWorkspace, previousSha: string): Promise<FrozenCandidate> {
+  async freeze(
+    workspace: WriterWorkspace,
+    previousSha: string,
+    contract: TaskContract,
+  ): Promise<FrozenCandidate> {
     if (this.fences.get(workspace.taskId) !== workspace.fence)
       throw new Error("stale workspace fence");
     const head = await this.git(["-C", workspace.path, "rev-parse", "HEAD"]);
@@ -131,7 +160,7 @@ export class CandidateWorkspace {
         workspace.path,
         "commit",
         "-m",
-        "Implement authorized task",
+        commitSubjectForTask(contract),
       ]);
       candidate = (await this.git(["-C", workspace.path, "rev-parse", "HEAD"])).trim();
     }

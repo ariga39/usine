@@ -47,7 +47,11 @@ interface DeliveryRunAuthority {
 interface DeliveryRunWorkspace {
   quarantinePriorWriters(taskId: string, activation: number): Promise<void>;
   prepareWriter(taskId: string, activation: number, baseSha: string): Promise<WriterWorkspace>;
-  freeze(workspace: WriterWorkspace, previousSha: string): Promise<FrozenCandidate>;
+  freeze(
+    workspace: WriterWorkspace,
+    previousSha: string,
+    contract: TaskContract,
+  ): Promise<FrozenCandidate>;
   quarantine(workspace: WriterWorkspace): Promise<void>;
 }
 

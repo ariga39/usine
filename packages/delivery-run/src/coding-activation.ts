@@ -85,7 +85,7 @@ async function runCodingAttempt(
     };
   }
   try {
-    const candidate = await services.workspace.freeze(workspace, previousSha);
+    const candidate = await services.workspace.freeze(workspace, previousSha, input.contract);
     const accepted = await services.authority.recordCandidate(
       { taskId: reservation.result.taskId, revision: reservation.result.revision },
       {
