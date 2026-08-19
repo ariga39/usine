@@ -21,6 +21,7 @@ import {
   executeAdmittedTask,
   lookupRestartableTasks,
   lookupTaskStatus,
+  recordExecutionObservation,
   runtimePolicyFromEnvironment,
   stateDirectoryFromEnvironment,
   type RuntimePolicy,
@@ -121,6 +122,28 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       });
       for (const task of restartable) {
         try {
+          yield* Effect.tryPromise({
+            try: () =>
+              recordExecutionObservation(
+                stateDirectory,
+                task.result,
+                "coordinator_restart",
+                "persistent-server",
+                "prior-coordinator",
+              ),
+            catch: (cause) => cause,
+          });
+          yield* Effect.tryPromise({
+            try: () =>
+              recordExecutionObservation(
+                stateDirectory,
+                task.result,
+                "execution_owner_change",
+                "persistent-server",
+                "prior-coordinator",
+              ),
+            catch: (cause) => cause,
+          });
           const contract = parseContract(task.input.rawContract);
           launchTask({ input: task.input, contract, result: task.result });
         } catch (error) {

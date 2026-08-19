@@ -33,6 +33,8 @@ export const taskHistory = sqliteTable(
     cycle: integer("cycle"),
     role: text("role"),
     model: text("model"),
+    executionOwner: text("execution_owner"),
+    previousExecutionOwner: text("previous_execution_owner"),
     startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
     endedAtEpochMs: integer("ended_at_epoch_ms"),
     outcome: text("outcome").notNull(),

@@ -29,6 +29,13 @@
       "when": 1787181045639,
       "tag": "0003_fluffy_rocket_raccoon",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787181849932,
+      "tag": "0004_fluffy_zarda",
+      "breakpoints": true
     }
   ]
 }

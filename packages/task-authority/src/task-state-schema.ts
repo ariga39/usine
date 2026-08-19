@@ -67,6 +67,8 @@ const historyRecord = Schema.Struct({
   cycle: Schema.NullOr(Schema.Natural),
   role: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
+  executionOwner: Schema.NullOr(Schema.String),
+  previousExecutionOwner: Schema.NullOr(Schema.String),
   startedAtEpochMs: Schema.Int,
   endedAtEpochMs: Schema.NullOr(Schema.Int),
   outcome: Schema.Literals([
@@ -194,6 +196,8 @@ export function decodeCurrentTaskStatus(input: unknown): TaskStatus {
       cycle: record.cycle,
       role: record.role,
       model: record.model,
+      executionOwner: record.executionOwner,
+      previousExecutionOwner: record.previousExecutionOwner,
       startedAtEpochMs: record.startedAtEpochMs,
       endedAtEpochMs: record.endedAtEpochMs,
       outcome: record.outcome,

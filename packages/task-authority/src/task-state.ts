@@ -141,6 +141,8 @@ export interface TaskHistoryRecordInput {
   cycle: number | null;
   role: string | null;
   model: string | null;
+  executionOwner?: string | null;
+  previousExecutionOwner?: string | null;
   startedAtEpochMs: number;
   endedAtEpochMs: number | null;
   outcome: TaskHistoryOutcome;
