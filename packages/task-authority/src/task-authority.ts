@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { repositoryLeases, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import { decodePersistedTaskResult, TASK_RESULT_SCHEMA_VERSION } from "./task-state-schema.js";
@@ -47,10 +47,22 @@ export class TaskAuthority {
   }
 
   async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
-    const rows = await this.database.query.taskRuns.findMany();
+    const rows = await this.database
+      .select({
+        rawResult: sql<string>`${taskRuns.result}`,
+        contractPath: taskRuns.contractPath,
+        repositoryPath: taskRuns.repositoryPath,
+        rawContract: taskRuns.rawContract,
+      })
+      .from(taskRuns);
     const restartable: Array<{ result: TaskResult; input: TaskExecutionInput }> = [];
     for (const row of rows) {
-      const result = decodePersistedTaskResult(row.result);
+      let result: TaskResult;
+      try {
+        result = decodePersistedTaskResult(JSON.parse(row.rawResult));
+      } catch {
+        continue;
+      }
       if (result.state === "reviewed_pr" || result.state === "blocked") continue;
       if (!row.contractPath || !row.repositoryPath || !row.rawContract) continue;
       restartable.push({

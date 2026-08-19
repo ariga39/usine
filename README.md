@@ -2,7 +2,7 @@
 
 Usine 是一个面向自主软件交付的确定性协调器。它的目标不是让一个 agent 更会写代码，而是让多个项目中的已授权任务在无人持续催促的情况下，有序地经过实现、验证、独立 review 和交付。
 
-当前仓库包含第一条经过真实验证的串行交付纵切：persistent local server 接收一个已授权且已提交的 Task Contract，通过本地 SQLite/Drizzle 持久化领域事实并由 deterministic reconcile loop 推进，在隔离 Git worktree 中调用 Codex，针对 immutable candidate SHA 运行项目检查和 fresh review，并通过 GitHub App 交付带 exact-SHA approval attestation 的 reviewed PR。CLI 只负责启动 server、提交 Task 与读取状态；提交 CLI 退出不会取消已 admission 的工作。它仍是仅面向一个 Task、一个 repository writer 和一个 GitHub forge 的 V0。
+当前仓库包含两类串行交付 evidence：PR #82/#83 提供真实 Codex executable delivery 与 restart recovery；Issue #153 的 server-hosted milestone fixture 使用 stubbed Codex SDK adapter，同时以真实 server process、SQLite、Git、project check、fake GitHub API/bare remote、SIGKILL、fresh activation 和 exact delivery effects 验证 server-owned lifecycle。CLI 只负责启动 server、提交 Task 与读取状态；提交 CLI 退出不会取消已 admission 的工作。它仍是仅面向一个 Task、一个 repository writer 和一个 GitHub forge 的 V0。
 
 Herdr/transcript lifecycle 曾被真实 settled-without-observation failure证伪，现已从 production correctness path 删除。Issue #76 选择以 provider-neutral Coding Session 包住当前 Codex SDK adapter；Issue #80 的实现随后完成六个行为模块，并通过两个 executable TypeScript delivery：正常路径形成 reviewed PR；第二条路径在 durable activation 后 SIGKILL coordinator，以同一 Task ID 重启并用 fresh fence/workspace 完成交付。
 

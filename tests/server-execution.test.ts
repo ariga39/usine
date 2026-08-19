@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,6 +192,63 @@ describe("server-owned execution", () => {
       expect(firstSeen).toEqual([admitted.taskId]);
       expect(restartedSeen).toEqual([admitted.taskId]);
       expect(completed.evidence.restartRecoveries).toBe(1);
+    } finally {
+      await second.close();
+    }
+  });
+
+  test("isolates corrupt restart rows and completes recovery before readiness", async () => {
+    const { submission, contractPath, stateDirectory } = await fixture();
+    const first = await startUsineServer({
+      environment: environment(stateDirectory),
+      execute: async ({ result }) => result,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const admitted = await submitTask(first.url, submission);
+    await first.close();
+
+    const corruptTaskId = admitted.taskId + "-corrupt";
+    const corruptResult = {
+      ...admitted,
+      taskId: corruptTaskId,
+      writer: { repositoryIdentity: "example/" + corruptTaskId },
+    };
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    database
+      .prepare(
+        "INSERT INTO task_runs (task_id, result, contract_path, repository_path, raw_contract) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(
+        corruptTaskId,
+        JSON.stringify(corruptResult),
+        contractPath,
+        submission.repositoryPath,
+        "{ invalid contract",
+      );
+    database
+      .prepare("INSERT INTO repository_leases (repository_identity, task_id) VALUES (?, ?)")
+      .run(corruptResult.writer.repositoryIdentity, corruptTaskId);
+    const quarantinedTaskId = admitted.taskId + "-quarantined";
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(quarantinedTaskId, "{ unreadable TaskResult");
+    database.close();
+
+    const healthyStarted = deferred<void>();
+    const second = await startUsineServer({
+      environment: environment(stateDirectory),
+      execute: async ({ result }) => {
+        if (result.taskId === admitted.taskId) healthyStarted.resolve();
+        return result;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const corrupt = await taskStatus(second.url, corruptTaskId);
+      expect(corrupt?.state).toBe("blocked");
+      await healthyStarted.promise;
     } finally {
       await second.close();
     }

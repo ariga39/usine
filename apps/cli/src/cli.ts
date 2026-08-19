@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
 import { startUsineServer } from "@usine/runtime";
-import { followTask, submitTask, taskStatus } from "./server-client.js";
+import { followTask, serverUrlFromEnvironment, submitTask, taskStatus } from "./server-client.js";
 
 export async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
@@ -50,7 +50,7 @@ export async function main(): Promise<void> {
     }
 
     try {
-      const result = await taskStatus(serverUrl(), contractPath);
+      const result = await taskStatus(serverUrlFromEnvironment(process.env), contractPath);
       if (!result) {
         process.stderr.write(
           `${JSON.stringify({ error: "task_not_found", taskId: contractPath })}\n`,
@@ -77,7 +77,7 @@ export async function main(): Promise<void> {
       return;
     }
     try {
-      const result = await followTask(serverUrl(), contractPath, {
+      const result = await followTask(serverUrlFromEnvironment(process.env), contractPath, {
         onProgress: (progress) => process.stderr.write(`${JSON.stringify(progress)}\n`),
       });
       process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -121,7 +121,7 @@ export async function main(): Promise<void> {
   }
 
   try {
-    const result = await submitTask(serverUrl(), {
+    const result = await submitTask(serverUrlFromEnvironment(process.env), {
       contractPath: resolve(contractPath),
       repositoryPath: await realpath(parsed.data.repository.path),
     });
@@ -130,10 +130,6 @@ export async function main(): Promise<void> {
     process.stderr.write(`${JSON.stringify({ error: "submit_failed", message: String(error) })}\n`);
     process.exitCode = 1;
   }
-}
-
-function serverUrl(): string {
-  return process.env.USINE_SERVER_URL?.trim() || "http://127.0.0.1:8787";
 }
 
 await main();

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vite-plus/test";
 import type { TaskResult } from "@usine/task-authority";
-import { followTask, ServerClientError, taskStatus } from "../src/server-client.js";
+import {
+  followTask,
+  ServerClientError,
+  serverUrlFromEnvironment,
+  taskStatus,
+} from "../src/server-client.js";
 
 function result(taskId: string, revision: number, state: TaskResult["state"]): TaskResult {
   return {
@@ -28,6 +33,15 @@ function result(taskId: string, revision: number, state: TaskResult["state"]): T
 }
 
 describe("server client follow", () => {
+  test("derives the client URL from the configured server host and port", () => {
+    expect(
+      serverUrlFromEnvironment({
+        USINE_SERVER_HOST: "::1",
+        USINE_SERVER_PORT: "4321",
+      }),
+    ).toBe("http://[::1]:4321");
+  });
+
   test("rejects malformed successful TaskResult responses", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>

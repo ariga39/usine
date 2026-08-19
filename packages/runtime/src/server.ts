@@ -63,6 +63,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
   if (!isLoopbackHost(host)) throw new Error("server host must be loopback");
+  const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
@@ -108,19 +109,29 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       const running: RunningUsineServer = {
         host,
         port: server.addressPort,
-        url: `http://${host}:${server.addressPort}`,
+        url: `http://${urlHost}:${server.addressPort}`,
         close: async () => undefined,
       };
-      resolveReady(running);
-
       const restartable = yield* Effect.tryPromise({
         try: () => lookupRestartableTasks(stateDirectory),
         catch: (cause) => cause,
       });
       for (const task of restartable) {
-        const contract = parseContract(task.input.rawContract);
-        launchTask({ input: task.input, contract, result: task.result });
+        try {
+          const contract = parseContract(task.input.rawContract);
+          launchTask({ input: task.input, contract, result: task.result });
+        } catch (error) {
+          try {
+            yield* Effect.tryPromise({
+              try: () => blockPersistedTask(stateDirectory, task.result.taskId, error),
+              catch: (cause) => cause,
+            });
+          } catch {
+            // A readable row remains isolated if its invalid input cannot be blocked.
+          }
+        }
       }
+      resolveReady(running);
       yield* Effect.never;
     }),
   );
@@ -183,7 +194,7 @@ async function executeServerTask(
     } catch (error) {
       const latest = await authority.lookup(current.taskId);
       if (!latest || latest.state === "reviewed_pr" || latest.state === "blocked") throw error;
-      return authority.block(
+      return await authority.block(
         { taskId: latest.taskId, revision: latest.revision },
         error instanceof Error ? error.message : String(error),
       );
@@ -204,7 +215,7 @@ async function blockPersistedTask(
     const current = await authority.lookup(taskId);
     if (!current) throw new Error(`cannot block missing task ${taskId}: ${String(error)}`);
     if (current.state === "reviewed_pr" || current.state === "blocked") return current;
-    return authority.block(
+    return await authority.block(
       { taskId: current.taskId, revision: current.revision },
       error instanceof Error ? error.message : String(error),
     );

@@ -11,6 +11,15 @@ export interface TaskSubmission {
   repositoryPath: string;
 }
 
+export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string {
+  const explicit = environment.USINE_SERVER_URL?.trim();
+  if (explicit) return explicit;
+  const host = environment.USINE_SERVER_HOST?.trim() || "127.0.0.1";
+  const port = environment.USINE_SERVER_PORT?.trim() || "8787";
+  const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
+  return "http://" + urlHost + ":" + port;
+}
+
 export class ServerClientError extends Error {
   constructor(
     message: string,
