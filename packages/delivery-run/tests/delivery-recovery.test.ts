@@ -41,6 +41,7 @@ function contract(id: string): TaskContract {
 
 function persistedResult(state: TaskResult["state"], id: string): TaskResult {
   return {
+    schemaVersion: 1,
     taskId: id,
     contractHash: "hash",
     revision: 4,

@@ -37,3 +37,7 @@ corepack pnpm check:links
 ```
 
 Use [codebase-design](.agents/skills/codebase-design/SKILL.md) for boundaries and ownership, [find-simplifications](.agents/skills/find-simplifications/SKILL.md) for deletion or replacement, [prose-standard](.agents/skills/prose-standard/SKILL.md) for visible text, [pre-push-checks](.agents/skills/pre-push-checks/SKILL.md) before publication, and [review-change](.agents/skills/review-change/SKILL.md) in a fresh context before acceptance.
+
+## Effect
+
+This repository uses Effect. Before writing Effect code, read `node_modules/effect/AGENTS.md` completely and follow its linked guidance when relevant. Search `node_modules/effect/src` when the guide does not cover an API or concept.

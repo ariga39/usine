@@ -22,6 +22,7 @@
     "@usine/quality-gate": "workspace:*",
     "@usine/runtime": "workspace:*",
     "@usine/task-authority": "workspace:*",
+    "effect": "4.0.0-rc.110",
     "execa": "latest",
     "typescript": "latest",
     "vite": "catalog:",

@@ -213,7 +213,7 @@ Implementer 的 private Issue/PR authority 仍由冻结 Task Contract 提供。�
 默认依赖选择：
 
 - Node 24 `node:sqlite` + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
-- Zod：外部 JSON/schema 边界；
+- Zod：现有 Task Contract 外部 JSON/schema 边界；Effect 4 RC Schema：Task Authority 的不可信 durable-state decode boundary，后续仅在当前 caller 能删除重复 validation、错误映射或资源 lifecycle code 时增量采用；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
 - `@openai/codex-sdk`：唯一 coding-agent lifecycle；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：协调器拥有的 schema-constrained 轻量语义 transform；
 - Pino：结构化日志；

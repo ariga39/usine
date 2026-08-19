@@ -101,6 +101,38 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("quarantines unsupported durable state at the lookup boundary", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-unsupported-state-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const inspection = new DatabaseSync(path);
+    inspection
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(taskId, JSON.stringify({ schemaVersion: 99, taskId }));
+    inspection.close();
+
+    const authority = authorityAt(path);
+    await expect(authority.lookup(taskId)).rejects.toMatchObject({
+      code: "task_state_quarantined",
+      message: "durable task state quarantined",
+    });
+  });
+
+  test("quarantines malformed current-version state at the lookup boundary", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-malformed-state-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const inspection = new DatabaseSync(path);
+    inspection
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(taskId, JSON.stringify({ schemaVersion: 1, taskId }));
+    inspection.close();
+
+    const authority = authorityAt(path);
+    await expect(authority.lookupExisting(taskId, "unused-contract-hash")).rejects.toMatchObject({
+      code: "task_state_quarantined",
+      message: "durable task state quarantined",
+    });
+  });
+
   test("keeps repository paths out of admitted and terminal durable results", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
@@ -113,10 +145,12 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
 
     expect(admitted.writer).toEqual({ repositoryIdentity: `authority/path-free-${taskId}` });
+    expect(await authority.lookup(taskId)).toEqual(admitted);
     const inspection = new DatabaseSync(path);
     const admittedRow = inspection
       .prepare("SELECT result FROM task_runs WHERE task_id = ?")
       .get(taskId) as { result: string };
+    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 1 });
     expect(JSON.parse(admittedRow.result).writer).toEqual(admitted.writer);
     expect(admittedRow.result).not.toContain('"repository"');
 
@@ -209,6 +243,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     await expect(
       migrated.lookupExisting("authority-v0-migration", "authority-v0-hash"),
     ).resolves.toEqual({
+      schemaVersion: 1,
       ...oldResult,
       writer: { repositoryIdentity: "authority/v0-migration" },
     });

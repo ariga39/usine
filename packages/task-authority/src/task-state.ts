@@ -34,6 +34,8 @@ export interface DeliveryEffect {
 }
 
 export interface TaskResult {
+  /** Version of the durable Task Authority result projection. */
+  schemaVersion: 1;
   taskId: string;
   contractHash: string;
   /** Durable compare-and-set identity for this observation. */
