@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   applyMigrations,
@@ -19,7 +19,31 @@ import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
 import { deadlineExpired } from "@usine/task-authority";
 
-export { runtimePolicyFromEnvironment, type RuntimePolicy } from "./runtime-policy.js";
+export {
+  runtimePolicyFromEnvironment,
+  stateDirectoryFromEnvironment,
+  type RuntimePolicy,
+} from "./runtime-policy.js";
+
+export async function lookupTaskStatus(
+  stateDirectory: string,
+  taskId: string,
+): Promise<TaskResult | null> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).lookup(taskId);
+  } finally {
+    handle.close();
+  }
+}
 
 export async function admitTask(
   contractPath: string,

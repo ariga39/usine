@@ -155,4 +155,53 @@ describe("CLI/SQLite admission seam", () => {
       state: "admitted",
     });
   }, 30_000);
+
+  test("reads a found task without rerunning it and reports stable not-found results", async () => {
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const { repository, root, taskId } = await admissionFixture();
+    const stateDirectory = join(root, "state");
+    const runEnvironment = {
+      USINE_STATE_DIR: stateDirectory,
+      USINE_STOP_AFTER: "admitted",
+      USINE_GIT_AUTHOR_NAME: "Release Bot",
+      USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
+    };
+    const run = await execa("node", [cliPath, "run", "task.json"], {
+      cwd: repository,
+      env: runEnvironment,
+      reject: false,
+    });
+    expect(run.exitCode, run.stderr).toBe(75);
+
+    const status = await execa("node", [cliPath, "status", taskId], {
+      cwd: root,
+      env: { NODE_NO_WARNINGS: "1", USINE_STATE_DIR: stateDirectory },
+      reject: false,
+    });
+    expect(status).toMatchObject({ exitCode: 0, stdout: run.stdout, stderr: "" });
+
+    const unknown = await execa("node", [cliPath, "status", `${taskId}-unknown`], {
+      cwd: root,
+      env: { NODE_NO_WARNINGS: "1", USINE_STATE_DIR: stateDirectory },
+      reject: false,
+    });
+    expect(unknown).toMatchObject({
+      exitCode: 3,
+      stdout: "",
+      stderr: JSON.stringify({ error: "task_not_found", taskId: `${taskId}-unknown` }),
+    });
+
+    const missingStateDirectory = join(root, "missing-state");
+    const missing = await execa("node", [cliPath, "status", taskId], {
+      cwd: root,
+      env: { NODE_NO_WARNINGS: "1", USINE_STATE_DIR: missingStateDirectory },
+      reject: false,
+    });
+    expect(missing).toMatchObject({
+      exitCode: 3,
+      stdout: "",
+      stderr: JSON.stringify({ error: "task_not_found", taskId }),
+    });
+    await expect(access(missingStateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
 });

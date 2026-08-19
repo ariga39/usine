@@ -3,10 +3,46 @@
 import { readFile } from "node:fs/promises";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
 import type { TaskProgress } from "@usine/task-authority";
-import { admitTask, runtimePolicyFromEnvironment } from "@usine/runtime";
+import {
+  admitTask,
+  lookupTaskStatus,
+  runtimePolicyFromEnvironment,
+  stateDirectoryFromEnvironment,
+} from "@usine/runtime";
 
 async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
+  if (command === "status") {
+    if (!contractPath || process.argv.length > 4) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "usage", usage: "usine status <task-id>" })}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+
+    try {
+      const result = await lookupTaskStatus(
+        stateDirectoryFromEnvironment(process.env),
+        contractPath,
+      );
+      if (!result) {
+        process.stderr.write(
+          `${JSON.stringify({ error: "task_not_found", taskId: contractPath })}\n`,
+        );
+        process.exitCode = 3;
+        return;
+      }
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "status_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (command !== "run" || !contractPath) {
     process.stderr.write(
       `${JSON.stringify({ error: "usage", usage: "usine run <task-contract.json>" })}\n`,
