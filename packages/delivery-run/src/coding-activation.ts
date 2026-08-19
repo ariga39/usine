@@ -1,8 +1,13 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { implementerOutputSchema } from "@usine/coding-session";
-import type { CheckResult, TaskResult } from "@usine/task-authority";
+import type {
+  CheckResult,
+  TaskHistoryOutcome,
+  TaskHistoryTokenUsage,
+  TaskResult,
+} from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
-import { blockTask, reportProgress } from "./delivery-progress.js";
+import { blockTask, recordHistory, reportProgress } from "./delivery-progress.js";
 
 function implementerPrompt(
   input: DeliveryRunInput,
@@ -51,6 +56,29 @@ async function runCodingAttempt(
     reservation.activation,
     previousSha,
   );
+  const startedAtEpochMs = Date.now();
+  const record = async (detail: {
+    outcome: TaskHistoryOutcome;
+    endedAtEpochMs?: number;
+    failure?: string | null;
+    candidateSha?: string | null;
+    tokenUsage?: TaskHistoryTokenUsage | null;
+  }): Promise<void> =>
+    recordHistory(services, {
+      taskId: reservation.result.taskId,
+      kind: "implementer",
+      activation: reservation.activation,
+      cycle: null,
+      role: input.implementer.role,
+      model: input.implementer.model,
+      startedAtEpochMs,
+      endedAtEpochMs: detail.endedAtEpochMs ?? Date.now(),
+      outcome: detail.outcome,
+      failure: detail.failure ?? null,
+      candidateSha: detail.candidateSha ?? null,
+      candidateFence: reservation.activation,
+      tokenUsage: detail.tokenUsage ?? null,
+    });
   const observation = await services.session.run({
     role: input.implementer.role,
     workspace: workspace.path,
@@ -65,10 +93,16 @@ async function runCodingAttempt(
   });
   if (input.signal?.aborted) {
     await services.workspace.quarantine(workspace);
+    await record({ outcome: "cancelled", failure: "coding session cancelled" });
     throw new Error("task execution cancelled");
   }
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
+    await record({
+      outcome: observation.status === "cancelled" ? "cancelled" : "failed",
+      failure: observation.failure ?? observation.summary,
+      tokenUsage: observation.usage,
+    });
     return {
       status: "failed",
       result: reservation.result,
@@ -78,6 +112,7 @@ async function runCodingAttempt(
   const output = observation.output;
   if (output.status === "blocked") {
     await services.workspace.quarantine(workspace);
+    await record({ outcome: "blocked", failure: output.summary, tokenUsage: observation.usage });
     return {
       status: "failed",
       result: reservation.result,
@@ -95,6 +130,11 @@ async function runCodingAttempt(
       },
     );
     reportProgress(services, accepted);
+    await record({
+      outcome: "succeeded",
+      candidateSha: candidate.sha,
+      tokenUsage: observation.usage,
+    });
     return {
       status: "succeeded",
       result: accepted,
@@ -106,6 +146,11 @@ async function runCodingAttempt(
       throw error;
     }
     await services.workspace.quarantine(workspace);
+    await record({
+      outcome: "failed",
+      failure: error instanceof Error ? error.message : String(error),
+      tokenUsage: observation.usage,
+    });
     return {
       status: "failed",
       result: reservation.result,

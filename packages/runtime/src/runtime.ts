@@ -9,6 +9,8 @@ import {
   type TaskExecutionInput,
   type TaskProgress,
   type TaskResult,
+  type TaskStatus,
+  type TaskHistoryKind,
   taskProgressFromResult,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
@@ -30,7 +32,7 @@ export type { TaskExecutionInput } from "@usine/task-authority";
 export async function lookupTaskStatus(
   stateDirectory: string,
   taskId: string,
-): Promise<TaskResult | null> {
+): Promise<TaskStatus | null> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   try {
     await access(databasePath);
@@ -41,7 +43,7 @@ export async function lookupTaskStatus(
 
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
-    return await new TaskAuthority(handle.database).lookup(taskId);
+    return await new TaskAuthority(handle.database).lookupStatus(taskId);
   } finally {
     handle.close();
   }
@@ -60,6 +62,38 @@ export async function lookupRestartableTasks(
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).listRestartable();
+  } finally {
+    handle.close();
+  }
+}
+
+export async function recordExecutionObservation(
+  stateDirectory: string,
+  result: TaskResult,
+  kind: Extract<TaskHistoryKind, "coordinator_restart" | "execution_owner_change">,
+  executionOwner: string,
+  previousExecutionOwner: string,
+): Promise<void> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    const now = Date.now();
+    await new TaskAuthority(handle.database).appendHistory({
+      taskId: result.taskId,
+      kind,
+      activation: result.activeActivation,
+      cycle: result.evidence.reviewCycles || null,
+      role: "coordinator",
+      model: null,
+      executionOwner,
+      previousExecutionOwner,
+      startedAtEpochMs: now,
+      endedAtEpochMs: now,
+      outcome: "observed",
+      failure: null,
+      candidateSha: result.candidateSha,
+      candidateFence: result.candidateFence,
+      tokenUsage: null,
+    });
   } finally {
     handle.close();
   }
@@ -263,6 +297,7 @@ async function executeWithServices(options: {
     repositoryIdentity,
     deadlineEpochMs,
     implementer: policy.roles.implementer,
+    reviewer: policy.roles.reviewer,
     signal: options.signal,
   };
   return executeDeliveryRun(workflowInput, {

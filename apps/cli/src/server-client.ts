@@ -1,9 +1,11 @@
 import { Clock, Duration, Effect } from "effect";
 import {
   decodeCurrentTaskResult,
+  decodeCurrentTaskStatus,
   taskProgressFromResult,
   type TaskProgress,
   type TaskResult,
+  type TaskStatus,
 } from "@usine/task-authority";
 
 export interface TaskSubmission {
@@ -41,10 +43,10 @@ export async function submitTask(
   });
 }
 
-export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResult | null> {
+export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskStatus | null> {
   const response = await fetch(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
   if (response.status === 404) return null;
-  return readResponse(response);
+  return readStatusResponse(response);
 }
 
 export interface FollowOptions {
@@ -101,6 +103,37 @@ async function readResponse(response: Response): Promise<TaskResult> {
   } catch {
     throw new ServerClientError(
       "server returned invalid TaskResult (" + response.status + ")",
+      response.status,
+    );
+  }
+}
+
+async function readStatusResponse(response: Response): Promise<TaskStatus> {
+  const body = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid JSON (${response.status})`,
+      response.status,
+    );
+  }
+  if (!response.ok) {
+    const message =
+      typeof parsed === "object" && parsed !== null && "message" in parsed
+        ? String(parsed.message)
+        : `server request failed (${response.status})`;
+    throw new ServerClientError(message, response.status);
+  }
+  try {
+    if (typeof parsed === "object" && parsed !== null && !("history" in parsed)) {
+      return { ...decodeCurrentTaskResult(parsed), history: [] };
+    }
+    return decodeCurrentTaskStatus(parsed);
+  } catch {
+    throw new ServerClientError(
+      "server returned invalid TaskStatus (" + response.status + ")",
       response.status,
     );
   }

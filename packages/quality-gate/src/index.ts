@@ -1,1 +1,5 @@
-export { QualityGate, type QualityGateOptions } from "./quality-gate.js";
+export {
+  QualityGate,
+  type QualityGateOptions,
+  type ReviewAttemptObservation,
+} from "./quality-gate.js";

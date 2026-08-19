@@ -1,12 +1,24 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { startUsineServer, type ServerExecutionContext } from "@usine/runtime";
+import {
+  lookupTaskStatus,
+  recordExecutionObservation,
+  startUsineServer,
+  type ServerExecutionContext,
+} from "@usine/runtime";
 import { submitTask, taskStatus, type TaskSubmission } from "../apps/cli/src/server-client.js";
-import type { TaskContract, TaskResult } from "@usine/task-authority";
+import {
+  applyMigrations,
+  hashTaskContract,
+  openSqliteDatabase,
+  TaskAuthority,
+  type TaskContract,
+  type TaskResult,
+} from "@usine/task-authority";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
@@ -114,6 +126,63 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 }
 
 describe("server-owned execution", () => {
+  test("persists restart and owner-change facts in the bounded status history", async () => {
+    const { contractPath, stateDirectory } = await fixture();
+    const rawContract = await readFile(contractPath, "utf8");
+    const contract = JSON.parse(rawContract) as TaskContract;
+    const databasePath = join(stateDirectory, "usine.sqlite");
+    await mkdir(stateDirectory, { recursive: true });
+    await applyMigrations(databasePath);
+    const handle = openSqliteDatabase(databasePath);
+    const authority = new TaskAuthority(handle.database);
+    const admitted = await authority.admit(
+      {
+        contract,
+        contractHash: hashTaskContract(rawContract),
+        repositoryIdentity: `example/${contract.id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+      },
+      { contractPath, repositoryPath: contract.repository.path, rawContract },
+    );
+    handle.close();
+
+    await recordExecutionObservation(
+      stateDirectory,
+      admitted,
+      "coordinator_restart",
+      "persistent-server",
+      "prior-coordinator",
+    );
+    await recordExecutionObservation(
+      stateDirectory,
+      admitted,
+      "execution_owner_change",
+      "persistent-server",
+      "prior-coordinator",
+    );
+
+    const status = await lookupTaskStatus(stateDirectory, admitted.taskId);
+    expect(status).toMatchObject({
+      ...admitted,
+      history: [
+        {
+          kind: "coordinator_restart",
+          outcome: "observed",
+          executionOwner: "persistent-server",
+          previousExecutionOwner: "prior-coordinator",
+        },
+        {
+          kind: "execution_owner_change",
+          outcome: "observed",
+          executionOwner: "persistent-server",
+          previousExecutionOwner: "prior-coordinator",
+        },
+      ],
+    });
+    expect(status?.history).toHaveLength(2);
+    expect(status?.revision).toBe(admitted.revision);
+  });
+
   test("continues an admitted task after the submitting client has returned", async () => {
     const { submission, stateDirectory } = await fixture();
     const started = deferred<void>();

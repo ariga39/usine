@@ -60,6 +60,45 @@ describe("server client follow", () => {
     }
   });
 
+  test("decodes bounded history alongside the current TaskResult projection", async () => {
+    const task = result("history-status", 3, "admitted");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ...task,
+          history: [
+            {
+              id: 1,
+              taskId: task.taskId,
+              kind: "implementer",
+              activation: 1,
+              cycle: null,
+              role: "implementer",
+              model: "gpt-5.6-luna",
+              executionOwner: null,
+              previousExecutionOwner: null,
+              startedAtEpochMs: 10,
+              endedAtEpochMs: 20,
+              outcome: "succeeded",
+              failure: null,
+              candidateSha: null,
+              candidateFence: 1,
+              tokenUsage: { inputTokens: 12, outputTokens: 7 },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+
+    try {
+      const status = await taskStatus("http://server.test", task.taskId);
+      expect(status).toMatchObject({ ...task, history: [{ kind: "implementer" }] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("uses the durable deadline instead of a default poll-count bound", async () => {
     const taskId = "long-follow-test";
     const originalFetch = globalThis.fetch;

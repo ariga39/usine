@@ -5,6 +5,7 @@ import type {
   SessionObservation,
   SessionRequest,
 } from "@usine/coding-session";
+import type { ReviewAttemptObservation } from "@usine/quality-gate";
 import { DeliveryQuarantineError } from "@usine/forge-delivery";
 import {
   deadlineExpired,
@@ -17,9 +18,11 @@ import {
   type TaskObservation,
   type TaskProgress,
   type TaskResult,
+  type TaskHistoryRecordInput,
+  type TaskHistoryTokenUsage,
 } from "@usine/task-authority";
 import { activateImplementer } from "./coding-activation.js";
-import { blockTask, reportProgress } from "./delivery-progress.js";
+import { blockTask, recordHistory, reportProgress } from "./delivery-progress.js";
 
 export interface DeliveryRunInput {
   contract: TaskContract;
@@ -27,6 +30,7 @@ export interface DeliveryRunInput {
   repositoryIdentity: string;
   deadlineEpochMs: number;
   implementer: RolePolicy;
+  reviewer?: RolePolicy;
   signal?: AbortSignal;
 }
 
@@ -42,6 +46,7 @@ interface DeliveryRunAuthority {
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
   block(observation: TaskObservation, blocker: string): Promise<TaskResult>;
+  appendHistory?(input: TaskHistoryRecordInput): Promise<unknown>;
 }
 
 interface DeliveryRunWorkspace {
@@ -56,11 +61,11 @@ interface DeliveryRunWorkspace {
 }
 
 interface DeliveryRunSession {
-  run(
-    request: SessionRequest<ImplementerOutput>,
-  ): Promise<
+  run(request: SessionRequest<ImplementerOutput>): Promise<
     Pick<SessionObservation<ImplementerOutput>, "status" | "output"> &
-      Pick<SessionObservation<ImplementerOutput>, "summary" | "failure">
+      Pick<SessionObservation<ImplementerOutput>, "summary" | "failure"> & {
+        usage?: TaskHistoryTokenUsage | null;
+      }
   >;
 }
 
@@ -72,6 +77,12 @@ interface DeliveryRunQuality {
     check: CheckResult,
     cycle: number,
   ): Promise<ReviewVerdict>;
+  reviewWithObservation?: (
+    contract: TaskContract,
+    sha: string,
+    check: CheckResult,
+    cycle: number,
+  ) => Promise<ReviewAttemptObservation>;
 }
 
 interface DeliveryRunForge {
@@ -149,11 +160,27 @@ export async function executeDeliveryRun(
         input.contract.budget.maxReviewCycles,
         Math.max(1, result.evidence.reviewCycles + 1),
       );
+      const startedAtEpochMs = Date.now();
       let check: CheckResult;
       try {
         check = await runServices.quality.check(input.contract, result.candidateSha, cycle);
         throwIfAborted(input.signal);
       } catch (error) {
+        await recordHistory(runServices, {
+          taskId: result.taskId,
+          kind: "project_check",
+          activation: result.candidateFence,
+          cycle,
+          role: null,
+          model: null,
+          startedAtEpochMs,
+          endedAtEpochMs: Date.now(),
+          outcome: input.signal?.aborted ? "cancelled" : "failed",
+          failure: error instanceof Error ? error.message : String(error),
+          candidateSha: result.candidateSha,
+          candidateFence: result.candidateFence,
+          tokenUsage: null,
+        });
         if (input.signal?.aborted) throw error;
         return blockTask(
           runServices,
@@ -161,6 +188,22 @@ export async function executeDeliveryRun(
           error instanceof Error ? error.message : String(error),
         );
       }
+      await recordHistory(runServices, {
+        taskId: result.taskId,
+        kind: "project_check",
+        activation: result.candidateFence,
+        cycle,
+        role: null,
+        model: null,
+        startedAtEpochMs,
+        endedAtEpochMs: Date.now(),
+        outcome: check.status === "passed" ? "succeeded" : "failed",
+        failure:
+          check.status === "passed" ? null : `project check exited with code ${check.exitCode}`,
+        candidateSha: result.candidateSha,
+        candidateFence: result.candidateFence,
+        tokenUsage: null,
+      });
       result = await runServices.authority.recordCheck(
         { taskId: result.taskId, revision: result.revision },
         check,
@@ -187,16 +230,44 @@ export async function executeDeliveryRun(
         input.contract.budget.maxReviewCycles,
         Math.max(1, result.evidence.reviewCycles + 1),
       );
-      let review: Awaited<ReturnType<DeliveryRunQuality["review"]>>;
+      const startedAtEpochMs = Date.now();
+      let review: ReviewVerdict;
+      let reviewUsage: TaskHistoryTokenUsage | null = null;
       try {
-        review = await runServices.quality.review(
-          input.contract,
-          result.candidateSha,
-          result.check,
-          cycle,
-        );
+        if (runServices.quality.reviewWithObservation) {
+          const observation = await runServices.quality.reviewWithObservation(
+            input.contract,
+            result.candidateSha,
+            result.check,
+            cycle,
+          );
+          review = observation.review;
+          reviewUsage = observation.usage;
+        } else {
+          review = await runServices.quality.review(
+            input.contract,
+            result.candidateSha,
+            result.check,
+            cycle,
+          );
+        }
         throwIfAborted(input.signal);
       } catch (error) {
+        await recordHistory(runServices, {
+          taskId: result.taskId,
+          kind: "fresh_review",
+          activation: result.candidateFence,
+          cycle,
+          role: input.reviewer?.role ?? "reviewer",
+          model: input.reviewer?.model ?? null,
+          startedAtEpochMs,
+          endedAtEpochMs: Date.now(),
+          outcome: input.signal?.aborted ? "cancelled" : "failed",
+          failure: error instanceof Error ? error.message : String(error),
+          candidateSha: result.candidateSha,
+          candidateFence: result.candidateFence,
+          tokenUsage: reviewUsage,
+        });
         if (input.signal?.aborted) throw error;
         return blockTask(
           runServices,
@@ -204,6 +275,26 @@ export async function executeDeliveryRun(
           error instanceof Error ? error.message : String(error),
         );
       }
+      await recordHistory(runServices, {
+        taskId: result.taskId,
+        kind: "fresh_review",
+        activation: result.candidateFence,
+        cycle,
+        role: input.reviewer?.role ?? "reviewer",
+        model: input.reviewer?.model ?? null,
+        startedAtEpochMs,
+        endedAtEpochMs: Date.now(),
+        outcome:
+          review.verdict === "approved"
+            ? "succeeded"
+            : review.verdict === "changes_requested"
+              ? "failed"
+              : "blocked",
+        failure: review.verdict === "approved" ? null : review.summary,
+        candidateSha: result.candidateSha,
+        candidateFence: result.candidateFence,
+        tokenUsage: reviewUsage,
+      });
       result = await runServices.authority.recordReview(
         { taskId: result.taskId, revision: result.revision },
         review,
@@ -254,6 +345,7 @@ export async function executeDeliveryRun(
       // the approved review durable if delivery throws; the next run retries
       // this exact bundle without another implementer.
       let delivery: Awaited<ReturnType<DeliveryRunForge["deliver"]>>;
+      const startedAtEpochMs = Date.now();
       try {
         delivery = await runServices.forge.deliver(
           input.contract,
@@ -263,11 +355,45 @@ export async function executeDeliveryRun(
         );
         throwIfAborted(input.signal);
       } catch (error) {
+        await recordHistory(runServices, {
+          taskId: result.taskId,
+          kind: "forge_delivery",
+          activation: null,
+          cycle: null,
+          role: null,
+          model: null,
+          startedAtEpochMs,
+          endedAtEpochMs: Date.now(),
+          outcome: input.signal?.aborted
+            ? "cancelled"
+            : error instanceof DeliveryQuarantineError
+              ? "blocked"
+              : "failed",
+          failure: error instanceof Error ? error.message : String(error),
+          candidateSha: result.candidateSha,
+          candidateFence: result.candidateFence,
+          tokenUsage: null,
+        });
         if (input.signal?.aborted) throw error;
         if (error instanceof DeliveryQuarantineError)
           return blockTask(runServices, result, error.message);
         throw error;
       }
+      await recordHistory(runServices, {
+        taskId: result.taskId,
+        kind: "forge_delivery",
+        activation: null,
+        cycle: null,
+        role: null,
+        model: null,
+        startedAtEpochMs,
+        endedAtEpochMs: Date.now(),
+        outcome: "succeeded",
+        failure: null,
+        candidateSha: result.candidateSha,
+        candidateFence: result.candidateFence,
+        tokenUsage: null,
+      });
       const delivered = await runServices.authority.recordDelivery(
         { taskId: result.taskId, revision: result.revision },
         delivery,
