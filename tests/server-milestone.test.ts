@@ -351,6 +351,14 @@ function processAlive(pid: number): boolean {
   }
 }
 
+function reapFixtureProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // The recovered server may already have reaped the fixture process.
+  }
+}
+
 describe("server-owned delivery milestone", () => {
   test("submit exits while the server delivers and follow observes the exact terminal result", async () => {
     const fixtureValue = await fixture("complete");
@@ -557,20 +565,7 @@ describe("server-owned delivery milestone", () => {
         await stopServer(second);
       }
     } finally {
-      if (codexPid) {
-        try {
-          process.kill(-codexPid, "SIGKILL");
-        } catch (error) {
-          if (
-            typeof error !== "object" ||
-            error === null ||
-            !("code" in error) ||
-            error.code !== "ESRCH"
-          ) {
-            throw error;
-          }
-        }
-      }
+      if (codexPid) reapFixtureProcessGroup(codexPid);
       await stopServer(first).catch(() => undefined);
       await forge.close();
     }
