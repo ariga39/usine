@@ -44,6 +44,18 @@ function contract(baseSha: string, title = "Deliver the authorized outcome"): Ta
   };
 }
 
+function isUnsafeSubjectCodePoint(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined) return false;
+  return (
+    codePoint <= 0x1f ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2060 && codePoint <= 0x206f)
+  );
+}
+
 describe("Candidate Workspace", () => {
   test("freezes only the current fenced activation and rejects stale writers", async () => {
     const input = await fixture();
@@ -123,11 +135,9 @@ describe("Candidate Workspace", () => {
       await execa("git", ["-C", writer.path, "show", "-s", "--format=%s", candidate.sha])
     ).stdout.trim();
 
-    expect(subject).toBe(
-      `#150 [outcome-task] Ship the outcome --no-verify ${"x".repeat(111)}`,
-    );
+    expect(subject).toBe(`#150 [outcome-task] Ship the outcome --no-verify ${"x".repeat(111)}`);
     expect(subject).toHaveLength(160);
-    expect(subject).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/u);
+    expect(Array.from(subject).some(isUnsafeSubjectCodePoint)).toBe(false);
     await workspace.quarantine(writer);
   });
 

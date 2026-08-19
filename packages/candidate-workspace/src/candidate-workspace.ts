@@ -4,6 +4,12 @@ import { execa } from "execa";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 
 const MAX_COMMIT_SUBJECT_LENGTH = 160;
+const ESCAPE_CHARACTER = String.fromCodePoint(0x1b);
+const BELL_CHARACTER = String.fromCodePoint(0x07);
+const ANSI_ESCAPE_SEQUENCE = new RegExp(
+  `${ESCAPE_CHARACTER}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHARACTER}]*(?:${BELL_CHARACTER}|${ESCAPE_CHARACTER}\\\\))`,
+  "gu",
+);
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -49,7 +55,7 @@ export interface WorkspaceOptions {
 function normalizeCommitSubjectPart(value: string): string {
   return value
     .normalize("NFKC")
-    .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/gu, "")
+    .replace(ANSI_ESCAPE_SEQUENCE, "")
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
