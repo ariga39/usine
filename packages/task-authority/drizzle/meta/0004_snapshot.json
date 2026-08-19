@@ -33,9 +33,7 @@
       "indexes": {
         "repository_leases_task_id_unique": {
           "name": "repository_leases_task_id_unique",
-          "columns": [
-            "task_id"
-          ],
+          "columns": ["task_id"],
           "isUnique": true
         }
       },
@@ -163,10 +161,7 @@
       "indexes": {
         "task_history_task_id_id_index": {
           "name": "task_history_task_id_id_index",
-          "columns": [
-            "task_id",
-            "id"
-          ],
+          "columns": ["task_id", "id"],
           "isUnique": false
         }
       },

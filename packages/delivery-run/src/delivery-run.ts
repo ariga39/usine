@@ -61,9 +61,7 @@ interface DeliveryRunWorkspace {
 }
 
 interface DeliveryRunSession {
-  run(
-    request: SessionRequest<ImplementerOutput>,
-  ): Promise<
+  run(request: SessionRequest<ImplementerOutput>): Promise<
     Pick<SessionObservation<ImplementerOutput>, "status" | "output"> &
       Pick<SessionObservation<ImplementerOutput>, "summary" | "failure"> & {
         usage?: TaskHistoryTokenUsage | null;
@@ -200,7 +198,8 @@ export async function executeDeliveryRun(
         startedAtEpochMs,
         endedAtEpochMs: Date.now(),
         outcome: check.status === "passed" ? "succeeded" : "failed",
-        failure: check.status === "passed" ? null : `project check exited with code ${check.exitCode}`,
+        failure:
+          check.status === "passed" ? null : `project check exited with code ${check.exitCode}`,
         candidateSha: result.candidateSha,
         candidateFence: result.candidateFence,
         tokenUsage: null,
@@ -245,7 +244,12 @@ export async function executeDeliveryRun(
           review = observation.review;
           reviewUsage = observation.usage;
         } else {
-          review = await runServices.quality.review(input.contract, result.candidateSha, result.check, cycle);
+          review = await runServices.quality.review(
+            input.contract,
+            result.candidateSha,
+            result.check,
+            cycle,
+          );
         }
         throwIfAborted(input.signal);
       } catch (error) {

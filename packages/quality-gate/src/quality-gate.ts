@@ -38,12 +38,11 @@ interface QualityGateWorkspace {
 }
 
 interface QualityGateSession {
-  run(
-    request: SessionRequest<ReviewerOutput>,
-  ): Promise<
+  run(request: SessionRequest<ReviewerOutput>): Promise<
     Pick<SessionObservation<ReviewerOutput>, "status" | "output"> &
-      Pick<SessionObservation<ReviewerOutput>, "summary" | "failure">
-      & { usage?: TaskHistoryTokenUsage | null }
+      Pick<SessionObservation<ReviewerOutput>, "summary" | "failure"> & {
+        usage?: TaskHistoryTokenUsage | null;
+      }
   >;
 }
 
