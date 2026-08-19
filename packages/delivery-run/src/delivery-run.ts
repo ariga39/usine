@@ -46,7 +46,7 @@ interface DeliveryRunAuthority {
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
   block(observation: TaskObservation, blocker: string): Promise<TaskResult>;
-  appendHistory?(input: TaskHistoryRecordInput): Promise<unknown>;
+  appendHistory(input: TaskHistoryRecordInput): Promise<unknown>;
 }
 
 interface DeliveryRunWorkspace {

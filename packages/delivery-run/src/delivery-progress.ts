@@ -17,7 +17,7 @@ export async function recordHistory(
   services: DeliveryRunServices,
   input: TaskHistoryRecordInput,
 ): Promise<void> {
-  await services.authority.appendHistory?.(input);
+  await services.authority.appendHistory(input);
 }
 
 export async function blockTask(
