@@ -32,7 +32,6 @@ export interface GitAuthor {
 export interface WriterWorkspace {
   taskId: string;
   activation: number;
-  fence: number;
   path: string;
   baseSha: string;
 }
@@ -83,8 +82,6 @@ export function credentialFreeGitEnvironment(environment: NodeJS.ProcessEnv): No
 }
 
 export class CandidateWorkspace {
-  private readonly fences = new Map<string, number>();
-
   constructor(private readonly options: WorkspaceOptions) {}
 
   async prepareWriter(
@@ -94,12 +91,11 @@ export class CandidateWorkspace {
   ): Promise<WriterWorkspace> {
     if (!Number.isSafeInteger(activation) || activation < 1)
       throw new Error("activation must be positive");
-    const fence = activation;
     const path = resolve(
       this.options.stateDirectory,
       "workspaces",
       taskId,
-      `${activation}-${fence}`,
+      `${activation}-${activation}`,
     );
     await mkdir(dirname(path), { recursive: true });
     await this.removeWorktree(path);
@@ -109,8 +105,7 @@ export class CandidateWorkspace {
       await this.removeWorktree(path);
       throw error;
     }
-    this.fences.set(taskId, fence);
-    return { taskId, activation, fence, path, baseSha };
+    return { taskId, activation, path, baseSha };
   }
 
   async quarantinePriorWriters(taskId: string, activation: number): Promise<void> {
@@ -138,8 +133,6 @@ export class CandidateWorkspace {
     previousSha: string,
     contract: TaskContract,
   ): Promise<FrozenCandidate> {
-    if (this.fences.get(workspace.taskId) !== workspace.fence)
-      throw new Error("stale workspace fence");
     const head = await this.git(["-C", workspace.path, "rev-parse", "HEAD"]);
     const status = await this.git(["-C", workspace.path, "status", "--porcelain"]);
     let candidate = head.trim();
@@ -197,8 +190,6 @@ export class CandidateWorkspace {
 
   async quarantine(workspace: WriterWorkspace): Promise<void> {
     await this.removeWorktree(workspace.path);
-    const current = this.fences.get(workspace.taskId);
-    if (current === workspace.fence) this.fences.delete(workspace.taskId);
   }
 
   private async removeWorktree(path: string): Promise<void> {

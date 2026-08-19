@@ -133,7 +133,6 @@ function servicesFor(
       prepareWriter: async () => ({
         taskId: "recovery",
         activation: 1,
-        fence: 1,
         path: ".",
         baseSha: "a".repeat(40),
       }),
@@ -143,7 +142,6 @@ function servicesFor(
         workspace: {
           taskId: "recovery",
           activation: 1,
-          fence: 1,
           path: ".",
           baseSha: "a".repeat(40),
         },
@@ -249,7 +247,6 @@ describe("Delivery Run durable phase recovery", () => {
           prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
             taskId: id,
             activation,
-            fence: activation,
             path: ".",
             baseSha,
           }),
@@ -382,7 +379,6 @@ describe("Delivery Run durable phase recovery", () => {
           prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
             taskId: id,
             activation,
-            fence: activation,
             path: ".",
             baseSha,
           }),
@@ -446,7 +442,6 @@ describe("Delivery Run durable phase recovery", () => {
           prepareWriter: async (_taskId: string, activation: number, baseSha: string) => ({
             taskId: id,
             activation,
-            fence: activation,
             path: ".",
             baseSha,
           }),

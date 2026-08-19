@@ -232,7 +232,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
           prepareWriter: async (_taskId: string, activation: number, parent: string) => ({
             taskId: input.contract.id,
             activation,
-            fence: activation,
             path: fixture.repository,
             baseSha: parent,
           }),
