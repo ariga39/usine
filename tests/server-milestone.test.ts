@@ -1,63 +1,46 @@
 import { createServer, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
+import { codexExecutionIdentityPath } from "@usine/coding-session";
 import { describe, expect, test } from "vite-plus/test";
 
-const fakeCodexLoader = String.raw`
-import { chmod, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+const fakeCodexExecutable = (hang: boolean): string => String.raw`#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { chmod, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
-export class Codex {
-  startThread(options) {
-    return {
-      id: "server-milestone-session",
-      async run(prompt) {
-        if (prompt.startsWith("Role: fresh independent reviewer.")) {
-          const sha = prompt.match(/Candidate SHA: ([0-9a-f]{40})/)?.[1];
-          if (!sha) throw new Error("review candidate SHA is missing");
-          return {
-            finalResponse: JSON.stringify({
-              sha,
-              verdict: "approved",
-              summary: "approved",
-              findings: [],
-            }),
-          };
-        }
-        const marker = process.env.USINE_CODEX_MARKER;
-        if (process.env.USINE_CODEX_MODE === "kill") {
-          if (!marker) throw new Error("USINE_CODEX_MARKER is required");
-          await writeFile(marker, "activation-started\\n");
-          await new Promise(() => undefined);
-        }
-        if (process.env.USINE_CODEX_MODE === "complete") {
-          await new Promise((resolve) => setTimeout(resolve, 150));
-        }
-        const target = join(options.workingDirectory, "target.sh");
-        await writeFile(target, "#!/bin/sh\\nexit 0\\n");
-        await chmod(target, 0o755);
-        return {
-          finalResponse: JSON.stringify({ status: "proposed", summary: "candidate" }),
-        };
-      },
-    };
+const args = process.argv;
+const workspace = args[args.indexOf("--cd") + 1];
+if (!workspace) throw new Error("Codex workspace is required");
+const activation = Number(basename(workspace).split("-")[0]);
+const stateDirectory = dirname(dirname(dirname(workspace)));
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
+const reviewer = prompt.includes("Role: fresh independent reviewer.");
+if (!reviewer) {
+  await writeFile(join(stateDirectory, "codex.pid"), String(process.pid));
+  if (${String(hang)} && activation === 1) {
+    const stalePath = join(workspace, "stale-after-loss");
+    const releasePath = join(stateDirectory, "release-stale-child");
+    const childSource = 'import { access, writeFile } from "node:fs/promises";\\nconst [releasePath, stalePath] = process.argv.slice(1);\\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
+    const descendant = spawn(process.execPath, ["--input-type=module", "--eval", childSource, releasePath, stalePath], { stdio: "ignore" });
+    if (!descendant.pid) throw new Error("descendant PID is missing");
+    await writeFile(join(stateDirectory, "descendant.pid"), String(descendant.pid));
+    await writeFile(join(stateDirectory, "activation.marker"), "activation-started\n");
+    await new Promise(() => undefined);
   }
+  await writeFile(join(workspace, "target.sh"), "#!/bin/sh\nexit 0\n");
+  await chmod(join(workspace, "target.sh"), 0o755);
 }
-`;
-
-const fakeCodexRedirectLoader = String.raw`
-import { pathToFileURL } from "node:url";
-
-const fakeCodexModule = process.env.USINE_FAKE_CODEX_MODULE;
-if (!fakeCodexModule) throw new Error("USINE_FAKE_CODEX_MODULE is required");
-const fakeCodexUrl = pathToFileURL(fakeCodexModule);
-
-export async function resolve(specifier, context, nextResolve) {
-  if (specifier === "@openai/codex-sdk") return { url: fakeCodexUrl.href, shortCircuit: true };
-  return nextResolve(specifier, context);
-}
+const sha = prompt.match(/Candidate SHA: ([0-9a-f]{40})/)?.[1];
+const output = reviewer
+  ? JSON.stringify({ sha, verdict: "approved", summary: "approved", findings: [] })
+  : JSON.stringify({ status: "proposed", summary: "candidate" });
+process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "server-milestone-session" }) + "\n");
+process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", id: "message-1", text: output } }) + "\n");
+process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } }) + "\n");
 `;
 
 interface Fixture {
@@ -68,7 +51,6 @@ interface Fixture {
   stateDirectory: string;
   taskId: string;
   branch: string;
-  loaderPath: string;
   fakeCodexPath: string;
   baseSha: string;
 }
@@ -100,8 +82,7 @@ async function fixture(name: string): Promise<Fixture> {
   const repository = join(root, "repository");
   const remote = join(root, "remote.git");
   const stateDirectory = join(root, "state");
-  const loaderPath = join(root, "codex-loader.mjs");
-  const fakeCodexPath = join(root, "fake-codex.mjs");
+  const fakeCodexPath = join(root, "bin", "codex");
   const taskId = `server-milestone-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const branch = `agent/${taskId}`;
 
@@ -141,8 +122,9 @@ async function fixture(name: string): Promise<Fixture> {
   await execa("git", ["add", "task.json"], { cwd: repository });
   await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
   await execa("git", ["init", "--bare", remote]);
-  await writeFile(loaderPath, fakeCodexRedirectLoader);
-  await writeFile(fakeCodexPath, fakeCodexLoader);
+  await mkdir(join(root, "bin"));
+  await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart"), { mode: 0o755 });
+  await chmod(fakeCodexPath, 0o755);
   return {
     root,
     repository,
@@ -151,7 +133,6 @@ async function fixture(name: string): Promise<Fixture> {
     stateDirectory,
     taskId,
     branch,
-    loaderPath,
     fakeCodexPath,
     baseSha,
   };
@@ -247,7 +228,7 @@ async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
 function environment(
   fixture: Fixture,
   forge: ForgeServer,
-  mode: "complete" | "kill",
+  _mode: "complete" | "kill",
 ): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: fixture.stateDirectory,
@@ -257,9 +238,7 @@ function environment(
     USINE_GITHUB_TEST_TOKEN: "test-token",
     USINE_GITHUB_API_URL: forge.url,
     USINE_GITHUB_GIT_URL: fixture.remote,
-    USINE_FAKE_CODEX_MODULE: fixture.fakeCodexPath,
-    USINE_CODEX_MODE: mode,
-    USINE_CODEX_MARKER: join(fixture.root, "activation.marker"),
+    PATH: `${join(fixture.root, "bin")}:${process.env.PATH ?? ""}`,
     USINE_SERVER_HOST: "127.0.0.1",
     USINE_SERVER_PORT: "0",
   };
@@ -271,11 +250,10 @@ async function startServer(
   forge: ForgeServer,
   mode: "complete" | "kill",
 ): Promise<UsineProcess> {
-  const child = execa(
-    "node",
-    ["--no-warnings", "--experimental-loader", fixture.loaderPath, cliPath, "server"],
-    { env: environment(fixture, forge, mode), reject: false },
-  );
+  const child = execa("node", ["--no-warnings", cliPath, "server"], {
+    env: environment(fixture, forge, mode),
+    reject: false,
+  });
   const url = await new Promise<string>((resolve, reject) => {
     let buffer = "";
     child.stdout?.on("data", (chunk) => {
@@ -324,15 +302,11 @@ async function runCli(
   argument: string,
   mode: "complete" | "kill" = "complete",
 ) {
-  return execa(
-    "node",
-    ["--no-warnings", "--experimental-loader", fixture.loaderPath, cliPath, command, argument],
-    {
-      cwd: fixture.repository,
-      env: { ...environment(fixture, forge, mode), USINE_SERVER_URL: serverUrl },
-      reject: false,
-    },
-  );
+  return execa("node", ["--no-warnings", cliPath, command, argument], {
+    cwd: fixture.repository,
+    env: { ...environment(fixture, forge, mode), USINE_SERVER_URL: serverUrl },
+    reject: false,
+  });
 }
 
 async function waitForStatus(
@@ -363,6 +337,26 @@ async function waitForMarker(path: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("timed out waiting for the Codex turn marker");
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function reapFixtureProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // The recovered server may already have reaped the fixture process.
+  }
 }
 
 describe("server-owned delivery milestone", () => {
@@ -460,7 +454,11 @@ describe("server-owned delivery milestone", () => {
         first.url,
         (result) => result.activeActivation === 1,
       );
-      await waitForMarker(join(fixtureValue.root, "activation.marker"));
+      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      const descendantPid = Number(
+        await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+      );
+      expect(processAlive(descendantPid)).toBe(true);
       await stopServer(first, "SIGKILL");
       firstStopped = true;
 
@@ -492,6 +490,21 @@ describe("server-owned delivery milestone", () => {
         expect(
           await git(fixtureValue.remote, "rev-parse", `refs/heads/${fixtureValue.branch}`),
         ).toBe(terminal.candidateSha);
+        expect(processAlive(descendantPid)).toBe(false);
+        await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await expect(
+          readFile(
+            join(
+              fixtureValue.stateDirectory,
+              "workspaces",
+              fixtureValue.taskId,
+              "1-1",
+              "stale-after-loss",
+            ),
+            "utf8",
+          ),
+        ).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         await stopServer(second);
       }
@@ -499,6 +512,61 @@ describe("server-owned delivery milestone", () => {
       if (!firstStopped) {
         await stopServer(first).catch(() => undefined);
       }
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("blocks recovery rather than grant a writer when launch ownership is incomplete", async () => {
+    const fixtureValue = await fixture("restart");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const first = await startServer(cliPath, fixtureValue, forge, "kill");
+    let codexPid: number | null = null;
+    try {
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "submit",
+        fixtureValue.contractPath,
+        "kill",
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      const oldWorkspace = join(
+        fixtureValue.stateDirectory,
+        "workspaces",
+        fixtureValue.taskId,
+        "1-1",
+      );
+      await writeFile(
+        codexExecutionIdentityPath(fixtureValue.stateDirectory, oldWorkspace),
+        JSON.stringify({ version: 1, state: "starting", workspace: oldWorkspace }),
+      );
+      await stopServer(first, "SIGKILL");
+      const second = await startServer(cliPath, fixtureValue, forge, "complete");
+      try {
+        const follow = await runCli(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          "follow",
+          fixtureValue.taskId,
+        );
+        expect(follow.exitCode, follow.stderr).toBe(0);
+        expect(JSON.parse(follow.stdout)).toMatchObject({
+          state: "blocked",
+          evidence: { implementerActivations: 1, restartRecoveries: 0 },
+        });
+      } finally {
+        await stopServer(second);
+      }
+    } finally {
+      if (codexPid) reapFixtureProcessGroup(codexPid);
+      await stopServer(first).catch(() => undefined);
       await forge.close();
     }
   }, 60_000);
