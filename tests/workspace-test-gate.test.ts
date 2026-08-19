@@ -28,7 +28,7 @@ test("the root test command covers the root suite and declared package test scri
   );
 
   expect(root.scripts?.test).toBe(
-    "vp test && vp run --filter './packages/*' --filter './apps/*' test",
+    "vp run --filter '@usine/cli...' build && vp test && vp run --filter './packages/*' --filter './apps/*' test",
   );
   expect(
     packages.filter((manifest) => manifest.scripts?.test).map((manifest) => manifest.name),
