@@ -24,13 +24,16 @@ export type RuntimeDatabase = SqliteRemoteDatabase<{
   taskRuns: typeof taskRuns;
 }>;
 
-export function openSqliteDatabase(path: string): {
+export function openSqliteDatabase(
+  path: string,
+  options: { readOnly?: boolean } = {},
+): {
   database: RuntimeDatabase;
   close: () => void;
   exclusiveTransaction: <T>(transaction: () => Promise<T>) => Promise<T>;
   migrate: (queries: string[]) => Promise<void>;
 } {
-  const client = new DatabaseSync(path, { timeout: 5_000 });
+  const client = new DatabaseSync(path, { timeout: 5_000, readOnly: options.readOnly ?? false });
   const execute: RemoteCallback = async (query, params, method) => {
     const statement = client.prepare(query);
     const values = params as SQLInputValue[];

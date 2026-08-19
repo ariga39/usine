@@ -33,15 +33,22 @@ export interface RuntimePolicy {
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
 }
 
+export function stateDirectoryFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  homeDirectory = homedir(),
+): string {
+  const userStateDirectory =
+    environment.XDG_STATE_HOME?.trim() || join(homeDirectory, ".local", "state");
+  return environment.USINE_STATE_DIR?.trim() || join(userStateDirectory, "usine");
+}
+
 export function runtimePolicyFromEnvironment(
   environment: NodeJS.ProcessEnv,
   repository: { owner: string; name: string },
   homeDirectory = homedir(),
 ): RuntimePolicy {
   const stopAfterAdmitted = environment.USINE_STOP_AFTER === "admitted";
-  const userStateDirectory =
-    environment.XDG_STATE_HOME?.trim() || join(homeDirectory, ".local", "state");
-  const stateDirectory = environment.USINE_STATE_DIR?.trim() || join(userStateDirectory, "usine");
+  const stateDirectory = stateDirectoryFromEnvironment(environment, homeDirectory);
   const roles = {
     implementer: {
       ...defaultRolePolicies.implementer,
