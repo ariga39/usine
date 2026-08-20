@@ -22,6 +22,7 @@ export const repositories = sqliteTable("repositories", {
   baseBranch: text("base_branch").notNull(),
   implementerProfile: text("implementer_profile").notNull(),
   reviewerProfile: text("reviewer_profile").notNull(),
+  forgeProfile: text("forge_profile").notNull(),
   projectCheckCommand: text("project_check_command").notNull(),
   projectCheckTimeoutMs: integer("project_check_timeout_ms").notNull(),
   gitAuthorName: text("git_author_name").notNull(),

@@ -64,6 +64,13 @@
       "when": 1787356800000,
       "tag": "0008_repository_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787356800001,
+      "tag": "0009_forge_access_profile",
+      "breakpoints": true
     }
   ]
 }

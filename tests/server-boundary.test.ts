@@ -83,6 +83,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "main",
         implementerProfile: "writer-profile",
         reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
@@ -120,6 +121,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "release",
         implementerProfile: "updated-writer-profile",
         reviewerProfile: "updated-reviewer-profile",
+        forgeProfile: "default",
         projectCheck: { command: "false", timeoutMs: 2_000 },
         gitAuthor: { name: "Updated Bot", email: "updated@example.invalid" },
       });
@@ -127,6 +129,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "release",
         implementerProfile: "updated-writer-profile",
         reviewerProfile: "updated-reviewer-profile",
+        forgeProfile: "default",
         projectCheck: { command: "false", timeoutMs: 2_000 },
       });
       const admittedAgain = await submitTask(server.url, { contractPath, repositoryId: taskId });
@@ -209,6 +212,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "main",
         implementerProfile: profiles[0],
         reviewerProfile: profiles[1],
+        forgeProfile: "default",
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
@@ -249,6 +253,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "main",
         implementerProfile: "one-writer-updated",
         reviewerProfile: "one-reviewer-updated",
+        forgeProfile: "default",
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
