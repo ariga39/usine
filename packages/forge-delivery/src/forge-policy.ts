@@ -77,7 +77,7 @@ export class ForgeAuthenticationError extends Error {
 
 function providerStatusOf(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null || !("status" in error)) return undefined;
-  const status = (error as { status: unknown }).status;
+  const status = error.status;
   return typeof status === "number" && Number.isFinite(status) ? status : undefined;
 }
 
