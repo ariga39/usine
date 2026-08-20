@@ -270,6 +270,7 @@ export async function executeAdmittedTask(
       authority,
       deadlineEpochMs: existing.deadlineEpochMs,
       onProgress,
+      signal,
     });
   } catch (error) {
     if (signal?.aborted) throw error;
