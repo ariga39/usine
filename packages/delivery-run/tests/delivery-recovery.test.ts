@@ -177,6 +177,29 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("requires a typed fresh-review observation from Quality Gate", () => {
+    const legacyQuality = {
+      check: async () => ({
+        sha,
+        status: "passed" as const,
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+      review: async () => ({
+        sha,
+        verdict: "approved" as const,
+        summary: "approved",
+        findings: [],
+      }),
+    };
+
+    // @ts-expect-error Delivery Run must not accept the legacy verdict-only callback.
+    const quality: DeliveryRunServices["quality"] = legacyQuality;
+    expect(quality).toBe(legacyQuality);
+  });
+
   test("records typed observations for all four delivery attempt kinds", async () => {
     const id = `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fake = fakeAuthority(persistedResult("admitted", id));
@@ -220,11 +243,14 @@ describe("Delivery Run durable phase recovery", () => {
             stdout: "",
             stderr: "",
           }),
-          review: async (_contract, candidateSha) => ({
-            sha: candidateSha,
-            verdict: "approved" as const,
-            summary: "approved",
-            findings: [],
+          reviewWithObservation: async (_contract, candidateSha) => ({
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved",
+              findings: [],
+            },
+            usage: { inputTokens: 5, outputTokens: 3 },
           }),
         },
         forge: {
@@ -266,6 +292,7 @@ describe("Delivery Run durable phase recovery", () => {
       role: "reviewer",
       outcome: "succeeded",
       candidateSha: sha,
+      tokenUsage: { inputTokens: 5, outputTokens: 3 },
     });
     expect(fake.getHistory()[3]).toMatchObject({
       outcome: "succeeded",
@@ -294,7 +321,7 @@ describe("Delivery Run durable phase recovery", () => {
             check: async () => {
               throw new Error("check should not start");
             },
-            review: async () => {
+            reviewWithObservation: async () => {
               throw new Error("review should not start");
             },
           },
@@ -388,7 +415,7 @@ describe("Delivery Run durable phase recovery", () => {
             stdout: "",
             stderr: "budget exhausted while checking candidate",
           }),
-          review: async () => {
+          reviewWithObservation: async () => {
             throw new Error("failed candidate must not be reviewed");
           },
         },
@@ -412,7 +439,7 @@ describe("Delivery Run durable phase recovery", () => {
             check: async () => {
               throw new Error("terminal task must not be checked");
             },
-            review: async () => {
+            reviewWithObservation: async () => {
               throw new Error("terminal task must not be reviewed");
             },
           },
@@ -469,7 +496,7 @@ describe("Delivery Run durable phase recovery", () => {
           stderr: "",
         };
       },
-      review: async () => {
+      reviewWithObservation: async () => {
         throw new Error("failed candidate must not be reviewed");
       },
     };
@@ -589,13 +616,16 @@ describe("Delivery Run durable phase recovery", () => {
               stderr: "",
             };
           },
-          review: async (_contract: TaskContract, candidateSha: string) => {
+          reviewWithObservation: async (_contract: TaskContract, candidateSha: string) => {
             reviewed.push(candidateSha);
             return {
-              sha: candidateSha,
-              verdict: "approved" as const,
-              summary: "approved",
-              findings: [],
+              review: {
+                sha: candidateSha,
+                verdict: "approved" as const,
+                summary: "approved",
+                findings: [],
+              },
+              usage: null,
             };
           },
         },
@@ -643,13 +673,16 @@ describe("Delivery Run durable phase recovery", () => {
             stderr: "",
           };
         },
-        review: async (_contract: TaskContract, candidateSha: string) => {
+        reviewWithObservation: async (_contract: TaskContract, candidateSha: string) => {
           reviewed.push(candidateSha);
           return {
-            sha: candidateSha,
-            verdict: "approved" as const,
-            summary: "approved",
-            findings: [],
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved",
+              findings: [],
+            },
+            usage: null,
           };
         },
       };
@@ -704,7 +737,7 @@ describe("Delivery Run durable phase recovery", () => {
           check: async () => {
             throw new Error("unexpected check");
           },
-          review: async () => {
+          reviewWithObservation: async () => {
             throw new Error("unexpected review");
           },
         },
@@ -759,7 +792,7 @@ describe("Delivery Run durable phase recovery", () => {
             check: async () => {
               throw new Error("unexpected check");
             },
-            review: async () => {
+            reviewWithObservation: async () => {
               throw new Error("unexpected review");
             },
           },
@@ -775,7 +808,7 @@ describe("Delivery Run durable phase recovery", () => {
           check: async () => {
             throw new Error("unexpected check");
           },
-          review: async () => {
+          reviewWithObservation: async () => {
             throw new Error("unexpected review");
           },
         },

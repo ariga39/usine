@@ -259,11 +259,14 @@ describe.sequential("Forge Delivery controlled protocol", () => {
             stdout: "",
             stderr: "",
           }),
-          review: async (_contract: TaskContract, sha: string) => ({
-            sha,
-            verdict: "approved" as const,
-            summary: "approved",
-            findings: [],
+          reviewWithObservation: async (_contract: TaskContract, sha: string) => ({
+            review: {
+              sha,
+              verdict: "approved" as const,
+              summary: "approved",
+              findings: [],
+            },
+            usage: null,
           }),
         },
         forge: forge(fixture.repository, apiUrl, fixture.remote),
@@ -397,7 +400,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
           check: async () => {
             throw new Error("terminal task must not check");
           },
-          review: async () => {
+          reviewWithObservation: async () => {
             throw new Error("terminal task must not review");
           },
         },
