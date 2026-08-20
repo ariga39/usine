@@ -140,13 +140,13 @@ describe("Coding Session", () => {
       NPM_TOKEN: "package-secret",
       PATH: "/portable/bin",
       LANG: "C",
-      CODEX_HOME: "/private/codex-home",
+      CODEX_HOME: "codex-home-sentinel",
     });
     expect(env).toEqual({
       CI: "true",
       PATH: "/portable/bin",
       LANG: "C",
-      CODEX_HOME: "/private/codex-home",
+      CODEX_HOME: "codex-home-sentinel",
     });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");

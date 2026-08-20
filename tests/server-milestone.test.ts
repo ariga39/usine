@@ -145,8 +145,8 @@ async function fixture(name: string): Promise<Fixture> {
   await execa("git", ["init", "--bare", remote]);
   await mkdir(join(root, "bin"));
   await mkdir(codexHome);
-  await writeFile(join(codexHome, "writer-profile.config.toml"), 'model = "gpt-5"\n');
-  await writeFile(join(codexHome, "reviewer-profile.config.toml"), 'model = "gpt-5"\n');
+  await writeFile(join(codexHome, "writer-profile.config.toml"), "# test profile\n");
+  await writeFile(join(codexHome, "reviewer-profile.config.toml"), "# test profile\n");
   await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart"), { mode: 0o755 });
   await chmod(fakeCodexPath, 0o755);
   return {
