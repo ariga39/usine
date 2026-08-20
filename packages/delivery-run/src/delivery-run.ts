@@ -6,7 +6,7 @@ import type {
   SessionRequest,
 } from "@usine/coding-session";
 import type { ReviewAttemptObservation } from "@usine/quality-gate";
-import { DeliveryQuarantineError } from "@usine/forge-delivery";
+import { DeliveryQuarantineError, ForgeAuthenticationError } from "@usine/forge-delivery";
 import {
   deadlineExpired,
   type AuthorityInput,
@@ -361,7 +361,7 @@ export async function executeDeliveryRun(
           endedAtEpochMs: Date.now(),
           outcome: input.signal?.aborted
             ? "cancelled"
-            : error instanceof DeliveryQuarantineError
+            : error instanceof DeliveryQuarantineError || error instanceof ForgeAuthenticationError
               ? "blocked"
               : "failed",
           failure: error instanceof Error ? error.message : String(error),
@@ -370,7 +370,7 @@ export async function executeDeliveryRun(
           tokenUsage: null,
         });
         if (input.signal?.aborted) throw error;
-        if (error instanceof DeliveryQuarantineError)
+        if (error instanceof DeliveryQuarantineError || error instanceof ForgeAuthenticationError)
           return blockTask(runServices, result, error.message);
         throw error;
       }

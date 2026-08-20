@@ -177,6 +177,22 @@ function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDeliver
   });
 }
 
+function appForge(repository: string, privateKeyPath: string): ForgeDelivery {
+  return new ForgeDelivery({
+    repository,
+    deadlineEpochMs: Date.now() + 60_000,
+    forge: {
+      mode: "app",
+      appSlug: "usine-app",
+      appId: "1",
+      installationId: 1,
+      privateKeyPath,
+      gitUrl: "https://github.com/owner/repo.git",
+    },
+    environment: process.env,
+  });
+}
+
 const passingCheck = {
   sha: "",
   status: "passed" as const,
@@ -420,6 +436,109 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     } finally {
       database.close();
       globalThis.fetch = originalFetch;
+    }
+  }, 30_000);
+
+  test("durably hides a missing Forge private-key path from auth failure surfaces", async () => {
+    const fixture = await repositoryFixture();
+    const task = { ...contract("forge-auth-capability"), baseSha: fixture.actualBaseSha };
+    const input = {
+      contract: task,
+      contractHash: "forge-auth-capability-contract",
+      repositoryIdentity: "owner/repo",
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer: {
+        role: "implementer" as const,
+        profile: "implementer-profile",
+        sandbox: "workspace-write" as const,
+      },
+    };
+    const privateKeyPath = join(fixture.root, "distinctive-missing-private-key.pem");
+    const forgeDelivery = appForge(fixture.repository, privateKeyPath);
+    const check = { ...passingCheck, sha: fixture.candidateSha };
+    const review = { ...approvedReview, sha: fixture.candidateSha };
+
+    await expect(
+      forgeDelivery.deliver(task, fixture.candidateSha, check, review),
+    ).rejects.toMatchObject({
+      name: "ForgeAuthenticationError",
+      code: "forge_authentication_failed",
+      message: "forge authentication capability is unavailable",
+    });
+    await expect(
+      forgeDelivery.deliver(task, fixture.candidateSha, check, review),
+    ).rejects.not.toThrow(privateKeyPath);
+
+    const databasePath = join(fixture.root, "state.sqlite");
+    await applyMigrations(databasePath);
+    const database = openSqliteDatabase(databasePath);
+    const authority = new TaskAuthority(database.database);
+    const admitted = await authority.admit({
+      contract: task,
+      contractHash: input.contractHash,
+      repositoryIdentity: input.repositoryIdentity,
+      deadlineEpochMs: input.deadlineEpochMs,
+    });
+    const activation = await authority.reserveActivation(task.id, 1);
+    const candidate = await authority.recordCandidate(
+      { taskId: admitted.taskId, revision: activation.result.revision },
+      { sha: fixture.candidateSha, baseSha: fixture.actualBaseSha, fence: activation.activation },
+    );
+    const checked = await authority.recordCheck(
+      { taskId: candidate.taskId, revision: candidate.revision },
+      check,
+    );
+    await authority.recordReview({ taskId: checked.taskId, revision: checked.revision }, review);
+    const progress: Array<{ state: string }> = [];
+    try {
+      const result = await executeDeliveryRun(input, {
+        authority,
+        workspace: {
+          quarantinePriorWriters: async () => undefined,
+          prepareWriter: async () => {
+            throw new Error("auth failure must not prepare a writer");
+          },
+          freeze: async () => {
+            throw new Error("auth failure must not freeze a candidate");
+          },
+          quarantine: async () => {
+            throw new Error("auth failure must not quarantine a workspace");
+          },
+        },
+        session: {
+          run: async () => {
+            throw new Error("auth failure must not start a session");
+          },
+        },
+        quality: {
+          check: async () => {
+            throw new Error("auth failure must not check");
+          },
+          reviewWithObservation: async () => {
+            throw new Error("auth failure must not review");
+          },
+        },
+        forge: forgeDelivery,
+        onProgress: (value) => progress.push(value),
+      });
+
+      expect(result.state).toBe("blocked");
+      expect(result.blocker).toBe("forge authentication capability is unavailable");
+      expect(result.blocker).not.toContain(privateKeyPath);
+      const history = await authority.listHistory(result.taskId);
+      expect(history.at(-1)).toMatchObject({
+        kind: "forge_delivery",
+        outcome: "blocked",
+        failure: "forge authentication capability is unavailable",
+      });
+      expect(history.at(-1)?.failure).not.toContain(privateKeyPath);
+      const status = await authority.lookupStatus(result.taskId);
+      expect(status?.state).toBe("blocked");
+      expect(JSON.stringify(status)).not.toContain(privateKeyPath);
+      expect(progress.at(-1)?.state).toBe("blocked");
+      expect(JSON.stringify(history)).not.toContain(privateKeyPath);
+    } finally {
+      database.close();
     }
   }, 30_000);
 });
