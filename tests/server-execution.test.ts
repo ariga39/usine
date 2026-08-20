@@ -145,7 +145,7 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 
 describe("server-owned execution", () => {
   test("persists restart and owner-change facts in the bounded status history", async () => {
-    const { contractPath, stateDirectory, repositoryName } = await fixture();
+    const { contractPath, stateDirectory } = await fixture();
     const rawContract = await readFile(contractPath, "utf8");
     const contract = JSON.parse(rawContract) as TaskContract;
     const databasePath = join(stateDirectory, "usine.sqlite");
