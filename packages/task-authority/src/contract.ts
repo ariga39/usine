@@ -1,35 +1,16 @@
 import { z } from "zod";
+import type { RepositorySnapshot } from "./repository.js";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
 
-function isMachineSpecificAbsolutePath(value: string): boolean {
-  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:/.test(value);
-}
-
-function hasParentDirectorySegment(value: string): boolean {
-  return /(?:^|[\\/])\.\.(?:$|[\\/])/.test(value);
-}
-
-const repositoryPath = z
+const repositoryId = z
   .string()
-  .min(1)
-  .refine((value) => !isMachineSpecificAbsolutePath(value) && !hasParentDirectorySegment(value), {
-    message:
-      "must be a repository-relative path; absolute and parent-directory paths are not allowed",
-  });
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
+    "must be a safe durable repository identifier of at most 128 characters",
+  );
 
-const repositoryIdentity = z
-  .string()
-  .min(1)
-  .refine((value) => value.trim().length > 0, {
-    message: "must not be blank",
-  });
-
-function isCanonicalGitHubIssueSource(
-  source: unknown,
-  repository: { owner: string; name: string },
-  issue: number,
-): boolean {
+function isCanonicalGitHubIssueSource(source: unknown, issue: number): boolean {
   if (typeof source !== "string") return false;
 
   let url: URL;
@@ -61,8 +42,8 @@ function isCanonicalGitHubIssueSource(
     name !== undefined &&
     kind === "issues" &&
     number === String(issue) &&
-    owner.toLowerCase() === repository.owner.toLowerCase() &&
-    name.toLowerCase() === repository.name.toLowerCase()
+    owner.length > 0 &&
+    name.length > 0
   );
 }
 
@@ -74,19 +55,11 @@ export const taskContractSchema = z
         /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
         "must be a safe durable identifier of at most 128 characters",
       ),
-    repository: z.object({
-      path: repositoryPath,
-      owner: repositoryIdentity,
-      name: repositoryIdentity,
-    }),
+    repositoryId,
     baseSha: sha,
     instructions: z.string().min(1),
     acceptance: z.array(z.string().min(1)).min(1),
     nonGoals: z.array(z.string().min(1)),
-    projectCheck: z.object({
-      command: z.string().min(1),
-      timeoutMs: z.number().int().positive(),
-    }),
     budget: z.object({
       maxImplementerActivations: z.number().int().min(1).max(2),
       maxReviewCycles: z.number().int().min(1).max(2),
@@ -97,12 +70,6 @@ export const taskContractSchema = z
       delivery: z.literal(true),
     }),
     delivery: z.object({
-      baseBranch: z
-        .string()
-        .min(1)
-        .refine((value) => value.trim().length > 0, {
-          message: "must not be blank",
-        }),
       branch: z
         .string()
         .min(1)
@@ -116,14 +83,8 @@ export const taskContractSchema = z
   })
   .strict()
   .superRefine((contract, context) => {
-    if (!contract.authorization || !contract.repository || !contract.delivery) return;
-    if (
-      !isCanonicalGitHubIssueSource(
-        contract.authorization.source,
-        contract.repository,
-        contract.delivery.issue,
-      )
-    ) {
+    if (!contract.authorization || !contract.delivery) return;
+    if (!isCanonicalGitHubIssueSource(contract.authorization.source, contract.delivery.issue)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["authorization", "source"],
@@ -134,6 +95,37 @@ export const taskContractSchema = z
   });
 
 export type TaskContract = z.infer<typeof taskContractSchema>;
+
+export type ResolvedTaskContract = Omit<TaskContract, "delivery"> & {
+  repository: Pick<RepositorySnapshot, "path" | "owner" | "name">;
+  projectCheck: RepositorySnapshot["projectCheck"];
+  delivery: TaskContract["delivery"] & { baseBranch: string };
+};
+
+export function resolveTaskContract(
+  contract: TaskContract,
+  repository: RepositorySnapshot,
+): ResolvedTaskContract {
+  if (contract.repositoryId !== repository.id)
+    throw new Error("task repository ID does not match the registered repository");
+  const source = new URL(contract.authorization.source);
+  const [leading, owner, name, kind, issue] = source.pathname.split("/");
+  if (
+    leading !== "" ||
+    owner?.toLowerCase() !== repository.owner.toLowerCase() ||
+    name?.toLowerCase() !== repository.name.toLowerCase() ||
+    kind !== "issues" ||
+    issue !== String(contract.delivery.issue)
+  ) {
+    throw new Error("task authorization does not match the registered repository");
+  }
+  return {
+    ...contract,
+    repository: { path: repository.path, owner: repository.owner, name: repository.name },
+    projectCheck: { ...repository.projectCheck },
+    delivery: { ...contract.delivery, baseBranch: repository.baseBranch },
+  };
+}
 
 export function contractIssues(error: z.ZodError): Array<{ path: string; message: string }> {
   return error.issues.map((issue) => ({

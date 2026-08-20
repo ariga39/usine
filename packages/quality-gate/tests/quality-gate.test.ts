@@ -6,9 +6,9 @@ import { expect, test } from "vite-plus/test";
 import { reviewerOutputSchema } from "@usine/coding-session";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { QualityGate } from "@usine/quality-gate";
-import type { TaskContract } from "@usine/task-authority";
+import type { ResolvedTaskContract } from "@usine/task-authority";
 
-const contract = { id: "quality-test" } as TaskContract;
+const contract = { id: "quality-test" } as ResolvedTaskContract;
 const testEnvironment = {
   ...credentialFreeGitEnvironment(process.env),
   CI: "true",
@@ -28,6 +28,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   const base = (await execa("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
   const task = {
     ...contract,
+    repositoryId: "repo",
     repository: { path: repository, owner: "owner", name: "repo" },
     baseSha: base,
     instructions: "Review",
@@ -40,7 +41,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 30_000 },
     authorization: { source: "test", delivery: true },
     delivery: { baseBranch: "main", branch: "agent/test", issue: 1, title: "test", body: "test" },
-  } as TaskContract;
+  } as ResolvedTaskContract;
   const workspace = new CandidateWorkspace({
     repository,
     stateDirectory: join(root, "state"),
@@ -154,7 +155,7 @@ test("cancels a running project check subprocess without recording a check fact"
       command: "sleep 10",
       timeoutMs: 20_000,
     },
-  } as TaskContract;
+  } as ResolvedTaskContract;
   const pending = gate.check(task, "a".repeat(40), 1);
   setTimeout(() => controller.abort(), 25);
   await expect(pending).rejects.toThrow();

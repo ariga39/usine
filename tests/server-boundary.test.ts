@@ -5,6 +5,7 @@ import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
+import { inspectRepository, registerRepository } from "../apps/cli/src/server-client.js";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
@@ -37,19 +38,17 @@ describe("CLI/server boundary", () => {
     const contractPath = join(repository, "task.json");
     const contract: TaskContract = {
       id: taskId,
-      repository: { path: ".", owner: "example", name: taskId },
+      repositoryId: taskId,
       baseSha,
       instructions: "Exercise the local server boundary.",
       acceptance: ["The server owns admission."],
       nonGoals: [],
-      projectCheck: { command: "true", timeoutMs: 1_000 },
       budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
       authorization: {
         source: `https://github.com/example/${taskId}/issues/153`,
         delivery: true,
       },
       delivery: {
-        baseBranch: "main",
         branch: `agent/${taskId}`,
         issue: 153,
         title: "Server boundary",
@@ -64,8 +63,6 @@ describe("CLI/server boundary", () => {
     const server = await startUsineServer({
       environment: {
         USINE_STATE_DIR: stateDirectory,
-        USINE_GIT_AUTHOR_NAME: "Release Bot",
-        USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
       },
       execute: async ({ result }) => result,
       host: "127.0.0.1",
@@ -73,13 +70,41 @@ describe("CLI/server boundary", () => {
     });
 
     try {
+      await registerRepository(server.url, {
+        id: taskId,
+        path: repository,
+        owner: "example",
+        name: taskId,
+        baseBranch: "main",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+      });
       const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
       const submit = await execa("node", [cliPath, "submit", contractPath], {
         cwd: repository,
         env: { USINE_SERVER_URL: server.url },
       });
       const submitted = JSON.parse(submit.stdout);
-      expect(submitted).toMatchObject({ taskId, state: "admitted" });
+      expect(submitted).toMatchObject({
+        taskId,
+        state: "admitted",
+        repository: {
+          id: taskId,
+          path: repository,
+          owner: "example",
+          name: taskId,
+          baseBranch: "main",
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+        },
+      });
+
+      await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
+        id: taskId,
+        path: repository,
+        owner: "example",
+        name: taskId,
+      });
 
       const status = await execa("node", [cliPath, "status", taskId], {
         cwd: root,

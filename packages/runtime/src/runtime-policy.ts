@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { credentialFreeGitEnvironment, type GitAuthor } from "@usine/candidate-workspace";
+import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { explicitWorkerEnvironment, type RolePolicy } from "@usine/coding-session";
 import type { ForgePolicy } from "@usine/forge-delivery";
 
@@ -21,7 +21,6 @@ const defaultRolePolicies = {
 
 export interface RuntimePolicy {
   stateDirectory: string;
-  gitAuthor: GitAuthor;
   roles: {
     implementer: RolePolicy;
     reviewer: RolePolicy;
@@ -60,30 +59,15 @@ export function runtimePolicyFromEnvironment(
     },
   };
 
-  const gitAuthor = parseGitAuthor(environment);
   const forge = parseForgePolicy(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
   return {
     stateDirectory,
-    gitAuthor,
     roles,
     forge,
     workerEnvironment,
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
   };
-}
-
-function parseGitAuthor(environment: NodeJS.ProcessEnv): GitAuthor {
-  const name = environment.USINE_GIT_AUTHOR_NAME?.trim();
-  const email = environment.USINE_GIT_AUTHOR_EMAIL?.trim();
-  if (!name || !email) {
-    const missing = [
-      name ? null : "USINE_GIT_AUTHOR_NAME",
-      email ? null : "USINE_GIT_AUTHOR_EMAIL",
-    ].filter((key): key is string => key !== null);
-    throw new Error(`Git author identity requires ${missing.join(" and ")}`);
-  }
-  return { name, email };
 }
 
 function parseForgePolicy(

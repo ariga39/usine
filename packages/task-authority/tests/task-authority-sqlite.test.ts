@@ -22,16 +22,14 @@ afterEach(() => {
 function makeContract(taskId: string): TaskContract {
   return {
     id: taskId,
-    repository: { path: ".", owner: "authority", name: "shared" },
+    repositoryId: "authority-repository",
     baseSha: "a".repeat(40),
     instructions: "exercise task authority",
     acceptance: ["authority is correct"],
     nonGoals: [],
-    projectCheck: { command: "true", timeoutMs: 1_000 },
     budget: { maxImplementerActivations: 3, maxReviewCycles: 2, maxElapsedMs: 30_000 },
     authorization: { source: "authority test", delivery: true },
     delivery: {
-      baseBranch: "main",
       branch: `agent/${taskId}`,
       issue: 80,
       title: "authority test",
@@ -281,7 +279,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       },
       {
         contractPath: "repository/task.json",
-        repositoryPath: "repository",
         rawContract,
       },
     );

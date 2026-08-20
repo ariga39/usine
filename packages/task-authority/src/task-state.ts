@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { TaskContract } from "./contract.js";
+import type { RepositorySnapshot } from "./repository.js";
 
 export type TaskState =
   | "admitted"
@@ -51,6 +52,8 @@ export interface TaskResult {
   blocker: string | null;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
+  /** Resolved repository facts frozen at admission for restart and audit. */
+  repository?: RepositorySnapshot;
   evidence: {
     implementerActivations: number;
     reviewCycles: number;
@@ -102,13 +105,13 @@ export interface AuthorityInput {
   contract: TaskContract;
   contractHash: string;
   repositoryIdentity: string;
+  repository?: RepositorySnapshot;
   deadlineEpochMs: number;
 }
 
 /** Local input needed to re-enter an admitted task after a server restart. */
 export interface TaskExecutionInput {
   contractPath: string;
-  repositoryPath: string;
   rawContract: string;
 }
 

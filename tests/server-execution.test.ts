@@ -8,6 +8,7 @@ import {
   lookupTaskStatus,
   recordExecutionObservation,
   startUsineServer,
+  registerRepository,
   type ServerExecutionContext,
 } from "@usine/runtime";
 import { submitTask, taskStatus, type TaskSubmission } from "../apps/cli/src/server-client.js";
@@ -18,6 +19,7 @@ import {
   TaskAuthority,
   type TaskContract,
   type TaskResult,
+  type RepositorySnapshot,
 } from "@usine/task-authority";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -44,19 +46,17 @@ async function fixture(): Promise<{
   const contractPath = join(repository, "task.json");
   const contract: TaskContract = {
     id: taskId,
-    repository: { path: ".", owner: "example", name: taskId },
+    repositoryId: taskId,
     baseSha,
     instructions: "Exercise server-owned execution.",
     acceptance: ["The server owns execution."],
     nonGoals: [],
-    projectCheck: { command: "true", timeoutMs: 1_000 },
     budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 60_000 },
     authorization: {
       source: `https://github.com/example/${taskId}/issues/153`,
       delivery: true,
     },
     delivery: {
-      baseBranch: "main",
       branch: `agent/${taskId}`,
       issue: 153,
       title: "Server execution",
@@ -67,12 +67,22 @@ async function fixture(): Promise<{
   await writeFile(contractPath, rawContract);
   await execa("git", ["add", "task.json"], { cwd: repository });
   await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+  const repositorySnapshot: RepositorySnapshot = {
+    id: taskId,
+    path: repository,
+    owner: "example",
+    name: taskId,
+    baseBranch: "main",
+    projectCheck: { command: "true", timeoutMs: 1_000 },
+    gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+  };
+  await registerRepository(stateDirectory, repositorySnapshot);
   return {
     contractPath,
     stateDirectory,
     submission: {
       contractPath,
-      repositoryPath: repository,
+      repositoryId: taskId,
     },
   };
 }
@@ -140,9 +150,18 @@ describe("server-owned execution", () => {
         contract,
         contractHash: hashTaskContract(rawContract),
         repositoryIdentity: `example/${contract.id}`,
+        repository: {
+          id: contract.repositoryId,
+          path: join(stateDirectory, "..", "repository"),
+          owner: "example",
+          name: contract.id,
+          baseBranch: "main",
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+        },
         deadlineEpochMs: Date.now() + 60_000,
       },
-      { contractPath, repositoryPath: contract.repository.path, rawContract },
+      { contractPath, rawContract },
     );
     handle.close();
 
@@ -292,7 +311,7 @@ describe("server-owned execution", () => {
         corruptTaskId,
         JSON.stringify(corruptResult),
         contractPath,
-        submission.repositoryPath,
+        submission.repositoryId ?? "",
         "{ invalid contract",
       );
     database

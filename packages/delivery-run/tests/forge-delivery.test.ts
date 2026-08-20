@@ -8,7 +8,7 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   taskContractSchema,
-  type TaskContract,
+  type ResolvedTaskContract,
 } from "@usine/task-authority";
 import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { ForgeDelivery } from "@usine/forge-delivery";
@@ -42,25 +42,29 @@ type ForgeServerState = {
   requests: string[];
 };
 
-function contract(id: string): TaskContract {
-  return taskContractSchema.parse({
+function contract(id: string): ResolvedTaskContract {
+  const parsed = taskContractSchema.parse({
     id,
-    repository: { path: ".", owner: "owner", name: "repo" },
+    repositoryId: "repo",
     baseSha,
     instructions: "deliver the candidate",
     acceptance: ["the candidate is delivered"],
     nonGoals: [],
-    projectCheck: { command: "true", timeoutMs: 10_000 },
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
     authorization: { source: "https://github.com/owner/repo/issues/100", delivery: true },
     delivery: {
-      baseBranch: "main",
       branch: "agent/forge-e2e",
       issue: 100,
       title: "Forge delivery",
       body: "Forge delivery",
     },
   });
+  return {
+    ...parsed,
+    repository: { path: ".", owner: "owner", name: "repo" },
+    projectCheck: { command: "true", timeoutMs: 10_000 },
+    delivery: { ...parsed.delivery, baseBranch: "main" },
+  };
 }
 
 function controlledFetch(state: ForgeServerState): typeof fetch {
@@ -210,7 +214,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     const authority = new TaskAuthority(database.database);
     const task = contract("forge-e2e");
     const input = {
-      contract: taskContractSchema.parse({ ...task, baseSha: fixture.actualBaseSha }),
+      contract: { ...task, baseSha: fixture.actualBaseSha },
       contractHash: "forge-e2e-contract",
       repositoryIdentity: "owner/repo",
       deadlineEpochMs: Date.now() + 60_000,
@@ -251,7 +255,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
           }),
         },
         quality: {
-          check: async (_contract: TaskContract, sha: string) => ({
+          check: async (_contract: ResolvedTaskContract, sha: string) => ({
             sha,
             status: "passed" as const,
             command: "true",
@@ -259,7 +263,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
             stdout: "",
             stderr: "",
           }),
-          reviewWithObservation: async (_contract: TaskContract, sha: string) => ({
+          reviewWithObservation: async (_contract: ResolvedTaskContract, sha: string) => ({
             review: {
               sha,
               verdict: "approved" as const,
@@ -326,10 +330,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       commentCreates: 0,
       requests: [],
     };
-    const task = taskContractSchema.parse({
-      ...contract("forge-closed-public"),
-      baseSha: fixture.actualBaseSha,
-    });
+    const task = { ...contract("forge-closed-public"), baseSha: fixture.actualBaseSha };
     const databasePath = join(fixture.root, "state.sqlite");
     await applyMigrations(databasePath);
     const database = openSqliteDatabase(databasePath);

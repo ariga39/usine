@@ -1,13 +1,13 @@
 import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
 import { execa } from "execa";
-import type { TaskContract } from "@usine/task-authority";
+import type { ResolvedTaskContract } from "@usine/task-authority";
 import { remainingUntil } from "@usine/task-authority";
 
 export async function verifyCommittedContract(
   contractPath: string,
   repositoryPath: string,
-  contract: TaskContract,
+  contract: ResolvedTaskContract,
   deadlineEpochMs: number,
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {

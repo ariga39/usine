@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import type { TaskContract } from "@usine/task-authority";
+import type { ResolvedTaskContract } from "@usine/task-authority";
 import { reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import {
@@ -49,7 +49,7 @@ interface QualityGateSession {
 export class QualityGate {
   constructor(private readonly options: QualityGateOptions) {}
 
-  async check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult> {
+  async check(contract: ResolvedTaskContract, sha: string, cycle: number): Promise<CheckResult> {
     return this.options.workspace.withCheckout(
       `check-${contract.id}-${cycle}`,
       sha,
@@ -106,7 +106,7 @@ export class QualityGate {
   }
 
   async review(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     cycle: number,
@@ -115,7 +115,7 @@ export class QualityGate {
   }
 
   async reviewWithObservation(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     cycle: number,

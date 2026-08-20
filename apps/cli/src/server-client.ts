@@ -6,11 +6,13 @@ import {
   type TaskProgress,
   type TaskResult,
   type TaskStatus,
+  repositoryRegistrationSchema,
+  type RepositorySnapshot,
 } from "@usine/task-authority";
 
 export interface TaskSubmission {
   contractPath: string;
-  repositoryPath: string;
+  repositoryId?: string;
 }
 
 export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string {
@@ -41,6 +43,55 @@ export async function submitTask(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(submission),
   });
+}
+
+export async function registerRepository(
+  serverUrl: string,
+  repository: RepositorySnapshot,
+): Promise<RepositorySnapshot> {
+  const response = await fetch(new URL("/v1/repositories", serverUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(repository),
+  });
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "repository registration failed"),
+      response.status,
+    );
+  try {
+    return repositoryRegistrationSchema.parse(body);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid Repository (${response.status})`,
+      response.status,
+    );
+  }
+}
+
+export async function inspectRepository(
+  serverUrl: string,
+  repositoryId: string,
+): Promise<RepositorySnapshot | null> {
+  const response = await fetch(
+    new URL(`/v1/repositories/${encodeURIComponent(repositoryId)}`, serverUrl),
+  );
+  if (response.status === 404) return null;
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "repository inspection failed"),
+      response.status,
+    );
+  try {
+    return repositoryRegistrationSchema.parse(body);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid Repository (${response.status})`,
+      response.status,
+    );
+  }
 }
 
 export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskStatus | null> {
@@ -81,16 +132,7 @@ async function request(serverUrl: string, path: string, init: RequestInit): Prom
 }
 
 async function readResponse(response: Response): Promise<TaskResult> {
-  const body = await response.text();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    throw new ServerClientError(
-      `server returned invalid JSON (${response.status})`,
-      response.status,
-    );
-  }
+  const parsed = await readJson(response);
   if (!response.ok) {
     const message =
       typeof parsed === "object" && parsed !== null && "message" in parsed
@@ -106,6 +148,24 @@ async function readResponse(response: Response): Promise<TaskResult> {
       response.status,
     );
   }
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  const body = await response.text();
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid JSON (${response.status})`,
+      response.status,
+    );
+  }
+}
+
+function responseMessage(body: unknown, fallback: string): string {
+  return typeof body === "object" && body !== null && "message" in body
+    ? String(body.message)
+    : fallback;
 }
 
 async function readStatusResponse(response: Response): Promise<TaskStatus> {

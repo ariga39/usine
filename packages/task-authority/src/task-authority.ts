@@ -1,5 +1,5 @@
 import { and, desc, eq, sql } from "drizzle-orm";
-import { repositoryLeases, taskHistory, taskRuns } from "./schema.js";
+import { repositories, repositoryLeases, taskHistory, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
@@ -22,6 +22,11 @@ import {
   type TaskResult,
   type TaskStatus,
 } from "./task-state.js";
+import {
+  snapshotFromRegistration,
+  type RepositoryRegistration,
+  type RepositorySnapshot,
+} from "./repository.js";
 
 export type {
   AuthorityInput,
@@ -38,6 +43,7 @@ export type {
   TaskResult,
   TaskStatus,
 } from "./task-state.js";
+export type { RepositoryRegistration, RepositorySnapshot } from "./repository.js";
 
 type AuthorityDatabase = RuntimeDatabase;
 
@@ -45,6 +51,65 @@ const MAX_HISTORY_LIMIT = 100;
 
 export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
+
+  async registerRepository(input: RepositoryRegistration): Promise<RepositorySnapshot> {
+    const register = async (database: AuthorityDatabase): Promise<RepositorySnapshot> => {
+      const existing = await database.query.repositories.findFirst({
+        where: eq(repositories.id, input.id),
+      });
+      const snapshot = snapshotFromRegistration(input);
+      if (existing) {
+        await database
+          .update(repositories)
+          .set({
+            path: input.path,
+            owner: input.owner,
+            name: input.name,
+            baseBranch: input.baseBranch,
+            projectCheckCommand: input.projectCheck.command,
+            projectCheckTimeoutMs: input.projectCheck.timeoutMs,
+            gitAuthorName: input.gitAuthor.name,
+            gitAuthorEmail: input.gitAuthor.email,
+            updatedAt: new Date(),
+          })
+          .where(eq(repositories.id, input.id));
+        return snapshot;
+      }
+      await database.insert(repositories).values({
+        id: input.id,
+        path: input.path,
+        owner: input.owner,
+        name: input.name,
+        baseBranch: input.baseBranch,
+        projectCheckCommand: input.projectCheck.command,
+        projectCheckTimeoutMs: input.projectCheck.timeoutMs,
+        gitAuthorName: input.gitAuthor.name,
+        gitAuthorEmail: input.gitAuthor.email,
+      });
+      return snapshot;
+    };
+    return this.inTransaction(register);
+  }
+
+  async lookupRepository(id: string): Promise<RepositorySnapshot | null> {
+    const row = await this.database.query.repositories.findFirst({
+      where: eq(repositories.id, id),
+    });
+    return row
+      ? {
+          id: row.id,
+          path: row.path,
+          owner: row.owner,
+          name: row.name,
+          baseBranch: row.baseBranch,
+          projectCheck: {
+            command: row.projectCheckCommand,
+            timeoutMs: row.projectCheckTimeoutMs,
+          },
+          gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
+        }
+      : null;
+  }
 
   async lookup(taskId: string): Promise<TaskResult | null> {
     const rows = await this.database
@@ -116,7 +181,6 @@ export class TaskAuthority {
       .select({
         rawResult: sql<string>`${taskRuns.result}`,
         contractPath: taskRuns.contractPath,
-        repositoryPath: taskRuns.repositoryPath,
         rawContract: taskRuns.rawContract,
       })
       .from(taskRuns);
@@ -129,12 +193,11 @@ export class TaskAuthority {
         continue;
       }
       if (result.state === "reviewed_pr" || result.state === "blocked") continue;
-      if (!row.contractPath || !row.repositoryPath || !row.rawContract) continue;
+      if (!row.contractPath || !row.rawContract || !result.repository) continue;
       restartable.push({
         result,
         input: {
           contractPath: row.contractPath,
-          repositoryPath: row.repositoryPath,
           rawContract: row.rawContract,
         },
       });
@@ -155,6 +218,11 @@ export class TaskAuthority {
       throw new Error("admitted contract is immutable");
     if (result.writer.repositoryIdentity !== input.repositoryIdentity)
       throw new Error("task repository identity is immutable");
+    if (
+      input.repository &&
+      (!result.repository || JSON.stringify(result.repository) !== JSON.stringify(input.repository))
+    )
+      throw new Error("task repository snapshot is immutable");
     return result;
   }
 
@@ -164,10 +232,7 @@ export class TaskAuthority {
       // concurrent admission cannot observe a half-updated lifecycle.
       const existing = await TaskAuthority.currentTask(database, input.contract.id);
       if (existing) {
-        if (
-          executionInput &&
-          (!existing.contractPath || !existing.repositoryPath || !existing.rawContract)
-        ) {
+        if (executionInput && (!existing.contractPath || !existing.rawContract)) {
           await database
             .update(taskRuns)
             .set(executionInput)
@@ -190,10 +255,7 @@ export class TaskAuthority {
         // conflict wait, the winning task is visible in this transaction.
         const winner = await TaskAuthority.currentTask(database, input.contract.id);
         if (winner) {
-          if (
-            executionInput &&
-            (!winner.contractPath || !winner.repositoryPath || !winner.rawContract)
-          ) {
+          if (executionInput && (!winner.contractPath || !winner.rawContract)) {
             await database
               .update(taskRuns)
               .set(executionInput)
@@ -226,6 +288,7 @@ export class TaskAuthority {
         writer: {
           repositoryIdentity: input.repositoryIdentity,
         },
+        repository: input.repository,
         evidence: {
           implementerActivations: 0,
           reviewCycles: 0,

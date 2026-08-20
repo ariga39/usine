@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./repository.js";
 export * from "./task-state.js";
 export * from "./task-authority.js";
 export {

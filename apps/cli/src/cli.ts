@@ -3,8 +3,16 @@
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
+import { repositoryRegistrationSchema } from "@usine/task-authority";
 import { startUsineServer } from "@usine/runtime";
-import { followTask, serverUrlFromEnvironment, submitTask, taskStatus } from "./server-client.js";
+import {
+  followTask,
+  inspectRepository,
+  registerRepository,
+  serverUrlFromEnvironment,
+  submitTask,
+  taskStatus,
+} from "./server-client.js";
 
 export async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
@@ -68,6 +76,62 @@ export async function main(): Promise<void> {
     return;
   }
 
+  if (command === "inspect") {
+    if (!contractPath || process.argv.length > 4) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "usage", usage: "usine inspect <repository-id>" })}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const repository = await inspectRepository(
+        serverUrlFromEnvironment(process.env),
+        contractPath,
+      );
+      if (!repository) {
+        process.stderr.write(
+          `${JSON.stringify({ error: "repository_not_found", repositoryId: contractPath })}\n`,
+        );
+        process.exitCode = 3;
+        return;
+      }
+      process.stdout.write(`${JSON.stringify(repository)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "inspect_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (command === "register") {
+    if (!contractPath || process.argv.length > 4) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "usage", usage: "usine register <repository.json>" })}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const input = JSON.parse(await readFile(contractPath, "utf8")) as unknown;
+      const registration = repositoryRegistrationSchema.parse(input);
+      const parsed = repositoryRegistrationSchema.parse({
+        ...registration,
+        path: await realpath(registration.path),
+      });
+      const repository = await registerRepository(serverUrlFromEnvironment(process.env), parsed);
+      process.stdout.write(`${JSON.stringify(repository)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ error: "register_failed", message: String(error) })}\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (command === "follow") {
     if (!contractPath || process.argv.length > 4) {
       process.stderr.write(
@@ -123,7 +187,7 @@ export async function main(): Promise<void> {
   try {
     const result = await submitTask(serverUrlFromEnvironment(process.env), {
       contractPath: resolve(contractPath),
-      repositoryPath: await realpath(parsed.data.repository.path),
+      repositoryId: parsed.data.repositoryId,
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {

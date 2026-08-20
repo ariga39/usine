@@ -5,8 +5,25 @@ export const taskRuns = sqliteTable("task_runs", {
   taskId: text("task_id").primaryKey(),
   result: text("result", { mode: "json" }).notNull(),
   contractPath: text("contract_path"),
-  repositoryPath: text("repository_path"),
   rawContract: text("raw_contract"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .default(sql`(unixepoch() * 1000)`)
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .default(sql`(unixepoch() * 1000)`)
+    .notNull(),
+});
+
+export const repositories = sqliteTable("repositories", {
+  id: text("id").primaryKey(),
+  path: text("path").notNull(),
+  owner: text("owner").notNull(),
+  name: text("name").notNull(),
+  baseBranch: text("base_branch").notNull(),
+  projectCheckCommand: text("project_check_command").notNull(),
+  projectCheckTimeoutMs: integer("project_check_timeout_ms").notNull(),
+  gitAuthorName: text("git_author_name").notNull(),
+  gitAuthorEmail: text("git_author_email").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .default(sql`(unixepoch() * 1000)`)
     .notNull(),
