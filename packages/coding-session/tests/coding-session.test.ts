@@ -112,6 +112,26 @@ describe("Coding Session", () => {
     });
   });
 
+  test("rejects a well-formed named profile that is absent from the Codex home", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "usine-codex-home-"));
+    const session = new CodexCodingSession(undefined, { environment: { CODEX_HOME: codexHome } });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "missing-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "codex_profile_unusable",
+    });
+    expect(observation.failure).toContain("missing-profile");
+  });
+
   test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
       OPENAI_API_KEY: "secret",
@@ -120,8 +140,14 @@ describe("Coding Session", () => {
       NPM_TOKEN: "package-secret",
       PATH: "/portable/bin",
       LANG: "C",
+      CODEX_HOME: "/private/codex-home",
     });
-    expect(env).toEqual({ CI: "true", PATH: "/portable/bin", LANG: "C" });
+    expect(env).toEqual({
+      CI: "true",
+      PATH: "/portable/bin",
+      LANG: "C",
+      CODEX_HOME: "/private/codex-home",
+    });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");
     expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");

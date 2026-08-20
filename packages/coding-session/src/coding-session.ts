@@ -7,6 +7,9 @@ import {
   type TurnOptions,
   type Usage,
 } from "@openai/codex-sdk";
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import { createCodexLauncher, removeCodexExecutionIdentity } from "./codex-execution.js";
@@ -22,6 +25,7 @@ const PORTABLE_ENVIRONMENT_KEYS = [
   "SYSTEMROOT",
   "COMSPEC",
   "PATHEXT",
+  "CODEX_HOME",
 ] as const;
 
 export interface RolePolicy {
@@ -46,6 +50,24 @@ export function validateCodexProfile(profile: string): string {
   const normalized = profile.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(normalized))
     throw new CodexProfileSelectionError(profile);
+  return normalized;
+}
+
+async function ensureCodexProfileUsable(
+  profile: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const normalized = validateCodexProfile(profile);
+  const codexHome = environment.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  try {
+    const profileFile = await stat(join(codexHome, `${normalized}.config.toml`));
+    if (!profileFile.isFile()) throw new Error("profile configuration is not a regular file");
+  } catch {
+    throw new CodexProfileSelectionError(
+      profile,
+      `named profile "${normalized}" does not have a usable Codex configuration`,
+    );
+  }
   return normalized;
 }
 
@@ -196,7 +218,10 @@ export class CodexCodingSession {
 
   private async createClient(request: SessionRequest): Promise<Codex> {
     if (this.clientFactory) return this.clientFactory(request);
-    const profile = validateCodexProfile(request.profile);
+    const profile = await ensureCodexProfileUsable(
+      request.profile,
+      request.environment ?? this.options.environment,
+    );
     const options: CodexOptions = {
       env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
     };
