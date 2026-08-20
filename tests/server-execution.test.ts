@@ -26,10 +26,14 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
 }
 
+const forgeSecretToken = "forge-secret-token-181";
+const forgeSecretKeyPath = "forge-private-key-181.pem";
+
 async function fixture(): Promise<{
   contractPath: string;
   submission: TaskSubmission;
   stateDirectory: string;
+  repositoryName: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "usine-server-execution-"));
   const repository = join(root, "repository");
@@ -75,6 +79,7 @@ async function fixture(): Promise<{
     baseBranch: "main",
     implementerProfile: "writer-profile",
     reviewerProfile: "reviewer-profile",
+    forgeProfile: "default",
     projectCheck: { command: "true", timeoutMs: 1_000 },
     gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
   };
@@ -82,6 +87,7 @@ async function fixture(): Promise<{
   return {
     contractPath,
     stateDirectory,
+    repositoryName: taskId,
     submission: {
       contractPath,
       repositoryId: taskId,
@@ -89,12 +95,14 @@ async function fixture(): Promise<{
   };
 }
 
-function environment(stateDirectory: string): NodeJS.ProcessEnv {
+function environment(stateDirectory: string, repositoryName: string): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: stateDirectory,
-    USINE_GITHUB_APP_SLUG: "test-app",
-    USINE_GITHUB_TEST_TOKEN: "test-token",
-    USINE_GITHUB_API_URL: "http://127.0.0.1:9",
+    USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
+    USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: forgeSecretToken,
+    USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
+    USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${repositoryName}`,
+    USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: forgeSecretKeyPath,
   };
 }
 
@@ -158,6 +166,7 @@ describe("server-owned execution", () => {
           baseBranch: "main",
           implementerProfile: "writer-profile",
           reviewerProfile: "reviewer-profile",
+          forgeProfile: "default",
           projectCheck: { command: "true", timeoutMs: 1_000 },
           gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
         },
@@ -205,13 +214,19 @@ describe("server-owned execution", () => {
   });
 
   test("continues an admitted task after the submitting client has returned", async () => {
-    const { submission, stateDirectory } = await fixture();
+    const { submission, stateDirectory, repositoryName } = await fixture();
     const started = deferred<void>();
     const release = deferred<void>();
     const seen: string[] = [];
     const server = await startUsineServer({
-      environment: environment(stateDirectory),
+      environment: environment(stateDirectory, repositoryName),
       execute: async (context) => {
+        const workerSurfaces = [
+          context.policy.workerEnvironment,
+          context.policy.credentialFreeGitEnvironment,
+        ];
+        expect(JSON.stringify(workerSurfaces)).not.toContain(forgeSecretToken);
+        expect(JSON.stringify(workerSurfaces)).not.toContain(forgeSecretKeyPath);
         started.resolve();
         await release.promise;
         return blockedExecutor(seen)(context);
@@ -229,6 +244,8 @@ describe("server-owned execution", () => {
         (result) => result.state === "blocked",
       );
       expect(completed.blocker).toBe("fake execution complete");
+      expect(JSON.stringify(completed)).not.toContain(forgeSecretToken);
+      expect(JSON.stringify(completed)).not.toContain(forgeSecretKeyPath);
       expect(seen).toEqual([admitted.taskId]);
     } finally {
       await server.close();
@@ -236,12 +253,12 @@ describe("server-owned execution", () => {
   });
 
   test("re-enters a durable admitted task once after server restart", async () => {
-    const { submission, stateDirectory } = await fixture();
+    const { submission, stateDirectory, repositoryName } = await fixture();
     const firstStarted = deferred<void>();
     const firstAborted = deferred<void>();
     const firstSeen: string[] = [];
     const first = await startUsineServer({
-      environment: environment(stateDirectory),
+      environment: environment(stateDirectory, repositoryName),
       execute: async ({ authority, contract, result, signal }) => {
         firstSeen.push(result.taskId);
         await authority.reserveActivation(result.taskId, contract.budget.maxImplementerActivations);
@@ -268,7 +285,7 @@ describe("server-owned execution", () => {
 
     const restartedSeen: string[] = [];
     const second = await startUsineServer({
-      environment: environment(stateDirectory),
+      environment: environment(stateDirectory, repositoryName),
       execute: blockedExecutor(restartedSeen),
       host: "127.0.0.1",
       port: 0,
@@ -288,9 +305,9 @@ describe("server-owned execution", () => {
   });
 
   test("isolates corrupt restart rows and completes recovery before readiness", async () => {
-    const { submission, contractPath, stateDirectory } = await fixture();
+    const { submission, contractPath, stateDirectory, repositoryName } = await fixture();
     const first = await startUsineServer({
-      environment: environment(stateDirectory),
+      environment: environment(stateDirectory, repositoryName),
       execute: async ({ result }) => result,
       host: "127.0.0.1",
       port: 0,
@@ -322,7 +339,7 @@ describe("server-owned execution", () => {
     const healthyStarted = deferred<void>();
     const reentered: string[] = [];
     const second = await startUsineServer({
-      environment: environment(stateDirectory),
+      environment: environment(stateDirectory, repositoryName),
       execute: async ({ result }) => {
         reentered.push(result.taskId);
         if (result.taskId === admitted.taskId) healthyStarted.resolve();

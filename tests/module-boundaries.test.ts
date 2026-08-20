@@ -18,6 +18,7 @@ const repository: RepositorySnapshot = {
   baseBranch: "main",
   implementerProfile: "writer-profile",
   reviewerProfile: "reviewer-profile",
+  forgeProfile: "default",
   projectCheck: { command: "true", timeoutMs: 1_000 },
   gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
 };

@@ -11,10 +11,11 @@ Herdr/transcript lifecycle 曾被真实 settled-without-observation failure证�
 ```sh
 vp install
 vp run --filter '@usine/cli...' build
-USINE_GITHUB_APP_ID=123456 \
-USINE_GITHUB_INSTALLATION_ID=123456 \
-USINE_GITHUB_APP_SLUG=example-app \
-USINE_GITHUB_PRIVATE_KEY_PATH=./app-private-key.pem \
+USINE_FORGE_PROFILE_RELEASE_APP_ID=123456 \
+USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID=123456 \
+USINE_FORGE_PROFILE_RELEASE_APP_SLUG=example-app \
+USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH=./app-private-key.pem \
+USINE_FORGE_PROFILE_RELEASE_REPOSITORY=example-owner/example-repository \
 node apps/cli/dist/cli.mjs server
 ```
 
@@ -25,7 +26,7 @@ node apps/cli/dist/cli.mjs submit ./committed-task-contract.json
 node apps/cli/dist/cli.mjs follow <task-id>
 ```
 
-完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG` 与 `USINE_GITHUB_PRIVATE_KEY_PATH`。这些配置用于 GitHub App 认证；Repository 注册时提供 Git commit author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
+完整交付需要为每个已注册 Repository 配置其 `forgeProfile` 对应的 `USINE_FORGE_PROFILE_<PROFILE>_*` GitHub App 变量。配置只在 host runtime 使用；Repository durable facts 保存 profile 名称，不保存凭据。上面的数值、身份、路径和任务文件名都是占位符。
 
 以下配置是可选覆盖；Repository 注册时必须提供 implementer 与 reviewer 的 Codex profile 名称：
 
@@ -33,7 +34,7 @@ node apps/cli/dist/cli.mjs follow <task-id>
 - `USINE_SERVER_HOST`：local server 监听地址，默认 `127.0.0.1`，只接受 loopback host；
 - `USINE_SERVER_PORT`：local server 监听端口，默认 `8787`；
 - `USINE_SERVER_URL`：client 使用的 server URL，默认 `http://127.0.0.1:8787`；
-- `USINE_GITHUB_GIT_URL`：forge Git URL，默认由已注册 Repository 的 owner/name 组成。
+- `USINE_FORGE_PROFILE_<PROFILE>_GIT_URL`：profile 的 forge Git URL，默认由已注册 Repository 的 owner/name 组成。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `corepack pnpm test`, and `vp run --filter '@usine/cli...' build`.

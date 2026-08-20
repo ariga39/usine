@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
-import { runtimePolicyFromEnvironment } from "@usine/runtime";
+import {
+  ForgeProfileResolutionError,
+  forgePolicyFromEnvironment,
+  runtimePolicyFromEnvironment,
+} from "@usine/runtime";
 
 async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
@@ -26,6 +30,7 @@ describe("runtime composition", () => {
       name: "example-repository",
       implementerProfile: "writer-profile",
       reviewerProfile: "reviewer-profile",
+      forgeProfile: "release",
     });
 
     expect(policy).toMatchObject({
@@ -51,16 +56,19 @@ describe("runtime composition", () => {
         OPENAI_API_KEY: "coordinator-secret",
         GITHUB_TOKEN: "delivery-secret",
         USINE_STATE_DIR: "/state",
-        USINE_GITHUB_APP_SLUG: "usine-app",
-        USINE_GITHUB_TEST_TOKEN: "test-token",
-        USINE_GITHUB_API_URL: "http://127.0.0.1:8787",
-        USINE_GITHUB_GIT_URL: "http://127.0.0.1:8787/owner/repo.git",
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "usine-app",
+        USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN: "test-token",
+        USINE_FORGE_PROFILE_RELEASE_API_URL: "http://127.0.0.1:8787",
+        USINE_FORGE_PROFILE_RELEASE_GIT_URL: "http://127.0.0.1:8787/owner/repo.git",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "private-key.pem",
       },
       {
         owner: "owner",
         name: "repo",
         implementerProfile: "implementer-profile",
         reviewerProfile: "reviewer-profile",
+        forgeProfile: "release",
       },
     );
 
@@ -89,12 +97,19 @@ describe("runtime composition", () => {
     expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
     expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
     expect(policy.workerEnvironment).not.toHaveProperty("GITHUB_TOKEN");
+    expect(policy.workerEnvironment).not.toHaveProperty("USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN");
+    expect(policy.workerEnvironment).not.toHaveProperty(
+      "USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH",
+    );
     expect(policy.credentialFreeGitEnvironment).toMatchObject({
       PATH: "/portable/bin",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
+    expect(policy.credentialFreeGitEnvironment).not.toHaveProperty(
+      "USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN",
+    );
   });
 
   test("does not read Git author policy from global environment", () => {
@@ -103,12 +118,18 @@ describe("runtime composition", () => {
         {
           USINE_GIT_AUTHOR_NAME: "Release Bot",
           USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
+          USINE_FORGE_PROFILE_WRITER_APP_SLUG: "app",
+          USINE_FORGE_PROFILE_WRITER_APP_ID: "1",
+          USINE_FORGE_PROFILE_WRITER_INSTALLATION_ID: "2",
+          USINE_FORGE_PROFILE_WRITER_PRIVATE_KEY_PATH: "app.pem",
+          USINE_FORGE_PROFILE_WRITER_REPOSITORY: "owner/repo",
         },
         {
           owner: "owner",
           name: "repo",
           implementerProfile: "writer-profile",
           reviewerProfile: "reviewer-profile",
+          forgeProfile: "writer",
         },
       ),
     ).not.toThrow();
@@ -118,15 +139,17 @@ describe("runtime composition", () => {
     expect(() =>
       runtimePolicyFromEnvironment(
         {
-          USINE_GITHUB_APP_SLUG: "usine-app",
-          USINE_GITHUB_TEST_TOKEN: "test-token",
-          USINE_GITHUB_API_URL: "https://github.com",
+          USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "usine-app",
+          USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN: "test-token",
+          USINE_FORGE_PROFILE_RELEASE_API_URL: "https://github.com",
+          USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
         },
         {
           owner: "owner",
           name: "repo",
           implementerProfile: "writer-profile",
           reviewerProfile: "reviewer-profile",
+          forgeProfile: "release",
         },
       ),
     ).toThrow("loopback");
@@ -135,17 +158,18 @@ describe("runtime composition", () => {
   test("retains the production GitHub App authentication policy without test credentials", () => {
     const policy = runtimePolicyFromEnvironment(
       {
-        USINE_GITHUB_APP_SLUG: "usine-app",
-        USINE_GITHUB_APP_ID: "123",
-        USINE_GITHUB_INSTALLATION_ID: "456",
-        USINE_GITHUB_PRIVATE_KEY_PATH: "app.pem",
-        USINE_GITHUB_GIT_URL: "https://github.com/owner/repo.git",
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "usine-app",
+        USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+        USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "456",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "app.pem",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
       },
       {
         owner: "owner",
         name: "repo",
         implementerProfile: "writer-profile",
         reviewerProfile: "reviewer-profile",
+        forgeProfile: "release",
       },
     );
 
@@ -157,5 +181,88 @@ describe("runtime composition", () => {
       privateKeyPath: "app.pem",
       gitUrl: "https://github.com/owner/repo.git",
     });
+  });
+
+  test("resolves the repository forge profile from host configuration", () => {
+    expect(
+      forgePolicyFromEnvironment(
+        {
+          USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+          USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+          USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "456",
+          USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "release.pem",
+          USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+        },
+        {
+          owner: "owner",
+          name: "repo",
+          forgeProfile: "release",
+        },
+      ),
+    ).toEqual({
+      mode: "app",
+      appSlug: "release-app",
+      appId: "123",
+      installationId: 456,
+      privateKeyPath: "release.pem",
+      gitUrl: "https://github.com/owner/repo.git",
+    });
+  });
+
+  test("does not select forge credentials from the deleted global path", () => {
+    expect(() =>
+      forgePolicyFromEnvironment(
+        {
+          USINE_GITHUB_APP_SLUG: "legacy",
+          USINE_GITHUB_APP_ID: "123",
+          USINE_GITHUB_INSTALLATION_ID: "456",
+          USINE_GITHUB_PRIVATE_KEY_PATH: "legacy.pem",
+        },
+        { owner: "owner", name: "repo", forgeProfile: "release" },
+      ),
+    ).toThrow("forge profile");
+  });
+
+  test("rejects profile names that could alias another host variable", () => {
+    expect(() =>
+      forgePolicyFromEnvironment({}, { owner: "owner", name: "repo", forgeProfile: "release_app" }),
+    ).toThrow("malformed");
+  });
+
+  test.each([
+    ["missing", {}, "unauthorized"],
+    [
+      "malformed",
+      {
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+      },
+      "malformed",
+    ],
+    [
+      "repository mismatch",
+      {
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+        USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+        USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "456",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "release.pem",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "other/repo",
+      },
+      "repository_mismatch",
+    ],
+  ])("rejects a %s forge profile before delivery", (_name, environment, code) => {
+    try {
+      forgePolicyFromEnvironment(environment, {
+        owner: "owner",
+        name: "repo",
+        forgeProfile: "release",
+      });
+      throw new Error("expected forge profile resolution to fail");
+    } catch (error) {
+      if (!(error instanceof ForgeProfileResolutionError)) throw error;
+      expect(error.code).toBe(code);
+      expect(error.message).toContain("release");
+      if (code === "repository_mismatch") expect(error.message).toContain("owner/repo");
+    }
   });
 });

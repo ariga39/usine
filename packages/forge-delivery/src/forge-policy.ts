@@ -66,6 +66,21 @@ export interface ForgeClient {
   appSlug: string;
 }
 
+export class ForgeAuthenticationError extends Error {
+  readonly code = "forge_authentication_failed" as const;
+  readonly name = "ForgeAuthenticationError";
+
+  constructor(readonly status?: number) {
+    super("forge authentication capability is unavailable");
+  }
+}
+
+function providerStatusOf(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("status" in error)) return undefined;
+  const status = error.status;
+  return typeof status === "number" && Number.isFinite(status) ? status : undefined;
+}
+
 export async function createForgeClient(options: ForgeDeliveryOptions): Promise<ForgeClient> {
   const forge = options.forge;
   if (forge.mode === "test") {
@@ -75,15 +90,19 @@ export async function createForgeClient(options: ForgeDeliveryOptions): Promise<
       appSlug: forge.appSlug,
     };
   }
-  const app = new App({
-    appId: forge.appId,
-    privateKey: await readFile(forge.privateKeyPath, "utf8"),
-  });
-  const octokit = await app.getInstallationOctokit(forge.installationId);
-  const auth = (await octokit.auth({ type: "installation" })) as { token?: unknown };
-  if (typeof auth.token !== "string")
-    throw new Error("GitHub App did not produce an installation token");
-  return { octokit, token: auth.token, appSlug: forge.appSlug };
+  try {
+    const app = new App({
+      appId: forge.appId,
+      privateKey: await readFile(forge.privateKeyPath, "utf8"),
+    });
+    const octokit = await app.getInstallationOctokit(forge.installationId);
+    const auth = (await octokit.auth({ type: "installation" })) as { token?: unknown };
+    if (typeof auth.token !== "string") throw new ForgeAuthenticationError();
+    return { octokit, token: auth.token, appSlug: forge.appSlug };
+  } catch (error) {
+    if (error instanceof ForgeAuthenticationError) throw error;
+    throw new ForgeAuthenticationError(providerStatusOf(error));
+  }
 }
 
 export function approvalAttestationBody(

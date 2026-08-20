@@ -14,6 +14,10 @@ const nonBlank = z
     message: "must not be blank",
   });
 
+export const forgeProfileSchema = z
+  .string()
+  .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/, "must use lowercase kebab-case");
+
 export const repositoryRegistrationSchema = z
   .object({
     id: identifier,
@@ -23,6 +27,7 @@ export const repositoryRegistrationSchema = z
     baseBranch: nonBlank,
     implementerProfile: nonBlank,
     reviewerProfile: nonBlank,
+    forgeProfile: forgeProfileSchema,
     projectCheck: z.object({
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),
@@ -37,7 +42,7 @@ export type RepositoryRegistration = z.infer<typeof repositoryRegistrationSchema
 export type RepositorySnapshot = RepositoryRegistration;
 export type TaskRepositorySnapshot = Omit<
   RepositorySnapshot,
-  "implementerProfile" | "reviewerProfile"
+  "implementerProfile" | "reviewerProfile" | "forgeProfile"
 >;
 
 export function taskSnapshotFromRegistration(

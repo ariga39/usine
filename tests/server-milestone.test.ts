@@ -138,6 +138,7 @@ async function fixture(name: string): Promise<Fixture> {
       baseBranch: "main",
       implementerProfile: "writer-profile",
       reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
       projectCheck: { command: "test -x target.sh", timeoutMs: 10_000 },
       gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
     }),
@@ -257,10 +258,11 @@ function environment(
 ): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: fixture.stateDirectory,
-    USINE_GITHUB_APP_SLUG: "usine-app",
-    USINE_GITHUB_TEST_TOKEN: "test-token",
-    USINE_GITHUB_API_URL: forge.url,
-    USINE_GITHUB_GIT_URL: fixture.remote,
+    USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "usine-app",
+    USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
+    USINE_FORGE_PROFILE_DEFAULT_API_URL: forge.url,
+    USINE_FORGE_PROFILE_DEFAULT_GIT_URL: fixture.remote,
+    USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${fixture.taskId}`,
     CODEX_HOME: join(fixture.root, "codex-home"),
     PATH: `${join(fixture.root, "bin")}:${process.env.PATH ?? ""}`,
     USINE_SERVER_HOST: "127.0.0.1",

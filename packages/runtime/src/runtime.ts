@@ -20,7 +20,7 @@ import {
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
-import { ForgeDelivery } from "@usine/forge-delivery";
+import { ForgeDelivery, type ForgePolicy } from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
@@ -28,6 +28,9 @@ import { deadlineExpired } from "@usine/task-authority";
 
 export {
   runtimePolicyFromEnvironment,
+  forgePolicyFromEnvironment,
+  ForgeProfileResolutionError,
+  type ForgeProfileErrorCode,
   stateDirectoryFromEnvironment,
   type RuntimePolicy,
 } from "./runtime-policy.js";
@@ -249,7 +252,6 @@ export async function executeAdmittedTask(
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
     const resolvedContract = resolveTaskContract(contract, existing.repository);
     const forgePolicy = policy.forge;
-    if (!forgePolicy) throw new Error("GitHub App credentials are required");
     await verifyCommittedContract(
       input.contractPath,
       existing.repository.path,
@@ -298,7 +300,7 @@ async function executeWithServices(options: {
   repository: string;
   gitAuthor: RepositorySnapshot["gitAuthor"];
   policy: RuntimePolicy;
-  forgePolicy: NonNullable<RuntimePolicy["forge"]>;
+  forgePolicy: ForgePolicy;
   authority: TaskAuthority;
   deadlineEpochMs: number;
   onProgress?: (progress: TaskProgress) => void;

@@ -80,6 +80,7 @@ export class TaskAuthority {
             baseBranch: input.baseBranch,
             implementerProfile: input.implementerProfile,
             reviewerProfile: input.reviewerProfile,
+            forgeProfile: input.forgeProfile,
             projectCheckCommand: input.projectCheck.command,
             projectCheckTimeoutMs: input.projectCheck.timeoutMs,
             gitAuthorName: input.gitAuthor.name,
@@ -97,6 +98,7 @@ export class TaskAuthority {
         baseBranch: input.baseBranch,
         implementerProfile: input.implementerProfile,
         reviewerProfile: input.reviewerProfile,
+        forgeProfile: input.forgeProfile,
         projectCheckCommand: input.projectCheck.command,
         projectCheckTimeoutMs: input.projectCheck.timeoutMs,
         gitAuthorName: input.gitAuthor.name,
@@ -120,6 +122,7 @@ export class TaskAuthority {
           baseBranch: row.baseBranch,
           implementerProfile: row.implementerProfile,
           reviewerProfile: row.reviewerProfile,
+          forgeProfile: row.forgeProfile,
           projectCheck: {
             command: row.projectCheckCommand,
             timeoutMs: row.projectCheckTimeoutMs,
