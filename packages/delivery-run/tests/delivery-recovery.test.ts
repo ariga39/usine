@@ -27,8 +27,7 @@ void historyCapabilityIsRequired;
 const sha = "b".repeat(40);
 const implementer = {
   role: "implementer" as const,
-  model: "test",
-  reasoningEffort: "high",
+  profile: "implementer-profile",
   sandbox: "workspace-write" as const,
 };
 function contract(id: string): ResolvedTaskContract {
@@ -276,7 +275,7 @@ describe("Delivery Run durable phase recovery", () => {
     expect(fake.getHistory()[0]).toMatchObject({
       activation: 1,
       role: "implementer",
-      model: "test",
+      profile: "implementer-profile",
       outcome: "succeeded",
       tokenUsage: { inputTokens: 12, outputTokens: 7 },
       candidateSha: sha,

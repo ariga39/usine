@@ -135,6 +135,8 @@ async function fixture(name: string): Promise<Fixture> {
       owner: "example",
       name: taskId,
       baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
       projectCheck: { command: "test -x target.sh", timeoutMs: 10_000 },
       gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
     }),

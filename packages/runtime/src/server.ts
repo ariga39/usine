@@ -197,7 +197,9 @@ async function executeServerTask(
   let policy: RuntimePolicy;
   try {
     if (!task.result.repository) throw new Error("admitted task has no repository snapshot");
-    policy = runtimePolicyFromEnvironment(environment, task.result.repository);
+    const repository = await inspectRepository(stateDirectory, task.result.repository.id);
+    if (!repository) throw new Error("registered repository is missing");
+    policy = runtimePolicyFromEnvironment(environment, repository);
   } catch (error) {
     return blockPersistedTask(stateDirectory, task.result.taskId, error);
   }

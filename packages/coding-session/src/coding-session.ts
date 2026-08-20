@@ -199,9 +199,6 @@ export class CodexCodingSession {
     const profile = validateCodexProfile(request.profile);
     const options: CodexOptions = {
       env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
-      config: {
-        service_tier: "default",
-      },
     };
     if (!this.options.executionStateDirectory) return new Codex(options);
     const launcher = await createCodexLauncher(

@@ -81,6 +81,8 @@ describe("CLI/server boundary", () => {
         owner: "example",
         name: taskId,
         baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
@@ -116,11 +118,15 @@ describe("CLI/server boundary", () => {
         owner: "example",
         name: taskId,
         baseBranch: "release",
+        implementerProfile: "updated-writer-profile",
+        reviewerProfile: "updated-reviewer-profile",
         projectCheck: { command: "false", timeoutMs: 2_000 },
         gitAuthor: { name: "Updated Bot", email: "updated@example.invalid" },
       });
       await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
         baseBranch: "release",
+        implementerProfile: "updated-writer-profile",
+        reviewerProfile: "updated-reviewer-profile",
         projectCheck: { command: "false", timeoutMs: 2_000 },
       });
       const admittedAgain = await submitTask(server.url, { contractPath, repositoryId: taskId });

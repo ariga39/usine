@@ -24,12 +24,14 @@ describe("runtime composition", () => {
     const policy = runtimePolicyFromEnvironment(environment, {
       owner: "example-owner",
       name: "example-repository",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
     });
 
     expect(policy).toMatchObject({
       roles: {
-        implementer: { model: "gpt-5.6-luna" },
-        reviewer: { model: "gpt-5.6-sol" },
+        implementer: { profile: "writer-profile" },
+        reviewer: { profile: "reviewer-profile" },
       },
       forge: {
         mode: "app",
@@ -49,15 +51,17 @@ describe("runtime composition", () => {
         OPENAI_API_KEY: "coordinator-secret",
         GITHUB_TOKEN: "delivery-secret",
         USINE_STATE_DIR: "/state",
-        USINE_IMPLEMENTER_MODEL: "implementer-model",
-        USINE_REVIEWER_MODEL: "reviewer-model",
-        USINE_REVIEWER_REASONING_EFFORT: "medium",
         USINE_GITHUB_APP_SLUG: "usine-app",
         USINE_GITHUB_TEST_TOKEN: "test-token",
         USINE_GITHUB_API_URL: "http://127.0.0.1:8787",
         USINE_GITHUB_GIT_URL: "http://127.0.0.1:8787/owner/repo.git",
       },
-      { owner: "owner", name: "repo" },
+      {
+        owner: "owner",
+        name: "repo",
+        implementerProfile: "implementer-profile",
+        reviewerProfile: "reviewer-profile",
+      },
     );
 
     expect(policy).toMatchObject({
@@ -65,14 +69,12 @@ describe("runtime composition", () => {
       roles: {
         implementer: {
           role: "implementer",
-          model: "implementer-model",
-          reasoningEffort: "high",
+          profile: "implementer-profile",
           sandbox: "workspace-write",
         },
         reviewer: {
           role: "reviewer",
-          model: "reviewer-model",
-          reasoningEffort: "medium",
+          profile: "reviewer-profile",
           sandbox: "read-only",
         },
       },
@@ -102,7 +104,12 @@ describe("runtime composition", () => {
           USINE_GIT_AUTHOR_NAME: "Release Bot",
           USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
         },
-        { owner: "owner", name: "repo" },
+        {
+          owner: "owner",
+          name: "repo",
+          implementerProfile: "writer-profile",
+          reviewerProfile: "reviewer-profile",
+        },
       ),
     ).not.toThrow();
   });
@@ -115,7 +122,12 @@ describe("runtime composition", () => {
           USINE_GITHUB_TEST_TOKEN: "test-token",
           USINE_GITHUB_API_URL: "https://github.com",
         },
-        { owner: "owner", name: "repo" },
+        {
+          owner: "owner",
+          name: "repo",
+          implementerProfile: "writer-profile",
+          reviewerProfile: "reviewer-profile",
+        },
       ),
     ).toThrow("loopback");
   });
@@ -129,7 +141,12 @@ describe("runtime composition", () => {
         USINE_GITHUB_PRIVATE_KEY_PATH: "app.pem",
         USINE_GITHUB_GIT_URL: "https://github.com/owner/repo.git",
       },
-      { owner: "owner", name: "repo" },
+      {
+        owner: "owner",
+        name: "repo",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+      },
     );
 
     expect(policy.forge).toEqual({

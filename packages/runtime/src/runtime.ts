@@ -121,7 +121,6 @@ export async function recordExecutionObservation(
       activation: result.activeActivation,
       cycle: result.evidence.reviewCycles || null,
       role: "coordinator",
-      model: null,
       executionOwner,
       previousExecutionOwner,
       startedAtEpochMs: now,
@@ -130,6 +129,9 @@ export async function recordExecutionObservation(
       failure: null,
       candidateSha: result.candidateSha,
       candidateFence: result.candidateFence,
+      profile: null,
+      observedModel: null,
+      observedProvider: null,
       tokenUsage: null,
     });
   } finally {
@@ -162,9 +164,11 @@ export async function admitTask(
       }
     };
     const existing = await authority.lookupExisting(contract.id, contractHash);
-    const repository =
-      existing?.repository ?? (await authority.lookupRepository(contract.repositoryId));
+    const registeredRepository = await authority.lookupRepository(contract.repositoryId);
+    const repository = existing?.repository ?? registeredRepository;
     if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
+    if (!registeredRepository)
+      throw new Error(`repository is not registered: ${contract.repositoryId}`);
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
@@ -197,7 +201,9 @@ export async function admitTask(
       {
         contract,
         contractHash,
-        repository: repository,
+        repository: existing
+          ? { ...registeredRepository, ...existing.repository }
+          : registeredRepository,
         repositoryIdentity: writerIdentity,
         deadlineEpochMs,
       },

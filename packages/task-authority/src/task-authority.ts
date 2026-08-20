@@ -31,6 +31,7 @@ import {
 } from "./task-state.js";
 import {
   snapshotFromRegistration,
+  taskSnapshotFromRegistration,
   type RepositoryRegistration,
   type RepositorySnapshot,
 } from "./repository.js";
@@ -50,7 +51,11 @@ export type {
   TaskResult,
   TaskStatus,
 } from "./task-state.js";
-export type { RepositoryRegistration, RepositorySnapshot } from "./repository.js";
+export type {
+  RepositoryRegistration,
+  RepositorySnapshot,
+  TaskRepositorySnapshot,
+} from "./repository.js";
 
 type AuthorityDatabase = RuntimeDatabase;
 
@@ -73,6 +78,8 @@ export class TaskAuthority {
             owner: input.owner,
             name: input.name,
             baseBranch: input.baseBranch,
+            implementerProfile: input.implementerProfile,
+            reviewerProfile: input.reviewerProfile,
             projectCheckCommand: input.projectCheck.command,
             projectCheckTimeoutMs: input.projectCheck.timeoutMs,
             gitAuthorName: input.gitAuthor.name,
@@ -88,6 +95,8 @@ export class TaskAuthority {
         owner: input.owner,
         name: input.name,
         baseBranch: input.baseBranch,
+        implementerProfile: input.implementerProfile,
+        reviewerProfile: input.reviewerProfile,
         projectCheckCommand: input.projectCheck.command,
         projectCheckTimeoutMs: input.projectCheck.timeoutMs,
         gitAuthorName: input.gitAuthor.name,
@@ -109,6 +118,8 @@ export class TaskAuthority {
           owner: row.owner,
           name: row.name,
           baseBranch: row.baseBranch,
+          implementerProfile: row.implementerProfile,
+          reviewerProfile: row.reviewerProfile,
           projectCheck: {
             command: row.projectCheckCommand,
             timeoutMs: row.projectCheckTimeoutMs,
@@ -154,7 +165,9 @@ export class TaskAuthority {
           activation: input.activation,
           cycle: input.cycle,
           role: input.role,
-          model: input.model,
+          profile: input.profile,
+          observedModel: input.observedModel,
+          observedProvider: input.observedProvider,
           executionOwner: input.executionOwner ?? null,
           previousExecutionOwner: input.previousExecutionOwner ?? null,
           startedAtEpochMs: input.startedAtEpochMs,
@@ -234,7 +247,9 @@ export class TaskAuthority {
       throw new Error("task repository identity is immutable");
     if (
       input.repository &&
-      (!result.repository || JSON.stringify(result.repository) !== JSON.stringify(input.repository))
+      (!result.repository ||
+        JSON.stringify(result.repository) !==
+          JSON.stringify(taskSnapshotFromRegistration(input.repository)))
     )
       throw new Error("task repository snapshot is immutable");
     return result;
@@ -302,7 +317,7 @@ export class TaskAuthority {
         writer: {
           repositoryIdentity: input.repositoryIdentity,
         },
-        repository: input.repository,
+        repository: input.repository ? taskSnapshotFromRegistration(input.repository) : undefined,
         evidence: {
           implementerActivations: 0,
           reviewCycles: 0,

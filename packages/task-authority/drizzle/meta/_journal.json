@@ -57,6 +57,13 @@
       "when": 1787181849935,
       "tag": "0007_remove_submission_repository_path",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787356800000,
+      "tag": "0008_repository_profiles",
+      "breakpoints": true
     }
   ]
 }
