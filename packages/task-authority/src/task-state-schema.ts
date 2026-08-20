@@ -52,6 +52,15 @@ const deliveryEffect = Schema.Struct({
   url: Schema.String,
   attestationId: Schema.String,
 });
+const repositorySnapshot = Schema.Struct({
+  id: Schema.String,
+  path: Schema.String,
+  owner: Schema.String,
+  name: Schema.String,
+  baseBranch: Schema.String,
+  projectCheck: Schema.Struct({ command: Schema.String, timeoutMs: Schema.Int }),
+  gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
+});
 const historyRecord = Schema.Struct({
   id: Schema.Natural,
   taskId: Schema.String,
@@ -104,6 +113,7 @@ const taskResultFields = {
     changesRequestedBatches: Schema.Natural,
     restartRecoveries: Schema.Natural,
   }),
+  repository: Schema.optional(repositorySnapshot),
 } as const;
 
 const currentTaskResult = Schema.Struct({
@@ -183,6 +193,13 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     blocker: decoded.blocker,
     activeActivation: decoded.activeActivation,
     writer: { repositoryIdentity: decoded.writer.repositoryIdentity },
+    repository: decoded.repository
+      ? {
+          ...decoded.repository,
+          projectCheck: { ...decoded.repository.projectCheck },
+          gitAuthor: { ...decoded.repository.gitAuthor },
+        }
+      : undefined,
     evidence: {
       implementerActivations: decoded.evidence.implementerActivations,
       reviewCycles: decoded.evidence.reviewCycles,

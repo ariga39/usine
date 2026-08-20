@@ -27,7 +27,6 @@ describe("runtime composition", () => {
     });
 
     expect(policy).toMatchObject({
-      gitAuthor: { name: "Example Automation", email: "automation@example.invalid" },
       roles: {
         implementer: { model: "gpt-5.6-luna" },
         reviewer: { model: "gpt-5.6-sol" },
@@ -50,8 +49,6 @@ describe("runtime composition", () => {
         OPENAI_API_KEY: "coordinator-secret",
         GITHUB_TOKEN: "delivery-secret",
         USINE_STATE_DIR: "/state",
-        USINE_GIT_AUTHOR_NAME: "Release Bot",
-        USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
         USINE_IMPLEMENTER_MODEL: "implementer-model",
         USINE_REVIEWER_MODEL: "reviewer-model",
         USINE_REVIEWER_REASONING_EFFORT: "medium",
@@ -65,7 +62,6 @@ describe("runtime composition", () => {
 
     expect(policy).toMatchObject({
       stateDirectory: "/state",
-      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       roles: {
         implementer: {
           role: "implementer",
@@ -99,21 +95,22 @@ describe("runtime composition", () => {
     });
   });
 
-  test.each([
-    ["name", { USINE_GIT_AUTHOR_NAME: "", USINE_GIT_AUTHOR_EMAIL: "release@example.invalid" }],
-    ["email", { USINE_GIT_AUTHOR_NAME: "Release Bot", USINE_GIT_AUTHOR_EMAIL: "   " }],
-  ])("rejects a blank Git author %s before activation", (_field, identity) => {
-    expect(() => runtimePolicyFromEnvironment(identity, { owner: "owner", name: "repo" })).toThrow(
-      /USINE_GIT_AUTHOR_(NAME|EMAIL)/,
-    );
+  test("does not read Git author policy from global environment", () => {
+    expect(() =>
+      runtimePolicyFromEnvironment(
+        {
+          USINE_GIT_AUTHOR_NAME: "Release Bot",
+          USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
+        },
+        { owner: "owner", name: "repo" },
+      ),
+    ).not.toThrow();
   });
 
   test("rejects test forge credentials outside loopback", () => {
     expect(() =>
       runtimePolicyFromEnvironment(
         {
-          USINE_GIT_AUTHOR_NAME: "Release Bot",
-          USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
           USINE_GITHUB_APP_SLUG: "usine-app",
           USINE_GITHUB_TEST_TOKEN: "test-token",
           USINE_GITHUB_API_URL: "https://github.com",
@@ -126,8 +123,6 @@ describe("runtime composition", () => {
   test("retains the production GitHub App authentication policy without test credentials", () => {
     const policy = runtimePolicyFromEnvironment(
       {
-        USINE_GIT_AUTHOR_NAME: "Release Bot",
-        USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
         USINE_GITHUB_APP_SLUG: "usine-app",
         USINE_GITHUB_APP_ID: "123",
         USINE_GITHUB_INSTALLATION_ID: "456",

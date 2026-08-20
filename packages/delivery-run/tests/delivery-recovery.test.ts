@@ -6,7 +6,7 @@ import {
   applyMigrations,
   openSqliteDatabase,
   TaskAuthority,
-  type TaskContract,
+  type ResolvedTaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
 import {
@@ -31,9 +31,10 @@ const implementer = {
   reasoningEffort: "high",
   sandbox: "workspace-write" as const,
 };
-function contract(id: string): TaskContract {
+function contract(id: string): ResolvedTaskContract {
   return {
     id,
+    repositoryId: "recovery-repository",
     repository: { path: ".", owner: "recovery", name: "recovery" },
     baseSha: "a".repeat(40),
     instructions: "recover",
@@ -485,7 +486,7 @@ describe("Delivery Run durable phase recovery", () => {
       },
     ];
     const quality = {
-      check: async (_contract: TaskContract, candidateSha: string) => {
+      check: async (_contract: ResolvedTaskContract, candidateSha: string) => {
         checked.push(candidateSha);
         return {
           sha: candidateSha,
@@ -605,7 +606,7 @@ describe("Delivery Run durable phase recovery", () => {
           },
         },
         quality: {
-          check: async (_contract: TaskContract, candidateSha: string) => {
+          check: async (_contract: ResolvedTaskContract, candidateSha: string) => {
             checked.push(candidateSha);
             return {
               sha: candidateSha,
@@ -616,7 +617,7 @@ describe("Delivery Run durable phase recovery", () => {
               stderr: "",
             };
           },
-          reviewWithObservation: async (_contract: TaskContract, candidateSha: string) => {
+          reviewWithObservation: async (_contract: ResolvedTaskContract, candidateSha: string) => {
             reviewed.push(candidateSha);
             return {
               review: {
@@ -630,7 +631,7 @@ describe("Delivery Run durable phase recovery", () => {
           },
         },
         forge: {
-          deliver: async (_contract: TaskContract, candidateSha: string) => {
+          deliver: async (_contract: ResolvedTaskContract, candidateSha: string) => {
             delivered.push(candidateSha);
             return {
               sha: candidateSha,
@@ -662,7 +663,7 @@ describe("Delivery Run durable phase recovery", () => {
       const reviewed: string[] = [];
       const delivered: string[] = [];
       const quality = {
-        check: async (_contract: TaskContract, candidateSha: string) => {
+        check: async (_contract: ResolvedTaskContract, candidateSha: string) => {
           evaluated.push(candidateSha);
           return {
             sha: candidateSha,
@@ -673,7 +674,7 @@ describe("Delivery Run durable phase recovery", () => {
             stderr: "",
           };
         },
-        reviewWithObservation: async (_contract: TaskContract, candidateSha: string) => {
+        reviewWithObservation: async (_contract: ResolvedTaskContract, candidateSha: string) => {
           reviewed.push(candidateSha);
           return {
             review: {
@@ -687,7 +688,7 @@ describe("Delivery Run durable phase recovery", () => {
         },
       };
       const forge = {
-        deliver: async (_contract: TaskContract, candidateSha: string) => {
+        deliver: async (_contract: ResolvedTaskContract, candidateSha: string) => {
           delivered.push(candidateSha);
           return {
             sha: candidateSha,
@@ -759,7 +760,7 @@ describe("Delivery Run durable phase recovery", () => {
     let calls = 0;
     let effectObserved = false;
     const forge = {
-      deliver: async (_contract: TaskContract, candidateSha: string) => {
+      deliver: async (_contract: ResolvedTaskContract, candidateSha: string) => {
         calls += 1;
         if (!effectObserved) {
           // The external PR/comment write happened, but the coordinator lost

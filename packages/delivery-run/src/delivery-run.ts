@@ -14,7 +14,7 @@ import {
   type CheckResult,
   type DeliveryEffect,
   type ReviewVerdict,
-  type TaskContract,
+  type ResolvedTaskContract,
   type TaskObservation,
   type TaskProgress,
   type TaskResult,
@@ -25,7 +25,7 @@ import { activateImplementer } from "./coding-activation.js";
 import { blockTask, recordHistory, reportProgress } from "./delivery-progress.js";
 
 export interface DeliveryRunInput {
-  contract: TaskContract;
+  contract: ResolvedTaskContract;
   contractHash: string;
   repositoryIdentity: string;
   deadlineEpochMs: number;
@@ -55,7 +55,7 @@ interface DeliveryRunWorkspace {
   freeze(
     workspace: WriterWorkspace,
     previousSha: string,
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
   ): Promise<FrozenCandidate>;
   quarantine(workspace: WriterWorkspace): Promise<void>;
 }
@@ -70,9 +70,9 @@ interface DeliveryRunSession {
 }
 
 interface DeliveryRunQuality {
-  check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult>;
+  check(contract: ResolvedTaskContract, sha: string, cycle: number): Promise<CheckResult>;
   reviewWithObservation(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     cycle: number,
@@ -81,7 +81,7 @@ interface DeliveryRunQuality {
 
 interface DeliveryRunForge {
   deliver(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     review: ReviewVerdict,

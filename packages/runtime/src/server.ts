@@ -1,4 +1,4 @@
-import { readFile, mkdir } from "node:fs/promises";
+import { readFile, mkdir, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -10,6 +10,8 @@ import {
   TaskAuthority,
   isTaskStateQuarantinedError,
   taskContractSchema,
+  repositoryRegistrationSchema,
+  type RepositorySnapshot,
   type TaskContract,
   type TaskExecutionInput,
   type TaskResult,
@@ -19,6 +21,8 @@ import { reapCodexExecution } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
+  inspectRepository,
+  registerRepository,
   lookupRestartableTasks,
   lookupTaskStatus,
   recordExecutionObservation,
@@ -29,7 +33,7 @@ import {
 
 export interface TaskSubmission {
   contractPath: string;
-  repositoryPath: string;
+  repositoryId?: string;
 }
 
 export interface ServerExecutionContext {
@@ -192,7 +196,8 @@ async function executeServerTask(
 ): Promise<TaskResult> {
   let policy: RuntimePolicy;
   try {
-    policy = runtimePolicyFromEnvironment(environment, task.contract.repository);
+    if (!task.result.repository) throw new Error("admitted task has no repository snapshot");
+    policy = runtimePolicyFromEnvironment(environment, task.result.repository);
   } catch (error) {
     return blockPersistedTask(stateDirectory, task.result.taskId, error);
   }
@@ -331,18 +336,43 @@ async function handleRequest(
     return;
   }
 
+  const repositoryId = url.pathname.match(/^\/v1\/repositories\/([^/]+)$/)?.[1];
+  if (request.method === "GET" && repositoryId) {
+    const repository = await inspectRepository(stateDirectory, decodeURIComponent(repositoryId));
+    if (!repository) {
+      response.statusCode = 404;
+      writeJson(response, { message: "repository not found" });
+      return;
+    }
+    writeJson(response, repository);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/repositories") {
+    const parsed = repositoryRegistrationSchema.safeParse(JSON.parse(await readBody(request)));
+    if (!parsed.success) {
+      response.statusCode = 400;
+      writeJson(response, { message: JSON.stringify(contractIssues(parsed.error)) });
+      return;
+    }
+    const registration: RepositorySnapshot = {
+      ...parsed.data,
+      path: await realpath(parsed.data.path),
+    };
+    writeJson(response, await registerRepository(stateDirectory, registration));
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/v1/tasks") {
     const submission = parseSubmission(await readBody(request));
     const rawContract = await readFile(submission.contractPath, "utf8");
     const contract = parseContract(rawContract);
-    const policy = runtimePolicyFromEnvironment(environment, contract.repository);
-    const result = await admitTask(
-      submission.contractPath,
-      submission.repositoryPath,
-      rawContract,
-      contract,
-      policy,
-    );
+    if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
+      throw new Error("submitted repository ID does not match the task contract");
+    const repository = await inspectRepository(stateDirectory, contract.repositoryId);
+    if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
+    const policy = runtimePolicyFromEnvironment(environment, repository);
+    const result = await admitTask(submission.contractPath, rawContract, contract, policy);
     if (result.state !== "reviewed_pr" && result.state !== "blocked") {
       launch({
         input: { ...submission, rawContract },
@@ -370,12 +400,17 @@ function parseSubmission(body: string): TaskSubmission {
     parsed === null ||
     !("contractPath" in parsed) ||
     typeof parsed.contractPath !== "string" ||
-    !("repositoryPath" in parsed) ||
-    typeof parsed.repositoryPath !== "string"
+    ("repositoryId" in parsed && typeof parsed.repositoryId !== "string")
   ) {
     throw new Error("task submission shape is invalid");
   }
-  return { contractPath: parsed.contractPath, repositoryPath: parsed.repositoryPath };
+  return {
+    contractPath: parsed.contractPath,
+    repositoryId:
+      "repositoryId" in parsed && typeof parsed.repositoryId === "string"
+        ? parsed.repositoryId
+        : undefined,
+  };
 }
 
 function parseContract(rawContract: string): TaskContract {

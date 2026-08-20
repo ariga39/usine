@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { App, Octokit } from "octokit";
-import type { CheckResult, ReviewVerdict, TaskContract } from "@usine/task-authority";
+import type { CheckResult, ResolvedTaskContract, ReviewVerdict } from "@usine/task-authority";
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -87,7 +87,7 @@ export async function createForgeClient(options: ForgeDeliveryOptions): Promise<
 }
 
 export function approvalAttestationBody(
-  contract: TaskContract,
+  contract: ResolvedTaskContract,
   sha: string,
   check: CheckResult,
   review: ReviewVerdict,

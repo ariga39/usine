@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import type { TaskContract } from "@usine/task-authority";
+import type { ResolvedTaskContract } from "@usine/task-authority";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "usine-candidate-"));
@@ -20,9 +20,10 @@ async function fixture() {
   return { root, repository, baseSha };
 }
 
-function contract(baseSha: string, title = "Deliver the authorized outcome"): TaskContract {
+function contract(baseSha: string, title = "Deliver the authorized outcome"): ResolvedTaskContract {
   return {
     id: "outcome-task",
+    repositoryId: "repo",
     repository: { path: ".", owner: "example", name: "repo" },
     baseSha,
     instructions: "Deliver the authorized outcome.",

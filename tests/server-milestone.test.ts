@@ -54,6 +54,7 @@ interface Fixture {
   repository: string;
   remote: string;
   contractPath: string;
+  registrationPath: string;
   stateDirectory: string;
   taskId: string;
   branch: string;
@@ -105,19 +106,17 @@ async function fixture(name: string): Promise<Fixture> {
     contractPath,
     JSON.stringify({
       id: taskId,
-      repository: { path: ".", owner: "example", name: taskId },
+      repositoryId: taskId,
       baseSha,
       instructions: "Implement the executable target and deliver it.",
       acceptance: ["The executable target passes the project check and is delivered."],
       nonGoals: [],
-      projectCheck: { command: "test -x target.sh", timeoutMs: 10_000 },
       budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 60_000 },
       authorization: {
         source: `https://github.com/example/${taskId}/issues/153`,
         delivery: true,
       },
       delivery: {
-        baseBranch: "main",
         branch,
         issue: 153,
         title: "Server milestone",
@@ -127,6 +126,19 @@ async function fixture(name: string): Promise<Fixture> {
   );
   await execa("git", ["add", "task.json"], { cwd: repository });
   await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+  const registrationPath = join(root, "repository-registration.json");
+  await writeFile(
+    registrationPath,
+    JSON.stringify({
+      id: taskId,
+      path: repository,
+      owner: "example",
+      name: taskId,
+      baseBranch: "main",
+      projectCheck: { command: "test -x target.sh", timeoutMs: 10_000 },
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    }),
+  );
   await execa("git", ["init", "--bare", remote]);
   await mkdir(join(root, "bin"));
   await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart"), { mode: 0o755 });
@@ -136,6 +148,7 @@ async function fixture(name: string): Promise<Fixture> {
     repository,
     remote,
     contractPath,
+    registrationPath,
     stateDirectory,
     taskId,
     branch,
@@ -238,8 +251,6 @@ function environment(
 ): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: fixture.stateDirectory,
-    USINE_GIT_AUTHOR_NAME: "Release Bot",
-    USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
     USINE_GITHUB_APP_SLUG: "usine-app",
     USINE_GITHUB_TEST_TOKEN: "test-token",
     USINE_GITHUB_API_URL: forge.url,
@@ -314,7 +325,7 @@ async function runCli(
   fixture: Fixture,
   forge: ForgeServer,
   serverUrl: string,
-  command: "submit" | "status" | "follow",
+  command: "register" | "submit" | "status" | "follow",
   argument: string,
   mode: "complete" | "kill" = "complete",
 ) {
@@ -395,6 +406,15 @@ describe("server-owned delivery milestone", () => {
     const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
     const server = await startServer(cliPath, fixtureValue, forge, "complete");
     try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
       const submit = await runCli(
         cliPath,
         fixtureValue,
@@ -466,6 +486,15 @@ describe("server-owned delivery milestone", () => {
     const first = await startServer(cliPath, fixtureValue, forge, "kill");
     let firstStopped = false;
     try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
       const submit = await runCli(
         cliPath,
         fixtureValue,
@@ -552,6 +581,15 @@ describe("server-owned delivery milestone", () => {
     const first = await startServer(cliPath, fixtureValue, forge, "kill");
     let codexPid: number | null = null;
     try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
       const submit = await runCli(
         cliPath,
         fixtureValue,

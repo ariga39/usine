@@ -4,10 +4,28 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { approvalAttestationBody, ForgeDelivery, forgeGitEnvironment } from "../src/index.js";
-import { taskContractSchema, type TaskContract } from "@usine/task-authority";
+import { taskContractSchema, type ResolvedTaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
-const simpleContract = { id: "forge-module-test" } as TaskContract;
+const simpleContract = {
+  id: "forge-module-test",
+  repositoryId: "repo",
+  repository: { path: "/repo", owner: "owner", name: "repo" },
+  baseSha: sha,
+  instructions: "test",
+  acceptance: ["test"],
+  nonGoals: [],
+  projectCheck: { command: "true", timeoutMs: 10_000 },
+  budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+  authorization: { source: "https://github.com/owner/repo/issues/100", delivery: true },
+  delivery: {
+    baseBranch: "main",
+    branch: "agent/test",
+    issue: 100,
+    title: "test",
+    body: "test",
+  },
+} satisfies ResolvedTaskContract;
 
 describe("Forge Delivery module", () => {
   test("attestation is bound to exact candidate SHA", () => {
@@ -97,25 +115,29 @@ type ForgeServerState = {
   requests: string[];
 };
 
-function contract(id: string): TaskContract {
-  return taskContractSchema.parse({
+function contract(id: string): ResolvedTaskContract {
+  const parsed = taskContractSchema.parse({
     id,
-    repository: { path: ".", owner: "owner", name: "repo" },
+    repositoryId: "repo",
     baseSha: "a".repeat(40),
     instructions: "deliver the candidate",
     acceptance: ["the candidate is delivered"],
     nonGoals: [],
-    projectCheck: { command: "true", timeoutMs: 10_000 },
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
     authorization: { source: "https://github.com/owner/repo/issues/100", delivery: true },
     delivery: {
-      baseBranch: "main",
       branch: "agent/forge-e2e",
       issue: 100,
       title: "Forge delivery",
       body: "Forge delivery",
     },
   });
+  return {
+    ...parsed,
+    repository: { path: ".", owner: "owner", name: "repo" },
+    projectCheck: { command: "true", timeoutMs: 10_000 },
+    delivery: { ...parsed.delivery, baseBranch: "main" },
+  };
 }
 
 function controlledFetch(state: ForgeServerState): typeof fetch {

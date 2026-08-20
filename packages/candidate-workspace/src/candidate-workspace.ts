@@ -1,7 +1,7 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
-import { remainingUntil, type TaskContract } from "@usine/task-authority";
+import { remainingUntil, type ResolvedTaskContract } from "@usine/task-authority";
 
 const MAX_COMMIT_SUBJECT_LENGTH = 160;
 const ESCAPE_CHARACTER = String.fromCodePoint(0x1b);
@@ -60,7 +60,7 @@ function normalizeCommitSubjectPart(value: string): string {
     .trim();
 }
 
-function commitSubjectForTask(contract: TaskContract): string {
+function commitSubjectForTask(contract: ResolvedTaskContract): string {
   const taskId = normalizeCommitSubjectPart(contract.id) || "unknown-task";
   const outcome = normalizeCommitSubjectPart(contract.delivery.title) || "authorized outcome";
   const prefix = `#${contract.delivery.issue} [${taskId}]`;
@@ -131,7 +131,7 @@ export class CandidateWorkspace {
   async freeze(
     workspace: WriterWorkspace,
     previousSha: string,
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
   ): Promise<FrozenCandidate> {
     const head = await this.git(["-C", workspace.path, "rev-parse", "HEAD"]);
     const status = await this.git(["-C", workspace.path, "status", "--porcelain"]);

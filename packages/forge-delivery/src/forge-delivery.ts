@@ -4,7 +4,7 @@ import type {
   CheckResult,
   DeliveryEffect,
   ReviewVerdict,
-  TaskContract,
+  ResolvedTaskContract,
 } from "@usine/task-authority";
 import { remainingUntil } from "@usine/task-authority";
 import {
@@ -26,7 +26,7 @@ export class ForgeDelivery {
   constructor(private readonly options: ForgeDeliveryOptions) {}
 
   async deliver(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     review: ReviewVerdict,
@@ -60,7 +60,7 @@ export class ForgeDelivery {
   }
 
   private async reconcile(
-    contract: TaskContract,
+    contract: ResolvedTaskContract,
     sha: string,
     check: CheckResult,
     review: ReviewVerdict,
