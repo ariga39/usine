@@ -197,18 +197,17 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     blocker: decoded.blocker,
     activeActivation: decoded.activeActivation,
     writer: { repositoryIdentity: decoded.writer.repositoryIdentity },
-    repository:
-      decoded.repository && decoded.repository
-        ? {
-            id: decoded.repository.id,
-            path: decoded.repository.path,
-            owner: decoded.repository.owner,
-            name: decoded.repository.name,
-            baseBranch: decoded.repository.baseBranch,
-            projectCheck: { ...decoded.repository.projectCheck },
-            gitAuthor: { ...decoded.repository.gitAuthor },
-          }
-        : undefined,
+    repository: decoded.repository
+      ? {
+          id: decoded.repository.id,
+          path: decoded.repository.path,
+          owner: decoded.repository.owner,
+          name: decoded.repository.name,
+          baseBranch: decoded.repository.baseBranch,
+          projectCheck: { ...decoded.repository.projectCheck },
+          gitAuthor: { ...decoded.repository.gitAuthor },
+        }
+      : undefined,
     evidence: {
       implementerActivations: decoded.evidence.implementerActivations,
       reviewCycles: decoded.evidence.reviewCycles,
