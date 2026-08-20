@@ -83,6 +83,7 @@ const historyRecord = Schema.Struct({
     }),
   ),
 });
+type DecodedHistoryRecord = Schema.Schema.Type<typeof historyRecord>;
 const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -123,6 +124,41 @@ const priorTaskResult = Schema.Struct({
 
 const persistedTaskResult = Schema.Union([currentTaskResult, priorTaskResult]);
 type DecodedPersistedTaskResult = Schema.Schema.Type<typeof persistedTaskResult>;
+
+function projectHistoryRecord(decoded: DecodedHistoryRecord): TaskHistoryRecord {
+  return {
+    id: decoded.id,
+    taskId: decoded.taskId,
+    kind: decoded.kind,
+    activation: decoded.activation,
+    cycle: decoded.cycle,
+    role: decoded.role,
+    model: decoded.model,
+    executionOwner: decoded.executionOwner,
+    previousExecutionOwner: decoded.previousExecutionOwner,
+    startedAtEpochMs: decoded.startedAtEpochMs,
+    endedAtEpochMs: decoded.endedAtEpochMs,
+    outcome: decoded.outcome,
+    failure: decoded.failure,
+    candidateSha: decoded.candidateSha,
+    candidateFence: decoded.candidateFence,
+    tokenUsage: decoded.tokenUsage
+      ? {
+          inputTokens: decoded.tokenUsage.inputTokens,
+          outputTokens: decoded.tokenUsage.outputTokens,
+          totalTokens: decoded.tokenUsage.totalTokens,
+        }
+      : null,
+  };
+}
+
+export function decodeTaskHistoryRecord(input: unknown): TaskHistoryRecord {
+  try {
+    return projectHistoryRecord(Schema.decodeUnknownSync(historyRecord)(input));
+  } catch {
+    throw new TaskStateQuarantinedError();
+  }
+}
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
   return {
@@ -181,23 +217,6 @@ export function decodeCurrentTaskStatus(input: unknown): TaskStatus {
   const result = projectDecodedResult(decoded);
   return {
     ...result,
-    history: decoded.history.map((record): TaskHistoryRecord => ({
-      id: record.id,
-      taskId: record.taskId,
-      kind: record.kind,
-      activation: record.activation,
-      cycle: record.cycle,
-      role: record.role,
-      model: record.model,
-      executionOwner: record.executionOwner,
-      previousExecutionOwner: record.previousExecutionOwner,
-      startedAtEpochMs: record.startedAtEpochMs,
-      endedAtEpochMs: record.endedAtEpochMs,
-      outcome: record.outcome,
-      failure: record.failure,
-      candidateSha: record.candidateSha,
-      candidateFence: record.candidateFence,
-      tokenUsage: record.tokenUsage,
-    })),
+    history: decoded.history.map(projectHistoryRecord),
   };
 }

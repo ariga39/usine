@@ -198,6 +198,44 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
+  test("quarantines malformed persisted history at the status boundary", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-malformed-history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const authority = authorityAt(path);
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-malformed-history-hash",
+      repositoryIdentity: `authority/malformed-history-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    await authority.appendHistory({
+      taskId,
+      kind: "coordinator_restart",
+      activation: null,
+      cycle: null,
+      role: null,
+      model: null,
+      startedAtEpochMs: 200,
+      endedAtEpochMs: 200,
+      outcome: "observed",
+      failure: null,
+      candidateSha: null,
+      candidateFence: null,
+      tokenUsage: null,
+    });
+
+    const inspection = new DatabaseSync(path);
+    inspection
+      .prepare("UPDATE task_history SET kind = ? WHERE task_id = ?")
+      .run("malformed-history-kind", taskId);
+    inspection.close();
+
+    await expect(authority.lookupStatus(taskId)).rejects.toMatchObject({
+      code: "task_state_quarantined",
+      message: "durable task state quarantined",
+    });
+  });
+
   test("keeps repository paths out of admitted and terminal durable results", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
