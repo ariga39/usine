@@ -127,9 +127,6 @@ async function readStatusResponse(response: Response): Promise<TaskStatus> {
     throw new ServerClientError(message, response.status);
   }
   try {
-    if (typeof parsed === "object" && parsed !== null && !("history" in parsed)) {
-      return { ...decodeCurrentTaskResult(parsed), history: [] };
-    }
     return decodeCurrentTaskStatus(parsed);
   } catch {
     throw new ServerClientError(

@@ -40,7 +40,7 @@ describe("CLI follow boundary", () => {
     const server = createServer((_request, response) => {
       const snapshot = snapshots[Math.min(requestCount++, snapshots.length - 1)];
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify(snapshot));
+      response.end(JSON.stringify({ ...snapshot, history: [] }));
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
