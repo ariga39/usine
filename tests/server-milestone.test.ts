@@ -290,6 +290,16 @@ async function startServer(
 
 async function stopServer(server: UsineProcess, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
   server.child.kill(signal);
+  if (signal === "SIGKILL") {
+    const pid = server.child.pid;
+    const phase = "SIGKILL server exit";
+    if (pid === undefined) throw new Error(`${phase} has no server PID`);
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      if (!processAlive(pid)) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`${phase} timed out after 5000ms (pid ${pid})`);
+  }
   await server.child;
 }
 
