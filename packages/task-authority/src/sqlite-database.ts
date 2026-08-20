@@ -1,7 +1,13 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
 import type { RemoteCallback, SqliteRemoteDatabase } from "drizzle-orm/sqlite-proxy";
-import { repositories, repositoryLeases, taskHistory, taskRuns } from "./schema.js";
+import {
+  repositories,
+  repositoryLeases,
+  taskHistory,
+  taskQuarantines,
+  taskRuns,
+} from "./schema.js";
 
 const transactionQueues = new Map<string, Promise<void>>();
 
@@ -24,6 +30,7 @@ export type RuntimeDatabase = SqliteRemoteDatabase<{
   taskHistory: typeof taskHistory;
   taskRuns: typeof taskRuns;
   repositories: typeof repositories;
+  taskQuarantines: typeof taskQuarantines;
 }>;
 
 export function openSqliteDatabase(
@@ -48,7 +55,7 @@ export function openSqliteDatabase(
     return { rows: statement.all(...values) };
   };
   const database = drizzle(execute, {
-    schema: { repositoryLeases, taskHistory, taskRuns, repositories },
+    schema: { repositoryLeases, taskHistory, taskRuns, repositories, taskQuarantines },
   });
 
   const databaseWithTransaction = database as unknown as {

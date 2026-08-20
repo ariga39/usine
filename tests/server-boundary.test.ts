@@ -1,11 +1,15 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
-import { inspectRepository, registerRepository } from "../apps/cli/src/server-client.js";
+import {
+  inspectRepository,
+  registerRepository,
+  submitTask,
+} from "../apps/cli/src/server-client.js";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
@@ -70,9 +74,10 @@ describe("CLI/server boundary", () => {
     });
 
     try {
+      const trustedPath = await realpath(repository);
       await registerRepository(server.url, {
         id: taskId,
-        path: repository,
+        path: trustedPath,
         owner: "example",
         name: taskId,
         baseBranch: "main",
@@ -90,7 +95,7 @@ describe("CLI/server boundary", () => {
         state: "admitted",
         repository: {
           id: taskId,
-          path: repository,
+          path: trustedPath,
           owner: "example",
           name: taskId,
           baseBranch: "main",
@@ -101,9 +106,28 @@ describe("CLI/server boundary", () => {
 
       await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
         id: taskId,
-        path: repository,
+        path: trustedPath,
         owner: "example",
         name: taskId,
+      });
+      await registerRepository(server.url, {
+        id: taskId,
+        path: trustedPath,
+        owner: "example",
+        name: taskId,
+        baseBranch: "release",
+        projectCheck: { command: "false", timeoutMs: 2_000 },
+        gitAuthor: { name: "Updated Bot", email: "updated@example.invalid" },
+      });
+      await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
+        baseBranch: "release",
+        projectCheck: { command: "false", timeoutMs: 2_000 },
+      });
+      const admittedAgain = await submitTask(server.url, { contractPath, repositoryId: taskId });
+      expect(admittedAgain.repository).toMatchObject({
+        baseBranch: "main",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
 
       const status = await execa("node", [cliPath, "status", taskId], {

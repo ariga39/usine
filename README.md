@@ -15,8 +15,6 @@ USINE_GITHUB_APP_ID=123456 \
 USINE_GITHUB_INSTALLATION_ID=123456 \
 USINE_GITHUB_APP_SLUG=example-app \
 USINE_GITHUB_PRIVATE_KEY_PATH=./app-private-key.pem \
-USINE_GIT_AUTHOR_NAME="Example Automation" \
-USINE_GIT_AUTHOR_EMAIL=automation@example.invalid \
 node apps/cli/dist/cli.mjs server
 ```
 
@@ -27,7 +25,7 @@ node apps/cli/dist/cli.mjs submit ./committed-task-contract.json
 node apps/cli/dist/cli.mjs follow <task-id>
 ```
 
-完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG`、`USINE_GITHUB_PRIVATE_KEY_PATH`、`USINE_GIT_AUTHOR_NAME` 与 `USINE_GIT_AUTHOR_EMAIL`。前四项用于 GitHub App 认证；后两项共同固定 host 最终 candidate commit 的 author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
+完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG` 与 `USINE_GITHUB_PRIVATE_KEY_PATH`。这些配置用于 GitHub App 认证；Repository 注册时提供 Git commit author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
 
 以下配置是可选覆盖；省略时使用 production 默认值：
 
@@ -38,7 +36,7 @@ node apps/cli/dist/cli.mjs follow <task-id>
 - `USINE_IMPLEMENTER_MODEL`：implementer 模型，默认使用内置 role policy；
 - `USINE_REVIEWER_MODEL`：reviewer 模型，默认使用内置 role policy；
 - `USINE_REVIEWER_REASONING_EFFORT`：reviewer reasoning effort，默认使用内置 role policy；
-- `USINE_GITHUB_GIT_URL`：forge Git URL，默认由 Task Contract 的 repository owner/name 组成。
+- `USINE_GITHUB_GIT_URL`：forge Git URL，默认由已注册 Repository 的 owner/name 组成。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `corepack pnpm test`, and `vp run --filter '@usine/cli...' build`.

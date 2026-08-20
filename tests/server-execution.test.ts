@@ -90,8 +90,6 @@ async function fixture(): Promise<{
 function environment(stateDirectory: string): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: stateDirectory,
-    USINE_GIT_AUTHOR_NAME: "Release Bot",
-    USINE_GIT_AUTHOR_EMAIL: "release@example.invalid",
     USINE_GITHUB_APP_SLUG: "test-app",
     USINE_GITHUB_TEST_TOKEN: "test-token",
     USINE_GITHUB_API_URL: "http://127.0.0.1:9",
@@ -305,15 +303,9 @@ describe("server-owned execution", () => {
     const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
     database
       .prepare(
-        "INSERT INTO task_runs (task_id, result, contract_path, repository_path, raw_contract) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO task_runs (task_id, result, contract_path, raw_contract) VALUES (?, ?, ?, ?)",
       )
-      .run(
-        corruptTaskId,
-        JSON.stringify(corruptResult),
-        contractPath,
-        submission.repositoryId ?? "",
-        "{ invalid contract",
-      );
+      .run(corruptTaskId, JSON.stringify(corruptResult), contractPath, "{ invalid contract");
     database
       .prepare("INSERT INTO repository_leases (repository_identity, task_id) VALUES (?, ?)")
       .run(corruptResult.writer.repositoryIdentity, corruptTaskId);

@@ -88,8 +88,7 @@ export const taskContractSchema = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["authorization", "source"],
-        message:
-          "must be the canonical HTTPS GitHub Issue URL matching repository and delivery.issue",
+        message: "must be the canonical HTTPS GitHub Issue URL matching delivery.issue",
       });
     }
   });

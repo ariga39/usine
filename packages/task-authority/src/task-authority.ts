@@ -1,10 +1,17 @@
 import { and, desc, eq, sql } from "drizzle-orm";
-import { repositories, repositoryLeases, taskHistory, taskRuns } from "./schema.js";
+import {
+  repositories,
+  repositoryLeases,
+  taskHistory,
+  taskQuarantines,
+  taskRuns,
+} from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
   decodeRawPersistedTaskResult,
   decodeTaskHistoryRecord,
+  TaskStateQuarantinedError,
   TASK_RESULT_SCHEMA_VERSION,
 } from "./task-state-schema.js";
 import {
@@ -118,7 +125,14 @@ export class TaskAuthority {
       .where(eq(taskRuns.taskId, taskId))
       .limit(1);
     const row = rows[0];
-    return row ? decodeRawPersistedTaskResult(row.rawResult) : null;
+    if (row) return decodeRawPersistedTaskResult(row.rawResult);
+    const quarantined = await this.database
+      .select({ taskId: taskQuarantines.taskId })
+      .from(taskQuarantines)
+      .where(eq(taskQuarantines.taskId, taskId))
+      .limit(1);
+    if (quarantined[0]) throw new TaskStateQuarantinedError();
+    return null;
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {

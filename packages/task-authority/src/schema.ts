@@ -32,6 +32,18 @@ export const repositories = sqliteTable("repositories", {
     .notNull(),
 });
 
+export const taskQuarantines = sqliteTable("task_quarantines", {
+  taskId: text("task_id").primaryKey(),
+  reason: text("reason").notNull(),
+  result: text("result").notNull(),
+  contractPath: text("contract_path"),
+  repositoryPath: text("repository_path"),
+  rawContract: text("raw_contract"),
+  quarantinedAt: integer("quarantined_at", { mode: "timestamp_ms" })
+    .default(sql`(unixepoch() * 1000)`)
+    .notNull(),
+});
+
 export const repositoryLeases = sqliteTable("repository_leases", {
   repositoryIdentity: text("repository_identity").primaryKey(),
   taskId: text("task_id").notNull().unique(),

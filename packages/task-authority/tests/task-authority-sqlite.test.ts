@@ -285,23 +285,19 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
 
     const inspection = new DatabaseSync(path);
     const row = inspection
-      .prepare(
-        "SELECT contract_path, repository_path, raw_contract FROM task_runs WHERE task_id = ?",
-      )
+      .prepare("SELECT contract_path, raw_contract FROM task_runs WHERE task_id = ?")
       .get(taskId) as {
       contract_path: string;
-      repository_path: string;
       raw_contract: string;
     };
     inspection.close();
     expect(row).toEqual({
       contract_path: "repository/task.json",
-      repository_path: "repository",
       raw_contract: rawContract,
     });
   });
 
-  test("migrates an admitted V0 lifecycle row into the result-only authority schema", async () => {
+  test("quarantines an admitted V0 lifecycle row that lacks a repository snapshot", async () => {
     const directory = await mkdtemp(join(tmpdir(), "usine-authority-v0-"));
     const path = join(directory, "state.sqlite");
     const v0Migration = await readFile(
@@ -379,11 +375,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const migrated = authorityAt(path);
     await expect(
       migrated.lookupExisting("authority-v0-migration", "authority-v0-hash"),
-    ).resolves.toEqual({
-      schemaVersion: 1,
-      ...oldResult,
-      writer: { repositoryIdentity: "authority/v0-migration" },
-    });
+    ).rejects.toMatchObject({ code: "task_state_quarantined" });
 
     const inspection = new DatabaseSync(path);
     const taskColumns = inspection
@@ -394,17 +386,20 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       .prepare("PRAGMA table_info(repository_leases)")
       .all()
       .map((row) => String(row.name));
-    inspection.close();
     expect(taskColumns).toEqual([
       "task_id",
       "result",
       "created_at",
       "updated_at",
       "contract_path",
-      "repository_path",
       "raw_contract",
     ]);
     expect(leaseColumns).toEqual(["repository_identity", "task_id", "created_at"]);
+    const quarantine = inspection
+      .prepare("SELECT reason FROM task_quarantines WHERE task_id = ?")
+      .get("authority-v0-migration") as { reason: string };
+    expect(quarantine.reason).toBe("repository registration required");
+    inspection.close();
   });
 
   test("accepts a candidate fact without accepting a caller-owned durable snapshot", async () => {

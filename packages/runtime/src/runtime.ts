@@ -161,11 +161,12 @@ export async function admitTask(
         // Progress is an observation only; a failed sink cannot alter authority.
       }
     };
-    const repository = await authority.lookupRepository(contract.repositoryId);
+    const existing = await authority.lookupExisting(contract.id, contractHash);
+    const repository =
+      existing?.repository ?? (await authority.lookupRepository(contract.repositoryId));
     if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
-    const existing = await authority.lookupExisting(contract.id, contractHash);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
     if (existing?.state === "reviewed_pr" || existing?.state === "blocked") return existing;
     const blockExpiredExisting = async (): Promise<TaskResult> => {
