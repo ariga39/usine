@@ -71,18 +71,12 @@ interface DeliveryRunSession {
 
 interface DeliveryRunQuality {
   check(contract: TaskContract, sha: string, cycle: number): Promise<CheckResult>;
-  review(
+  reviewWithObservation(
     contract: TaskContract,
     sha: string,
     check: CheckResult,
     cycle: number,
-  ): Promise<ReviewVerdict>;
-  reviewWithObservation?: (
-    contract: TaskContract,
-    sha: string,
-    check: CheckResult,
-    cycle: number,
-  ) => Promise<ReviewAttemptObservation>;
+  ): Promise<ReviewAttemptObservation>;
 }
 
 interface DeliveryRunForge {
@@ -234,23 +228,14 @@ export async function executeDeliveryRun(
       let review: ReviewVerdict;
       let reviewUsage: TaskHistoryTokenUsage | null = null;
       try {
-        if (runServices.quality.reviewWithObservation) {
-          const observation = await runServices.quality.reviewWithObservation(
-            input.contract,
-            result.candidateSha,
-            result.check,
-            cycle,
-          );
-          review = observation.review;
-          reviewUsage = observation.usage;
-        } else {
-          review = await runServices.quality.review(
-            input.contract,
-            result.candidateSha,
-            result.check,
-            cycle,
-          );
-        }
+        const observation = await runServices.quality.reviewWithObservation(
+          input.contract,
+          result.candidateSha,
+          result.check,
+          cycle,
+        );
+        review = observation.review;
+        reviewUsage = observation.usage;
         throwIfAborted(input.signal);
       } catch (error) {
         await recordHistory(runServices, {
