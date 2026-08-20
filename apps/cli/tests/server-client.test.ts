@@ -99,6 +99,25 @@ describe("server client follow", () => {
     }
   });
 
+  test("rejects a valid TaskResult response without history", async () => {
+    const task = result("missing-history", 1, "admitted");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify(task), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    try {
+      await expect(taskStatus("http://server.test", task.taskId)).rejects.toMatchObject({
+        name: "ServerClientError",
+        status: 200,
+      } satisfies Partial<ServerClientError>);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("uses the durable deadline instead of a default poll-count bound", async () => {
     const taskId = "long-follow-test";
     const originalFetch = globalThis.fetch;
@@ -106,7 +125,7 @@ describe("server client follow", () => {
     globalThis.fetch = async () => {
       const revision = requestCount++;
       const state = revision === 600 ? "blocked" : "admitted";
-      return new Response(JSON.stringify(result(taskId, revision, state)), {
+      return new Response(JSON.stringify({ ...result(taskId, revision, state), history: [] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
