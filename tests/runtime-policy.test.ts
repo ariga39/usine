@@ -81,7 +81,13 @@ describe("runtime composition", () => {
           sandbox: "read-only",
         },
       },
-      forge: { mode: "test", appSlug: "usine-app", token: "test-token", apiUrl: "http://127.0.0.1:8787", gitUrl: "http://127.0.0.1:8787/owner/repo.git" },
+      forge: {
+        mode: "test",
+        appSlug: "usine-app",
+        token: "test-token",
+        apiUrl: "http://127.0.0.1:8787",
+        gitUrl: "http://127.0.0.1:8787/owner/repo.git",
+      },
     });
     expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
     expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
@@ -203,5 +209,36 @@ describe("runtime composition", () => {
         { owner: "owner", name: "repo", forgeProfile: "release" },
       ),
     ).toThrow("forge profile");
+  });
+
+  test.each([
+    ["missing", {}, "unauthorized"],
+    [
+      "malformed",
+      {
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+      },
+      "malformed",
+    ],
+    [
+      "repository mismatch",
+      {
+        USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+        USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+        USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "456",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "release.pem",
+        USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "other/repo",
+      },
+      "does not match repository",
+    ],
+  ])("rejects a %s forge profile before delivery", (_name, environment, message) => {
+    expect(() =>
+      forgePolicyFromEnvironment(environment, {
+        owner: "owner",
+        name: "repo",
+        forgeProfile: "release",
+      }),
+    ).toThrow(message);
   });
 });

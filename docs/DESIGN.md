@@ -137,7 +137,7 @@ Project checks 和 reviewer 是两个独立事实。Reviewer 可以读取完整 
 
 所有 gate 绑定 exact Candidate SHA。新 commit 自动使旧 check、review verdict 和 attestation stale。`changes_requested` 先聚合为一个 finding batch，再激活一次 implementer；不会让每条评论分别激活 agent。重复不收敛按预算进入 blocker/diagnosis，不形成无限 review 风暴。
 
-GitHub 是当前 forge 与交付 surface，不是核心 task domain。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
+GitHub 是当前 forge 与交付 surface，不是核心 task domain。每个 registered Repository 只保存一个 opaque `forgeProfile` 名称；local host 在 execution boundary 将它解析为该 Repository 绑定的 GitHub App capability。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据，profile secrets 不进入 Task Contract、durable facts、history、logs 或 status。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
 
 fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。第一项产品行为停在带 exact-SHA approval attestation 的 reviewed PR；未来自动 merge 仍须重新读取 live head，并验证 checks、verdict、attestation 与任何 platform approval 都绑定该 head。
 

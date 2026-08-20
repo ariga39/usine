@@ -67,6 +67,11 @@ describe("CLI/server boundary", () => {
     const server = await startUsineServer({
       environment: {
         USINE_STATE_DIR: stateDirectory,
+        USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "boundary-app",
+        USINE_FORGE_PROFILE_DEFAULT_APP_ID: "1",
+        USINE_FORGE_PROFILE_DEFAULT_INSTALLATION_ID: "2",
+        USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "boundary.pem",
+        USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${taskId}`,
       },
       execute: async ({ result }) => result,
       host: "127.0.0.1",
@@ -153,12 +158,35 @@ describe("CLI/server boundary", () => {
   test("looks up each Repository policy independently for the next execution run", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-profiles-"));
     const stateDirectory = join(root, "state");
-    const seen = new Map<string, [string, string]>();
+    const seen = new Map<string, [string, string, string, string, number]>();
     const waiting = new Map<string, (value: void) => void>();
     const server = await startUsineServer({
-      environment: { USINE_STATE_DIR: stateDirectory },
+      environment: {
+        USINE_STATE_DIR: stateDirectory,
+        USINE_FORGE_PROFILE_PROFILES_ONE_APP_SLUG: "one-app",
+        USINE_FORGE_PROFILE_PROFILES_ONE_APP_ID: "1",
+        USINE_FORGE_PROFILE_PROFILES_ONE_INSTALLATION_ID: "2",
+        USINE_FORGE_PROFILE_PROFILES_ONE_PRIVATE_KEY_PATH: "one.pem",
+        USINE_FORGE_PROFILE_PROFILES_ONE_REPOSITORY: "example/profiles-one",
+        USINE_FORGE_PROFILE_PROFILES_TWO_APP_SLUG: "two-app",
+        USINE_FORGE_PROFILE_PROFILES_TWO_APP_ID: "3",
+        USINE_FORGE_PROFILE_PROFILES_TWO_INSTALLATION_ID: "4",
+        USINE_FORGE_PROFILE_PROFILES_TWO_PRIVATE_KEY_PATH: "two.pem",
+        USINE_FORGE_PROFILE_PROFILES_TWO_REPOSITORY: "example/profiles-two",
+        USINE_FORGE_PROFILE_PROFILES_ONE_THIRD_APP_SLUG: "three-app",
+        USINE_FORGE_PROFILE_PROFILES_ONE_THIRD_APP_ID: "5",
+        USINE_FORGE_PROFILE_PROFILES_ONE_THIRD_INSTALLATION_ID: "6",
+        USINE_FORGE_PROFILE_PROFILES_ONE_THIRD_PRIVATE_KEY_PATH: "three.pem",
+        USINE_FORGE_PROFILE_PROFILES_ONE_THIRD_REPOSITORY: "example/profiles-one",
+      },
       execute: async ({ result, policy, authority }) => {
-        seen.set(result.taskId, [policy.roles.implementer.profile, policy.roles.reviewer.profile]);
+        seen.set(result.taskId, [
+          policy.roles.implementer.profile,
+          policy.roles.reviewer.profile,
+          policy.forge.mode,
+          policy.forge.appSlug,
+          policy.forge.mode === "app" ? policy.forge.installationId : 0,
+        ]);
         waiting.get(result.taskId)?.();
         return authority.block(
           { taskId: result.taskId, revision: result.revision },
@@ -212,7 +240,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "main",
         implementerProfile: profiles[0],
         reviewerProfile: profiles[1],
-        forgeProfile: "default",
+        forgeProfile: id,
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
@@ -242,8 +270,8 @@ describe("CLI/server boundary", () => {
         repositoryId: "profiles-two",
       });
       await Promise.all([waitFor("profiles-one"), waitFor("profiles-two")]);
-      expect(seen.get("profiles-one")).toEqual(["one-writer", "one-reviewer"]);
-      expect(seen.get("profiles-two")).toEqual(["two-writer", "two-reviewer"]);
+      expect(seen.get("profiles-one")).toEqual(["one-writer", "one-reviewer", "app", "one-app", 2]);
+      expect(seen.get("profiles-two")).toEqual(["two-writer", "two-reviewer", "app", "two-app", 4]);
 
       await registerRepository(server.url, {
         id: "profiles-one",
@@ -253,7 +281,7 @@ describe("CLI/server boundary", () => {
         baseBranch: "main",
         implementerProfile: "one-writer-updated",
         reviewerProfile: "one-reviewer-updated",
-        forgeProfile: "default",
+        forgeProfile: "profiles-one-third",
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
@@ -291,7 +319,13 @@ describe("CLI/server boundary", () => {
         repositoryId: "profiles-one",
       });
       await waitFor(nextTaskId);
-      expect(seen.get(nextTaskId)).toEqual(["one-writer-updated", "one-reviewer-updated"]);
+      expect(seen.get(nextTaskId)).toEqual([
+        "one-writer-updated",
+        "one-reviewer-updated",
+        "app",
+        "three-app",
+        6,
+      ]);
     } finally {
       await server.close();
     }
