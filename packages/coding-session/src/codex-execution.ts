@@ -143,13 +143,16 @@ export async function stopCodexExecution(
   }
   if (identity.workspace !== workspace) throw new Error("Codex execution identity is invalid");
   if (identity.state === "starting")
-    throw new Error("Codex execution identity was interrupted before process ownership was recorded");
+    throw new Error(
+      "Codex execution identity was interrupted before process ownership was recorded",
+    );
   const initialState = processState(identity);
   if (initialState === "stopped") {
     await removeCodexExecutionIdentity(stateDirectory, workspace);
     return identity.pid;
   }
-  if (initialState === "mismatch") throw new Error("Codex execution identity no longer belongs to this task");
+  if (initialState === "mismatch")
+    throw new Error("Codex execution identity no longer belongs to this task");
   try {
     process.kill(-identity.pid, "SIGTERM");
   } catch (error) {
@@ -161,7 +164,8 @@ export async function stopCodexExecution(
       await removeCodexExecutionIdentity(stateDirectory, workspace);
       return identity.pid;
     }
-    if (state === "mismatch") throw new Error("Codex execution identity no longer belongs to this task");
+    if (state === "mismatch")
+      throw new Error("Codex execution identity no longer belongs to this task");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   if (processState(identity) === "belongs") {
@@ -205,9 +209,7 @@ function processStillBelongsToExecution(identity: RunningCodexExecutionIdentity)
   return processState(identity) === "belongs";
 }
 
-function processState(
-  identity: RunningCodexExecutionIdentity,
-): "belongs" | "stopped" | "mismatch" {
+function processState(identity: RunningCodexExecutionIdentity): "belongs" | "stopped" | "mismatch" {
   try {
     const currentStart = execFileSync("ps", ["-o", "lstart=", "-p", String(identity.pid)], {
       encoding: "utf8",
