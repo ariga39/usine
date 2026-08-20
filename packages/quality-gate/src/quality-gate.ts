@@ -75,6 +75,7 @@ export class QualityGate {
             extendEnv: false,
             timeout,
             cancelSignal: this.options.signal,
+            killDescendants: true,
             reject: false,
           });
           if (this.options.signal?.aborted) throw new Error("project check cancelled");
