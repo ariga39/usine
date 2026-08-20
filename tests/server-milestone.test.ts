@@ -24,12 +24,18 @@ if (!reviewer) {
   if (${String(hang)} && activation === 1) {
     const stalePath = join(workspace, "stale-after-loss");
     const releasePath = join(stateDirectory, "release-stale-child");
-    const childSource = 'import { access, writeFile } from "node:fs/promises";\\nconst [releasePath, stalePath] = process.argv.slice(1);\\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
-    const descendant = spawn(process.execPath, ["--input-type=module", "--eval", childSource, releasePath, stalePath], { stdio: "ignore" });
+    const childSource = 'import { access, writeFile } from "node:fs/promises";\nconst [releasePath, stalePath] = process.argv.slice(1);\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
+    const descendant = spawn(
+      process.execPath,
+      ["--input-type=module", "--eval", childSource, releasePath, stalePath],
+      { stdio: "ignore" },
+    );
     if (!descendant.pid) throw new Error("descendant PID is missing");
     await writeFile(join(stateDirectory, "descendant.pid"), String(descendant.pid));
     await writeFile(join(stateDirectory, "activation.marker"), "activation-started\n");
-    await new Promise(() => undefined);
+    await new Promise(() => {
+      setInterval(() => undefined, 1_000);
+    });
   }
   await writeFile(join(workspace, "target.sh"), "#!/bin/sh\nexit 0\n");
   await chmod(join(workspace, "target.sh"), 0o755);
@@ -290,6 +296,16 @@ async function startServer(
 
 async function stopServer(server: UsineProcess, signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
   server.child.kill(signal);
+  if (signal === "SIGKILL") {
+    const pid = server.child.pid;
+    const phase = "SIGKILL server exit";
+    if (pid === undefined) throw new Error(`${phase} has no server PID`);
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      if (!processAlive(pid)) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`${phase} timed out after 5000ms (pid ${pid})`);
+  }
   await server.child;
 }
 
@@ -316,15 +332,28 @@ async function waitForStatus(
   serverUrl: string,
   predicate: (result: Record<string, unknown>) => boolean,
 ): Promise<Record<string, unknown>> {
+  let lastEvidence: {
+    status: Record<string, unknown> | null;
+    exitCode: number | null;
+    signal: string | null;
+    stderr: string;
+  } = { status: null, exitCode: null, signal: null, stderr: "" };
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const status = await runCli(cliPath, fixture, forge, serverUrl, "status", fixture.taskId);
+    lastEvidence = {
+      status: null,
+      exitCode: status.exitCode ?? null,
+      signal: status.signal ?? null,
+      stderr: status.stderr.slice(-2_000),
+    };
     if (status.exitCode === 0) {
       const result = JSON.parse(status.stdout) as Record<string, unknown>;
+      lastEvidence.status = result;
       if (predicate(result)) return result;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error("timed out waiting for server task status");
+  throw new Error(`timed out waiting for server task status: ${JSON.stringify(lastEvidence)}`);
 }
 
 async function waitForMarker(path: string): Promise<void> {
