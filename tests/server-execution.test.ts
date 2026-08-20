@@ -26,6 +26,9 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
 }
 
+const forgeSecretToken = "forge-secret-token-181";
+const forgeSecretKeyPath = "forge-private-key-181.pem";
+
 async function fixture(): Promise<{
   contractPath: string;
   submission: TaskSubmission;
@@ -96,9 +99,10 @@ function environment(stateDirectory: string, repositoryName: string): NodeJS.Pro
   return {
     USINE_STATE_DIR: stateDirectory,
     USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
-    USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
+    USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: forgeSecretToken,
     USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
     USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${repositoryName}`,
+    USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: forgeSecretKeyPath,
   };
 }
 
@@ -217,6 +221,12 @@ describe("server-owned execution", () => {
     const server = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
       execute: async (context) => {
+        const workerSurfaces = [
+          context.policy.workerEnvironment,
+          context.policy.credentialFreeGitEnvironment,
+        ];
+        expect(JSON.stringify(workerSurfaces)).not.toContain(forgeSecretToken);
+        expect(JSON.stringify(workerSurfaces)).not.toContain(forgeSecretKeyPath);
         started.resolve();
         await release.promise;
         return blockedExecutor(seen)(context);
@@ -234,6 +244,8 @@ describe("server-owned execution", () => {
         (result) => result.state === "blocked",
       );
       expect(completed.blocker).toBe("fake execution complete");
+      expect(JSON.stringify(completed)).not.toContain(forgeSecretToken);
+      expect(JSON.stringify(completed)).not.toContain(forgeSecretKeyPath);
       expect(seen).toEqual([admitted.taskId]);
     } finally {
       await server.close();

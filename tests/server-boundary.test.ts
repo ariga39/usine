@@ -64,15 +64,16 @@ describe("CLI/server boundary", () => {
     await execa("git", ["add", "task.json"], { cwd: repository });
     await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
 
+    const serverEnvironment: NodeJS.ProcessEnv = {
+      USINE_STATE_DIR: stateDirectory,
+      USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "boundary-app",
+      USINE_FORGE_PROFILE_DEFAULT_APP_ID: "1",
+      USINE_FORGE_PROFILE_DEFAULT_INSTALLATION_ID: "2",
+      USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "boundary-private-key-181.pem",
+      USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${taskId}`,
+    };
     const server = await startUsineServer({
-      environment: {
-        USINE_STATE_DIR: stateDirectory,
-        USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "boundary-app",
-        USINE_FORGE_PROFILE_DEFAULT_APP_ID: "1",
-        USINE_FORGE_PROFILE_DEFAULT_INSTALLATION_ID: "2",
-        USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "boundary.pem",
-        USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${taskId}`,
-      },
+      environment: serverEnvironment,
       execute: async ({ result }) => result,
       host: "127.0.0.1",
       port: 0,
@@ -118,6 +119,8 @@ describe("CLI/server boundary", () => {
         owner: "example",
         name: taskId,
       });
+      const repositoryStatus = await inspectRepository(server.url, taskId);
+      expect(JSON.stringify(repositoryStatus)).not.toContain("boundary-private-key-181");
       await registerRepository(server.url, {
         id: taskId,
         path: trustedPath,
@@ -150,6 +153,18 @@ describe("CLI/server boundary", () => {
       });
       const observed = JSON.parse(status.stdout);
       expect(observed).toMatchObject({ ...submitted, history: [] });
+      expect(JSON.stringify(observed)).not.toContain("boundary-private-key-181");
+
+      delete serverEnvironment.USINE_FORGE_PROFILE_DEFAULT_APP_SLUG;
+      const errorResponse = await fetch(new URL("/v1/tasks", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ contractPath }),
+      });
+      const errorBody = await errorResponse.json();
+      expect(errorResponse.status).toBe(500);
+      expect(errorBody).toMatchObject({ code: "unauthorized" });
+      expect(JSON.stringify(errorBody)).not.toContain("boundary-private-key-181");
     } finally {
       await server.close();
     }
