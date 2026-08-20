@@ -4,6 +4,7 @@ import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
   decodeRawPersistedTaskResult,
+  decodeTaskHistoryRecord,
   TASK_RESULT_SCHEMA_VERSION,
 } from "./task-state-schema.js";
 import {
@@ -18,7 +19,6 @@ import {
   type TaskExecutionInput,
   type TaskHistoryRecord,
   type TaskHistoryRecordInput,
-  type TaskHistoryTokenUsage,
   type TaskResult,
   type TaskStatus,
 } from "./task-state.js";
@@ -89,24 +89,7 @@ export class TaskAuthority {
         .returning();
       const row = inserted[0];
       if (!row) throw new Error("history record was not persisted");
-      return {
-        id: row.id,
-        taskId: row.taskId,
-        kind: row.kind as TaskHistoryRecord["kind"],
-        activation: row.activation,
-        cycle: row.cycle,
-        role: row.role,
-        model: row.model,
-        executionOwner: row.executionOwner,
-        previousExecutionOwner: row.previousExecutionOwner,
-        startedAtEpochMs: row.startedAtEpochMs,
-        endedAtEpochMs: row.endedAtEpochMs,
-        outcome: row.outcome as TaskHistoryRecord["outcome"],
-        failure: row.failure,
-        candidateSha: row.candidateSha,
-        candidateFence: row.candidateFence,
-        tokenUsage: row.tokenUsage as TaskHistoryTokenUsage | null,
-      };
+      return decodeTaskHistoryRecord(row);
     };
     return this.inTransaction(append);
   }
@@ -119,24 +102,7 @@ export class TaskAuthority {
       .where(eq(taskHistory.taskId, taskId))
       .orderBy(desc(taskHistory.id))
       .limit(boundedLimit);
-    return rows.reverse().map((row) => ({
-      id: row.id,
-      taskId: row.taskId,
-      kind: row.kind as TaskHistoryRecord["kind"],
-      activation: row.activation,
-      cycle: row.cycle,
-      role: row.role,
-      model: row.model,
-      executionOwner: row.executionOwner,
-      previousExecutionOwner: row.previousExecutionOwner,
-      startedAtEpochMs: row.startedAtEpochMs,
-      endedAtEpochMs: row.endedAtEpochMs,
-      outcome: row.outcome as TaskHistoryRecord["outcome"],
-      failure: row.failure,
-      candidateSha: row.candidateSha,
-      candidateFence: row.candidateFence,
-      tokenUsage: row.tokenUsage as TaskHistoryTokenUsage | null,
-    }));
+    return rows.reverse().map(decodeTaskHistoryRecord);
   }
 
   async lookupStatus(taskId: string, limit = MAX_HISTORY_LIMIT): Promise<TaskStatus | null> {
