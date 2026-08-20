@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
 import { codexExecutionIdentityPath } from "@usine/coding-session";
+import { lookupTaskStatus } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 
 const fakeCodexExecutable = (hang: boolean): string => String.raw`#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const args = process.argv;
@@ -24,15 +25,25 @@ if (!reviewer) {
   if (${String(hang)} && activation === 1) {
     const stalePath = join(workspace, "stale-after-loss");
     const releasePath = join(stateDirectory, "release-stale-child");
-    const childSource = 'import { access, writeFile } from "node:fs/promises";\nconst [releasePath, stalePath] = process.argv.slice(1);\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
+    const readyPath = join(stateDirectory, "descendant.ready");
+    const childSource = 'import { access, writeFile } from "node:fs/promises";\nprocess.on("SIGTERM", () => undefined);\nconst [releasePath, stalePath, readyPath] = process.argv.slice(1);\nawait writeFile(readyPath, "ready\\n");\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
     const descendant = spawn(
       process.execPath,
-      ["--input-type=module", "--eval", childSource, releasePath, stalePath],
+      ["--input-type=module", "--eval", childSource, releasePath, stalePath, readyPath],
       { stdio: "ignore" },
     );
     if (!descendant.pid) throw new Error("descendant PID is missing");
     await writeFile(join(stateDirectory, "descendant.pid"), String(descendant.pid));
+    for (;;) {
+      try {
+        await access(readyPath);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
     await writeFile(join(stateDirectory, "activation.marker"), "activation-started\n");
+    process.once("SIGTERM", () => process.exit(0));
     await new Promise(() => {
       setInterval(() => undefined, 1_000);
     });
@@ -148,7 +159,9 @@ async function fixture(name: string): Promise<Fixture> {
   await mkdir(codexHome);
   await writeFile(join(codexHome, "writer-profile.config.toml"), "# test profile\n");
   await writeFile(join(codexHome, "reviewer-profile.config.toml"), "# test profile\n");
-  await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart"), { mode: 0o755 });
+  await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart" || name === "graceful"), {
+    mode: 0o755,
+  });
   await chmod(fakeCodexPath, 0o755);
   return {
     root,
@@ -484,6 +497,103 @@ describe("server-owned delivery milestone", () => {
       );
     } finally {
       await stopServer(server);
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("gracefully stops the active Codex tree before restart can create a fresh writer", async () => {
+    const fixtureValue = await fixture("graceful");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const first = await startServer(cliPath, fixtureValue, forge, "complete");
+    let firstStopped = false;
+    try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "submit",
+        fixtureValue.contractPath,
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+      await waitForStatus(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        (result) => result.activeActivation === 1,
+      );
+      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      const descendantPid = Number(
+        await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+      );
+      expect(processAlive(descendantPid)).toBe(true);
+
+      await stopServer(first);
+      firstStopped = true;
+      const interrupted = await lookupTaskStatus(fixtureValue.stateDirectory, fixtureValue.taskId);
+      expect(interrupted?.history[0]).toMatchObject({
+        kind: "implementer",
+        activation: 1,
+        outcome: "cancelled",
+      });
+
+      await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await expect(
+        readFile(
+          join(
+            fixtureValue.stateDirectory,
+            "workspaces",
+            fixtureValue.taskId,
+            "1-1",
+            "stale-after-loss",
+          ),
+          "utf8",
+        ),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+
+      const second = await startServer(cliPath, fixtureValue, forge, "complete");
+      try {
+        const follow = await runCli(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          "follow",
+          fixtureValue.taskId,
+        );
+        expect(follow.exitCode, follow.stderr).toBe(0);
+        expect(JSON.parse(follow.stdout)).toMatchObject({
+          state: "reviewed_pr",
+          evidence: { implementerActivations: 2, restartRecoveries: 1 },
+          delivery: { prNumber: 1, attestationId: "7" },
+        });
+        expect(forge.pullRequests).toBe(1);
+        expect(forge.attestations).toBe(1);
+      } finally {
+        await stopServer(second);
+      }
+    } finally {
+      if (!firstStopped) await stopServer(first).catch(() => undefined);
+      try {
+        const descendantPid = Number(
+          await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+        );
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The graceful shutdown may already have reaped the fixture group.
+      }
       await forge.close();
     }
   }, 60_000);

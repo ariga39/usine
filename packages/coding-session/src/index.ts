@@ -15,6 +15,8 @@ export {
   codexExecutionIdentityPath,
   createCodexLauncher,
   reapCodexExecution,
+  removeCodexExecutionIdentity,
+  stopCodexExecution,
 } from "./codex-execution.js";
 export {
   implementerOutputSchema,

@@ -17,7 +17,7 @@ import {
   type TaskResult,
   type TaskStatus,
 } from "@usine/task-authority";
-import { reapCodexExecution } from "@usine/coding-session";
+import { reapCodexExecution, stopCodexExecution } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
@@ -178,6 +178,17 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     ...running,
     close: async () => {
       await Effect.runPromise(Fiber.interrupt(fiber));
+      const activeTasks = await lookupRestartableTasks(stateDirectory);
+      for (const task of activeTasks) {
+        if (task.result.activeActivation === null) continue;
+        const workspace = resolve(
+          stateDirectory,
+          "workspaces",
+          task.result.taskId,
+          `${task.result.activeActivation}-${task.result.activeActivation}`,
+        );
+        await stopCodexExecution(stateDirectory, workspace);
+      }
     },
   };
 }

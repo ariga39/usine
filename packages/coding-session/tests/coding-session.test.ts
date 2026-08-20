@@ -1,4 +1,5 @@
-import { readFile, mkdtemp } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Codex, type RunResult, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
@@ -8,6 +9,8 @@ import {
   createCodexLauncher,
   explicitWorkerEnvironment,
   implementerOutputSchema,
+  codexExecutionIdentityPath,
+  removeCodexExecutionIdentity,
   reviewerOutputSchema,
 } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
@@ -47,6 +50,50 @@ function deferred<T>(): {
 }
 
 describe("Coding Session", () => {
+  test("retains starting and live execution identities and removes a confirmed-stopped identity", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-identity-"));
+    const workspace = join(stateDirectory, "workspace");
+    const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
+    await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
+
+    await writeFile(
+      identityPath,
+      JSON.stringify({ version: 1, state: "starting", workspace }) + "\n",
+    );
+    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(false);
+    await expect(access(identityPath)).resolves.toBeUndefined();
+
+    const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+      encoding: "utf8",
+    }).trim();
+    await writeFile(
+      identityPath,
+      JSON.stringify({ version: 1, state: "running", pid: process.pid, startedAt, workspace }) +
+        "\n",
+    );
+    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(false);
+    await expect(readFile(identityPath, "utf8")).resolves.toContain('"state":"running"');
+
+    const stoppedChild = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+    if (!stoppedChild.pid) throw new Error("stopped child has no PID");
+    await new Promise<void>((resolve, reject) => {
+      stoppedChild.once("error", reject);
+      stoppedChild.once("exit", () => resolve());
+    });
+    await writeFile(
+      identityPath,
+      JSON.stringify({
+        version: 1,
+        state: "running",
+        pid: stoppedChild.pid,
+        startedAt: "confirmed-stopped",
+        workspace,
+      }) + "\n",
+    );
+    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(true);
+    await expect(access(identityPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("routes each selected profile through the Codex launcher and keeps role sandboxes local", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
     const implementer = await createCodexLauncher(stateDirectory, "/writer", "writer-profile");
