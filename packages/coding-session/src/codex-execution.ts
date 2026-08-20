@@ -38,6 +38,7 @@ export async function removeCodexExecutionIdentity(
 export async function createCodexLauncher(
   stateDirectory: string,
   workspace: string,
+  profile: string,
 ): Promise<{ launcherPath: string; identityPath: string }> {
   const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
   await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
@@ -49,7 +50,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
 writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, state: "starting", workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
-const child = spawn("codex", process.argv.slice(2), { detached: true, env: process.env, stdio: "inherit" });
+const child = spawn("codex", ["--profile", ${JSON.stringify(profile)}, ...process.argv.slice(2)], { detached: true, env: process.env, stdio: "inherit" });
 if (!child.pid) throw new Error("Codex process has no PID");
 const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], { encoding: "utf8" }).trim();
 if (!startedAt) throw new Error("Codex process has no start identity");

@@ -103,7 +103,10 @@ export type ResolvedTaskContract = Omit<TaskContract, "delivery"> & {
 
 export function resolveTaskContract(
   contract: TaskContract,
-  repository: RepositorySnapshot,
+  repository: Pick<
+    RepositorySnapshot,
+    "id" | "path" | "owner" | "name" | "baseBranch" | "projectCheck"
+  >,
 ): ResolvedTaskContract {
   if (contract.repositoryId !== repository.id)
     throw new Error("task repository ID does not match the registered repository");

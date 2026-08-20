@@ -7,6 +7,9 @@ import {
   type TurnOptions,
   type Usage,
 } from "@openai/codex-sdk";
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import { createCodexLauncher, removeCodexExecutionIdentity } from "./codex-execution.js";
@@ -22,13 +25,50 @@ const PORTABLE_ENVIRONMENT_KEYS = [
   "SYSTEMROOT",
   "COMSPEC",
   "PATHEXT",
+  "CODEX_HOME",
 ] as const;
 
 export interface RolePolicy {
   role: "implementer" | "reviewer";
-  model: string;
-  reasoningEffort: string;
+  profile: string;
   sandbox: "workspace-write" | "read-only";
+}
+
+export class CodexProfileSelectionError extends Error {
+  readonly code = "codex_profile_unusable" as const;
+
+  constructor(
+    readonly profile: string,
+    reason = "must be a non-blank safe profile name",
+  ) {
+    super(`Codex profile is unusable: ${reason}`);
+    this.name = "CodexProfileSelectionError";
+  }
+}
+
+export function validateCodexProfile(profile: string): string {
+  const normalized = profile.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(normalized))
+    throw new CodexProfileSelectionError(profile);
+  return normalized;
+}
+
+async function ensureCodexProfileUsable(
+  profile: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const normalized = validateCodexProfile(profile);
+  const codexHome = environment.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  try {
+    const profileFile = await stat(join(codexHome, `${normalized}.config.toml`));
+    if (!profileFile.isFile()) throw new Error("profile configuration is not a regular file");
+  } catch {
+    throw new CodexProfileSelectionError(
+      profile,
+      `named profile "${normalized}" does not have a usable Codex configuration`,
+    );
+  }
+  return normalized;
 }
 
 export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
@@ -54,8 +94,7 @@ export interface SessionRequest<Output = unknown> {
   workspace: string;
   contract: TaskContract;
   prompt: string;
-  model: string;
-  reasoningEffort: string;
+  profile: string;
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
@@ -75,6 +114,7 @@ export interface SessionObservation<T = unknown> {
   usage: { inputTokens?: number; outputTokens?: number } | null;
   summary: string;
   failure: string | null;
+  failureCode?: "codex_profile_unusable" | null;
 }
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
@@ -126,9 +166,9 @@ export class CodexCodingSession {
       };
     }
     try {
+      validateCodexProfile(request.profile);
       const client = await this.createClient(request);
       const threadOptions: ThreadOptions = {
-        model: request.model,
         sandboxMode: request.sandbox,
         workingDirectory: request.workspace,
       };
@@ -167,6 +207,7 @@ export class CodexCodingSession {
         usage: null,
         summary: failure,
         failure,
+        failureCode: error instanceof CodexProfileSelectionError ? error.code : null,
       };
     } finally {
       if (this.options.executionStateDirectory) {
@@ -177,17 +218,18 @@ export class CodexCodingSession {
 
   private async createClient(request: SessionRequest): Promise<Codex> {
     if (this.clientFactory) return this.clientFactory(request);
+    const profile = await ensureCodexProfileUsable(
+      request.profile,
+      request.environment ?? this.options.environment,
+    );
     const options: CodexOptions = {
       env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
-      config: {
-        model_reasoning_effort: request.reasoningEffort,
-        service_tier: "default",
-      },
     };
     if (!this.options.executionStateDirectory) return new Codex(options);
     const launcher = await createCodexLauncher(
       this.options.executionStateDirectory,
       request.workspace,
+      profile,
     );
     return new Codex({
       ...options,

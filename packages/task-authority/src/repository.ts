@@ -21,6 +21,8 @@ export const repositoryRegistrationSchema = z
     owner: nonBlank,
     name: nonBlank,
     baseBranch: nonBlank,
+    implementerProfile: nonBlank,
+    reviewerProfile: nonBlank,
     projectCheck: z.object({
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),
@@ -33,6 +35,24 @@ export type RepositoryRegistration = z.infer<typeof repositoryRegistrationSchema
 
 /** The immutable repository facts copied into an admitted Task. */
 export type RepositorySnapshot = RepositoryRegistration;
+export type TaskRepositorySnapshot = Omit<
+  RepositorySnapshot,
+  "implementerProfile" | "reviewerProfile"
+>;
+
+export function taskSnapshotFromRegistration(
+  registration: RepositoryRegistration,
+): TaskRepositorySnapshot {
+  return {
+    id: registration.id,
+    path: registration.path,
+    owner: registration.owner,
+    name: registration.name,
+    baseBranch: registration.baseBranch,
+    projectCheck: { ...registration.projectCheck },
+    gitAuthor: { ...registration.gitAuthor },
+  };
+}
 
 export function repositoryIdentity(owner: string, name: string): string {
   return `${owner}/${name}`.toLowerCase();

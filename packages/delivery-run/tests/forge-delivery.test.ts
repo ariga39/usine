@@ -220,8 +220,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       deadlineEpochMs: Date.now() + 60_000,
       implementer: {
         role: "implementer" as const,
-        model: "test",
-        reasoningEffort: "high",
+        profile: "implementer-profile",
         sandbox: "workspace-write" as const,
       },
     };
@@ -342,8 +341,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       deadlineEpochMs: Date.now() + 60_000,
       implementer: {
         role: "implementer" as const,
-        model: "test",
-        reasoningEffort: "high",
+        profile: "implementer-profile",
         sandbox: "workspace-write" as const,
       },
     };

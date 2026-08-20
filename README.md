@@ -27,15 +27,12 @@ node apps/cli/dist/cli.mjs follow <task-id>
 
 完整交付需要以下配置：`USINE_GITHUB_APP_ID`、`USINE_GITHUB_INSTALLATION_ID`、`USINE_GITHUB_APP_SLUG` 与 `USINE_GITHUB_PRIVATE_KEY_PATH`。这些配置用于 GitHub App 认证；Repository 注册时提供 Git commit author 和 committer identity。上面的数值、身份、路径和任务文件名都是占位符。
 
-以下配置是可选覆盖；省略时使用 production 默认值：
+以下配置是可选覆盖；Repository 注册时必须提供 implementer 与 reviewer 的 Codex profile 名称：
 
 - `USINE_STATE_DIR`：状态目录，默认位于用户状态目录下的 `usine` 子目录；
 - `USINE_SERVER_HOST`：local server 监听地址，默认 `127.0.0.1`，只接受 loopback host；
 - `USINE_SERVER_PORT`：local server 监听端口，默认 `8787`；
 - `USINE_SERVER_URL`：client 使用的 server URL，默认 `http://127.0.0.1:8787`；
-- `USINE_IMPLEMENTER_MODEL`：implementer 模型，默认使用内置 role policy；
-- `USINE_REVIEWER_MODEL`：reviewer 模型，默认使用内置 role policy；
-- `USINE_REVIEWER_REASONING_EFFORT`：reviewer reasoning effort，默认使用内置 role policy；
 - `USINE_GITHUB_GIT_URL`：forge Git URL，默认由已注册 Repository 的 owner/name 组成。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,

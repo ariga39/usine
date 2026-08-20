@@ -73,6 +73,8 @@ async function fixture(): Promise<{
     owner: "example",
     name: taskId,
     baseBranch: "main",
+    implementerProfile: "writer-profile",
+    reviewerProfile: "reviewer-profile",
     projectCheck: { command: "true", timeoutMs: 1_000 },
     gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
   };
@@ -154,6 +156,8 @@ describe("server-owned execution", () => {
           owner: "example",
           name: contract.id,
           baseBranch: "main",
+          implementerProfile: "writer-profile",
+          reviewerProfile: "reviewer-profile",
           projectCheck: { command: "true", timeoutMs: 1_000 },
           gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
         },

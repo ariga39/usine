@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { TaskContract } from "./contract.js";
-import type { RepositorySnapshot } from "./repository.js";
+import type { RepositorySnapshot, TaskRepositorySnapshot } from "./repository.js";
 
 export type TaskState =
   | "admitted"
@@ -53,7 +53,7 @@ export interface TaskResult {
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
   /** Resolved repository facts frozen at admission for restart and audit. */
-  repository?: RepositorySnapshot;
+  repository?: TaskRepositorySnapshot;
   evidence: {
     implementerActivations: number;
     reviewCycles: number;
@@ -143,7 +143,9 @@ export interface TaskHistoryRecordInput {
   activation: number | null;
   cycle: number | null;
   role: string | null;
-  model: string | null;
+  profile: string | null;
+  observedModel: string | null;
+  observedProvider: string | null;
   executionOwner?: string | null;
   previousExecutionOwner?: string | null;
   startedAtEpochMs: number;

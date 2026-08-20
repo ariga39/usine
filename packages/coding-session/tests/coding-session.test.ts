@@ -1,7 +1,11 @@
+import { readFile, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Codex, type RunResult, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
+  createCodexLauncher,
   explicitWorkerEnvironment,
   implementerOutputSchema,
   reviewerOutputSchema,
@@ -43,6 +47,91 @@ function deferred<T>(): {
 }
 
 describe("Coding Session", () => {
+  test("routes each selected profile through the Codex launcher and keeps role sandboxes local", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
+    const implementer = await createCodexLauncher(stateDirectory, "/writer", "writer-profile");
+    const reviewer = await createCodexLauncher(stateDirectory, "/reviewer", "reviewer-profile");
+    expect(await readFile(implementer.launcherPath, "utf8")).toContain(
+      '["--profile", "writer-profile", ...process.argv.slice(2)]',
+    );
+    expect(await readFile(reviewer.launcherPath, "utf8")).toContain(
+      '["--profile", "reviewer-profile", ...process.argv.slice(2)]',
+    );
+
+    const sandboxes: string[] = [];
+    const session = new CodexCodingSession(async (request) =>
+      testClient(
+        async () => sdkTurn(JSON.stringify({ status: "proposed", summary: request.profile })),
+        request.profile,
+        (options) => sandboxes.push(String(options.sandboxMode)),
+      ),
+    );
+    await session.run({
+      role: "implementer",
+      workspace: "/writer",
+      contract,
+      prompt: "work",
+      profile: "writer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+    });
+    await session.run({
+      role: "reviewer",
+      workspace: "/reviewer",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+    });
+    expect(sandboxes).toEqual(["workspace-write", "read-only"]);
+  });
+
+  test("rejects an unusable profile before creating a Codex client", async () => {
+    let created = false;
+    const session = new CodexCodingSession(async () => {
+      created = true;
+      return testClient(async () => sdkTurn("{}"));
+    });
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: " ",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+    });
+    expect(created).toBe(false);
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "codex_profile_unusable",
+    });
+  });
+
+  test("rejects a well-formed named profile that is absent from the Codex home", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "usine-codex-home-"));
+    const session = new CodexCodingSession(undefined, { environment: { CODEX_HOME: codexHome } });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "missing-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "codex_profile_unusable",
+    });
+    expect(observation.failure).toContain("missing-profile");
+  });
+
   test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
       OPENAI_API_KEY: "secret",
@@ -51,8 +140,14 @@ describe("Coding Session", () => {
       NPM_TOKEN: "package-secret",
       PATH: "/portable/bin",
       LANG: "C",
+      CODEX_HOME: "codex-home-sentinel",
     });
-    expect(env).toEqual({ CI: "true", PATH: "/portable/bin", LANG: "C" });
+    expect(env).toEqual({
+      CI: "true",
+      PATH: "/portable/bin",
+      LANG: "C",
+      CODEX_HOME: "codex-home-sentinel",
+    });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");
     expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
@@ -78,8 +173,7 @@ describe("Coding Session", () => {
       workspace: ".",
       contract,
       prompt: "work",
-      model: "test-model",
-      reasoningEffort: "high",
+      profile: "implementer-profile",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
@@ -125,8 +219,7 @@ describe("Coding Session", () => {
       workspace: ".",
       contract,
       prompt: "work",
-      model: "test-model",
-      reasoningEffort: "high",
+      profile: "implementer-profile",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
@@ -152,8 +245,7 @@ describe("Coding Session", () => {
       workspace: ".",
       contract,
       prompt: "work",
-      model: "test-model",
-      reasoningEffort: "high",
+      profile: "implementer-profile",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 50,
       outputSchema: implementerOutputSchema,
@@ -179,8 +271,7 @@ describe("Coding Session", () => {
       workspace: ".",
       contract,
       prompt: "work",
-      model: "test-model",
-      reasoningEffort: "high",
+      profile: "implementer-profile",
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
@@ -210,8 +301,7 @@ describe("Coding Session", () => {
       workspace: ".",
       contract,
       prompt: "review",
-      model: "test-model",
-      reasoningEffort: "low",
+      profile: "reviewer-profile",
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,

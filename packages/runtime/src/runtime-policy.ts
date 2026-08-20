@@ -1,20 +1,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import { explicitWorkerEnvironment, type RolePolicy } from "@usine/coding-session";
+import {
+  explicitWorkerEnvironment,
+  validateCodexProfile,
+  type RolePolicy,
+} from "@usine/coding-session";
 import type { ForgePolicy } from "@usine/forge-delivery";
 
 const defaultRolePolicies = {
   implementer: {
     role: "implementer" as const,
-    model: "gpt-5.6-luna",
-    reasoningEffort: "high",
     sandbox: "workspace-write" as const,
   },
   reviewer: {
     role: "reviewer" as const,
-    model: "gpt-5.6-sol",
-    reasoningEffort: "low",
     sandbox: "read-only" as const,
   },
 };
@@ -41,21 +41,18 @@ export function stateDirectoryFromEnvironment(
 
 export function runtimePolicyFromEnvironment(
   environment: NodeJS.ProcessEnv,
-  repository: { owner: string; name: string },
+  repository: { owner: string; name: string; implementerProfile: string; reviewerProfile: string },
   homeDirectory = homedir(),
 ): RuntimePolicy {
   const stateDirectory = stateDirectoryFromEnvironment(environment, homeDirectory);
   const roles = {
     implementer: {
       ...defaultRolePolicies.implementer,
-      model: environment.USINE_IMPLEMENTER_MODEL?.trim() || defaultRolePolicies.implementer.model,
+      profile: validateCodexProfile(repository.implementerProfile),
     },
     reviewer: {
       ...defaultRolePolicies.reviewer,
-      model: environment.USINE_REVIEWER_MODEL?.trim() || defaultRolePolicies.reviewer.model,
-      reasoningEffort:
-        environment.USINE_REVIEWER_REASONING_EFFORT?.trim() ||
-        defaultRolePolicies.reviewer.reasoningEffort,
+      profile: validateCodexProfile(repository.reviewerProfile),
     },
   };
 

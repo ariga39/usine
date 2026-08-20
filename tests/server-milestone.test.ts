@@ -89,6 +89,7 @@ async function fixture(name: string): Promise<Fixture> {
   const repository = join(root, "repository");
   const remote = join(root, "remote.git");
   const stateDirectory = join(root, "state");
+  const codexHome = join(root, "codex-home");
   const fakeCodexPath = join(root, "bin", "codex");
   const taskId = `server-milestone-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const branch = `agent/${taskId}`;
@@ -135,12 +136,17 @@ async function fixture(name: string): Promise<Fixture> {
       owner: "example",
       name: taskId,
       baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
       projectCheck: { command: "test -x target.sh", timeoutMs: 10_000 },
       gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
     }),
   );
   await execa("git", ["init", "--bare", remote]);
   await mkdir(join(root, "bin"));
+  await mkdir(codexHome);
+  await writeFile(join(codexHome, "writer-profile.config.toml"), "# test profile\n");
+  await writeFile(join(codexHome, "reviewer-profile.config.toml"), "# test profile\n");
   await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart"), { mode: 0o755 });
   await chmod(fakeCodexPath, 0o755);
   return {
@@ -255,6 +261,7 @@ function environment(
     USINE_GITHUB_TEST_TOKEN: "test-token",
     USINE_GITHUB_API_URL: forge.url,
     USINE_GITHUB_GIT_URL: fixture.remote,
+    CODEX_HOME: join(fixture.root, "codex-home"),
     PATH: `${join(fixture.root, "bin")}:${process.env.PATH ?? ""}`,
     USINE_SERVER_HOST: "127.0.0.1",
     USINE_SERVER_PORT: "0",

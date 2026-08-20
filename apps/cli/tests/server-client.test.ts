@@ -75,7 +75,7 @@ describe("server client follow", () => {
               activation: 1,
               cycle: null,
               role: "implementer",
-              model: "gpt-5.6-luna",
+              profile: "writer-profile",
               executionOwner: null,
               previousExecutionOwner: null,
               startedAtEpochMs: 10,

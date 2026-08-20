@@ -16,6 +16,8 @@ const repository: RepositorySnapshot = {
   owner: "example",
   name: "usine",
   baseBranch: "main",
+  implementerProfile: "writer-profile",
+  reviewerProfile: "reviewer-profile",
   projectCheck: { command: "true", timeoutMs: 1_000 },
   gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
 };
