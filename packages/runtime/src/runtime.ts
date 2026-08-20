@@ -29,6 +29,8 @@ import { deadlineExpired } from "@usine/task-authority";
 export {
   runtimePolicyFromEnvironment,
   forgePolicyFromEnvironment,
+  ForgeProfileResolutionError,
+  type ForgeProfileErrorCode,
   stateDirectoryFromEnvironment,
   type RuntimePolicy,
 } from "./runtime-policy.js";

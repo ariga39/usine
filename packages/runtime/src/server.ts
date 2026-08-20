@@ -28,6 +28,7 @@ import {
   recordExecutionObservation,
   runtimePolicyFromEnvironment,
   stateDirectoryFromEnvironment,
+  ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
 
@@ -283,7 +284,7 @@ function listen(
       void handler(request, response).catch((error) => {
         if (!response.headersSent) {
           response.statusCode = 500;
-          writeJson(response, { message: String(error) });
+          writeJson(response, errorProjection(error));
         } else {
           response.destroy(error instanceof Error ? error : undefined);
         }
@@ -445,4 +446,10 @@ function readBody(request: IncomingMessage): Promise<string> {
 function writeJson(response: ServerResponse, value: unknown): void {
   response.setHeader("content-type", "application/json");
   response.end(JSON.stringify(value));
+}
+
+function errorProjection(error: unknown): { message: string; code?: string } {
+  if (error instanceof ForgeProfileResolutionError)
+    return { code: error.code, message: error.message };
+  return { message: error instanceof Error ? error.message : String(error) };
 }

@@ -7,6 +7,7 @@ import {
   type RolePolicy,
 } from "@usine/coding-session";
 import type { ForgePolicy } from "@usine/forge-delivery";
+import { forgeProfileSchema } from "@usine/task-authority";
 
 const defaultRolePolicies = {
   implementer: {
@@ -28,6 +29,24 @@ export interface RuntimePolicy {
   forge: ForgePolicy;
   workerEnvironment: NodeJS.ProcessEnv;
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
+}
+
+export type ForgeProfileErrorCode = "malformed" | "unauthorized" | "repository_mismatch";
+
+export class ForgeProfileResolutionError extends Error {
+  readonly name = "ForgeProfileResolutionError";
+
+  constructor(
+    readonly code: ForgeProfileErrorCode,
+    readonly profile: string,
+    readonly repository: string,
+  ) {
+    super(
+      code === "repository_mismatch"
+        ? `forge profile '${profile}' is not authorized for repository '${repository}'`
+        : `forge profile '${profile}' is ${code}`,
+    );
+  }
 }
 
 export function stateDirectoryFromEnvironment(
@@ -78,42 +97,73 @@ export function forgePolicyFromEnvironment(
   repository: { owner: string; name: string; forgeProfile: string },
 ): ForgePolicy {
   const profile = repository.forgeProfile.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(profile))
-    throw new Error("forge profile is malformed");
-  const prefix = `USINE_FORGE_PROFILE_${profile.toUpperCase().replaceAll(/[^A-Z0-9]/g, "_")}_`;
-  const appSlug = required(environment[`${prefix}APP_SLUG`], "forge profile is unauthorized");
+  if (!forgeProfileSchema.safeParse(profile).success)
+    throw new ForgeProfileResolutionError(
+      "malformed",
+      profile || "<missing>",
+      repositoryIdentity(repository),
+    );
+  const prefix = `USINE_FORGE_PROFILE_${profile.toUpperCase().replaceAll("-", "_")}_`;
+  const appSlug = requiredProfileValue(
+    environment[`${prefix}APP_SLUG`],
+    "unauthorized",
+    profile,
+    repository,
+  );
   const testToken = environment[`${prefix}TEST_TOKEN`];
   const apiUrl = environment[`${prefix}API_URL`]?.trim();
   const gitUrl =
     environment[`${prefix}GIT_URL`]?.trim() ||
     `https://github.com/${repository.owner}/${repository.name}.git`;
-  const configuredRepository = required(
+  const configuredRepository = requiredProfileValue(
     environment[`${prefix}REPOSITORY`],
-    "forge profile is unauthorized",
+    "unauthorized",
+    profile,
+    repository,
   );
   if (configuredRepository.toLowerCase() !== `${repository.owner}/${repository.name}`.toLowerCase())
-    throw new Error("forge profile does not match repository");
+    throw new ForgeProfileResolutionError(
+      "repository_mismatch",
+      profile,
+      repositoryIdentity(repository),
+    );
   if (testToken) {
     if (!apiUrl || !isLoopbackHttpUrl(apiUrl))
       throw new Error("test GitHub token is restricted to loopback API URL");
     return { mode: "test", appSlug, token: testToken, apiUrl, gitUrl };
   }
 
-  const appId = required(environment[`${prefix}APP_ID`], "forge profile is malformed");
-  const privateKeyPath = required(
+  const appId = requiredProfileValue(
+    environment[`${prefix}APP_ID`],
+    "malformed",
+    profile,
+    repository,
+  );
+  const privateKeyPath = requiredProfileValue(
     environment[`${prefix}PRIVATE_KEY_PATH`],
-    "forge profile is malformed",
+    "malformed",
+    profile,
+    repository,
   );
   const installationId = Number(environment[`${prefix}INSTALLATION_ID`]);
   if (!Number.isSafeInteger(installationId) || installationId <= 0)
-    throw new Error("forge profile is malformed");
+    throw new ForgeProfileResolutionError("malformed", profile, repositoryIdentity(repository));
   return { mode: "app", appSlug, appId, installationId, privateKeyPath, gitUrl };
 }
 
-function required(value: string | undefined, message: string): string {
+function requiredProfileValue(
+  value: string | undefined,
+  code: ForgeProfileErrorCode,
+  profile: string,
+  repository: { owner: string; name: string },
+): string {
   const result = value?.trim();
-  if (!result) throw new Error(message);
+  if (!result) throw new ForgeProfileResolutionError(code, profile, repositoryIdentity(repository));
   return result;
+}
+
+function repositoryIdentity(repository: { owner: string; name: string }): string {
+  return `${repository.owner}/${repository.name}`;
 }
 
 function isLoopbackHttpUrl(value: string): boolean {

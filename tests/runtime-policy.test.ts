@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
-import { forgePolicyFromEnvironment, runtimePolicyFromEnvironment } from "@usine/runtime";
+import {
+  ForgeProfileResolutionError,
+  forgePolicyFromEnvironment,
+  runtimePolicyFromEnvironment,
+} from "@usine/runtime";
 
 async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
@@ -57,6 +61,7 @@ describe("runtime composition", () => {
         USINE_FORGE_PROFILE_RELEASE_API_URL: "http://127.0.0.1:8787",
         USINE_FORGE_PROFILE_RELEASE_GIT_URL: "http://127.0.0.1:8787/owner/repo.git",
         USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "private-key.pem",
       },
       {
         owner: "owner",
@@ -92,12 +97,19 @@ describe("runtime composition", () => {
     expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
     expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
     expect(policy.workerEnvironment).not.toHaveProperty("GITHUB_TOKEN");
+    expect(policy.workerEnvironment).not.toHaveProperty("USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN");
+    expect(policy.workerEnvironment).not.toHaveProperty(
+      "USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH",
+    );
     expect(policy.credentialFreeGitEnvironment).toMatchObject({
       PATH: "/portable/bin",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
+    expect(policy.credentialFreeGitEnvironment).not.toHaveProperty(
+      "USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN",
+    );
   });
 
   test("does not read Git author policy from global environment", () => {
@@ -211,6 +223,12 @@ describe("runtime composition", () => {
     ).toThrow("forge profile");
   });
 
+  test("rejects profile names that could alias another host variable", () => {
+    expect(() =>
+      forgePolicyFromEnvironment({}, { owner: "owner", name: "repo", forgeProfile: "release_app" }),
+    ).toThrow("malformed");
+  });
+
   test.each([
     ["missing", {}, "unauthorized"],
     [
@@ -230,15 +248,21 @@ describe("runtime composition", () => {
         USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "release.pem",
         USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "other/repo",
       },
-      "does not match repository",
+      "repository_mismatch",
     ],
-  ])("rejects a %s forge profile before delivery", (_name, environment, message) => {
-    expect(() =>
+  ])("rejects a %s forge profile before delivery", (_name, environment, code) => {
+    try {
       forgePolicyFromEnvironment(environment, {
         owner: "owner",
         name: "repo",
         forgeProfile: "release",
-      }),
-    ).toThrow(message);
+      });
+      throw new Error("expected forge profile resolution to fail");
+    } catch (error) {
+      if (!(error instanceof ForgeProfileResolutionError)) throw error;
+      expect(error.code).toBe(code);
+      expect(error.message).toContain("release");
+      if (code === "repository_mismatch") expect(error.message).toContain("owner/repo");
+    }
   });
 });
