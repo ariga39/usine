@@ -210,15 +210,23 @@ function processStillBelongsToExecution(identity: RunningCodexExecutionIdentity)
 }
 
 function processState(identity: RunningCodexExecutionIdentity): "belongs" | "stopped" | "mismatch" {
+  let currentStart = "";
   try {
-    const currentStart = execFileSync("ps", ["-o", "lstart=", "-p", String(identity.pid)], {
+    currentStart = execFileSync("ps", ["-o", "lstart=", "-p", String(identity.pid)], {
       encoding: "utf8",
     }).trim();
-    if (!currentStart) return "stopped";
-    return currentStart === identity.startedAt ? "belongs" : "mismatch";
   } catch {
-    return "stopped";
+    // The leader may have exited while its process group is still alive.
   }
+  if (currentStart && currentStart !== identity.startedAt) return "mismatch";
+  try {
+    process.kill(-identity.pid, 0);
+    return "belongs";
+  } catch (error) {
+    if (hasErrorCode(error, "EPERM")) return "belongs";
+    if (!hasErrorCode(error, "ESRCH")) throw error;
+  }
+  return currentStart ? "belongs" : "stopped";
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

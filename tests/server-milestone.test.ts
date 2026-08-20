@@ -9,7 +9,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 const fakeCodexExecutable = (hang: boolean): string => String.raw`#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const args = process.argv;
@@ -25,15 +25,25 @@ if (!reviewer) {
   if (${String(hang)} && activation === 1) {
     const stalePath = join(workspace, "stale-after-loss");
     const releasePath = join(stateDirectory, "release-stale-child");
-    const childSource = 'import { access, writeFile } from "node:fs/promises";\nconst [releasePath, stalePath] = process.argv.slice(1);\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
+    const readyPath = join(stateDirectory, "descendant.ready");
+    const childSource = 'import { access, writeFile } from "node:fs/promises";\nprocess.on("SIGTERM", () => undefined);\nconst [releasePath, stalePath, readyPath] = process.argv.slice(1);\nawait writeFile(readyPath, "ready\\n");\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
     const descendant = spawn(
       process.execPath,
-      ["--input-type=module", "--eval", childSource, releasePath, stalePath],
+      ["--input-type=module", "--eval", childSource, releasePath, stalePath, readyPath],
       { stdio: "ignore" },
     );
     if (!descendant.pid) throw new Error("descendant PID is missing");
     await writeFile(join(stateDirectory, "descendant.pid"), String(descendant.pid));
+    for (;;) {
+      try {
+        await access(readyPath);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
     await writeFile(join(stateDirectory, "activation.marker"), "activation-started\n");
+    process.once("SIGTERM", () => process.exit(0));
     await new Promise(() => {
       setInterval(() => undefined, 1_000);
     });
@@ -531,7 +541,6 @@ describe("server-owned delivery milestone", () => {
 
       await stopServer(first);
       firstStopped = true;
-      expect(processAlive(descendantPid)).toBe(false);
       const interrupted = await lookupTaskStatus(fixtureValue.stateDirectory, fixtureValue.taskId);
       expect(interrupted?.history[0]).toMatchObject({
         kind: "implementer",
@@ -577,6 +586,14 @@ describe("server-owned delivery milestone", () => {
       }
     } finally {
       if (!firstStopped) await stopServer(first).catch(() => undefined);
+      try {
+        const descendantPid = Number(
+          await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+        );
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The graceful shutdown may already have reaped the fixture group.
+      }
       await forge.close();
     }
   }, 60_000);
