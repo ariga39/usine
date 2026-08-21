@@ -7,7 +7,9 @@ import { repositoryRegistrationSchema } from "@usine/task-authority";
 import { createRuntimeExecutionAdapter, startUsineServer } from "@usine/runtime";
 import {
   followTask,
+  getTask,
   inspectRepository,
+  listTasks,
   registerRepository,
   serverUrlFromEnvironment,
   submitTask,
@@ -74,6 +76,11 @@ export async function main(): Promise<void> {
       );
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (command === "task") {
+    await runTaskCommand(process.argv.slice(3));
     return;
   }
 
@@ -198,3 +205,106 @@ export async function main(): Promise<void> {
 }
 
 await main();
+
+async function runTaskCommand(args: string[]): Promise<void> {
+  const [operation, ...rest] = args;
+  const json = rest.includes("--json");
+  const values = rest.filter((value) => value !== "--json");
+  const serverUrl = serverUrlFromEnvironment(process.env);
+
+  if (operation === "list" && values.length === 0) {
+    try {
+      const page = await listTasks(serverUrl);
+      if (json) process.stdout.write(`${JSON.stringify(page)}\n`);
+      else {
+        process.stdout.write("TASK ID\tSTATE\tREVISION\n");
+        for (const task of page.tasks)
+          process.stdout.write(`${task.taskId}\t${task.state}\t${task.revision}\n`);
+      }
+    } catch (error) {
+      taskCommandFailure("task_list_failed", error);
+    }
+    return;
+  }
+
+  if (operation === "get") {
+    const taskId = values.length === 1 ? values[0] : undefined;
+    if (!taskId) return taskUsage("usine task get <task-id> [--json]");
+    try {
+      const task = await getTask(serverUrl, taskId);
+      if (!task) {
+        process.stderr.write(`${JSON.stringify({ error: "task_not_found", taskId })}\n`);
+        process.exitCode = 3;
+        return;
+      }
+      if (json) process.stdout.write(`${JSON.stringify(task)}\n`);
+      else process.stdout.write(`Task ${task.taskId}: ${task.state} (revision ${task.revision})\n`);
+    } catch (error) {
+      taskCommandFailure("task_get_failed", error);
+    }
+    return;
+  }
+
+  if (operation === "watch") {
+    const taskId = values[0];
+    const afterIndex = values.indexOf("--after");
+    const timeoutIndex = values.indexOf("--timeout");
+    const optionIndices = new Set<number>();
+    for (const index of [afterIndex, timeoutIndex]) {
+      if (index >= 0) {
+        optionIndices.add(index);
+        optionIndices.add(index + 1);
+      }
+    }
+    const positional = values.filter((_, index) => !optionIndices.has(index));
+    if (
+      !taskId ||
+      positional.length !== 1 ||
+      (afterIndex >= 0 && !values[afterIndex + 1]) ||
+      (timeoutIndex >= 0 && !values[timeoutIndex + 1])
+    ) {
+      return taskUsage("usine task watch <task-id> [--after <sequence>] [--timeout <ms>] [--json]");
+    }
+    const afterSequence = afterIndex < 0 ? 0 : parseTaskNumber(values[afterIndex + 1], "after");
+    const timeoutMs =
+      timeoutIndex < 0 ? undefined : parseTaskNumber(values[timeoutIndex + 1], "timeout");
+    if (afterSequence === null || timeoutMs === null) return;
+    try {
+      const task = await followTask(serverUrl, taskId, {
+        afterSequence,
+        timeoutMs,
+        onEvent: (event) => process.stderr.write(`${JSON.stringify(event)}\n`),
+      });
+      if (json) process.stdout.write(`${JSON.stringify(task)}\n`);
+      else process.stdout.write(`Task ${task.taskId}: ${task.state} (revision ${task.revision})\n`);
+    } catch (error) {
+      taskCommandFailure("task_watch_failed", error);
+    }
+    return;
+  }
+
+  taskUsage("usine task <list|get|watch> ...");
+}
+
+function parseTaskNumber(value: string | undefined, name: string): number | null {
+  if (!value || !/^\d+$/.test(value)) {
+    taskUsage(`usine task watch <task-id> [--${name} <number>]`);
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    taskUsage(`usine task watch <task-id> [--${name} <number>]`);
+    return null;
+  }
+  return parsed;
+}
+
+function taskUsage(usage: string): void {
+  process.stderr.write(`${JSON.stringify({ error: "usage", usage })}\n`);
+  process.exitCode = 2;
+}
+
+function taskCommandFailure(error: string, cause: unknown): void {
+  process.stderr.write(`${JSON.stringify({ error, message: String(cause) })}\n`);
+  process.exitCode = 1;
+}

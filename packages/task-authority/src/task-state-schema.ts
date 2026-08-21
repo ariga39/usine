@@ -7,7 +7,7 @@ export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined"
 export class TaskStateQuarantinedError extends Error {
   readonly code = "task_state_quarantined";
 
-  constructor() {
+  constructor(readonly taskId?: string) {
     super(TASK_STATE_QUARANTINE_DIAGNOSTIC);
     this.name = "TaskStateQuarantinedError";
   }
@@ -104,6 +104,29 @@ const currentTaskResult = Schema.Struct({
   schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
   ...taskResultFields,
 });
+
+const taskListItem = Schema.Struct({
+  taskId: Schema.String,
+  revision: Schema.Natural,
+  deadlineEpochMs: Schema.Int,
+  state: taskState,
+  candidateSha: Schema.NullOr(exactSha),
+  activeActivation: Schema.NullOr(Schema.Natural),
+  writer: Schema.Struct({ repositoryIdentity: Schema.String }),
+  evidence: Schema.Struct({
+    implementerActivations: Schema.Natural,
+    reviewCycles: Schema.Natural,
+    changesRequestedBatches: Schema.Natural,
+    restartRecoveries: Schema.Natural,
+  }),
+});
+
+const taskListPage = Schema.Struct({
+  tasks: Schema.Array(taskListItem),
+});
+
+export type TaskListItem = Schema.Schema.Type<typeof taskListItem>;
+export type TaskListPage = Schema.Schema.Type<typeof taskListPage>;
 
 const legacyTaskResultFields = {
   taskId: Schema.String,
@@ -218,4 +241,21 @@ export function decodeRawPersistedTaskResult(input: string): TaskResult {
 
 export function decodeCurrentTaskResult(input: unknown): TaskResult {
   return projectDecodedResult(Schema.decodeUnknownSync(currentTaskResult)(input));
+}
+
+export function taskListItemFromResult(result: TaskResult): TaskListItem {
+  return {
+    taskId: result.taskId,
+    revision: result.revision,
+    deadlineEpochMs: result.deadlineEpochMs,
+    state: result.state,
+    candidateSha: result.candidateSha,
+    activeActivation: result.activeActivation,
+    writer: { repositoryIdentity: result.writer.repositoryIdentity },
+    evidence: { ...result.evidence },
+  };
+}
+
+export function decodeTaskListPage(input: unknown): TaskListPage {
+  return Schema.decodeUnknownSync(taskListPage)(input);
 }

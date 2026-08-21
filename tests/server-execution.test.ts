@@ -349,6 +349,13 @@ describe("server-owned execution", () => {
         error: "task_state_quarantined",
       });
 
+      const quarantinedListResponse = await fetch(new URL("/v1/tasks", second.url));
+      expect(quarantinedListResponse.status).toBe(503);
+      expect(await quarantinedListResponse.json()).toEqual({
+        taskId: quarantinedTaskId,
+        error: "task_state_quarantined",
+      });
+
       const corrupt = await taskStatus(second.url, corruptTaskId);
       expect(corrupt?.state).toBe("blocked");
       await healthyStarted.promise;

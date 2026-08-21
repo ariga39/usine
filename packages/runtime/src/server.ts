@@ -16,6 +16,7 @@ import {
   type TaskExecutionInput,
   type TaskResult,
   type TaskEventPage,
+  type TaskListPage,
   isTerminalState,
 } from "@usine/task-authority";
 import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
@@ -27,6 +28,7 @@ import {
   lookupRestartableTasks,
   lookupTaskStatus,
   lookupTaskEvents,
+  lookupTasks,
   recordRecoveryObservation,
   runtimePolicyFromEnvironment,
   stateDirectoryFromEnvironment,
@@ -341,6 +343,22 @@ async function handleRequest(
   const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
+  if (request.method === "GET" && url.pathname === "/v1/tasks") {
+    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
+    let page: TaskListPage;
+    try {
+      page = { tasks: await lookupTasks(stateDirectory, limit) };
+    } catch (error) {
+      if (isTaskStateQuarantinedError(error)) {
+        response.statusCode = 503;
+        writeJson(response, { taskId: error.taskId, error: error.code });
+        return;
+      }
+      throw error;
+    }
+    writeJson(response, page);
+    return;
+  }
   if (request.method === "GET" && taskEventsPath) {
     const requestedTaskId = decodeURIComponent(taskEventsPath);
     const afterSequence = parseCursor(url.searchParams.get("after"), "after");

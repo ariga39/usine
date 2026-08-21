@@ -2,8 +2,10 @@ import { Clock, Duration, Effect } from "effect";
 import {
   decodeCurrentTaskResult,
   decodeTaskEventPage,
+  decodeTaskListPage,
   type TaskEvent,
   type TaskEventPage,
+  type TaskListPage,
   type TaskResult,
   repositoryRegistrationSchema,
   type RepositorySnapshot,
@@ -100,6 +102,23 @@ export async function taskStatus(serverUrl: string, taskId: string): Promise<Tas
   return readResponse(response);
 }
 
+export async function listTasks(serverUrl: string, limit = 100): Promise<TaskListPage> {
+  const response = await fetch(new URL(`/v1/tasks?limit=${limit}`, serverUrl));
+  const parsed = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(responseMessage(parsed, "task list failed"), response.status);
+  try {
+    return decodeTaskListPage(parsed);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid TaskListPage (${response.status})`,
+      response.status,
+    );
+  }
+}
+
+export const getTask = taskStatus;
+
 export async function taskEvents(
   serverUrl: string,
   taskId: string,
@@ -127,6 +146,7 @@ export async function taskEvents(
 export interface FollowOptions {
   intervalMs?: number;
   afterSequence?: number;
+  timeoutMs?: number;
   onEvent?: (event: TaskEvent) => void;
 }
 
@@ -137,6 +157,7 @@ export async function followTask(
 ): Promise<TaskResult> {
   const intervalMs = options.intervalMs ?? 100;
   let afterSequence = options.afterSequence ?? 0;
+  const startedAt = await Effect.runPromise(Clock.currentTimeMillis);
   while (true) {
     const result = await taskStatus(serverUrl, taskId);
     if (!result) throw new ServerClientError(`task not found: ${taskId}`, 404);
@@ -149,9 +170,20 @@ export async function followTask(
       if (page.events.length < 200) break;
     }
     if (isTerminalState(result.state)) return result;
-    const remainingMs = result.deadlineEpochMs - (await Effect.runPromise(Clock.currentTimeMillis));
+    const now = await Effect.runPromise(Clock.currentTimeMillis);
+    const durableRemainingMs = result.deadlineEpochMs - now;
+    const timeoutRemainingMs =
+      options.timeoutMs === undefined
+        ? Number.POSITIVE_INFINITY
+        : options.timeoutMs - (now - startedAt);
+    const remainingMs = Math.min(durableRemainingMs, timeoutRemainingMs);
     if (remainingMs <= 0)
-      throw new ServerClientError("task follow reached its durable deadline", 408);
+      throw new ServerClientError(
+        timeoutRemainingMs <= 0
+          ? "task watch timed out"
+          : "task follow reached its durable deadline",
+        408,
+      );
     await Effect.runPromise(Effect.sleep(Duration.millis(Math.min(intervalMs, remainingMs))));
   }
 }

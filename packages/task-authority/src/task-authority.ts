@@ -1,10 +1,11 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { repositories, repositoryLeases, taskEvents, taskQuarantines, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
   decodeRawPersistedTaskResult,
   TaskStateQuarantinedError,
+  isTaskStateQuarantinedError,
   TASK_RESULT_SCHEMA_VERSION,
 } from "./task-state-schema.js";
 import {
@@ -45,6 +46,7 @@ export type {
   TaskObservation,
   TaskResult,
 } from "./task-state.js";
+import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
 export {
   decodeTaskEvent,
   decodeTaskEventPage,
@@ -145,7 +147,14 @@ export class TaskAuthority {
       .where(eq(taskRuns.taskId, taskId))
       .limit(1);
     const row = rows[0];
-    if (row) return decodeRawPersistedTaskResult(row.rawResult);
+    if (row) {
+      try {
+        return decodeRawPersistedTaskResult(row.rawResult);
+      } catch (error) {
+        if (isTaskStateQuarantinedError(error)) throw new TaskStateQuarantinedError(taskId);
+        throw error;
+      }
+    }
     const quarantined = await this.database
       .select({ taskId: taskQuarantines.taskId })
       .from(taskQuarantines)
@@ -153,6 +162,25 @@ export class TaskAuthority {
       .limit(1);
     if (quarantined[0]) throw new TaskStateQuarantinedError();
     return null;
+  }
+
+  async listTasks(limit = 100): Promise<TaskListItem[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), 200);
+    const rows = await this.database
+      .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
+      .from(taskRuns)
+      .orderBy(asc(taskRuns.taskId))
+      .limit(boundedLimit);
+    const tasks: TaskListItem[] = [];
+    for (const row of rows) {
+      try {
+        tasks.push(taskListItemFromResult(decodeRawPersistedTaskResult(row.rawResult)));
+      } catch (error) {
+        if (isTaskStateQuarantinedError(error)) throw new TaskStateQuarantinedError(row.taskId);
+        throw error;
+      }
+    }
+    return tasks;
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {

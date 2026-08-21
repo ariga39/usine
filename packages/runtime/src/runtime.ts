@@ -13,6 +13,7 @@ import {
   type RepositorySnapshot,
   type ResolvedTaskContract,
   type TaskEvent,
+  type TaskListItem,
   type TaskResult,
   type TaskObservationEventInput,
   isTerminalState,
@@ -91,6 +92,23 @@ export async function lookupTaskStatus(
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).lookup(taskId);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupTasks(stateDirectory: string, limit = 100): Promise<TaskListItem[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).listTasks(limit);
   } finally {
     handle.close();
   }
