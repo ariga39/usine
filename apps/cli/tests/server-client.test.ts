@@ -9,12 +9,13 @@ import {
 
 function result(taskId: string, revision: number, state: TaskResult["state"]): TaskResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId,
     contractHash: "contract-hash",
     revision,
     deadlineEpochMs: Date.now() + 30_000,
     state,
+    mergeAuthorized: false,
     candidateSha: null,
     candidateFence: null,
     check: null,

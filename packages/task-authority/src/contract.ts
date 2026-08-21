@@ -68,6 +68,8 @@ export const taskContractSchema = z
     authorization: z.object({
       source: z.string().min(1),
       delivery: z.literal(true),
+      /** Legacy contracts omit merge; only an explicit true grants merge authority. */
+      merge: z.literal(true).optional(),
     }),
     delivery: z.object({
       branch: z

@@ -54,12 +54,13 @@ function contract(id: string): ResolvedTaskContract {
 
 function persistedResult(state: TaskResult["state"], id: string): TaskResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: id,
     contractHash: "hash",
     revision: 4,
     deadlineEpochMs: Date.now() + 30_000,
     state,
+    mergeAuthorized: false,
     candidateSha: state === "admitted" ? null : sha,
     candidateFence: state === "admitted" ? null : 1,
     check:

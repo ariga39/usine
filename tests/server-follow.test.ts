@@ -5,12 +5,13 @@ import type { TaskResult, TaskState } from "@usine/task-authority";
 
 function result(taskId: string, revision: number, state: TaskState): TaskResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId,
     contractHash: "contract-hash",
     revision,
     deadlineEpochMs: Date.now() + 30_000,
     state,
+    mergeAuthorized: false,
     candidateSha: state === "candidate" ? "a".repeat(40) : null,
     candidateFence: state === "candidate" ? 1 : null,
     check: null,

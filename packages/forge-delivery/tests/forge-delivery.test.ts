@@ -146,6 +146,11 @@ type PullRequest = {
   state: "open" | "closed";
   head: { sha: string };
   html_url: string;
+  merged?: boolean;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
 };
 
 type ForgeServerState = {
@@ -157,10 +162,14 @@ type ForgeServerState = {
   failAfterCommentCreate: boolean;
   pullRequestCreates: number;
   commentCreates: number;
+  mergeCalls?: number;
+  failAfterMerge?: boolean;
+  mergeRefusal?: string;
+  authoritativeHeadSha?: string;
   requests: string[];
 };
 
-function contract(id: string): ResolvedTaskContract {
+function contract(id: string, merge = false): ResolvedTaskContract {
   const parsed = taskContractSchema.parse({
     id,
     repositoryId: "repo",
@@ -169,7 +178,11 @@ function contract(id: string): ResolvedTaskContract {
     acceptance: ["the candidate is delivered"],
     nonGoals: [],
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
-    authorization: { source: "https://github.com/owner/repo/issues/100", delivery: true },
+    authorization: {
+      source: "https://github.com/owner/repo/issues/100",
+      delivery: true,
+      ...(merge ? { merge: true } : {}),
+    },
     delivery: {
       branch: "agent/forge-e2e",
       issue: 100,
@@ -204,6 +217,14 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
     }
     if (method === "GET" && pathname === "/repos/owner/repo/pulls")
       return Response.json(state.pullRequests);
+    if (method === "GET" && pathname === "/repos/owner/repo/pulls/1") {
+      const pullRequest = state.pullRequests[0];
+      if (!pullRequest) return Response.json({ message: "Not Found" }, { status: 404 });
+      return Response.json({
+        ...pullRequest,
+        head: { sha: state.authoritativeHeadSha ?? pullRequest.head.sha },
+      });
+    }
     if (method === "POST" && pathname === "/repos/owner/repo/pulls") {
       const inputBody = JSON.parse(typeof init?.body === "string" ? init.body : "") as {
         head: string;
@@ -223,6 +244,22 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
         throw new TypeError("response lost after pull request creation");
       }
       return Response.json(pullRequest, { status: 201 });
+    }
+    if (method === "PUT" && pathname === "/repos/owner/repo/pulls/1/merge") {
+      state.mergeCalls = (state.mergeCalls ?? 0) + 1;
+      if (state.mergeRefusal)
+        return Response.json({ merged: false, message: state.mergeRefusal }, { status: 405 });
+      const pullRequest = state.pullRequests[0];
+      if (!pullRequest) return Response.json({ message: "Not Found" }, { status: 404 });
+      pullRequest.state = "closed";
+      pullRequest.merged = true;
+      pullRequest.merged_at = "2026-08-22T00:00:00Z";
+      pullRequest.merge_commit_sha = "d".repeat(40);
+      if (state.failAfterMerge) {
+        state.failAfterMerge = false;
+        throw new TypeError("response lost after merge");
+      }
+      return Response.json({ merged: true, sha: "d".repeat(40), message: "Pull Request successfully merged" });
     }
     if (pathname === "/repos/owner/repo/issues/1/comments") {
       if (method === "GET") return Response.json(state.comments);
@@ -442,7 +479,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(state.commentCreates).toBe(1);
     for (const sentinel of attestationSentinels)
       expect(state.comments[0]?.body).not.toContain(sentinel);
-  }, 30_000);
+  });
 
   test("quarantines a conflicting branch head before any Git update", async () => {
     const fixture = await repositoryFixture();
@@ -623,4 +660,192 @@ describe.sequential("Forge Delivery reconciliation", () => {
     ).rejects.toThrow("App/Bot");
     expect(state.commentCreates).toBe(0);
   });
+
+  test("merges an explicitly authorized exact head after the live PR and attestation probe", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+          mergeable: null,
+          mergeable_state: "blocked",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = contract("forge-authorized-merge", true);
+    const check = { ...passingCheck, sha: fixture.candidateSha };
+    const review = { ...approvedReview, sha: fixture.candidateSha };
+    state.pullRequests[0].mergeable = true;
+    state.pullRequests[0].mergeable_state = "clean";
+
+    await withControlledFetch(state, async (apiUrl) => {
+      const result = await forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        task,
+        fixture.candidateSha,
+        check,
+        review,
+      );
+      expect(result).toMatchObject({
+        sha: fixture.candidateSha,
+        prNumber: 1,
+        attestationId: "7",
+        merge: {
+          prNumber: 1,
+          approvedHeadSha: fixture.candidateSha,
+          mergeCommitSha: "d".repeat(40),
+          observedState: "merged",
+        },
+      });
+    });
+    expect(state.mergeCalls).toBe(1);
+  }, 30_000);
+
+  test("stops at the reviewed PR without merge authority", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const result = await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        contract("forge-no-merge-authority"),
+        fixture.candidateSha,
+        { ...passingCheck, sha: fixture.candidateSha },
+        { ...approvedReview, sha: fixture.candidateSha },
+      ),
+    );
+    expect(result.merge).toBeNull();
+    expect(state.mergeCalls ?? 0).toBe(0);
+  }, 30_000);
+
+  test("blocks a changed live head before calling merge", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      authoritativeHeadSha: "e".repeat(40),
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    await expect(
+      withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote).deliver(
+          contract("forge-live-head-changed", true),
+          fixture.candidateSha,
+          { ...passingCheck, sha: fixture.candidateSha },
+          { ...approvedReview, sha: fixture.candidateSha },
+        ),
+      ),
+    ).rejects.toThrow("approved open head");
+    expect(state.mergeCalls ?? 0).toBe(0);
+  }, 30_000);
+
+  test("turns a platform merge refusal into a concrete quarantine", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      mergeRefusal: "Required approval is missing",
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+          mergeable: false,
+          mergeable_state: "blocked",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    await expect(
+      withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote).deliver(
+          contract("forge-platform-refusal", true),
+          fixture.candidateSha,
+          { ...passingCheck, sha: fixture.candidateSha },
+          { ...approvedReview, sha: fixture.candidateSha },
+        ),
+      ),
+    ).rejects.toThrow("platform policy blocked merge");
+    expect(state.mergeCalls).toBe(1);
+  }, 30_000);
+
+  test("recovers a lost successful merge response with one external merge", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      failAfterMerge: true,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+          mergeable: true,
+          mergeable_state: "clean",
+        },
+      ],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const result = await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        contract("forge-merge-recovery", true),
+        fixture.candidateSha,
+        { ...passingCheck, sha: fixture.candidateSha },
+        { ...approvedReview, sha: fixture.candidateSha },
+      ),
+    );
+    expect(result.merge?.mergeCommitSha).toBe("d".repeat(40));
+    expect(result.attestationId).toBe("7");
+    expect(state.mergeCalls).toBe(1);
+  }, 30_000);
 });
