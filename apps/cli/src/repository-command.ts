@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { Argument, Command } from "effect/unstable/cli";
 import { repositoryRegistrationSchema } from "@usine/task-authority";
 import { inspectRepository, listRepositories, registerRepository } from "./server-client.js";
-import { notFoundFailure, runCommand } from "./cli-failure.js";
+import { CliFailure, notFoundFailure, runCommand } from "./cli-failure.js";
 import { boundedLimitFlag, jsonFlag } from "./cli-parameters.js";
 import { renderJson, renderRepository, renderRepositoryList } from "./cli-renderer.js";
 
@@ -91,18 +91,21 @@ export async function runRegisterCommand(
   registrationPath: string,
   serverUrl: string,
 ): Promise<void> {
-  return runCommand(
-    "register_failed",
-    async () => {
+  return runCommand("register_failed", async () => {
+    let parsed: ReturnType<typeof repositoryRegistrationSchema.parse>;
+    try {
       const input = JSON.parse(await readFile(registrationPath, "utf8")) as unknown;
       const registration = repositoryRegistrationSchema.parse(input);
-      const parsed = repositoryRegistrationSchema.parse({
+      parsed = repositoryRegistrationSchema.parse({
         ...registration,
         path: await realpath(registration.path),
       });
-      const repository = await registerRepository(serverUrl, parsed);
-      process.stdout.write(renderJson(repository));
-    },
-    "validation",
-  );
+    } catch {
+      throw new CliFailure("invalid_repository_registration", "validation", {
+        issues: [{ path: "", message: "registration input is unreadable or invalid" }],
+      });
+    }
+    const repository = await registerRepository(serverUrl, parsed);
+    process.stdout.write(renderJson(repository));
+  });
 }

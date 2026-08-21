@@ -156,6 +156,47 @@ test("CLI distinguishes a server connection failure from usage and validation", 
   });
 });
 
+test("CLI classifies invalid local repository registration as validation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));
+  const registrationPath = join(directory, "invalid-registration.json");
+  await writeFile(registrationPath, "{");
+
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "register", registrationPath], {
+    reject: false,
+  });
+
+  expect(run.exitCode).toBe(7);
+  expect(JSON.parse(run.stderr)).toMatchObject({ error: "invalid_repository_registration" });
+});
+
+test("CLI preserves registration connection failures for valid local input", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));
+  const registrationPath = join(directory, "registration.json");
+  await writeFile(
+    registrationPath,
+    JSON.stringify({
+      id: "unreachable-registration",
+      path: directory,
+      owner: "example",
+      name: "unreachable-registration",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    }),
+  );
+
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "register", registrationPath], {
+    env: { USINE_SERVER_URL: "http://127.0.0.1:1" },
+    reject: false,
+  });
+
+  expect(run.exitCode).toBe(5);
+  expect(JSON.parse(run.stderr)).toMatchObject({ error: "register_failed", kind: "connection" });
+});
+
 test.each([
   ["task", "list", "--limit", "0"],
   ["repository", "list", "--limit", "201"],
