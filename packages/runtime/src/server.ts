@@ -17,7 +17,7 @@ import {
   type TaskResult,
   type TaskStatus,
 } from "@usine/task-authority";
-import { reapCodexExecution, stopCodexExecution } from "@usine/coding-session";
+import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
@@ -51,6 +51,7 @@ export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskR
 export interface UsineServerOptions {
   environment: NodeJS.ProcessEnv;
   execute?: ServerExecution;
+  executionAdapter?: CodingSessionRuntimeAdapter;
   host?: string;
   port?: number;
 }
@@ -126,41 +127,39 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         catch: (cause) => cause,
       });
       for (const task of restartable) {
-        try {
-          yield* Effect.tryPromise({
-            try: () =>
-              recordExecutionObservation(
-                stateDirectory,
-                task.result,
-                "coordinator_restart",
-                "persistent-server",
-                "prior-coordinator",
-              ),
-            catch: (cause) => cause,
-          });
-          yield* Effect.tryPromise({
-            try: () =>
-              recordExecutionObservation(
-                stateDirectory,
-                task.result,
-                "execution_owner_change",
-                "persistent-server",
-                "prior-coordinator",
-              ),
-            catch: (cause) => cause,
-          });
-          const contract = parseContract(task.input.rawContract);
-          launchTask({ input: task.input, contract, result: task.result });
-        } catch (error) {
-          try {
-            yield* Effect.tryPromise({
+        yield* Effect.tryPromise({
+          try: async () => {
+            if (options.executionAdapter)
+              await options.executionAdapter.reapOwned(stateDirectory, task.result.taskId);
+            await recordExecutionObservation(
+              stateDirectory,
+              task.result,
+              "coordinator_restart",
+              "persistent-server",
+              "prior-coordinator",
+            );
+            await recordExecutionObservation(
+              stateDirectory,
+              task.result,
+              "execution_owner_change",
+              "persistent-server",
+              "prior-coordinator",
+            );
+            const contract = parseContract(task.input.rawContract);
+            launchTask({ input: task.input, contract, result: task.result });
+          },
+          catch: (cause) => cause,
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.tryPromise({
               try: () => blockPersistedTask(stateDirectory, task.result.taskId, error),
               catch: (cause) => cause,
-            });
-          } catch {
-            // A readable row remains isolated if its invalid input cannot be blocked.
-          }
-        }
+            }).pipe(
+              Effect.asVoid,
+              Effect.catch(() => Effect.succeed(undefined)),
+            ),
+          ),
+        );
       }
       resolveReady(running);
       yield* Effect.never;
@@ -177,20 +176,50 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   return {
     ...running,
     close: async () => {
-      await Effect.runPromise(Fiber.interrupt(fiber));
-      const activeTasks = await lookupRestartableTasks(stateDirectory);
-      for (const task of activeTasks) {
-        if (task.result.activeActivation === null) continue;
-        const workspace = resolve(
-          stateDirectory,
-          "workspaces",
-          task.result.taskId,
-          `${task.result.activeActivation}-${task.result.activeActivation}`,
-        );
-        await stopCodexExecution(stateDirectory, workspace);
+      const initial = await Promise.allSettled([
+        options.executionAdapter
+          ? cleanupOwnedExecutions(options.executionAdapter, stateDirectory)
+          : Promise.resolve(),
+        Effect.runPromise(Fiber.interrupt(fiber)),
+      ]);
+      const initialFailure = initial.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      let finalFailure: unknown;
+      if (options.executionAdapter) {
+        try {
+          await cleanupOwnedExecutions(options.executionAdapter, stateDirectory);
+        } catch (error) {
+          finalFailure = error;
+        }
       }
+      if (initialFailure) throw initialFailure.reason;
+      if (finalFailure) throw finalFailure;
     },
   };
+}
+
+async function cleanupOwnedExecutions(
+  adapter: CodingSessionRuntimeAdapter,
+  stateDirectory: string,
+): Promise<void> {
+  const taskIds = await adapter.listOwnedTaskIds(stateDirectory);
+  const results = await Promise.allSettled(
+    taskIds.map(async (taskId) => {
+      const handles = await adapter.discoverOwned(stateDirectory, taskId);
+      const cleanup = await Promise.allSettled(
+        handles.flatMap((handle) => [adapter.interrupt(handle), adapter.reap(handle)]),
+      );
+      const failure = cleanup.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) throw failure.reason;
+    }),
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -214,17 +243,6 @@ async function executeServerTask(
     policy = runtimePolicyFromEnvironment(environment, repository);
   } catch (error) {
     return blockPersistedTask(stateDirectory, task.result.taskId, error);
-  }
-  if (task.result.activeActivation !== null) {
-    const activation = task.result.activeActivation;
-    try {
-      await reapCodexExecution(
-        stateDirectory,
-        resolve(stateDirectory, "workspaces", task.result.taskId, `${activation}-${activation}`),
-      );
-    } catch (error) {
-      return blockPersistedTask(stateDirectory, task.result.taskId, error);
-    }
   }
   if (!execute) {
     return executeAdmittedTask(task.input, task.contract, policy, undefined, signal);

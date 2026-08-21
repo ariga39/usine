@@ -18,7 +18,7 @@ import {
   taskProgressFromResult,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession } from "@usine/coding-session";
+import { CodexCodingSession, type CodingSessionRuntimeAdapter } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
 import { ForgeDelivery, type ForgePolicy } from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
@@ -35,6 +35,12 @@ export {
   type RuntimePolicy,
 } from "./runtime-policy.js";
 export type { TaskExecutionInput } from "@usine/task-authority";
+
+export function createRuntimeExecutionAdapter(
+  environment: NodeJS.ProcessEnv,
+): CodingSessionRuntimeAdapter {
+  return new CodexCodingSession(undefined, { environment }).runtimeAdapter;
+}
 
 export async function registerRepository(
   stateDirectory: string,

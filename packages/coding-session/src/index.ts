@@ -3,6 +3,7 @@ export {
   CodexProfileSelectionError,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
+  type CodingSessionRuntimeAdapter,
   explicitWorkerEnvironment,
   validateCodexProfile,
   type CodingSessionClientFactory,
@@ -18,9 +19,17 @@ export {
 export {
   codexExecutionIdentityPath,
   createCodexLauncher,
-  reapCodexExecution,
+  discoverOwnedExecutions,
+  executionLifecycle,
+  listExecutionTaskIds,
+  reapExecutionsForTask,
   removeCodexExecutionIdentity,
-  stopCodexExecution,
+  stopExecutionsForTask,
+  CodexExecutionOwnershipError,
+  type ExecutionHandle,
+  type ExecutionLifecycle,
+  type ExecutionObservation,
+  type ExecutionReference,
 } from "./codex-execution.js";
 export {
   implementerOutputSchema,
