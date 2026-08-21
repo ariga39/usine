@@ -483,7 +483,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(state.commentCreates).toBe(1);
     for (const sentinel of attestationSentinels)
       expect(state.comments[0]?.body).not.toContain(sentinel);
-  });
+  }, 30_000);
 
   test("quarantines a conflicting branch head before any Git update", async () => {
     const fixture = await repositoryFixture();

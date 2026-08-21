@@ -274,7 +274,10 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       )
         throw new Error("delivery is not bound to an exact approved candidate");
       requireExactSha(fact.delivery.sha);
-      if (merged) requireExactSha(mergeEffect.approvedHeadSha);
+      if (merged) {
+        requireExactSha(mergeEffect.approvedHeadSha);
+        requireExactSha(mergeEffect.mergeCommitSha);
+      }
       return {
         ...result,
         state: nextState,

@@ -190,7 +190,7 @@ export class ForgeDelivery {
       marker,
       body,
     );
-    const delivered = deliveryEffect(pullRequest, sha, null, String(attestation.id));
+    const delivered = deliveryEffect(pullRequest, sha, null, requireAttestationId(attestation));
     if (contract.authorization.merge !== true) return delivered;
 
     const livePullRequest = (
@@ -271,7 +271,7 @@ export class ForgeDelivery {
         mergeCommitSha,
         observedState: "merged",
       },
-      String(attestation.id),
+      requireAttestationId(attestation),
     );
   }
 
@@ -299,7 +299,7 @@ export class ForgeDelivery {
     const merge = mergedEffect(authoritative, sha);
     if (!merge) return null;
     const attestation = await this.ensureAttestation(client, owner, repo, pullNumber, marker, body);
-    return deliveryEffect(authoritative, sha, merge, String(attestation.id));
+    return deliveryEffect(authoritative, sha, merge, requireAttestationId(attestation));
   }
 
   private async ensureAttestation(
@@ -392,6 +392,15 @@ function isExactSha(value: unknown): value is string {
 function isMergeRefusal(error: unknown): boolean {
   const status = statusOf(error);
   return status === 405 || status === 409 || status === 422;
+}
+
+function requireAttestationId(attestation: { id?: unknown }): string {
+  const id =
+    typeof attestation.id === "string" || typeof attestation.id === "number"
+      ? String(attestation.id)
+      : "";
+  if (id.length === 0) throw new DeliveryQuarantineError("approval attestation has no durable ID");
+  return id;
 }
 
 function mergedEffect(pullRequest: LivePullRequest, sha: string): MergeEffect | null {

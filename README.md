@@ -1,10 +1,10 @@
 # Usine
 
-Usine 是一个面向自主软件交付的确定性协调器。它的目标不是让一个 agent 更会写代码，而是让多个项目中的已授权任务在无人持续催促的情况下，有序地经过实现、验证、独立 review 和交付。
+Usine 是一个面向自主软件交付的确定性协调器。它的目标不是让一个 agent 更会写代码，而是让多个项目中的已授权任务在无人持续催促的情况下，有序地经过实现、验证、独立 review，并在 Task Contract 明确授权时合并 exact approved head。
 
-当前 V0 由六个 provider-independent 行为模块组成：Task Authority、Delivery Run、Coding Session、Candidate Workspace、Quality Gate 和 Forge Delivery。PR #82/#83 是真实 Codex executable delivery 与 restart evidence；Issue #153 是使用 stubbed Codex adapter 的 server-hosted lifecycle fixture，不能证明 production Codex turn。产品路径仍是单 Task、每个 repository 一个 writer lease 和一个 GitHub forge；Herdr、transcript 和 agent prose 不拥有完成 authority。
+当前 V0 由六个 provider-independent 行为模块组成：Task Authority、Delivery Run、Coding Session、Candidate Workspace、Quality Gate 和 Forge Delivery。PR #82/#83 是真实 Codex executable delivery 与 restart evidence；Issue #153 是使用 stubbed Codex adapter 的 server-hosted lifecycle fixture，不能证明 production Codex turn。Issue #199 增加了显式 merge authority 下的 exact-head `merged` terminal；没有该 authority 的任务仍在 `reviewed_pr` 停止。产品路径仍是单 Task、每个 repository 一个 writer lease 和一个 GitHub forge；Herdr、transcript 和 agent prose 不拥有完成 authority。
 
-当前方向是 `correct_before_expansion`：#192/#193 已合并；#195 已授权但 app-server runtime 尚未证明；#176 是下一项真实 persistent-server delivery 的 falsifier。其它 eligible work 以 canonical design 的当前状态 ledger 为准。
+当前方向是 `correct_before_expansion`：#192/#193 已合并；#199 已证明授权 merge 的 hermetic/server path；#195 已授权但 app-server runtime 尚未证明；#176 是下一项真实 persistent-server delivery 的 falsifier。其它 eligible work 以 canonical design 的当前状态 ledger 为准。
 
 运行需要 Node 24、pnpm、Git、Codex 和 GitHub App 配置。状态默认写入目标仓库外的用户状态目录，也可用 `USINE_STATE_DIR` 覆盖。先启动 server：
 

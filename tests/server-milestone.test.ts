@@ -89,6 +89,7 @@ interface ForgeServer {
   url: string;
   pullRequests: number;
   attestations: number;
+  mergeCalls: number;
   close(): Promise<void>;
 }
 
@@ -107,7 +108,7 @@ async function jsonResponse(response: ServerResponse, body: unknown, status = 20
   response.end(JSON.stringify(body));
 }
 
-async function fixture(name: string): Promise<Fixture> {
+async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), `usine-server-milestone-${name}-`));
   const repository = join(root, "repository");
   const remote = join(root, "remote.git");
@@ -139,6 +140,7 @@ async function fixture(name: string): Promise<Fixture> {
       authorization: {
         source: `https://github.com/example/${taskId}/issues/153`,
         delivery: true,
+        ...(mergeAuthorized ? { merge: true } : {}),
       },
       delivery: {
         branch,
@@ -193,9 +195,13 @@ async function fixture(name: string): Promise<Fixture> {
   };
 }
 
-async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
+async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<ForgeServer> {
   let pullRequests = 0;
   let attestations = 0;
+  let mergeCalls = 0;
+  let merged = false;
+  let mergeCommitSha: string | null = null;
+  let attestationBody: string | null = null;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const method = request.method ?? "GET";
@@ -208,12 +214,32 @@ async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
       return;
     }
     if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
-      await jsonResponse(response, []);
+      await jsonResponse(
+        response,
+        pullRequests === 0
+          ? []
+          : [
+              {
+                number: 1,
+                state: merged ? "closed" : "open",
+                head: {
+                  sha:
+                    mergeCommitSha ??
+                    (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`)),
+                },
+                html_url: "http://example.invalid/pull/1",
+                merged,
+                merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+                merge_commit_sha: mergeCommitSha,
+              },
+            ],
+      );
       return;
     }
     if (method === "POST" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
       pullRequests += 1;
       const headSha = await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`);
+      mergeCommitSha = headSha;
       await jsonResponse(
         response,
         {
@@ -226,9 +252,54 @@ async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
       );
       return;
     }
+    if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls/1`) {
+      const headSha =
+        mergeCommitSha ?? (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`));
+      await jsonResponse(response, {
+        number: 1,
+        state: merged ? "closed" : "open",
+        head: { sha: headSha },
+        html_url: "http://example.invalid/pull/1",
+        merged,
+        merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+        merge_commit_sha: merged ? mergeCommitSha : null,
+        mergeable: null,
+        mergeable_state: null,
+      });
+      return;
+    }
+    if (
+      mergeAuthorized &&
+      method === "PUT" &&
+      url.pathname === `/repos/example/${fixture.taskId}/pulls/1/merge`
+    ) {
+      mergeCalls += 1;
+      const headSha = mergeCommitSha;
+      if (!headSha) throw new Error("merge endpoint has no candidate head");
+      merged = true;
+      await execa("git", ["update-ref", "refs/heads/main", headSha], { cwd: fixture.remote });
+      await jsonResponse(response, {
+        merged: true,
+        sha: headSha,
+        message: "Pull Request successfully merged",
+      });
+      return;
+    }
     if (url.pathname === `/repos/example/${fixture.taskId}/issues/1/comments`) {
       if (method === "GET") {
-        await jsonResponse(response, []);
+        await jsonResponse(
+          response,
+          attestationBody
+            ? [
+                {
+                  id: 7,
+                  body: attestationBody,
+                  performed_via_github_app: { slug: "usine-app" },
+                  user: { type: "Bot" },
+                },
+              ]
+            : [],
+        );
         return;
       }
       if (method === "POST") {
@@ -244,6 +315,7 @@ async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
           throw new Error("forge comment body is invalid");
         }
         attestations += 1;
+        attestationBody = parsed.body;
         await jsonResponse(
           response,
           {
@@ -272,6 +344,9 @@ async function forgeServer(fixture: Fixture): Promise<ForgeServer> {
     },
     get attestations() {
       return attestations;
+    },
+    get mergeCalls() {
+      return mergeCalls;
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
@@ -511,6 +586,77 @@ describe("server-owned delivery milestone", () => {
       expect(await git(fixtureValue.remote, "rev-parse", `refs/heads/${fixtureValue.branch}`)).toBe(
         terminal.candidateSha,
       );
+    } finally {
+      await stopServer(server);
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("explicit merge authority reaches merged and advances the remote base", async () => {
+    const fixtureValue = await fixture("authorized-merge", true);
+    const forge = await forgeServer(fixtureValue, true);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const server = await startServer(cliPath, fixtureValue, forge, "complete");
+    try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "submit",
+        fixtureValue.contractPath,
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+
+      const follow = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "follow",
+        fixtureValue.taskId,
+      );
+      expect(follow.exitCode, follow.stderr).toBe(0);
+      const terminal = JSON.parse(follow.stdout) as {
+        taskId: string;
+        state: string;
+        candidateSha: string;
+        delivery: {
+          prNumber: number;
+          attestationId: string;
+          merge: {
+            approvedHeadSha: string;
+            mergeCommitSha: string;
+            observedState: string;
+          };
+        };
+      };
+      expect(terminal).toMatchObject({
+        taskId: fixtureValue.taskId,
+        state: "merged",
+        delivery: {
+          prNumber: 1,
+          attestationId: "7",
+          merge: { approvedHeadSha: terminal.candidateSha, observedState: "merged" },
+        },
+      });
+      expect(terminal.delivery.merge.mergeCommitSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(terminal.delivery.merge.mergeCommitSha).toBe(terminal.candidateSha);
+      expect(await git(fixtureValue.remote, "rev-parse", "refs/heads/main")).toBe(
+        terminal.delivery.merge.mergeCommitSha,
+      );
+      expect(forge.pullRequests).toBe(1);
+      expect(forge.attestations).toBe(1);
+      expect(forge.mergeCalls).toBe(1);
     } finally {
       await stopServer(server);
       await forge.close();

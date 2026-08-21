@@ -231,7 +231,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     revision: decoded.revision,
     deadlineEpochMs: decoded.deadlineEpochMs,
     state: decoded.state,
-    mergeAuthorized: "mergeAuthorized" in decoded ? decoded.mergeAuthorized === true : false,
+    mergeAuthorized: "mergeAuthorized" in decoded ? decoded.mergeAuthorized : false,
     candidateSha: decoded.candidateSha,
     candidateFence: decoded.candidateFence,
     check: decoded.check,

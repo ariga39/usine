@@ -140,4 +140,23 @@ describe("server client follow", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("follows an authorized task through the merged terminal state", async () => {
+    const task = result("merged-follow", 9, "merged");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ...task, history: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    try {
+      await expect(
+        followTask("http://server.test", task.taskId, { intervalMs: 0 }),
+      ).resolves.toMatchObject({
+        state: "merged",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -9,6 +9,7 @@ import type { ReviewAttemptObservation } from "@usine/quality-gate";
 import { DeliveryQuarantineError, ForgeAuthenticationError } from "@usine/forge-delivery";
 import {
   deadlineExpired,
+  isTerminalState,
   type AuthorityInput,
   type CandidateFact,
   type CheckResult,
@@ -109,7 +110,7 @@ export async function executeDeliveryRun(
     deadlineEpochMs: input.deadlineEpochMs,
   });
   throwIfAborted(input.signal);
-  if (result.state === "reviewed_pr" || result.state === "blocked") return result;
+  if (isTerminalState(result.state)) return result;
   let lastProgressRevision = result.revision;
   const runServices: DeliveryRunServices = services.onProgress
     ? {
@@ -127,7 +128,7 @@ export async function executeDeliveryRun(
   // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
   for (;;) {
-    if (result.state === "blocked") return result;
+    if (isTerminalState(result.state)) return result;
     if (deadlineExpired(result.deadlineEpochMs))
       return blockTask(runServices, result, "elapsed budget exhausted");
 
