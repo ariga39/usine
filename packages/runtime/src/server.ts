@@ -17,6 +17,8 @@ import {
   type TaskResult,
   type TaskEventPage,
   type TaskListPage,
+  type ServerSnapshot,
+  taskResourceFromResult,
   isTerminalState,
 } from "@usine/task-authority";
 import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
@@ -24,11 +26,15 @@ import {
   admitTask,
   executeAdmittedTask,
   inspectRepository,
-  registerRepository,
+  inspectRepositoryResource,
+  lookupRepositories,
+  registerRepositoryResource,
   lookupRestartableTasks,
   lookupTaskStatus,
   lookupTaskEvents,
   lookupTasks,
+  lookupServerHealth,
+  lookupServerSnapshot,
   recordRecoveryObservation,
   runtimePolicyFromEnvironment,
   stateDirectoryFromEnvironment,
@@ -65,6 +71,15 @@ export interface RunningUsineServer {
   readonly port: number;
   readonly url: string;
   close(): Promise<void>;
+}
+
+class ServerValidationError extends Error {
+  readonly code = "validation";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ServerValidationError";
+  }
 }
 
 interface AdmittedTask {
@@ -308,7 +323,7 @@ function listen(
     const server = createServer((request, response) => {
       void handler(request, response).catch((error) => {
         if (!response.headersSent) {
-          response.statusCode = 500;
+          response.statusCode = error instanceof ServerValidationError ? 400 : 500;
           writeJson(response, errorProjection(error));
         } else {
           response.destroy(error instanceof Error ? error : undefined);
@@ -343,6 +358,34 @@ async function handleRequest(
   const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
+  if (request.method === "GET" && ["/v1/health", "/v1/server/health"].includes(url.pathname)) {
+    try {
+      writeJson(response, await lookupServerHealth(stateDirectory));
+    } catch (error) {
+      if (isTaskStateQuarantinedError(error)) {
+        response.statusCode = 503;
+        writeJson(response, { taskId: error.taskId, error: error.code });
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+  if (request.method === "GET" && ["/v1/snapshot", "/v1/server/snapshot"].includes(url.pathname)) {
+    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
+    try {
+      const snapshot: ServerSnapshot = await lookupServerSnapshot(stateDirectory, limit);
+      writeJson(response, snapshot);
+    } catch (error) {
+      if (isTaskStateQuarantinedError(error)) {
+        response.statusCode = 503;
+        writeJson(response, { taskId: error.taskId, error: error.code });
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/v1/tasks") {
     const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
     let page: TaskListPage;
@@ -391,13 +434,22 @@ async function handleRequest(
       writeJson(response, { message: "task not found" });
       return;
     }
-    writeJson(response, result);
+    writeJson(response, taskResourceFromResult(result));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/repositories") {
+    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
+    writeJson(response, { repositories: await lookupRepositories(stateDirectory, limit) });
     return;
   }
 
   const repositoryId = url.pathname.match(/^\/v1\/repositories\/([^/]+)$/)?.[1];
   if (request.method === "GET" && repositoryId) {
-    const repository = await inspectRepository(stateDirectory, decodeURIComponent(repositoryId));
+    const repository = await inspectRepositoryResource(
+      stateDirectory,
+      decodeURIComponent(repositoryId),
+    );
     if (!repository) {
       response.statusCode = 404;
       writeJson(response, { message: "repository not found" });
@@ -418,7 +470,7 @@ async function handleRequest(
       ...parsed.data,
       path: await realpath(parsed.data.path),
     };
-    writeJson(response, await registerRepository(stateDirectory, registration));
+    writeJson(response, await registerRepositoryResource(stateDirectory, registration));
     return;
   }
 
@@ -439,7 +491,7 @@ async function handleRequest(
         result,
       });
     }
-    writeJson(response, result);
+    writeJson(response, taskResourceFromResult(result));
     return;
   }
 
@@ -448,11 +500,13 @@ async function handleRequest(
 }
 
 function parseCursor(value: string | null, name: string, fallback = 0): number {
-  if (value == null || value === "") return fallback;
-  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a non-negative integer`);
+  if (value == null) return fallback;
+  if (!/^\d+$/.test(value))
+    throw new ServerValidationError(`${name} must be a non-negative integer`);
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new Error(`${name} is out of range`);
-  if (name === "limit" && (parsed < 1 || parsed > 200)) throw new Error(`${name} is out of range`);
+  if (!Number.isSafeInteger(parsed)) throw new ServerValidationError(`${name} is out of range`);
+  if (name === "limit" && (parsed < 1 || parsed > 200))
+    throw new ServerValidationError(`${name} is out of range`);
   return parsed;
 }
 
@@ -514,7 +568,8 @@ function writeJson(response: ServerResponse, value: unknown): void {
 }
 
 function errorProjection(error: unknown): { message: string; code?: string } {
+  if (error instanceof ServerValidationError) return { code: error.code, message: error.message };
   if (error instanceof ForgeProfileResolutionError)
     return { code: error.code, message: error.message };
-  return { message: error instanceof Error ? error.message : String(error) };
+  return { code: "server_error", message: "server request failed" };
 }

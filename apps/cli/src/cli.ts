@@ -9,15 +9,23 @@ import {
   followTask,
   getTask,
   inspectRepository,
+  listRepositories,
   listTasks,
   registerRepository,
   serverUrlFromEnvironment,
+  serverHealth,
+  serverSnapshot,
   submitTask,
+  taskEvents,
   taskStatus,
 } from "./server-client.js";
 
 export async function main(): Promise<void> {
   const [command, contractPath] = process.argv.slice(2);
+  if (command === "server" && (contractPath === "health" || contractPath === "snapshot")) {
+    await runServerReadCommand(process.argv.slice(3));
+    return;
+  }
   if (command === "server") {
     if (contractPath || process.argv.length > 3) {
       process.stderr.write(`${JSON.stringify({ error: "usage", usage: "usine server" })}\n`);
@@ -43,10 +51,7 @@ export async function main(): Promise<void> {
       });
       await server.close();
     } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ error: "server_failed", message: String(error) })}\n`,
-      );
-      process.exitCode = 1;
+      taskCommandFailure("server_failed", error, "server");
     }
     return;
   }
@@ -71,16 +76,18 @@ export async function main(): Promise<void> {
       }
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ error: "status_failed", message: String(error) })}\n`,
-      );
-      process.exitCode = 1;
+      taskCommandFailure("status_failed", error);
     }
     return;
   }
 
   if (command === "task") {
     await runTaskCommand(process.argv.slice(3));
+    return;
+  }
+
+  if (command === "repository") {
+    await runRepositoryCommand(process.argv.slice(3));
     return;
   }
 
@@ -106,10 +113,7 @@ export async function main(): Promise<void> {
       }
       process.stdout.write(`${JSON.stringify(repository)}\n`);
     } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ error: "inspect_failed", message: String(error) })}\n`,
-      );
-      process.exitCode = 1;
+      taskCommandFailure("inspect_failed", error);
     }
     return;
   }
@@ -132,10 +136,7 @@ export async function main(): Promise<void> {
       const repository = await registerRepository(serverUrlFromEnvironment(process.env), parsed);
       process.stdout.write(`${JSON.stringify(repository)}\n`);
     } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ error: "register_failed", message: String(error) })}\n`,
-      );
-      process.exitCode = 1;
+      taskCommandFailure("register_failed", error, "validation");
     }
     return;
   }
@@ -154,10 +155,7 @@ export async function main(): Promise<void> {
       });
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ error: "follow_failed", message: String(error) })}\n`,
-      );
-      process.exitCode = 1;
+      taskCommandFailure("follow_failed", error);
     }
     return;
   }
@@ -175,9 +173,9 @@ export async function main(): Promise<void> {
   try {
     rawContract = await readFile(contractPath, "utf8");
     input = JSON.parse(rawContract);
-  } catch (error) {
+  } catch {
     process.stderr.write(
-      `${JSON.stringify({ error: "invalid_task_contract", issues: [{ path: "", message: String(error) }] })}\n`,
+      `${JSON.stringify({ error: "invalid_task_contract", issues: [{ path: "", message: "contract input is unreadable or invalid JSON" }] })}\n`,
     );
     process.exitCode = 2;
     return;
@@ -199,8 +197,7 @@ export async function main(): Promise<void> {
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    process.stderr.write(`${JSON.stringify({ error: "submit_failed", message: String(error) })}\n`);
-    process.exitCode = 1;
+    taskCommandFailure("submit_failed", error);
   }
 }
 
@@ -212,9 +209,21 @@ async function runTaskCommand(args: string[]): Promise<void> {
   const values = rest.filter((value) => value !== "--json");
   const serverUrl = serverUrlFromEnvironment(process.env);
 
-  if (operation === "list" && values.length === 0) {
+  if (operation === "list") {
+    const limitIndex = values.indexOf("--limit");
+    const positional =
+      limitIndex < 0
+        ? values
+        : values.filter((_, index) => index !== limitIndex && index !== limitIndex + 1);
+    if (positional.length > 0 || (limitIndex >= 0 && !values[limitIndex + 1]))
+      return taskUsage("usine task list [--limit <count>] [--json]");
+    const limit =
+      limitIndex < 0
+        ? 100
+        : parseBoundedLimit(values[limitIndex + 1], "usine task list [--limit <count>] [--json]");
+    if (limit === null) return;
     try {
-      const page = await listTasks(serverUrl);
+      const page = await listTasks(serverUrl, limit);
       if (json) process.stdout.write(`${JSON.stringify(page)}\n`);
       else {
         process.stdout.write("TASK ID\tSTATE\tREVISION\n");
@@ -283,7 +292,162 @@ async function runTaskCommand(args: string[]): Promise<void> {
     return;
   }
 
-  taskUsage("usine task <list|get|watch> ...");
+  if (operation === "history") {
+    const taskId = values[0];
+    const afterIndex = values.indexOf("--after");
+    const limitIndex = values.indexOf("--limit");
+    const optionIndices = new Set<number>();
+    for (const index of [afterIndex, limitIndex]) {
+      if (index >= 0) {
+        optionIndices.add(index);
+        optionIndices.add(index + 1);
+      }
+    }
+    const positional = values.filter((_, index) => !optionIndices.has(index));
+    if (
+      !taskId ||
+      positional.length !== 1 ||
+      (afterIndex >= 0 && !values[afterIndex + 1]) ||
+      (limitIndex >= 0 && !values[limitIndex + 1])
+    )
+      return taskUsage(
+        "usine task history <task-id> [--after <sequence>] [--limit <count>] [--json]",
+      );
+    const afterSequence = afterIndex < 0 ? 0 : parseTaskNumber(values[afterIndex + 1], "after");
+    const limit = limitIndex < 0 ? 200 : parseTaskNumber(values[limitIndex + 1], "limit");
+    if (afterSequence === null || limit === null || limit < 1 || limit > 200)
+      return taskUsage(
+        "usine task history <task-id> [--after <sequence>] [--limit <count>] [--json]",
+      );
+    try {
+      const page = await taskEvents(serverUrl, taskId, afterSequence, limit);
+      if (json) process.stdout.write(`${JSON.stringify(page)}\n`);
+      else {
+        process.stdout.write(`Task ${page.taskId} events after ${afterSequence}:\n`);
+        for (const event of page.events)
+          process.stdout.write(`#${event.sequence}\t${event.data.type}\n`);
+      }
+    } catch (error) {
+      taskCommandFailure("task_history_failed", error);
+    }
+    return;
+  }
+
+  taskUsage("usine task <list|get|watch|history> ...");
+}
+
+async function runRepositoryCommand(args: string[]): Promise<void> {
+  const [operation, ...rest] = args;
+  const json = rest.includes("--json");
+  const values = rest.filter((value) => value !== "--json");
+  const serverUrl = serverUrlFromEnvironment(process.env);
+
+  if (operation === "list") {
+    const limitIndex = values.indexOf("--limit");
+    const positional =
+      limitIndex < 0
+        ? values
+        : values.filter((_, index) => index !== limitIndex && index !== limitIndex + 1);
+    if (positional.length > 0 || (limitIndex >= 0 && !values[limitIndex + 1]))
+      return taskUsage("usine repository list [--limit <count>] [--json]");
+    const limit =
+      limitIndex < 0
+        ? 100
+        : parseBoundedLimit(
+            values[limitIndex + 1],
+            "usine repository list [--limit <count>] [--json]",
+          );
+    if (limit === null) return;
+    try {
+      const page = await listRepositories(serverUrl, limit);
+      if (json) process.stdout.write(`${JSON.stringify(page)}\n`);
+      else {
+        process.stdout.write("REPOSITORY ID\tOWNER/NAME\tREVISION\n");
+        for (const repository of page.repositories)
+          process.stdout.write(
+            `${repository.id}\t${repository.owner}/${repository.name}\t${repository.revision}\n`,
+          );
+      }
+    } catch (error) {
+      taskCommandFailure("repository_list_failed", error);
+    }
+    return;
+  }
+
+  if (operation === "get") {
+    const repositoryId = values.length === 1 ? values[0] : undefined;
+    if (!repositoryId) return taskUsage("usine repository get <repository-id> [--json]");
+    try {
+      const repository = await inspectRepository(serverUrl, repositoryId);
+      if (!repository) {
+        process.stderr.write(
+          `${JSON.stringify({ error: "repository_not_found", repositoryId })}\n`,
+        );
+        process.exitCode = 3;
+        return;
+      }
+      if (json) process.stdout.write(`${JSON.stringify(repository)}\n`);
+      else
+        process.stdout.write(
+          `Repository ${repository.id}: ${repository.owner}/${repository.name} (revision ${repository.revision})\n`,
+        );
+    } catch (error) {
+      taskCommandFailure("repository_get_failed", error);
+    }
+    return;
+  }
+
+  taskUsage("usine repository <list|get> ...");
+}
+
+async function runServerReadCommand(args: string[]): Promise<void> {
+  const [operation, ...rest] = args;
+  const json = rest.includes("--json");
+  const values = rest.filter((value) => value !== "--json");
+  const limitIndex = values.indexOf("--limit");
+  const positional =
+    limitIndex < 0
+      ? values
+      : values.filter((_, index) => index !== limitIndex && index !== limitIndex + 1);
+  if (
+    !operation ||
+    (operation === "health" && values.length > 0) ||
+    (operation !== "health" &&
+      (positional.length > 0 || (limitIndex >= 0 && !values[limitIndex + 1])))
+  ) {
+    return taskUsage("usine server <health|snapshot> [--json]");
+  }
+  try {
+    const url = serverUrlFromEnvironment(process.env);
+    if (operation === "health") {
+      const health = await serverHealth(url);
+      if (json) process.stdout.write(`${JSON.stringify(health)}\n`);
+      else process.stdout.write(`Server: ${health.status} (revision ${health.revision})\n`);
+      return;
+    }
+    if (operation === "snapshot") {
+      const limit =
+        limitIndex < 0
+          ? 100
+          : parseBoundedLimit(
+              values[limitIndex + 1],
+              "usine server snapshot [--limit <count>] [--json]",
+            );
+      if (limit === null) return;
+      const snapshot = await serverSnapshot(url, limit);
+      if (json) process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+      else {
+        process.stdout.write(`Server: ${snapshot.server.status} (revision ${snapshot.revision})\n`);
+        process.stdout.write(`Repositories: ${snapshot.repositories.length}\n`);
+        process.stdout.write(`Tasks: ${snapshot.tasks.length}\n`);
+        process.stdout.write(`Coding sessions: ${snapshot.codingSessions.length}\n`);
+      }
+      return;
+    }
+    return taskUsage("usine server <health|snapshot> [--json]");
+  } catch (error) {
+    taskCommandFailure(`server_${operation}_failed`, error);
+  }
 }
 
 function parseTaskNumber(value: string | undefined, name: string): number | null {
@@ -299,12 +463,54 @@ function parseTaskNumber(value: string | undefined, name: string): number | null
   return parsed;
 }
 
+function parseBoundedLimit(value: string | undefined, usage: string): number | null {
+  if (!value || !/^\d+$/.test(value)) {
+    return taskUsageAndNull(usage);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) {
+    return taskUsageAndNull(usage);
+  }
+  return parsed;
+}
+
+function taskUsageAndNull(usage: string): null {
+  taskUsage(usage);
+  return null;
+}
+
 function taskUsage(usage: string): void {
   process.stderr.write(`${JSON.stringify({ error: "usage", usage })}\n`);
   process.exitCode = 2;
 }
 
-function taskCommandFailure(error: string, cause: unknown): void {
-  process.stderr.write(`${JSON.stringify({ error, message: String(cause) })}\n`);
-  process.exitCode = 1;
+function taskCommandFailure(
+  error: string,
+  cause: unknown,
+  forcedKind?: "validation" | "server",
+): void {
+  const typed =
+    cause instanceof Error && "kind" in cause ? (cause as { kind?: string }) : undefined;
+  const kind = forcedKind ?? (typed?.kind as string | undefined) ?? "server";
+  const diagnostic =
+    cause instanceof Error && "diagnostic" in cause
+      ? (cause as { diagnostic?: string }).diagnostic
+      : undefined;
+  process.stderr.write(
+    `${JSON.stringify({ error: diagnostic ?? error, kind, message: failureMessage(cause) })}\n`,
+  );
+  process.exitCode = exitCodeForKind(kind);
+}
+
+function failureMessage(cause: unknown): string {
+  if (cause instanceof Error && "kind" in cause) return cause.message;
+  return "operation failed";
+}
+
+function exitCodeForKind(kind: string): number {
+  if (kind === "not_found") return 3;
+  if (kind === "timeout") return 4;
+  if (kind === "connection") return 5;
+  if (kind === "server") return 6;
+  return 2;
 }

@@ -1,8 +1,10 @@
 import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { expect, test } from "vite-plus/test";
+import { startUsineServer } from "@usine/runtime";
 import {
   resolveTaskContract,
   taskContractSchema,
@@ -53,6 +55,106 @@ test("CLI keeps invalid contract input at the public parse boundary", async () =
   const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], { reject: false });
   expect(run.exitCode).toBe(2);
   expect(run.stderr).toContain("invalid_task_contract");
+});
+
+test("CLI distinguishes a server connection failure from usage and validation", async () => {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", "task", "get", "missing"], {
+    env: { USINE_SERVER_URL: "http://127.0.0.1:1" },
+    reject: false,
+  });
+  expect(run.exitCode).toBe(5);
+  expect(JSON.parse(run.stderr)).toMatchObject({
+    error: "task_get_failed",
+    kind: "connection",
+  });
+});
+
+test.each([
+  ["task", "list", "--limit", "0"],
+  ["repository", "list", "--limit", "201"],
+  ["server", "snapshot", "--limit", "not-a-number"],
+])("CLI validates bounded %s output locally", async (...args) => {
+  const run = await execa("node", ["apps/cli/dist/cli.mjs", ...args], { reject: false });
+  expect(run.exitCode).toBe(2);
+  expect(JSON.parse(run.stderr)).toMatchObject({ error: "usage" });
+});
+
+test("server returns typed validation for invalid cursor and limit inputs", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "usine-server-validation-"));
+  const server = await startUsineServer({
+    environment: { USINE_STATE_DIR: stateDirectory },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    for (const path of [
+      "/v1/tasks?limit=0",
+      "/v1/repositories?limit=201",
+      "/v1/tasks/example/events?after=not-a-number",
+    ]) {
+      const response = await fetch(new URL(path, server.url));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ code: "validation" });
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("legacy task watch reports a timeout with exit code 4", async () => {
+  const taskId = "watch-timeout";
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url?.includes("/events")) {
+      response.end(JSON.stringify({ taskId, events: [], nextSequence: 0 }));
+      return;
+    }
+    response.end(
+      JSON.stringify({
+        schemaVersion: 2,
+        taskId,
+        contractHash: "a".repeat(64),
+        revision: 1,
+        deadlineEpochMs: Date.now() + 30_000,
+        state: "admitted",
+        mergeAuthorized: false,
+        candidateSha: null,
+        candidateFence: null,
+        check: null,
+        review: null,
+        delivery: null,
+        blocker: null,
+        activeActivation: 1,
+        writer: { repositoryIdentity: "example/repository" },
+        evidence: {
+          implementerActivations: 1,
+          reviewCycles: 0,
+          changesRequestedBatches: 0,
+          restartRecoveries: 0,
+        },
+      }),
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("watch fixture did not bind");
+  try {
+    const run = await execa(
+      "node",
+      ["apps/cli/dist/cli.mjs", "task", "watch", taskId, "--timeout", "5"],
+      {
+        env: { USINE_SERVER_URL: `http://127.0.0.1:${address.port}` },
+        reject: false,
+      },
+    );
+    expect(run.exitCode).toBe(4);
+    expect(JSON.parse(run.stderr)).toMatchObject({ error: "task_watch_failed", kind: "timeout" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test.each([

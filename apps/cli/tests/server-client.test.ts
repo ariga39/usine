@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskEvent, TaskResult } from "@usine/task-authority";
+import type { TaskEvent, TaskResource } from "@usine/task-authority";
 import {
   followTask,
   ServerClientError,
@@ -8,7 +8,7 @@ import {
   taskStatus,
 } from "../src/server-client.js";
 
-function result(taskId: string, revision: number, state: TaskResult["state"]): TaskResult {
+function result(taskId: string, revision: number, state: TaskResource["state"]): TaskResource {
   return {
     schemaVersion: 2,
     taskId,
@@ -22,7 +22,7 @@ function result(taskId: string, revision: number, state: TaskResult["state"]): T
     check: null,
     review: null,
     delivery: null,
-    blocker: state === "blocked" ? "operator stopped task" : null,
+    blocker: state === "blocked" ? { classification: "unknown" } : null,
     activeActivation: state === "admitted" ? 1 : null,
     writer: { repositoryIdentity: "example/repository" },
     evidence: {
@@ -78,7 +78,7 @@ describe("server client follow", () => {
   test("follows events by cursor and returns the authoritative terminal snapshot", async () => {
     const taskId = "follow-events";
     const originalFetch = globalThis.fetch;
-    let state: TaskResult["state"] = "admitted";
+    let state: TaskResource["state"] = "admitted";
     const received: TaskEvent[] = [];
     const requestedAfter: number[] = [];
     let sequenceNumber = 0;

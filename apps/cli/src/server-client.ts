@@ -1,14 +1,19 @@
 import { Clock, Duration, Effect } from "effect";
 import {
-  decodeCurrentTaskResult,
+  decodeTaskResource,
   decodeTaskEventPage,
   decodeTaskListPage,
+  decodeServerHealth,
+  decodeServerSnapshot,
   type TaskEvent,
   type TaskEventPage,
   type TaskListPage,
-  type TaskResult,
-  repositoryRegistrationSchema,
+  type TaskResource,
+  repositoryResourceSchema,
+  type RepositoryResource,
   type RepositorySnapshot,
+  type ServerHealth,
+  type ServerSnapshot,
   isTerminalState,
 } from "@usine/task-authority";
 
@@ -26,21 +31,66 @@ export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string
   return "http://" + urlHost + ":" + port;
 }
 
+export async function serverHealth(serverUrl: string): Promise<ServerHealth> {
+  const response = await fetchServer(new URL("/v1/health", serverUrl));
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "server health failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  try {
+    return decodeServerHealth(body);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid ServerHealth (${response.status})`,
+      response.status,
+    );
+  }
+}
+
+export async function serverSnapshot(serverUrl: string, limit = 100): Promise<ServerSnapshot> {
+  validateLimit(limit);
+  const response = await fetchServer(new URL(`/v1/snapshot?limit=${limit}`, serverUrl));
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "server snapshot failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  try {
+    return decodeServerSnapshot(body);
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid ServerSnapshot (${response.status})`,
+      response.status,
+    );
+  }
+}
+
 export class ServerClientError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly kind: ServerFailureKind = failureKindForStatus(status),
+    readonly diagnostic?: string,
   ) {
     super(message);
     this.name = "ServerClientError";
   }
 }
 
+export type ServerFailureKind = "validation" | "not_found" | "timeout" | "connection" | "server";
+
 export async function submitTask(
   serverUrl: string,
   submission: TaskSubmission,
-): Promise<TaskResult> {
-  return request(serverUrl, "/v1/tasks", {
+): Promise<TaskResource> {
+  return requestTask(serverUrl, "/v1/tasks", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(submission),
@@ -50,8 +100,8 @@ export async function submitTask(
 export async function registerRepository(
   serverUrl: string,
   repository: RepositorySnapshot,
-): Promise<RepositorySnapshot> {
-  const response = await fetch(new URL("/v1/repositories", serverUrl), {
+): Promise<RepositoryResource> {
+  const response = await fetchServer(new URL("/v1/repositories", serverUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(repository),
@@ -61,12 +111,14 @@ export async function registerRepository(
     throw new ServerClientError(
       responseMessage(body, "repository registration failed"),
       response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
     );
   try {
-    return repositoryRegistrationSchema.parse(body);
+    return repositoryResourceSchema.parse(body);
   } catch {
     throw new ServerClientError(
-      `server returned invalid Repository (${response.status})`,
+      `server returned invalid RepositoryResource (${response.status})`,
       response.status,
     );
   }
@@ -75,8 +127,8 @@ export async function registerRepository(
 export async function inspectRepository(
   serverUrl: string,
   repositoryId: string,
-): Promise<RepositorySnapshot | null> {
-  const response = await fetch(
+): Promise<RepositoryResource | null> {
+  const response = await fetchServer(
     new URL(`/v1/repositories/${encodeURIComponent(repositoryId)}`, serverUrl),
   );
   if (response.status === 404) return null;
@@ -85,28 +137,71 @@ export async function inspectRepository(
     throw new ServerClientError(
       responseMessage(body, "repository inspection failed"),
       response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
     );
   try {
-    return repositoryRegistrationSchema.parse(body);
+    return repositoryResourceSchema.parse(body);
   } catch {
     throw new ServerClientError(
-      `server returned invalid Repository (${response.status})`,
+      `server returned invalid RepositoryResource (${response.status})`,
       response.status,
     );
   }
 }
 
-export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResult | null> {
-  const response = await fetch(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
+export async function listRepositories(
+  serverUrl: string,
+  limit = 100,
+): Promise<{ repositories: RepositoryResource[] }> {
+  validateLimit(limit);
+  const response = await fetchServer(new URL(`/v1/repositories?limit=${limit}`, serverUrl));
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "repository list failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  try {
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("repositories" in body) ||
+      !Array.isArray(body.repositories)
+    )
+      throw new Error("invalid repository list");
+    return {
+      repositories: body.repositories.map((repository) =>
+        repositoryResourceSchema.parse(repository),
+      ),
+    };
+  } catch {
+    throw new ServerClientError(
+      `server returned invalid RepositoryList (${response.status})`,
+      response.status,
+    );
+  }
+}
+
+export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResource | null> {
+  const response = await fetchServer(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
   if (response.status === 404) return null;
-  return readResponse(response);
+  return readTaskResponse(response);
 }
 
 export async function listTasks(serverUrl: string, limit = 100): Promise<TaskListPage> {
-  const response = await fetch(new URL(`/v1/tasks?limit=${limit}`, serverUrl));
+  validateLimit(limit);
+  const response = await fetchServer(new URL(`/v1/tasks?limit=${limit}`, serverUrl));
   const parsed = await readJson(response);
   if (!response.ok)
-    throw new ServerClientError(responseMessage(parsed, "task list failed"), response.status);
+    throw new ServerClientError(
+      responseMessage(parsed, "task list failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(parsed),
+    );
   try {
     return decodeTaskListPage(parsed);
   } catch {
@@ -125,13 +220,17 @@ export async function taskEvents(
   afterSequence = 0,
   limit = 200,
 ): Promise<TaskEventPage> {
+  validateCursor(afterSequence, "after");
+  validateLimit(limit);
   const path = `/v1/tasks/${encodeURIComponent(taskId)}/events?after=${afterSequence}&limit=${limit}`;
-  const response = await fetch(new URL(path, serverUrl));
+  const response = await fetchServer(new URL(path, serverUrl));
   const parsed = await readJson(response);
   if (!response.ok)
     throw new ServerClientError(
       responseMessage(parsed, "task events request failed"),
       response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(parsed),
     );
   try {
     return decodeTaskEventPage(parsed);
@@ -154,7 +253,7 @@ export async function followTask(
   serverUrl: string,
   taskId: string,
   options: FollowOptions = {},
-): Promise<TaskResult> {
+): Promise<TaskResource> {
   const intervalMs = options.intervalMs ?? 100;
   let afterSequence = options.afterSequence ?? 0;
   const startedAt = await Effect.runPromise(Clock.currentTimeMillis);
@@ -188,24 +287,33 @@ export async function followTask(
   }
 }
 
-async function request(serverUrl: string, path: string, init: RequestInit): Promise<TaskResult> {
-  return readResponse(await fetch(new URL(path, serverUrl), init));
+async function requestTask(
+  serverUrl: string,
+  path: string,
+  init: RequestInit,
+): Promise<TaskResource> {
+  return readTaskResponse(await fetchServer(new URL(path, serverUrl), init));
 }
 
-async function readResponse(response: Response): Promise<TaskResult> {
+async function readTaskResponse(response: Response): Promise<TaskResource> {
   const parsed = await readJson(response);
   if (!response.ok) {
     const message =
       typeof parsed === "object" && parsed !== null && "message" in parsed
         ? String(parsed.message)
         : `server request failed (${response.status})`;
-    throw new ServerClientError(message, response.status);
+    throw new ServerClientError(
+      message,
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(parsed),
+    );
   }
   try {
-    return decodeCurrentTaskResult(parsed);
+    return decodeTaskResource(parsed);
   } catch {
     throw new ServerClientError(
-      "server returned invalid TaskResult (" + response.status + ")",
+      "server returned invalid TaskResource (" + response.status + ")",
       response.status,
     );
   }
@@ -227,4 +335,36 @@ function responseMessage(body: unknown, fallback: string): string {
   return typeof body === "object" && body !== null && "message" in body
     ? String(body.message)
     : fallback;
+}
+
+function responseDiagnostic(body: unknown): string | undefined {
+  return typeof body === "object" && body !== null && "error" in body
+    ? String(body.error)
+    : undefined;
+}
+
+async function fetchServer(input: URL, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new ServerClientError("server connection failed", 0, "connection");
+  }
+}
+
+function failureKindForStatus(status: number): ServerFailureKind {
+  if (status === 0) return "connection";
+  if (status === 404) return "not_found";
+  if (status === 408 || status === 504) return "timeout";
+  if (status >= 500) return "server";
+  return "validation";
+}
+
+function validateLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+    throw new ServerClientError("limit is out of range", 400, "validation", "validation");
+}
+
+function validateCursor(cursor: number, name: string): void {
+  if (!Number.isSafeInteger(cursor) || cursor < 0)
+    throw new ServerClientError(`${name} is out of range`, 400, "validation", "validation");
 }

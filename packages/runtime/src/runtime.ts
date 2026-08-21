@@ -11,10 +11,13 @@ import {
   type TaskContract,
   type TaskExecutionInput,
   type RepositorySnapshot,
+  type RepositoryResource,
   type ResolvedTaskContract,
   type TaskEvent,
   type TaskListItem,
   type TaskResult,
+  type ServerHealth,
+  type ServerSnapshot,
   type TaskObservationEventInput,
   isTerminalState,
 } from "@usine/task-authority";
@@ -77,6 +80,54 @@ export async function inspectRepository(
   }
 }
 
+export async function inspectRepositoryResource(
+  stateDirectory: string,
+  repositoryId: string,
+): Promise<RepositoryResource | null> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).lookupRepositoryResource(repositoryId);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupRepositories(
+  stateDirectory: string,
+  limit = 100,
+): Promise<RepositoryResource[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).listRepositories(limit);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function registerRepositoryResource(
+  stateDirectory: string,
+  registration: RepositorySnapshot,
+): Promise<RepositoryResource> {
+  await registerRepository(stateDirectory, registration);
+  const resource = await inspectRepositoryResource(stateDirectory, registration.id);
+  if (!resource) throw new Error("registered repository is missing");
+  return resource;
+}
+
 export async function lookupTaskStatus(
   stateDirectory: string,
   taskId: string,
@@ -112,6 +163,39 @@ export async function lookupTasks(stateDirectory: string, limit = 100): Promise<
   } finally {
     handle.close();
   }
+}
+
+export async function lookupServerSnapshot(
+  stateDirectory: string,
+  limit = 100,
+): Promise<ServerSnapshot> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        schemaVersion: 1,
+        revision: 0,
+        server: { status: "ok", revision: 0 },
+        repositories: [],
+        tasks: [],
+        codingSessions: [],
+      };
+    }
+    throw error;
+  }
+
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).readServerSnapshot(limit);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupServerHealth(stateDirectory: string): Promise<ServerHealth> {
+  return (await lookupServerSnapshot(stateDirectory, 200)).server;
 }
 
 export async function lookupTaskEvents(
