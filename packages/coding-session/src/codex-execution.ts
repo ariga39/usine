@@ -1,17 +1,57 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+export interface ExecutionReference {
+  taskId: string;
+  role: "implementer" | "reviewer";
+  attempt: string;
+}
+
+export interface ExecutionHandle {
+  reference: ExecutionReference;
+  workspace: string;
+}
+
+export type ExecutionObservation = "starting" | "running" | "stopped";
+
+export class CodexExecutionOwnershipError extends Error {
+  readonly code = "codex_execution_ownership_error" as const;
+
+  constructor(
+    message: string,
+    readonly reason: "incomplete" | "mismatch",
+  ) {
+    super(message);
+    this.name = "CodexExecutionOwnershipError";
+  }
+}
+
+export interface ExecutionLifecycle {
+  start(
+    reference: ExecutionReference,
+    stateDirectory: string,
+    workspace: string,
+  ): Promise<ExecutionHandle>;
+  discover(stateDirectory: string, taskId: string): Promise<readonly ExecutionHandle[]>;
+  observe(stateDirectory: string, handle: ExecutionHandle): Promise<ExecutionObservation>;
+  interrupt(stateDirectory: string, handle: ExecutionHandle): Promise<void>;
+  reap(stateDirectory: string, handle: ExecutionHandle): Promise<void>;
+}
+
 interface StartingCodexExecutionIdentity {
-  version: 1;
+  version: 2;
   state: "starting";
+  reference: ExecutionReference;
   workspace: string;
 }
 
 interface RunningCodexExecutionIdentity {
-  version: 1;
+  version: 2;
   state: "running";
+  reference: ExecutionReference;
   pid: number;
   startedAt: string;
   workspace: string;
@@ -19,20 +59,25 @@ interface RunningCodexExecutionIdentity {
 
 type CodexExecutionIdentity = StartingCodexExecutionIdentity | RunningCodexExecutionIdentity;
 
-export function codexExecutionIdentityPath(stateDirectory: string, workspace: string): string {
-  const workspaceId = createHash("sha256").update(workspace).digest("hex");
-  return join(stateDirectory, "codex-executions", `${workspaceId}.json`);
+export function codexExecutionIdentityPath(
+  stateDirectory: string,
+  reference: ExecutionReference,
+): string {
+  const executionId = [reference.taskId, reference.role, reference.attempt].join("\0");
+  const executionHash = createHash("sha256").update(executionId).digest("hex");
+  return join(stateDirectory, "codex-executions", `${executionHash}.json`);
 }
 
 export async function removeCodexExecutionIdentity(
   stateDirectory: string,
-  workspace: string,
+  reference: ExecutionReference,
 ): Promise<boolean> {
-  const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
+  const identityPath = codexExecutionIdentityPath(stateDirectory, reference);
   let identity: CodexExecutionIdentity | null = null;
   try {
     const decoded: unknown = JSON.parse(await readFile(identityPath, "utf8"));
-    if (!isCodexExecutionIdentity(decoded) || decoded.workspace !== workspace) return false;
+    if (!isCodexExecutionIdentity(decoded) || !sameReference(decoded.reference, reference))
+      return false;
     identity = decoded;
   } catch (error) {
     if (!hasErrorCode(error, "ENOENT")) return false;
@@ -50,9 +95,10 @@ export async function createCodexLauncher(
   stateDirectory: string,
   workspace: string,
   profile: string,
+  reference: ExecutionReference,
 ): Promise<{ launcherPath: string; identityPath: string }> {
-  const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
-  await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
+  const handle = await executionLifecycle.start(reference, stateDirectory, workspace);
+  const identityPath = codexExecutionIdentityPath(stateDirectory, handle.reference);
   const launcherPath = `${identityPath}.mjs`;
   await writeFile(
     launcherPath,
@@ -60,7 +106,6 @@ export async function createCodexLauncher(
 import { spawn, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
-writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, state: "starting", workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
 const child = spawn("codex", ["--profile", ${JSON.stringify(profile)}, ...process.argv.slice(2)], { detached: true, env: process.env, stdio: "inherit" });
 const forwardSignal = (signal) => { try { process.kill(-child.pid, signal); } catch {} };
 process.once("SIGINT", () => forwardSignal("SIGINT"));
@@ -69,7 +114,7 @@ process.once("SIGHUP", () => forwardSignal("SIGHUP"));
 if (!child.pid) throw new Error("Codex process has no PID");
 const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], { encoding: "utf8" }).trim();
 if (!startedAt) throw new Error("Codex process has no start identity");
-writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 1, state: "running", pid: child.pid, startedAt, workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
+writeFileSync(process.env.USINE_CODEX_IDENTITY_PATH, JSON.stringify({ version: 2, state: "running", reference: ${JSON.stringify(reference)}, pid: child.pid, startedAt, workspace: process.env.USINE_CODEX_WORKSPACE }) + "\n");
 child.once("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
 `,
     { mode: 0o755 },
@@ -77,111 +122,181 @@ child.once("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 
   return { launcherPath, identityPath };
 }
 
+export async function discoverOwnedExecutions(
+  stateDirectory: string,
+  taskId: string,
+): Promise<readonly ExecutionHandle[]> {
+  return executionLifecycle.discover(stateDirectory, taskId);
+}
+
+export async function reapExecutionsForTask(stateDirectory: string, taskId: string): Promise<void> {
+  for (const handle of await executionLifecycle.discover(stateDirectory, taskId)) {
+    await executionLifecycle.reap(stateDirectory, handle);
+  }
+}
+
+export async function stopExecutionsForTask(stateDirectory: string, taskId: string): Promise<void> {
+  for (const handle of await executionLifecycle.discover(stateDirectory, taskId)) {
+    await executionLifecycle.interrupt(stateDirectory, handle);
+  }
+}
+
+export async function listExecutionTaskIds(stateDirectory: string): Promise<string[]> {
+  return [
+    ...new Set(
+      (await discoverExecutionHandles(stateDirectory)).map(({ reference }) => reference.taskId),
+    ),
+  ];
+}
+
 export async function reapCodexExecution(
   stateDirectory: string,
-  workspace: string,
-): Promise<number | null> {
-  const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
-  let identity: CodexExecutionIdentity;
-  try {
-    const decoded: unknown = JSON.parse(await readFile(identityPath, "utf8"));
-    if (!isCodexExecutionIdentity(decoded)) throw new Error("Codex execution identity is invalid");
-    identity = decoded;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      await unlink(`${identityPath}.mjs`).catch(() => undefined);
-      return null;
-    }
-    throw error;
-  }
-  if (identity.workspace !== workspace) throw new Error("Codex execution identity is invalid");
-  if (identity.state === "starting") {
-    throw new Error(
-      "Codex execution identity was interrupted before process ownership was recorded",
-    );
-  }
-  let currentStart: string;
-  try {
-    currentStart = execFileSync("ps", ["-o", "lstart=", "-p", String(identity.pid)], {
-      encoding: "utf8",
-    }).trim();
-  } catch {
-    await removeCodexExecutionIdentity(stateDirectory, workspace);
-    return identity.pid;
-  }
-  if (currentStart !== identity.startedAt)
-    throw new Error("Codex execution identity no longer belongs to this task");
-  process.kill(-identity.pid, "SIGKILL");
-  for (let attempt = 0; attempt < 300; attempt += 1) {
-    try {
-      process.kill(identity.pid, 0);
-    } catch (error) {
-      if (hasErrorCode(error, "ESRCH")) {
-        await removeCodexExecutionIdentity(stateDirectory, workspace);
-        return identity.pid;
-      }
-      throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Codex execution did not exit during recovery");
+  handle: ExecutionHandle,
+): Promise<void> {
+  await terminateCodexExecution(stateDirectory, handle, "reap");
 }
 
 export async function stopCodexExecution(
   stateDirectory: string,
-  workspace: string,
-): Promise<number | null> {
-  const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
-  let identity: CodexExecutionIdentity;
+  handle: ExecutionHandle,
+): Promise<void> {
+  await terminateCodexExecution(stateDirectory, handle, "interrupt");
+}
+
+async function terminateCodexExecution(
+  stateDirectory: string,
+  handle: ExecutionHandle,
+  mode: "interrupt" | "reap",
+): Promise<void> {
+  const identity = await readExecutionIdentity(stateDirectory, handle.reference);
+  if (!identity) return;
+  if (!sameReference(identity.reference, handle.reference))
+    throw new CodexExecutionOwnershipError(
+      "Codex execution identity reference is mismatched",
+      "mismatch",
+    );
+  if (identity.state === "starting")
+    throw new CodexExecutionOwnershipError(
+      "Codex execution identity was interrupted before process ownership was recorded",
+      "incomplete",
+    );
+  let state = processState(identity);
+  if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
+  if (state === "mismatch") throw ownershipMismatch();
+
+  state = sendTerminationSignal(identity, mode === "interrupt" ? "SIGTERM" : "SIGKILL");
+  if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
+  state = await waitForTermination(identity);
+  if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
+  if (state === "mismatch") throw ownershipMismatch();
+  if (mode === "reap") throw executionStillLive();
+
+  state = sendTerminationSignal(identity, "SIGKILL");
+  if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
+  state = await waitForTermination(identity);
+  if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
+  if (state === "mismatch") throw ownershipMismatch();
+  throw executionStillLive();
+}
+
+function sendTerminationSignal(
+  identity: RunningCodexExecutionIdentity,
+  signal: NodeJS.Signals,
+): "belongs" | "stopped" {
+  try {
+    process.kill(-identity.pid, signal);
+    return "belongs";
+  } catch (error) {
+    if (hasErrorCode(error, "ESRCH")) return "stopped";
+    throw error;
+  }
+}
+
+async function waitForTermination(
+  identity: RunningCodexExecutionIdentity,
+): Promise<"belongs" | "stopped" | "mismatch"> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const state = processState(identity);
+    if (state === "stopped" || state === "mismatch") return state;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return processState(identity);
+}
+
+async function cleanStoppedExecution(
+  stateDirectory: string,
+  reference: ExecutionReference,
+): Promise<void> {
+  const identityPath = codexExecutionIdentityPath(stateDirectory, reference);
+  await Promise.all([
+    unlink(identityPath).catch((error) => {
+      if (!hasErrorCode(error, "ENOENT")) throw error;
+    }),
+    unlink(`${identityPath}.mjs`).catch((error) => {
+      if (!hasErrorCode(error, "ENOENT")) throw error;
+    }),
+  ]);
+}
+
+function ownershipMismatch(): CodexExecutionOwnershipError {
+  return new CodexExecutionOwnershipError(
+    "Codex execution identity no longer belongs to this task",
+    "mismatch",
+  );
+}
+
+function executionStillLive(): CodexExecutionOwnershipError {
+  return new CodexExecutionOwnershipError(
+    "Codex execution did not exit during termination",
+    "mismatch",
+  );
+}
+
+export const executionLifecycle: ExecutionLifecycle = {
+  start: async (reference, stateDirectory, workspace) => {
+    const identityPath = codexExecutionIdentityPath(stateDirectory, reference);
+    await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
+    await writeFile(
+      identityPath,
+      JSON.stringify({ version: 2, state: "starting", reference, workspace }) + "\n",
+    );
+    return { reference, workspace };
+  },
+  discover: async (stateDirectory, taskId) =>
+    (await discoverExecutionHandles(stateDirectory)).filter(
+      ({ reference }) => reference.taskId === taskId,
+    ),
+  observe: async (stateDirectory, handle) => {
+    const identity = await readExecutionIdentity(stateDirectory, handle.reference);
+    if (!identity) return "stopped";
+    if (!sameReference(identity.reference, handle.reference)) throw ownershipMismatch();
+    if (identity.state === "starting") return "starting";
+    const state = processState(identity);
+    if (state === "mismatch") throw ownershipMismatch();
+    return state === "belongs" ? "running" : "stopped";
+  },
+  interrupt: stopCodexExecution,
+  reap: reapCodexExecution,
+};
+
+async function readExecutionIdentity(
+  stateDirectory: string,
+  reference: ExecutionReference,
+): Promise<CodexExecutionIdentity | null> {
+  const identityPath = codexExecutionIdentityPath(stateDirectory, reference);
   try {
     const decoded: unknown = JSON.parse(await readFile(identityPath, "utf8"));
-    if (!isCodexExecutionIdentity(decoded)) throw new Error("Codex execution identity is invalid");
-    identity = decoded;
+    if (!isCodexExecutionIdentity(decoded))
+      throw new CodexExecutionOwnershipError(
+        "Codex execution identity is incomplete",
+        "incomplete",
+      );
+    if (!sameReference(decoded.reference, reference)) throw ownershipMismatch();
+    return decoded;
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) return null;
     throw error;
   }
-  if (identity.workspace !== workspace) throw new Error("Codex execution identity is invalid");
-  if (identity.state === "starting")
-    throw new Error(
-      "Codex execution identity was interrupted before process ownership was recorded",
-    );
-  const initialState = processState(identity);
-  if (initialState === "stopped") {
-    await removeCodexExecutionIdentity(stateDirectory, workspace);
-    return identity.pid;
-  }
-  if (initialState === "mismatch")
-    throw new Error("Codex execution identity no longer belongs to this task");
-  try {
-    process.kill(-identity.pid, "SIGTERM");
-  } catch (error) {
-    if (!hasErrorCode(error, "ESRCH")) throw error;
-  }
-  for (let attempt = 0; attempt < 300; attempt += 1) {
-    const state = processState(identity);
-    if (state === "stopped") {
-      await removeCodexExecutionIdentity(stateDirectory, workspace);
-      return identity.pid;
-    }
-    if (state === "mismatch")
-      throw new Error("Codex execution identity no longer belongs to this task");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  if (processState(identity) === "belongs") {
-    process.kill(-identity.pid, "SIGKILL");
-    for (let attempt = 0; attempt < 300; attempt += 1) {
-      const state = processState(identity);
-      if (state === "stopped") {
-        await removeCodexExecutionIdentity(stateDirectory, workspace);
-        return identity.pid;
-      }
-      if (state === "mismatch")
-        throw new Error("Codex execution identity no longer belongs to this task");
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  throw new Error("Codex execution did not exit during graceful shutdown");
 }
 
 function isCodexExecutionIdentity(value: unknown): value is CodexExecutionIdentity {
@@ -189,9 +304,11 @@ function isCodexExecutionIdentity(value: unknown): value is CodexExecutionIdenti
     typeof value === "object" &&
     value !== null &&
     "version" in value &&
-    value.version === 1 &&
+    value.version === 2 &&
     "state" in value &&
     (value.state === "starting" || value.state === "running") &&
+    "reference" in value &&
+    isExecutionReference(value.reference) &&
     "workspace" in value &&
     typeof value.workspace === "string" &&
     (value.state === "starting" ||
@@ -203,6 +320,60 @@ function isCodexExecutionIdentity(value: unknown): value is CodexExecutionIdenti
         typeof value.startedAt === "string" &&
         value.startedAt.length > 0))
   );
+}
+
+function isExecutionReference(value: unknown): value is ExecutionReference {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "taskId" in value &&
+    typeof value.taskId === "string" &&
+    value.taskId.length > 0 &&
+    "role" in value &&
+    (value.role === "implementer" || value.role === "reviewer") &&
+    "attempt" in value &&
+    typeof value.attempt === "string" &&
+    value.attempt.length > 0
+  );
+}
+
+async function discoverExecutionHandles(stateDirectory: string): Promise<ExecutionHandle[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(join(stateDirectory, "codex-executions"), { withFileTypes: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  const identityFiles = new Set(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name),
+  );
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".mjs")) {
+      const identityName = entry.name.slice(0, -".mjs".length);
+      if (!identityFiles.has(identityName))
+        throw new Error("Codex execution launcher has no durable identity");
+    }
+  }
+  const identities: ExecutionHandle[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const identityPath = join(stateDirectory, "codex-executions", entry.name);
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(await readFile(identityPath, "utf8"));
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) continue;
+      throw error;
+    }
+    if (!isCodexExecutionIdentity(decoded)) throw new Error("Codex execution identity is invalid");
+    if (codexExecutionIdentityPath(stateDirectory, decoded.reference) !== identityPath)
+      throw new Error("Codex execution identity path is invalid");
+    identities.push({ reference: decoded.reference, workspace: decoded.workspace });
+  }
+  return identities;
 }
 
 function processStillBelongsToExecution(identity: RunningCodexExecutionIdentity): boolean {
@@ -219,14 +390,38 @@ function processState(identity: RunningCodexExecutionIdentity): "belongs" | "sto
     // The leader may have exited while its process group is still alive.
   }
   if (currentStart && currentStart !== identity.startedAt) return "mismatch";
+  return processGroupState(identity.pid);
+}
+
+function processGroupState(pid: number): "belongs" | "stopped" {
   try {
-    process.kill(-identity.pid, 0);
+    const output = execFileSync("ps", ["-o", "pid=,stat=", "-g", String(pid)], {
+      encoding: "utf8",
+    });
+    const states = output
+      .trim()
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/, 2)[1])
+      .filter((state): state is string => state !== undefined);
+    if (states.length > 0)
+      return states.some((state) => !/^[ZX]/.test(state)) ? "belongs" : "stopped";
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "status" in error && error.status === 1)
+      return "stopped";
+    // Fall back to the process-group signal probe when ps cannot enumerate the group.
+  }
+  try {
+    process.kill(-pid, 0);
     return "belongs";
   } catch (error) {
     if (hasErrorCode(error, "EPERM")) return "belongs";
     if (!hasErrorCode(error, "ESRCH")) throw error;
   }
-  return currentStart ? "belongs" : "stopped";
+  return "stopped";
+}
+
+function sameReference(left: ExecutionReference, right: ExecutionReference): boolean {
+  return left.taskId === right.taskId && left.role === right.role && left.attempt === right.attempt;
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

@@ -7,7 +7,10 @@ import { codexExecutionIdentityPath } from "@usine/coding-session";
 import { lookupTaskStatus } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 
-const fakeCodexExecutable = (hang: boolean): string => String.raw`#!/usr/bin/env node
+const fakeCodexExecutable = (
+  hang: boolean,
+  hangReviewer: boolean,
+): string => String.raw`#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { access, chmod, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -16,10 +19,19 @@ const args = process.argv;
 const workspace = args[args.indexOf("--cd") + 1];
 if (!workspace) throw new Error("Codex workspace is required");
 const activation = Number(basename(workspace).split("-")[0]);
-const stateDirectory = dirname(dirname(dirname(workspace)));
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Role: fresh independent reviewer.");
+const stateDirectory = reviewer
+  ? dirname(dirname(workspace))
+  : dirname(dirname(dirname(workspace)));
+if (reviewer && ${String(hangReviewer)}) {
+  await writeFile(join(stateDirectory, "reviewer.pid"), String(process.pid));
+  process.on("SIGTERM", () => undefined);
+  await new Promise(() => {
+    setInterval(() => undefined, 1_000);
+  });
+}
 if (!reviewer) {
   await writeFile(join(stateDirectory, "codex.pid"), String(process.pid));
   if (${String(hang)} && activation === 1) {
@@ -159,9 +171,13 @@ async function fixture(name: string): Promise<Fixture> {
   await mkdir(codexHome);
   await writeFile(join(codexHome, "writer-profile.config.toml"), "# test profile\n");
   await writeFile(join(codexHome, "reviewer-profile.config.toml"), "# test profile\n");
-  await writeFile(fakeCodexPath, fakeCodexExecutable(name === "restart" || name === "graceful"), {
-    mode: 0o755,
-  });
+  await writeFile(
+    fakeCodexPath,
+    fakeCodexExecutable(name === "restart" || name === "graceful", name === "reviewer-shutdown"),
+    {
+      mode: 0o755,
+    },
+  );
   await chmod(fakeCodexPath, 0o755);
   return {
     root,
@@ -693,6 +709,61 @@ describe("server-owned delivery milestone", () => {
     }
   }, 60_000);
 
+  test("stops a long-running reviewer before server shutdown completes", async () => {
+    const fixtureValue = await fixture("reviewer-shutdown");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const server = await startServer(cliPath, fixtureValue, forge, "complete");
+    let reviewerPid: number | null = null;
+    try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "submit",
+        fixtureValue.contractPath,
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+      await waitForStatus(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        (result) => result.state === "checked",
+      );
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          reviewerPid = Number(
+            await readFile(join(fixtureValue.stateDirectory, "reviewer.pid"), "utf8"),
+          );
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+      if (!reviewerPid) throw new Error("timed out waiting for the reviewer process");
+      expect(processAlive(reviewerPid)).toBe(true);
+
+      await stopServer(server);
+
+      expect(processAlive(reviewerPid)).toBe(false);
+    } finally {
+      if (reviewerPid) reapFixtureProcessGroup(reviewerPid);
+      await stopServer(server).catch(() => undefined);
+      await forge.close();
+    }
+  }, 60_000);
+
   test("blocks recovery rather than grant a writer when launch ownership is incomplete", async () => {
     const fixtureValue = await fixture("restart");
     const forge = await forgeServer(fixtureValue);
@@ -728,8 +799,17 @@ describe("server-owned delivery milestone", () => {
         "1-1",
       );
       await writeFile(
-        codexExecutionIdentityPath(fixtureValue.stateDirectory, oldWorkspace),
-        JSON.stringify({ version: 1, state: "starting", workspace: oldWorkspace }),
+        codexExecutionIdentityPath(fixtureValue.stateDirectory, {
+          taskId: fixtureValue.taskId,
+          role: "implementer",
+          attempt: "1",
+        }),
+        JSON.stringify({
+          version: 2,
+          state: "starting",
+          reference: { taskId: fixtureValue.taskId, role: "implementer", attempt: "1" },
+          workspace: oldWorkspace,
+        }),
       );
       await stopServer(first, "SIGKILL");
       const second = await startServer(cliPath, fixtureValue, forge, "complete");

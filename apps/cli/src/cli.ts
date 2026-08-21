@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
 import { repositoryRegistrationSchema } from "@usine/task-authority";
-import { startUsineServer } from "@usine/runtime";
+import { createRuntimeExecutionAdapter, startUsineServer } from "@usine/runtime";
 import {
   followTask,
   inspectRepository,
@@ -25,6 +25,7 @@ export async function main(): Promise<void> {
     try {
       const server = await startUsineServer({
         environment: process.env,
+        executionAdapter: createRuntimeExecutionAdapter(process.env),
         host: process.env.USINE_SERVER_HOST?.trim() || "127.0.0.1",
         port: Number(process.env.USINE_SERVER_PORT || 8787),
       });

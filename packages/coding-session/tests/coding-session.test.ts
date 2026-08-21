@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,8 @@ import {
   CodexCodingSession,
   createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
+  discoverOwnedExecutions,
+  executionLifecycle,
   explicitWorkerEnvironment,
   implementerOutputSchema,
   codexExecutionIdentityPath,
@@ -18,6 +20,8 @@ import type { TaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
+const implementerExecution = { taskId: contract.id, role: "implementer" as const, attempt: "1" };
+const reviewerExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-a" };
 
 function sdkTurn(finalResponse: string, usage: RunResult["usage"] = null): RunResult {
   return { items: [], finalResponse, usage };
@@ -54,26 +58,44 @@ describe("Coding Session", () => {
   test("retains starting and live execution identities and removes a confirmed-stopped identity", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-identity-"));
     const workspace = join(stateDirectory, "workspace");
-    const identityPath = codexExecutionIdentityPath(stateDirectory, workspace);
+    const identityPath = codexExecutionIdentityPath(stateDirectory, implementerExecution);
     await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
 
     await writeFile(
       identityPath,
-      JSON.stringify({ version: 1, state: "starting", workspace }) + "\n",
+      JSON.stringify({
+        version: 2,
+        state: "starting",
+        reference: implementerExecution,
+        workspace,
+      }) + "\n",
     );
-    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(false);
+    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(false);
     await expect(access(identityPath)).resolves.toBeUndefined();
 
-    const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+    const liveChild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    if (!liveChild.pid) throw new Error("live child has no PID");
+    const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(liveChild.pid)], {
       encoding: "utf8",
     }).trim();
     await writeFile(
       identityPath,
-      JSON.stringify({ version: 1, state: "running", pid: process.pid, startedAt, workspace }) +
-        "\n",
+      JSON.stringify({
+        version: 2,
+        state: "running",
+        reference: implementerExecution,
+        pid: liveChild.pid,
+        startedAt,
+        workspace,
+      }) + "\n",
     );
-    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(false);
+    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(false);
     await expect(readFile(identityPath, "utf8")).resolves.toContain('"state":"running"');
+    process.kill(-liveChild.pid, "SIGKILL");
+    await new Promise<void>((resolve) => liveChild.once("exit", () => resolve()));
 
     const stoppedChild = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
     if (!stoppedChild.pid) throw new Error("stopped child has no PID");
@@ -84,21 +106,147 @@ describe("Coding Session", () => {
     await writeFile(
       identityPath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         state: "running",
+        reference: implementerExecution,
         pid: stoppedChild.pid,
         startedAt: "confirmed-stopped",
         workspace,
       }) + "\n",
     );
-    expect(await removeCodexExecutionIdentity(stateDirectory, workspace)).toBe(true);
+    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(true);
     await expect(access(identityPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("discovers valid implementer and reviewer launcher identities by task ownership", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-discovery-"));
+    const implementer = await createCodexLauncher(
+      stateDirectory,
+      join(stateDirectory, "writer"),
+      "writer-profile",
+      implementerExecution,
+    );
+    const reviewerReference = {
+      taskId: "review-task",
+      role: "reviewer" as const,
+      attempt: "1-a" + sha,
+    };
+    const reviewer = await createCodexLauncher(
+      stateDirectory,
+      join(stateDirectory, "reviewer"),
+      "reviewer-profile",
+      reviewerReference,
+    );
+
+    await expect(discoverOwnedExecutions(stateDirectory, contract.id)).resolves.toEqual([
+      { reference: implementerExecution, workspace: join(stateDirectory, "writer") },
+    ]);
+    await expect(
+      discoverOwnedExecutions(stateDirectory, reviewerReference.taskId),
+    ).resolves.toEqual([
+      { reference: reviewerReference, workspace: join(stateDirectory, "reviewer") },
+    ]);
+    await expect(readFile(implementer.launcherPath, "utf8")).resolves.toContain(
+      'reference: {"taskId":"session-test","role":"implementer","attempt":"1"}',
+    );
+    await expect(readFile(reviewer.identityPath, "utf8")).resolves.toContain('"role":"reviewer"');
+  });
+
+  test("fails closed when a launcher has no companion identity", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-incomplete-"));
+    const launcher = await createCodexLauncher(
+      stateDirectory,
+      join(stateDirectory, "workspace"),
+      "profile",
+      implementerExecution,
+    );
+    await unlink(launcher.identityPath);
+    await expect(discoverOwnedExecutions(stateDirectory, contract.id)).rejects.toThrow(
+      "Codex execution launcher has no durable identity",
+    );
+  });
+
+  test("converges concurrent reviewer interrupt and reap on one owned execution", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-race-"));
+    const workspace = join(stateDirectory, "reviewer");
+    const reference = {
+      taskId: "review-race",
+      role: "reviewer" as const,
+      attempt: `1-${sha}`,
+    };
+    const launcher = await createCodexLauncher(
+      stateDirectory,
+      workspace,
+      "reviewer-profile",
+      reference,
+    );
+    const child = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
+      { detached: true, stdio: "ignore" },
+    );
+    if (!child.pid) throw new Error("reviewer child has no PID");
+    try {
+      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
+        encoding: "utf8",
+      }).trim();
+      await writeFile(
+        launcher.identityPath,
+        JSON.stringify({
+          version: 2,
+          state: "running",
+          reference,
+          pid: child.pid,
+          startedAt,
+          workspace,
+        }) + "\n",
+      );
+      const handle = { reference, workspace };
+      const results = await Promise.allSettled([
+        executionLifecycle.interrupt(stateDirectory, handle),
+        executionLifecycle.reap(stateDirectory, handle),
+      ]);
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      await expect(discoverOwnedExecutions(stateDirectory, reference.taskId)).resolves.toEqual([]);
+      await expect(access(launcher.identityPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(launcher.launcherPath)).rejects.toMatchObject({ code: "ENOENT" });
+      let states: string[] = [];
+      try {
+        states = execFileSync("ps", ["-o", "stat=", "-g", String(child.pid)], {
+          encoding: "utf8",
+        })
+          .trim()
+          .split("\n")
+          .filter(Boolean);
+      } catch (error) {
+        if (!(error instanceof Error && "status" in error && error.status === 1)) throw error;
+      }
+      expect(states.every((state) => /^[ZX]/.test(state.trim()))).toBe(true);
+    } finally {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The shared termination transition may already have removed the group.
+      }
+      if (child.exitCode === null && child.signalCode === null)
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
   });
 
   test("routes each selected profile through the Codex launcher and keeps role sandboxes local", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
-    const implementer = await createCodexLauncher(stateDirectory, "/writer", "writer-profile");
-    const reviewer = await createCodexLauncher(stateDirectory, "/reviewer", "reviewer-profile");
+    const implementer = await createCodexLauncher(
+      stateDirectory,
+      "/writer",
+      "writer-profile",
+      implementerExecution,
+    );
+    const reviewer = await createCodexLauncher(
+      stateDirectory,
+      "/reviewer",
+      "reviewer-profile",
+      reviewerExecution,
+    );
     expect(await readFile(implementer.launcherPath, "utf8")).toContain(
       '["--profile", "writer-profile", ...process.argv.slice(2)]',
     );
@@ -123,6 +271,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
     });
     await session.run({
       role: "reviewer",
@@ -133,6 +282,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
     });
     expect(sandboxes).toEqual(["workspace-write", "read-only"]);
   });
@@ -152,6 +302,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
     });
     expect(created).toBe(false);
     expect(observation).toMatchObject({
@@ -172,6 +323,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -236,6 +388,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -298,6 +451,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
 
@@ -390,6 +544,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
       environment: { CI: "true" },
       signal: controller.signal,
     });
@@ -429,6 +584,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
       signal: controller.signal,
     });
@@ -467,6 +623,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 250,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
 
@@ -491,6 +648,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 50,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
       environment: { CI: "true" },
     });
     expect(started).toBe(false);
@@ -517,6 +675,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -548,6 +707,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -572,6 +732,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
 
@@ -601,6 +762,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
 
@@ -633,6 +795,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
       environment: { CI: "true" },
     });
 

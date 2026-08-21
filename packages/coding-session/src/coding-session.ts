@@ -14,7 +14,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
-import { createCodexLauncher, removeCodexExecutionIdentity } from "./codex-execution.js";
+import {
+  createCodexLauncher,
+  executionLifecycle,
+  listExecutionTaskIds,
+  reapCodexExecution,
+  type ExecutionHandle,
+  type ExecutionReference,
+} from "./codex-execution.js";
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -100,6 +107,7 @@ export interface SessionRequest<Output = unknown> {
   sandbox: SandboxMode;
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
+  execution: ExecutionReference;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
@@ -166,6 +174,16 @@ export interface SessionObservation<T = unknown> {
     | null;
 }
 
+export interface CodingSessionRuntimeAdapter {
+  start<T>(request: SessionRequest<T>): Promise<unknown>;
+  observe<T>(handle: unknown): Promise<SessionObservation<T>>;
+  interrupt(handle: unknown): Promise<void>;
+  reap(handle: unknown): Promise<void>;
+  discoverOwned(stateDirectory: string, taskId: string): Promise<readonly unknown[]>;
+  reapOwned(stateDirectory: string, taskId: string): Promise<void>;
+  listOwnedTaskIds(stateDirectory: string): Promise<readonly string[]>;
+}
+
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
 
 function outputFrom(result: RunResult): unknown {
@@ -177,6 +195,116 @@ function outputFrom(result: RunResult): unknown {
 }
 
 class RoleOutputTransformCancelled extends Error {}
+
+interface CodexSessionHandle<T> {
+  kind: "session";
+  controller: AbortController;
+  execution: ExecutionHandle;
+  promise: Promise<SessionObservation<T>>;
+  executionStateDirectory?: string;
+}
+
+interface CodexOwnedHandle {
+  kind: "owned";
+  stateDirectory: string;
+  execution: ExecutionHandle;
+}
+
+class CodexRuntimeAdapter implements CodingSessionRuntimeAdapter {
+  constructor(
+    private readonly runProvider: <T>(request: SessionRequest<T>) => Promise<SessionObservation<T>>,
+    private readonly executionStateDirectory?: string,
+  ) {}
+
+  async start<T>(request: SessionRequest<T>): Promise<unknown> {
+    const controller = new AbortController();
+    const signal = request.signal
+      ? AbortSignal.any([request.signal, controller.signal])
+      : controller.signal;
+    return {
+      kind: "session",
+      controller,
+      execution: { reference: request.execution, workspace: request.workspace },
+      promise: this.runProvider({ ...request, signal }),
+      executionStateDirectory: this.executionStateDirectory,
+    } satisfies CodexSessionHandle<T>;
+  }
+
+  observe<T>(handle: unknown): Promise<SessionObservation<T>> {
+    if (!isCodexSessionHandle<T>(handle)) throw new Error("coding session handle is invalid");
+    return handle.promise;
+  }
+
+  async interrupt(handle: unknown): Promise<void> {
+    if (isCodexSessionHandle(handle)) {
+      handle.controller.abort();
+      return;
+    }
+    if (!isCodexOwnedHandle(handle)) throw new Error("coding session handle is invalid");
+    await executionLifecycle.interrupt(handle.stateDirectory, handle.execution);
+  }
+
+  async reap(handle: unknown): Promise<void> {
+    if (isCodexSessionHandle(handle)) {
+      try {
+        await handle.promise;
+      } finally {
+        if (handle.executionStateDirectory)
+          await reapCodexExecution(handle.executionStateDirectory, handle.execution);
+      }
+      return;
+    }
+    if (!isCodexOwnedHandle(handle)) throw new Error("coding session handle is invalid");
+    await executionLifecycle.reap(handle.stateDirectory, handle.execution);
+  }
+
+  async discoverOwned(stateDirectory: string, taskId: string): Promise<readonly unknown[]> {
+    return (await executionLifecycle.discover(stateDirectory, taskId)).map(
+      (execution) =>
+        ({
+          kind: "owned",
+          stateDirectory,
+          execution,
+        }) satisfies CodexOwnedHandle,
+    );
+  }
+
+  async reapOwned(stateDirectory: string, taskId: string): Promise<void> {
+    const handles = await this.discoverOwned(stateDirectory, taskId);
+    const results = await Promise.allSettled(handles.map((handle) => this.reap(handle)));
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure) throw failure.reason;
+  }
+
+  listOwnedTaskIds(stateDirectory: string): Promise<readonly string[]> {
+    return listExecutionTaskIds(stateDirectory);
+  }
+}
+
+function isCodexSessionHandle<T>(value: unknown): value is CodexSessionHandle<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "session" &&
+    "promise" in value &&
+    value.promise instanceof Promise
+  );
+}
+
+function isCodexOwnedHandle(value: unknown): value is CodexOwnedHandle {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "owned" &&
+    "stateDirectory" in value &&
+    typeof value.stateDirectory === "string" &&
+    "execution" in value
+  );
+}
 
 async function runRoleOutputTransform(
   transform: RoleOutputTransform,
@@ -194,12 +322,34 @@ async function runRoleOutputTransform(
 }
 
 export class CodexCodingSession {
+  private readonly adapter: CodingSessionRuntimeAdapter;
+
   constructor(
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
-  ) {}
+  ) {
+    this.adapter = new CodexRuntimeAdapter(
+      (request) => this.runProvider(request),
+      options.executionStateDirectory,
+    );
+  }
+
+  get runtimeAdapter(): CodingSessionRuntimeAdapter {
+    return this.adapter;
+  }
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
+    const handle = await this.adapter.start(request);
+    try {
+      return await this.adapter.observe<T>(handle);
+    } finally {
+      await this.adapter.reap(handle);
+    }
+  }
+
+  private async runProvider<T = unknown>(
+    request: SessionRequest<T>,
+  ): Promise<SessionObservation<T>> {
     let remaining: number;
     try {
       remaining = remainingUntil(request.deadlineEpochMs);
@@ -313,10 +463,6 @@ export class CodexCodingSession {
         failure,
         failureCode: error instanceof CodexProfileSelectionError ? error.code : null,
       };
-    } finally {
-      if (this.options.executionStateDirectory) {
-        await removeCodexExecutionIdentity(this.options.executionStateDirectory, request.workspace);
-      }
     }
   }
 
@@ -334,6 +480,7 @@ export class CodexCodingSession {
       this.options.executionStateDirectory,
       request.workspace,
       profile,
+      request.execution,
     );
     return new Codex({
       ...options,
