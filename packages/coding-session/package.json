@@ -14,8 +14,10 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@ai-sdk/openai": "latest",
     "@openai/codex-sdk": "0.146.0",
     "@usine/task-authority": "workspace:*",
+    "ai": "latest",
     "zod": "latest"
   },
   "devDependencies": {

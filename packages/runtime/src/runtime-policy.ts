@@ -2,9 +2,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
+  createOpenAICompatibleRoleOutputTransform,
   explicitWorkerEnvironment,
   validateCodexProfile,
   type RolePolicy,
+  type RoleOutputTransform,
 } from "@usine/coding-session";
 import type { ForgePolicy } from "@usine/forge-delivery";
 import { forgeProfileSchema } from "@usine/task-authority";
@@ -27,6 +29,7 @@ export interface RuntimePolicy {
     reviewer: RolePolicy;
   };
   forge: ForgePolicy;
+  roleOutputTransform?: RoleOutputTransform;
   workerEnvironment: NodeJS.ProcessEnv;
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
 }
@@ -83,13 +86,28 @@ export function runtimePolicyFromEnvironment(
 
   const forge = forgePolicyFromEnvironment(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
+  const roleOutputTransform = roleOutputTransformFromEnvironment(environment);
   return {
     stateDirectory,
     roles,
     forge,
+    roleOutputTransform,
     workerEnvironment,
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
   };
+}
+
+function roleOutputTransformFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): RoleOutputTransform | undefined {
+  const apiKey = environment.USINE_ROLE_OUTPUT_API_KEY?.trim();
+  const baseURL = environment.USINE_ROLE_OUTPUT_API_URL?.trim();
+  const model = environment.USINE_ROLE_OUTPUT_MODEL?.trim();
+  const configured = [apiKey, baseURL, model].filter(Boolean).length;
+  if (configured === 0) return undefined;
+  if (configured !== 3 || !apiKey || !baseURL || !model)
+    throw new Error("role output transform configuration is incomplete");
+  return createOpenAICompatibleRoleOutputTransform({ apiKey, baseURL, model });
 }
 
 export function forgePolicyFromEnvironment(

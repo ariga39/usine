@@ -330,6 +330,7 @@ async function executeWithServices(options: {
   const session = new CodexCodingSession(undefined, {
     environment: policy.workerEnvironment,
     executionStateDirectory: policy.stateDirectory,
+    roleOutputTransform: policy.roleOutputTransform,
   });
   const quality = new QualityGate({
     workspace,
