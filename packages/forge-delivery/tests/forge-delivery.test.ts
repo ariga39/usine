@@ -43,10 +43,10 @@ describe("Forge Delivery module", () => {
 
   test("attestation omits untrusted contract, check, and review content", () => {
     const sentinels = {
-      localPath: "/private/local/forge-sentinel/target",
-      machineUser: "forge-machine-user-sentinel",
-      privateTarget: "private-target-sentinel",
-      credential: "ghp_credential-sentinel",
+      localPath: "excluded-local-path-value",
+      machineUser: "excluded-machine-identity-value",
+      privateTarget: "excluded-private-target-value",
+      credential: "excluded-credential-value",
     };
     const excludedContent = Object.values(sentinels).join(" ");
     const unsafeContract: ResolvedTaskContract = {
@@ -311,10 +311,10 @@ const approvedReview = {
 };
 
 const attestationSentinels = [
-  "/private/local/forge-sentinel/target",
-  "forge-machine-user-sentinel",
-  "private-target-sentinel",
-  "ghp_credential-sentinel",
+  "excluded-local-path-value",
+  "excluded-machine-identity-value",
+  "excluded-private-target-value",
+  "excluded-credential-value",
 ] as const;
 const excludedAttestationContent = attestationSentinels.join(" ");
 
