@@ -20,6 +20,28 @@ async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
   return environment;
 }
 
+const repository = {
+  owner: "owner",
+  name: "repo",
+  implementerProfile: "implementer-profile",
+  reviewerProfile: "reviewer-profile",
+  forgeProfile: "release",
+};
+
+const forgeEnvironment = {
+  USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "release-app",
+  USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+  USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "456",
+  USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "app.pem",
+  USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+};
+
+const roleOutputEnvironment = {
+  USINE_ROLE_OUTPUT_API_KEY: "placeholder-coordinator-key",
+  USINE_ROLE_OUTPUT_API_URL: "https://placeholder.invalid/v1",
+  USINE_ROLE_OUTPUT_MODEL: "placeholder-normalization-model",
+};
+
 describe("runtime composition", () => {
   test("accepts the documented production startup shape before external delivery", async () => {
     const environment = await documentedProductionEnvironment();
@@ -110,6 +132,47 @@ describe("runtime composition", () => {
     expect(policy.credentialFreeGitEnvironment).not.toHaveProperty(
       "USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN",
     );
+  });
+
+  test.each([
+    ["all settings", roleOutputEnvironment, true],
+    ["no settings", {}, false],
+  ])("resolves role output configuration with %s", (_name, roleOutput, configured) => {
+    const policy = runtimePolicyFromEnvironment({ ...forgeEnvironment, ...roleOutput }, repository);
+
+    if (configured) expect(policy.roleOutputTransform).toEqual(expect.any(Function));
+    else expect(policy.roleOutputTransform).toBeUndefined();
+  });
+
+  test.each([
+    ["API key", { USINE_ROLE_OUTPUT_API_KEY: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_KEY }],
+    ["API URL", { USINE_ROLE_OUTPUT_API_URL: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_URL }],
+    ["model", { USINE_ROLE_OUTPUT_MODEL: roleOutputEnvironment.USINE_ROLE_OUTPUT_MODEL }],
+    [
+      "API key and API URL",
+      {
+        USINE_ROLE_OUTPUT_API_KEY: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_KEY,
+        USINE_ROLE_OUTPUT_API_URL: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_URL,
+      },
+    ],
+    [
+      "API key and model",
+      {
+        USINE_ROLE_OUTPUT_API_KEY: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_KEY,
+        USINE_ROLE_OUTPUT_MODEL: roleOutputEnvironment.USINE_ROLE_OUTPUT_MODEL,
+      },
+    ],
+    [
+      "API URL and model",
+      {
+        USINE_ROLE_OUTPUT_API_URL: roleOutputEnvironment.USINE_ROLE_OUTPUT_API_URL,
+        USINE_ROLE_OUTPUT_MODEL: roleOutputEnvironment.USINE_ROLE_OUTPUT_MODEL,
+      },
+    ],
+  ])("rejects partial role output configuration: %s", (_name, roleOutput) => {
+    expect(() =>
+      runtimePolicyFromEnvironment({ ...forgeEnvironment, ...roleOutput }, repository),
+    ).toThrow("role output transform configuration is incomplete");
   });
 
   test("does not read Git author policy from global environment", () => {

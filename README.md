@@ -16,6 +16,9 @@ USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID=123456 \
 USINE_FORGE_PROFILE_RELEASE_APP_SLUG=example-app \
 USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH=./app-private-key.pem \
 USINE_FORGE_PROFILE_RELEASE_REPOSITORY=example-owner/example-repository \
+USINE_ROLE_OUTPUT_API_KEY=placeholder-coordinator-key \
+USINE_ROLE_OUTPUT_API_URL=https://placeholder.invalid/v1 \
+USINE_ROLE_OUTPUT_MODEL=placeholder-normalization-model \
 node apps/cli/dist/cli.mjs server
 ```
 
@@ -35,6 +38,7 @@ node apps/cli/dist/cli.mjs follow <task-id>
 - `USINE_SERVER_PORT`：local server 监听端口，默认 `8787`；
 - `USINE_SERVER_URL`：client 使用的 server URL，默认 `http://127.0.0.1:8787`；
 - `USINE_FORGE_PROFILE_<PROFILE>_GIT_URL`：profile 的 forge Git URL，默认由已注册 Repository 的 owner/name 组成。
+- `USINE_ROLE_OUTPUT_API_KEY`、`USINE_ROLE_OUTPUT_API_URL`、`USINE_ROLE_OUTPUT_MODEL`：协调器用于规范化非直接 JSON role output 的 OpenAI-compatible API 配置；三项必须同时提供，示例中的值均为占位符。
 
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `corepack pnpm test`, and `vp run --filter '@usine/cli...' build`.
