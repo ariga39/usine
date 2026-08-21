@@ -53,7 +53,7 @@ Context window 和 model catalog 会随客户端、账户和供应商变化，�
 
 除空仓库 root commit 外，不在 main 直接开发。
 
-1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。Issue #76 授权其后唯一一次 full-refactor Issue/PR：用小提交逐 cluster 替换并删除旧 seam，不拆成会固化过渡接口的新 backlog；这不是以后大 PR 的通用先例。
+1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。
 2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。Linked worktree 必须位于任何现有 package workspace 之外；嵌套 worktree 会让 pnpm/Vite+ 把父 workspace 的依赖和工具误认作当前 checkout。
 3. 每个 branch 只实现一个 Issue。Outcome owner 可以修改交付 coherent behavior 所需的每个内部 layer；只有真实 permission、security、external authority 或 independent concurrent ownership boundary 才能形成 writable restriction。
 4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
@@ -66,9 +66,9 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 ## 3. 有界并排开发
 
-当前 classification 是 `continue`。Representative executable code task 与 induced live coordinator restart recovery 已由 PR #82 / #83 提供 evidence；最多同时拥有两个 active implementation PR，并继续要求独立 ownership 与不重叠 writable surface。这不是产品容量限制，而是当前单一 orchestrator 的注意力 fence。增加第二 runtime/forge、分布式 runner、自动 merge authority 或更高并发仍须经过各自方向 checkpoint。
+当前 product classification 与 eligible work 以 DESIGN.md 的状态 ledger 为准。Repository development 保留最多两个 ownership 与 writable surface 不重叠的 active implementation PR，作为单一 orchestrator 的 attention fence；这不是产品 capacity claim。增加 runtime、forge、分布式 runner、自动 merge authority 或更高并发，必须有授权 Issue、当前 caller 和对应实证。
 
-在 PR #82 / #83 完成上述证据前，implementation 必须串行。现在的两项上限仍只是满足该证据门槛及下列条件后允许并排的 fence，不是当前已经具备分布式或任意并行开发能力的声明。
+产品交付 evidence 仍按每个 repository 一个 writer lease 串行；上述两项上限只约束 Usine repository development 的注意力，不表示产品支持多 Task 并行。
 
 只有满足以下条件才并排：
 
@@ -80,9 +80,9 @@ GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行�
 
 若只是把一个紧耦合功能机械拆给两个 agent，会把节省的墙钟时间变成 merge、沟通和返工成本，应串行。主编排者不亲自同时深写两个任务；它负责边界、进度、integration 和纠偏。每完成一项才从 Issue 队列补下一项。
 
-### Continuation 与完成条件
+### 跨 turn 推进与完成条件
 
-用户不需要发送 Codex `/goal` 或重复“继续”。GitHub Issue、canonical docs、Git state 和 PR gate 定义 durable continuation；主编排者负责跨 turn、验证 checkpoint、review/fix、merge 和下一项工作的自主推进。Codex `/goal` 只可作为内部运行机制，不能成为用户监督前置条件，也不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。
+用户不需要发送 Codex `/goal` 或重复“继续”。GitHub Issue、canonical docs、Git state 和 PR gate 定义 durable progress；主编排者负责跨 turn、验证 checkpoint、review/fix、merge 和下一项工作的自主推进。Codex `/goal` 只可作为内部运行机制，不能成为用户监督前置条件，也不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。
 
 当授权中的 active Issue 尚未达到 stopping condition 时，回答任何 interim status、confirmation 或 clarification interruption 后，必须在同一 turn 恢复下一项安全且仍在 scope 内的动作。
 
@@ -99,7 +99,7 @@ Repository-agent constitution、orchestration policy 与 repo-local tools 由 pr
 - product-code implementation：fresh worker、isolated workspace-write checkout、无 delivery credentials；
 - semantic review：fresh session、只读 exact candidate、不继承 implementer chat；
 - bounded research：需要独立 evidence 时使用 fresh read-only session；
-- 轻量 classification/extraction/normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担 repository work、completion authority 或 semantic review。
+- optional final role-output normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担一般 classification/extraction/summary、repository work、completion authority 或 semantic review。
 
 ## 4. Falsifier、任务优先级与设计责任
 
@@ -150,7 +150,7 @@ Draft checkpoint 与 merge gate 分离：第一处 scoped green 必须先 commit
 
 出现以下情况时停止扩张，先提交 decision note 或缩小方案：
 
-- 为当前 Issue 新增第二种 runtime、forge、database 或 sandbox adapter；
+- 未经 Issue 授权或尚无实证的第二种 runtime、forge、database 或 sandbox adapter；
 - 创建没有当前生产 caller 的通用 interface；
 - 测试数量增长，但 Issue 的端到端状态没有前进；
 - draft checkpoint 已 green，但代码仍只在本地；
@@ -193,7 +193,7 @@ Review 要求高于实现，但 review 本身也必须有 scope 和成本预算�
 
 1. 新的 canonical design 在标记 ready/merge 前；
 2. 第一条完整的 task → implementation → checks → independent review → reviewed PR 纵切完成后，在增加通用架构、容量或自动 merge 权限前；
-3. 增加第二种 runtime/forge、分布式 runner、扩大 worker/delivery 权限，或把主编排开发并发提高到两个以上之前；
+3. 增加未经当前 Issue 授权且尚无实证的第二种 runtime/forge、分布式 runner、扩大 worker/delivery 权限，或把主编排开发并发提高到两个以上之前；
 4. 提前触发条件出现时：连续三个 PR 没有推进用户可见 outcome、canonical authority 冲突、重复 compact 后路线无法解释，或实现再次被底层基础设施/测试矩阵吞噬。
 
 Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续扩大架构、权限或容量，直到方向 blocker 被处理。
@@ -210,7 +210,7 @@ Self-review、普通 code review、更多测试或一份主编排者总结都不
 
 ## 9. 文档生命周期
 
-不复制旧任务树和旧实现报告。本仓库从零开始，历史 clean-room archive 保存在仓库外，只用于追溯，不参与 agent 默认 context。
+不复制旧任务树和旧实现报告。Canonical bootstrap 是恢复入口；历史 clean-room archive 保存在仓库外，只用于追溯，不参与 agent 默认 context。
 
 - 当前架构变化：修改 `DESIGN.md`；
 - 持久技术选择：修改 `DECISIONS.md`，明确 supersedes/re-entry；

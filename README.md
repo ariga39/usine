@@ -2,9 +2,9 @@
 
 Usine 是一个面向自主软件交付的确定性协调器。它的目标不是让一个 agent 更会写代码，而是让多个项目中的已授权任务在无人持续催促的情况下，有序地经过实现、验证、独立 review 和交付。
 
-当前仓库包含两类串行交付 evidence：PR #82/#83 提供真实 Codex executable delivery 与 restart recovery；Issue #153 的 server-hosted milestone fixture 使用 stubbed Codex SDK adapter，同时以真实 server process、SQLite、Git、project check、fake GitHub API/bare remote、SIGKILL、fresh activation 和 exact delivery effects 验证 server-owned lifecycle。CLI 只负责启动 server、提交 Task 与读取状态；提交 CLI 退出不会取消已 admission 的工作。它仍是仅面向一个 Task、一个 repository writer 和一个 GitHub forge 的 V0。
+当前 V0 由六个 provider-independent 行为模块组成：Task Authority、Delivery Run、Coding Session、Candidate Workspace、Quality Gate 和 Forge Delivery。PR #82/#83 是真实 Codex executable delivery 与 restart evidence；Issue #153 是使用 stubbed Codex adapter 的 server-hosted lifecycle fixture，不能证明 production Codex turn。产品路径仍是单 Task、每个 repository 一个 writer lease 和一个 GitHub forge；Herdr、transcript 和 agent prose 不拥有完成 authority。
 
-Herdr/transcript lifecycle 曾被真实 settled-without-observation failure证伪，现已从 production correctness path 删除。Issue #76 选择以 provider-neutral Coding Session 包住当前 Codex SDK adapter；Issue #80 的实现随后完成六个行为模块，并通过两个 executable TypeScript delivery：正常路径形成 reviewed PR；第二条路径在 durable activation 后 SIGKILL coordinator，以同一 Task ID 重启并用 fresh fence/workspace 完成交付。
+当前方向是 `correct_before_expansion`：#192/#193 已合并；#195 已授权但 app-server runtime 尚未证明；#176 是下一项真实 persistent-server delivery 的 falsifier。其它 eligible work 以 canonical design 的当前状态 ledger 为准。
 
 运行需要 Node 24、pnpm、Git、Codex 和 GitHub App 配置。状态默认写入目标仓库外的用户状态目录，也可用 `USINE_STATE_DIR` 覆盖。先启动 server：
 
@@ -22,12 +22,17 @@ USINE_ROLE_OUTPUT_MODEL=placeholder-normalization-model \
 node apps/cli/dist/cli.mjs server
 ```
 
-另一个 CLI 进程通过同一 local server 提交并跟随 Task：
+另一个 CLI 进程必须先注册 Repository，再通过同一 local server 提交并跟随 Task：
 
 ```sh
+node apps/cli/dist/cli.mjs register ./repository-registration.json
+node apps/cli/dist/cli.mjs inspect <repository-id>
 node apps/cli/dist/cli.mjs submit ./committed-task-contract.json
+node apps/cli/dist/cli.mjs status <task-id>
 node apps/cli/dist/cli.mjs follow <task-id>
 ```
+
+当前 CLI 命令只有 `server`、`register`、`inspect`、`submit`、`status` 和 `follow`。Resource CLI work is not complete; in particular, do not infer completion for Issue #188 from this command surface.
 
 完整交付需要为每个已注册 Repository 配置其 `forgeProfile` 对应的 `USINE_FORGE_PROFILE_<PROFILE>_*` GitHub App 变量。配置只在 host runtime 使用；Repository durable facts 保存 profile 名称，不保存凭据。上面的数值、身份、路径和任务文件名都是占位符。
 
@@ -46,7 +51,7 @@ The root `corepack pnpm test` command runs the root public-seam suite and every 
 that declares a `test` script. `vp check` combines formatting, linting, and type-checking; the
 root TypeScript project continues to include `tests/**/*.ts` in that static coverage.
 
-首条纵切只面向受信任的私有仓库。项目检查使用最小显式环境并在 disposable checkout 中运行，但当前仍共享 host 的网络与文件系统权限；更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex sandbox 不足时进入。
+首条纵切只面向受信任的私有仓库。项目检查在 candidate 的 disposable exact-SHA checkout 中以 reduced explicit environment 运行，仍共享 host 的文件系统与网络权限；只有 Forge credentials 不传入该环境。更强的容器或 VM 隔离只会在实际风险证明现有 host/Codex permissions 不足时进入。
 
 当前权威文档只有：
 
