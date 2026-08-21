@@ -259,7 +259,11 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
         state.failAfterMerge = false;
         throw new TypeError("response lost after merge");
       }
-      return Response.json({ merged: true, sha: "d".repeat(40), message: "Pull Request successfully merged" });
+      return Response.json({
+        merged: true,
+        sha: "d".repeat(40),
+        message: "Pull Request successfully merged",
+      });
     }
     if (pathname === "/repos/owner/repo/issues/1/comments") {
       if (method === "GET") return Response.json(state.comments);

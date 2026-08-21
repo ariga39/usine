@@ -200,6 +200,31 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
+  test("decodes a version-one persisted result as an unauthorized current result", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-legacy-result-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-legacy-result-hash",
+      repositoryIdentity: `authority/legacy-result-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const inspection = new DatabaseSync(path);
+    const legacy = { ...admitted, schemaVersion: 1 } as Record<string, unknown>;
+    delete legacy.mergeAuthorized;
+    inspection
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(legacy), taskId);
+    inspection.close();
+
+    await expect(authority.lookup(taskId)).resolves.toMatchObject({
+      schemaVersion: 2,
+      mergeAuthorized: false,
+      state: "admitted",
+    });
+  });
+
   test("quarantines malformed persisted history at the status boundary", async () => {
     const path = await makeDatabase();
     const taskId = `authority-malformed-history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -620,7 +645,14 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     );
     const checked = await authority.recordCheck(
       { taskId, revision: candidate.revision },
-      { sha: "b".repeat(40), status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
     );
     const reviewed = await authority.recordReview(
       { taskId, revision: checked.revision },

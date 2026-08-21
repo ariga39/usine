@@ -412,8 +412,7 @@ export class TaskAuthority {
       const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
       const prior = decodePersistedTaskResult(current.result);
-      if (isTerminalState(prior.state))
-        throw new Error("task is terminal");
+      if (isTerminalState(prior.state)) throw new Error("task is terminal");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
       });

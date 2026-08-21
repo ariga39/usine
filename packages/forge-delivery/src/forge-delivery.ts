@@ -115,7 +115,15 @@ export class ForgeDelivery {
           throw new DeliveryQuarantineError(
             `merged delivery PR #${existing.number} was observed without explicit merge authority; delivery quarantined`,
           );
-        const recovered = await this.probeMerged(client, owner, repo, existing.number, sha, marker, body);
+        const recovered = await this.probeMerged(
+          client,
+          owner,
+          repo,
+          existing.number,
+          sha,
+          marker,
+          body,
+        );
         if (recovered) return recovered;
       }
       throw new DeliveryQuarantineError(
@@ -153,7 +161,8 @@ export class ForgeDelivery {
         },
       );
     }
-    const pullRequest = (existing ?? (
+    const pullRequest = (existing ??
+      (
         await client.octokit.rest.pulls.create({
           owner,
           repo,
@@ -184,16 +193,18 @@ export class ForgeDelivery {
     const delivered = deliveryEffect(pullRequest, sha, null, String(attestation.id));
     if (contract.authorization.merge !== true) return delivered;
 
-    const livePullRequest = (await client.octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: pullRequest.number,
-      request: {
-        timeout: remainingUntil(this.options.deadlineEpochMs),
-        retries: 0,
-        signal: this.options.signal,
-      },
-    })).data as LivePullRequest;
+    const livePullRequest = (
+      await client.octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullRequest.number,
+        request: {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      })
+    ).data as LivePullRequest;
     const alreadyMerged = mergedEffect(livePullRequest, sha);
     if (alreadyMerged) {
       const recovered = await this.probeMerged(
@@ -273,26 +284,21 @@ export class ForgeDelivery {
     marker: string,
     body: string,
   ): Promise<DeliveryEffect | null> {
-    const authoritative = (await client.octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      request: {
-        timeout: remainingUntil(this.options.deadlineEpochMs),
-        retries: 0,
-        signal: this.options.signal,
-      },
-    })).data as LivePullRequest;
+    const authoritative = (
+      await client.octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        request: {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      })
+    ).data as LivePullRequest;
     const merge = mergedEffect(authoritative, sha);
     if (!merge) return null;
-    const attestation = await this.ensureAttestation(
-      client,
-      owner,
-      repo,
-      pullNumber,
-      marker,
-      body,
-    );
+    const attestation = await this.ensureAttestation(client, owner, repo, pullNumber, marker, body);
     return deliveryEffect(authoritative, sha, merge, String(attestation.id));
   }
 
