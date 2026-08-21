@@ -1,9 +1,11 @@
 export {
   CodexCodingSession,
   CodexProfileSelectionError,
+  codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
   type CodingSessionRuntimeAdapter,
+  type CodingSessionMcpServer,
   explicitWorkerEnvironment,
   validateCodexProfile,
   type CodingSessionClientFactory,

@@ -2,6 +2,9 @@ import { access, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/pro
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   Codex,
   type RunResult,
@@ -12,6 +15,7 @@ import {
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
+  codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
   discoverOwnedExecutions,
@@ -23,6 +27,7 @@ import {
   reviewerOutputSchema,
 } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
+import { z } from "zod";
 
 const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
@@ -80,6 +85,90 @@ function deferred<T>(): {
     resolve = resolveValue;
   });
   return { promise, resolve };
+}
+
+async function startFakeGithubHost(): Promise<{
+  connectClient: () => Promise<Client>;
+  calls: Array<{ name: string; arguments: Record<string, unknown> }>;
+  close: () => Promise<void>;
+}> {
+  const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+  const mcp = new McpServer({ name: "fake-github-host", version: "1.0.0" });
+  const issue = {
+    owner: "example",
+    repository: "authorized",
+    number: 189,
+    title: "Read-only MCP context",
+  };
+  mcp.registerTool(
+    "github_issue_get",
+    {
+      description: "Read the admitted GitHub Issue.",
+      inputSchema: { owner: z.string(), repository: z.string(), issue: z.number() },
+    },
+    async (input) => {
+      calls.push({ name: "github_issue_get", arguments: input });
+      if (
+        input.owner !== issue.owner ||
+        input.repository !== issue.repository ||
+        input.issue !== issue.number
+      )
+        return {
+          isError: true,
+          content: [{ type: "text", text: "GitHub repository or Issue is outside the admission" }],
+        };
+      return { content: [{ type: "text", text: JSON.stringify(issue) }] };
+    },
+  );
+  mcp.registerTool(
+    "github_issue_update",
+    {
+      description: "Mutation endpoint that must never be usable by a worker.",
+      inputSchema: {
+        owner: z.string(),
+        repository: z.string(),
+        issue: z.number(),
+        title: z.string(),
+      },
+    },
+    async (input) => {
+      calls.push({ name: "github_issue_update", arguments: input });
+      return {
+        isError: true,
+        content: [{ type: "text", text: "GitHub mutation is not available to Coding Session" }],
+      };
+    },
+  );
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await mcp.connect(serverTransport);
+  return {
+    connectClient: async () => {
+      const client = new Client({ name: "usine-coding-session-test", version: "1.0.0" });
+      await client.connect(clientTransport);
+      return client;
+    },
+    calls,
+    close: async () => {
+      await mcp.close();
+    },
+  };
+}
+
+function textContent(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const item = value.find(
+    (candidate): candidate is { readonly type: "text"; readonly text: string } =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      "type" in candidate &&
+      candidate.type === "text" &&
+      "text" in candidate &&
+      typeof candidate.text === "string",
+  );
+
+  return item?.text;
 }
 
 describe("Coding Session", () => {
@@ -313,6 +402,103 @@ describe("Coding Session", () => {
       execution: reviewerExecution,
     });
     expect(sandboxes).toEqual(["workspace-write", "read-only"]);
+  });
+
+  test("reads the admitted Issue through read-only MCP without giving the worker credentials", async () => {
+    const host = await startFakeGithubHost();
+    const observations: unknown[] = [];
+    const session = new CodexCodingSession(
+      async (request) => {
+        if (!request.mcpServer) throw new Error("GitHub read MCP server is missing");
+        const config = codexMcpConfig(request.mcpServer);
+        expect(JSON.stringify(config)).not.toContain("worker-github-secret");
+        expect(explicitWorkerEnvironment(request.environment ?? {})).not.toHaveProperty(
+          "GITHUB_TOKEN",
+        );
+        const client = await host.connectClient();
+        return testClient(async () => {
+          try {
+            const authorized = await client.callTool({
+              name: "github_issue_get",
+              arguments: { owner: "example", repository: "authorized", issue: 189 },
+            });
+            const crossRepository = await client.callTool({
+              name: "github_issue_get",
+              arguments: { owner: "example", repository: "other", issue: 189 },
+            });
+            const mutation = await client.callTool({
+              name: "github_issue_update",
+              arguments: {
+                owner: "example",
+                repository: "authorized",
+                issue: 189,
+                title: "attack",
+              },
+            });
+            if (authorized.isError || !crossRepository.isError || !mutation.isError)
+              throw new Error("GitHub MCP boundary did not fail closed");
+            const issueText = textContent(authorized.content);
+            if (!issueText) throw new Error("authorized Issue was not returned over MCP");
+            const issue: unknown = JSON.parse(issueText);
+            if (
+              typeof issue !== "object" ||
+              issue === null ||
+              !("title" in issue) ||
+              typeof issue.title !== "string"
+            ) {
+              throw new Error("authorized Issue response had no title");
+            }
+            await request.onObservation?.({
+              type: "tool_completed",
+              tool: "unknown",
+              outcome: "succeeded",
+            });
+            return sdkTurn(JSON.stringify({ status: "proposed", summary: issue.title }));
+          } finally {
+            await client.close();
+          }
+        });
+      },
+      { environment: { GITHUB_TOKEN: "worker-github-secret" } },
+    );
+    try {
+      const observation = await session.run({
+        role: "implementer",
+        workspace: ".",
+        contract,
+        prompt: "Use the configured GitHub read-only MCP server for the current Issue.",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 30_000,
+        outputSchema: implementerOutputSchema,
+        mcpServer: {
+          name: "github_read",
+          url: "http://fake-github-host.test/mcp?task=session-test",
+          enabledTools: ["github_issue_get"],
+          startupTimeoutMs: 5_000,
+          toolTimeoutMs: 5_000,
+          required: true,
+        },
+        execution: implementerExecution,
+        environment: { GITHUB_TOKEN: "worker-github-secret" },
+        onObservation: (event) => {
+          observations.push(event);
+        },
+      });
+      expect(observation).toMatchObject({
+        status: "completed",
+        output: { status: "proposed", summary: "Read-only MCP context" },
+      });
+      expect(host.calls.map(({ name }) => name)).toEqual([
+        "github_issue_get",
+        "github_issue_get",
+        "github_issue_update",
+      ]);
+      expect(JSON.stringify(observation)).not.toContain("worker-github-secret");
+      expect(JSON.stringify(observations)).not.toContain("worker-github-secret");
+    } finally {
+      await host.close();
+    }
   });
 
   test("rejects an unusable profile before creating a Codex client", async () => {
