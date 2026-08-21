@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/sqlite-proxy";
 import type { RemoteCallback, SqliteRemoteDatabase } from "drizzle-orm/sqlite-proxy";
 import {
   repositories,
+  taskEvents,
   repositoryLeases,
   taskHistory,
   taskQuarantines,
@@ -28,6 +29,7 @@ function enqueueTransaction<T>(path: string, transaction: () => Promise<T>): Pro
 export type RuntimeDatabase = SqliteRemoteDatabase<{
   repositoryLeases: typeof repositoryLeases;
   taskHistory: typeof taskHistory;
+  taskEvents: typeof taskEvents;
   taskRuns: typeof taskRuns;
   repositories: typeof repositories;
   taskQuarantines: typeof taskQuarantines;
@@ -55,7 +57,7 @@ export function openSqliteDatabase(
     return { rows: statement.all(...values) };
   };
   const database = drizzle(execute, {
-    schema: { repositoryLeases, taskHistory, taskRuns, repositories, taskQuarantines },
+    schema: { repositoryLeases, taskHistory, taskEvents, taskRuns, repositories, taskQuarantines },
   });
 
   const databaseWithTransaction = database as unknown as {

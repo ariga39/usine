@@ -1,5 +1,12 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 export const taskRuns = sqliteTable("task_runs", {
   taskId: text("task_id").primaryKey(),
@@ -79,5 +86,23 @@ export const taskHistory = sqliteTable(
   },
   (table) => ({
     taskHistoryTaskIdId: index("task_history_task_id_id_index").on(table.taskId, table.id),
+  }),
+);
+
+export const taskEvents = sqliteTable(
+  "task_events",
+  {
+    taskId: text("task_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    eventId: text("event_id").notNull(),
+    occurredAtEpochMs: integer("occurred_at_epoch_ms").notNull(),
+    data: text("data", { mode: "json" }).notNull(),
+  },
+  (table) => ({
+    taskEventsPrimaryKey: primaryKey({ columns: [table.taskId, table.sequence] }),
+    taskEventsTaskIdEventId: uniqueIndex("task_events_task_id_event_id_index").on(
+      table.taskId,
+      table.eventId,
+    ),
   }),
 );
