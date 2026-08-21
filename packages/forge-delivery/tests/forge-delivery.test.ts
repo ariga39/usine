@@ -36,7 +36,52 @@ describe("Forge Delivery module", () => {
       { sha, verdict: "approved", summary: "ok", findings: [] },
     );
     expect(body).toContain(`usine-approval:${simpleContract.id}:${sha}`);
+    expect(body).toContain(`- Task: \`${simpleContract.id}\``);
+    expect(body).toContain("- Project check: `passed`");
     expect(body).toContain("Fresh reviewer verdict: `approved`");
+  });
+
+  test("attestation omits untrusted contract, check, and review content", () => {
+    const sentinels = {
+      localPath: "excluded-local-path-value",
+      machineUser: "excluded-machine-identity-value",
+      privateTarget: "excluded-private-target-value",
+      credential: "excluded-credential-value",
+    };
+    const excludedContent = Object.values(sentinels).join(" ");
+    const unsafeContract: ResolvedTaskContract = {
+      ...simpleContract,
+      repository: { ...simpleContract.repository, path: sentinels.localPath },
+      projectCheck: { ...simpleContract.projectCheck, command: excludedContent },
+      instructions: excludedContent,
+      acceptance: [excludedContent],
+      nonGoals: [excludedContent],
+      delivery: {
+        ...simpleContract.delivery,
+        title: excludedContent,
+        body: excludedContent,
+      },
+    };
+    const body = approvalAttestationBody(
+      unsafeContract,
+      sha,
+      {
+        sha,
+        status: "passed",
+        command: excludedContent,
+        exitCode: 0,
+        stdout: excludedContent,
+        stderr: excludedContent,
+      },
+      {
+        sha,
+        verdict: "approved",
+        summary: excludedContent,
+        findings: [excludedContent],
+      },
+    );
+
+    for (const sentinel of Object.values(sentinels)) expect(body).not.toContain(sentinel);
   });
 
   test("fails closed before any effect without exact approval", async () => {
@@ -266,6 +311,50 @@ const approvedReview = {
   findings: [],
 };
 
+const attestationSentinels = [
+  "excluded-local-path-value",
+  "excluded-machine-identity-value",
+  "excluded-private-target-value",
+  "excluded-credential-value",
+] as const;
+const excludedAttestationContent = attestationSentinels.join(" ");
+
+function unsafeAttestationContract(id: string): ResolvedTaskContract {
+  const task = contract(id);
+  return {
+    ...task,
+    repository: { ...task.repository, path: attestationSentinels[0] },
+    projectCheck: { ...task.projectCheck, command: excludedAttestationContent },
+    instructions: excludedAttestationContent,
+    acceptance: [excludedAttestationContent],
+    nonGoals: [excludedAttestationContent],
+    delivery: {
+      ...task.delivery,
+      title: excludedAttestationContent,
+      body: excludedAttestationContent,
+    },
+  };
+}
+
+function unsafeAttestationCheck(candidateSha: string) {
+  return {
+    ...passingCheck,
+    sha: candidateSha,
+    command: excludedAttestationContent,
+    stdout: excludedAttestationContent,
+    stderr: excludedAttestationContent,
+  };
+}
+
+function unsafeAttestationReview(candidateSha: string) {
+  return {
+    ...approvedReview,
+    sha: candidateSha,
+    summary: excludedAttestationContent,
+    findings: [excludedAttestationContent],
+  };
+}
+
 async function withControlledFetch<T>(
   state: ForgeServerState,
   action: (apiUrl: string) => Promise<T>,
@@ -299,18 +388,23 @@ describe.sequential("Forge Delivery reconciliation", () => {
       commentCreates: 0,
       requests: [],
     };
-    const task = contract("forge-disable-hooks");
+    const task = unsafeAttestationContract("forge-disable-hooks");
+    const check = unsafeAttestationCheck(fixture.candidateSha);
+    const review = unsafeAttestationReview(fixture.candidateSha);
 
     await withControlledFetch(state, (apiUrl) =>
       forge(fixture.repository, apiUrl, fixture.remote).deliver(
         task,
         fixture.candidateSha,
-        { ...passingCheck, sha: fixture.candidateSha },
-        { ...approvedReview, sha: fixture.candidateSha },
+        check,
+        review,
       ),
     );
 
     await expect(readFile(hookMarker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(state.commentCreates).toBe(1);
+    for (const sentinel of attestationSentinels)
+      expect(state.comments[0]?.body).not.toContain(sentinel);
   });
 
   test("reconciles lost PR and attestation responses without duplicate effects", async () => {
@@ -326,9 +420,9 @@ describe.sequential("Forge Delivery reconciliation", () => {
       commentCreates: 0,
       requests: [],
     };
-    const task = contract("forge-recovery");
-    const check = { ...passingCheck, sha: fixture.candidateSha };
-    const review = { ...approvedReview, sha: fixture.candidateSha };
+    const task = unsafeAttestationContract("forge-recovery");
+    const check = unsafeAttestationCheck(fixture.candidateSha);
+    const review = unsafeAttestationReview(fixture.candidateSha);
 
     await withControlledFetch(state, async (apiUrl) => {
       const result = await forge(fixture.repository, apiUrl, fixture.remote).deliver(
@@ -346,6 +440,8 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(await readFile(join(fixture.remote, "update-count"), "utf8")).toBe("1\n");
     expect(state.pullRequestCreates).toBe(1);
     expect(state.commentCreates).toBe(1);
+    for (const sentinel of attestationSentinels)
+      expect(state.comments[0]?.body).not.toContain(sentinel);
   }, 30_000);
 
   test("quarantines a conflicting branch head before any Git update", async () => {

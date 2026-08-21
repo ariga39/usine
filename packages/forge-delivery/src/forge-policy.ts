@@ -114,9 +114,9 @@ export function approvalAttestationBody(
   return [
     `<!-- usine-approval:${contract.id}:${sha} -->`,
     "Usine exact-SHA semantic approval attestation",
+    `- Task: \`${contract.id}\``,
     `- Candidate: \`${sha}\``,
-    `- Project check: \`${check.command}\` (${check.status})`,
+    `- Project check: \`${check.status}\``,
     `- Fresh reviewer verdict: \`${review.verdict}\``,
-    `- Review summary: ${review.summary}`,
   ].join("\n");
 }
