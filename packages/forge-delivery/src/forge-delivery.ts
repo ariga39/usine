@@ -258,10 +258,21 @@ export class ForgeDelivery {
         `GitHub refused merge for PR #${livePullRequest.number}: ${mergeResponse.data.message ?? "platform policy rejected merge"} (mergeable=${String(livePullRequest.mergeable)}, mergeable_state=${livePullRequest.mergeable_state ?? "unknown"})`,
       );
     const mergeCommitSha = mergeResponse.data.sha;
-    if (!isExactSha(mergeCommitSha))
-      throw new DeliveryQuarantineError(
-        `GitHub accepted merge for PR #${livePullRequest.number} without a merge commit SHA`,
+    if (!isExactSha(mergeCommitSha)) {
+      const recovered = await this.probeMerged(
+        client,
+        owner,
+        repo,
+        livePullRequest.number,
+        sha,
+        marker,
+        body,
       );
+      if (recovered) return recovered;
+      throw new DeliveryQuarantineError(
+        `GitHub accepted merge for PR #${livePullRequest.number} without a merge commit SHA; authoritative probe did not prove the merged effect`,
+      );
+    }
     return deliveryEffect(
       livePullRequest,
       sha,

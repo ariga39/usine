@@ -164,6 +164,7 @@ type ForgeServerState = {
   commentCreates: number;
   mergeCalls?: number;
   failAfterMerge?: boolean;
+  mergeResponseSha?: "missing" | "malformed";
   mergeRefusal?: string;
   authoritativeHeadSha?: string;
   requests: string[];
@@ -261,7 +262,9 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
       }
       return Response.json({
         merged: true,
-        sha: "d".repeat(40),
+        ...(state.mergeResponseSha === "missing"
+          ? {}
+          : { sha: state.mergeResponseSha === "malformed" ? "not-a-sha" : "d".repeat(40) }),
         message: "Pull Request successfully merged",
       });
     }
@@ -852,4 +855,58 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(result.attestationId).toBe("7");
     expect(state.mergeCalls).toBe(1);
   }, 30_000);
+
+  test.each(["missing", "malformed"] as const)(
+    "probes a successful merge response with a %s merge SHA",
+    async (mergeResponseSha) => {
+      const fixture = await repositoryFixture();
+      const state: ForgeServerState = {
+        candidateSha: fixture.candidateSha,
+        headSha: fixture.candidateSha,
+        mergeResponseSha,
+        pullRequests: [
+          {
+            number: 1,
+            state: "open",
+            head: { sha: fixture.candidateSha },
+            html_url: "http://example.invalid/pull/1",
+            mergeable: true,
+            mergeable_state: "clean",
+          },
+        ],
+        comments: [],
+        failAfterPullRequestCreate: false,
+        failAfterCommentCreate: false,
+        pullRequestCreates: 0,
+        commentCreates: 0,
+        requests: [],
+      };
+
+      const result = await withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote).deliver(
+          contract(`forge-merge-${mergeResponseSha}-sha-recovery`, true),
+          fixture.candidateSha,
+          { ...passingCheck, sha: fixture.candidateSha },
+          { ...approvedReview, sha: fixture.candidateSha },
+        ),
+      );
+
+      expect(result).toMatchObject({
+        sha: fixture.candidateSha,
+        prNumber: 1,
+        attestationId: "7",
+        merge: {
+          prNumber: 1,
+          approvedHeadSha: fixture.candidateSha,
+          mergeCommitSha: "d".repeat(40),
+          observedState: "merged",
+        },
+      });
+      expect(state.mergeCalls).toBe(1);
+      expect(
+        state.requests.filter((request) => request === "GET /repos/owner/repo/pulls/1"),
+      ).toHaveLength(2);
+    },
+    30_000,
+  );
 });
