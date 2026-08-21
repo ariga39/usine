@@ -302,7 +302,7 @@ describe("resource-oriented Task CLI", () => {
 
       const history = await execa(
         "node",
-        ["apps/cli/dist/cli.mjs", "task", "history", taskId, "--after", "7", "--json"],
+        ["apps/cli/dist/cli.mjs", "task", "history", "--after", "7", taskId, "--json"],
         { cwd: process.cwd(), env: environment },
       );
       expect(
@@ -311,7 +311,7 @@ describe("resource-oriented Task CLI", () => {
 
       const watch = await execa(
         "node",
-        [cliPath, "task", "watch", taskId, "--after", "7", "--json"],
+        [cliPath, "task", "watch", "--after", "7", taskId, "--json"],
         { cwd: root, env: environment },
       );
       const watchedEvents = watch.stderr

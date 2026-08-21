@@ -1,4 +1,10 @@
-export type CliFailureKind = "validation" | "not_found" | "timeout" | "connection" | "server";
+export type CliFailureKind =
+  | "usage"
+  | "validation"
+  | "not_found"
+  | "timeout"
+  | "connection"
+  | "server";
 
 export class CliFailure extends Error {
   constructor(
@@ -12,8 +18,8 @@ export class CliFailure extends Error {
   }
 }
 
-export function usageFailure(usage: string): CliFailure {
-  return new CliFailure("usage", "validation", { usage });
+export function usageFailure(fields: Record<string, unknown>): CliFailure {
+  return new CliFailure("usage", "usage", fields);
 }
 
 export function notFoundFailure(resource: string, field: string, value: string): CliFailure {
@@ -57,10 +63,12 @@ export function reportCommandFailure(
 }
 
 export function exitCodeForKind(kind: string): number {
+  if (kind === "usage") return 2;
   if (kind === "not_found") return 3;
   if (kind === "timeout") return 4;
   if (kind === "connection") return 5;
   if (kind === "server") return 6;
+  if (kind === "validation") return 7;
   return 2;
 }
 

@@ -11,6 +11,7 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.110",
     "@usine/runtime": "workspace:*",
     "@usine/task-authority": "workspace:*",
     "effect": "4.0.0-rc.110"

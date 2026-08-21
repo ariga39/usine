@@ -406,14 +406,23 @@ async function handleRequest(
     const requestedTaskId = decodeURIComponent(taskEventsPath);
     const afterSequence = parseCursor(url.searchParams.get("after"), "after");
     const limit = parseCursor(url.searchParams.get("limit"), "limit", 200);
-    const page = await lookupTaskEvents(stateDirectory, requestedTaskId, afterSequence, limit);
+    let page: TaskEventPage | null;
+    try {
+      page = await lookupTaskEvents(stateDirectory, requestedTaskId, afterSequence, limit);
+    } catch (error) {
+      if (isTaskStateQuarantinedError(error)) {
+        response.statusCode = 503;
+        writeJson(response, { taskId: error.taskId, error: error.code });
+        return;
+      }
+      throw error;
+    }
     if (!page) {
       response.statusCode = 404;
       writeJson(response, { message: "task not found" });
       return;
     }
-    const typedPage: TaskEventPage = page;
-    writeJson(response, typedPage);
+    writeJson(response, page);
     return;
   }
   if (request.method === "GET" && taskId) {

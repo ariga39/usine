@@ -1,25 +1,43 @@
 import { createRuntimeExecutionAdapter, startUsineServer } from "@usine/runtime";
-import { runCommand, usageFailure } from "./cli-failure.js";
+import { Effect } from "effect";
+import { Command } from "effect/unstable/cli";
+import { reportCommandFailure } from "./cli-failure.js";
 import { renderJson } from "./cli-renderer.js";
-import { runServerReadCommand } from "./server-read-command.js";
+import { serverReadCommands } from "./server-read-command.js";
 
-export async function runServerCommand(
-  args: string[],
-  environment: NodeJS.ProcessEnv,
-  serverUrl: string,
-): Promise<void> {
-  if (args[0] === "health" || args[0] === "snapshot") return runServerReadCommand(args, serverUrl);
-  if (args.length > 0) throw usageFailure("usine server");
+export function serverCommand(environment: NodeJS.ProcessEnv, serverUrl: string) {
+  return Command.make("server", {}, () => runServerCommand(environment)).pipe(
+    Command.withSubcommands(serverReadCommands(serverUrl)),
+  );
+}
 
-  return runCommand("server_failed", async () => {
-    const server = await startUsineServer({
-      environment,
-      executionAdapter: createRuntimeExecutionAdapter(environment),
-      host: environment.USINE_SERVER_HOST?.trim() || "127.0.0.1",
-      port: Number(environment.USINE_SERVER_PORT || 8787),
-    });
-    process.stdout.write(renderJson({ event: "server_ready", url: server.url }));
-    await new Promise<void>((resolve) => {
+export function runServerCommand(environment: NodeJS.ProcessEnv) {
+  return Effect.acquireUseRelease(
+    Effect.promise(() =>
+      startUsineServer({
+        environment,
+        executionAdapter: createRuntimeExecutionAdapter(environment),
+        host: environment.USINE_SERVER_HOST?.trim() || "127.0.0.1",
+        port: Number(environment.USINE_SERVER_PORT || 8787),
+      }),
+    ),
+    (server) =>
+      Effect.sync(() => {
+        process.stdout.write(renderJson({ event: "server_ready", url: server.url }));
+      }).pipe(Effect.andThen(awaitServerStop)),
+    (server) => Effect.promise(() => server.close()),
+  ).pipe(
+    Effect.catch((cause) =>
+      Effect.sync(() => {
+        reportCommandFailure("server_failed", cause);
+      }),
+    ),
+  );
+}
+
+const awaitServerStop = Effect.promise(
+  () =>
+    new Promise<void>((resolve) => {
       const stop = () => {
         process.off("SIGINT", stop);
         process.off("SIGTERM", stop);
@@ -27,7 +45,5 @@ export async function runServerCommand(
       };
       process.once("SIGINT", stop);
       process.once("SIGTERM", stop);
-    });
-    await server.close();
-  });
-}
+    }),
+);

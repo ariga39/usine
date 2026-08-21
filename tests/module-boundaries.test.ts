@@ -53,8 +53,95 @@ test("CLI keeps invalid contract input at the public parse boundary", async () =
   const path = join(directory, "invalid.json");
   await writeFile(path, "{}");
   const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], { reject: false });
-  expect(run.exitCode).toBe(2);
+  expect(run.exitCode).toBe(7);
   expect(run.stderr).toContain("invalid_task_contract");
+});
+
+test("CLI keeps server validation distinct from usage", async () => {
+  const server = createServer((_request, response) => {
+    response.statusCode = 400;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ error: "validation", message: "server rejected the request" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("validation fixture did not bind");
+  try {
+    const run = await execa("node", ["apps/cli/dist/cli.mjs", "task", "get", "task-id"], {
+      env: { USINE_SERVER_URL: `http://127.0.0.1:${address.port}` },
+      reject: false,
+    });
+    expect(run.exitCode).toBe(7);
+    expect(JSON.parse(run.stderr)).toMatchObject({ error: "validation", kind: "validation" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("CLI keeps server failures at exit code 6", async () => {
+  const server = createServer((_request, response) => {
+    response.statusCode = 500;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ error: "server_failure", message: "server failed" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string")
+    throw new Error("server failure fixture did not bind");
+  try {
+    const run = await execa("node", ["apps/cli/dist/cli.mjs", "task", "get", "task-id"], {
+      env: { USINE_SERVER_URL: `http://127.0.0.1:${address.port}` },
+      reject: false,
+    });
+    expect(run.exitCode).toBe(6);
+    expect(JSON.parse(run.stderr)).toMatchObject({ error: "server_failure", kind: "server" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("history diagnostics preserve Effect parser facts", async () => {
+  const run = await execa(
+    "node",
+    ["apps/cli/dist/cli.mjs", "task", "history", "--after", "not-a-number", "task-id"],
+    { reject: false },
+  );
+  expect(run.exitCode).toBe(2);
+  expect(JSON.parse(run.stderr)).toMatchObject({
+    error: "usage",
+    commandPath: ["usine", "task", "history"],
+    errors: [{ tag: "InvalidValue", message: expect.stringContaining("--after") }],
+  });
+});
+
+test("Effect CLI owns unknown and missing argument diagnostics", async () => {
+  const unknown = await execa(
+    "node",
+    ["apps/cli/dist/cli.mjs", "task", "get", "task-id", "--unknown"],
+    { reject: false },
+  );
+  expect(unknown.exitCode).toBe(2);
+  expect(JSON.parse(unknown.stderr)).toMatchObject({
+    error: "usage",
+    commandPath: ["usine", "task", "get"],
+    errors: [{ tag: "UnrecognizedOption" }],
+  });
+
+  const missing = await execa("node", ["apps/cli/dist/cli.mjs", "task", "get", "--json"], {
+    reject: false,
+  });
+  expect(missing.exitCode).toBe(2);
+  expect(JSON.parse(missing.stderr)).toMatchObject({
+    error: "usage",
+    commandPath: ["usine", "task", "get"],
+    errors: [{ tag: "MissingArgument" }],
+  });
 });
 
 test("CLI distinguishes a server connection failure from usage and validation", async () => {
@@ -181,7 +268,7 @@ test.each([
       reject: false,
     });
 
-    expect(run.exitCode).toBe(2);
+    expect(run.exitCode).toBe(7);
     expect(run.stderr).toContain('"error":"invalid_task_contract"');
     expect(run.stderr).toContain('"path":"authorization.source"');
     await expect(access(join(directory, "state"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -207,7 +294,7 @@ test("CLI rejects whitespace-only repository IDs before admission", async () => 
 
   const run = await execa("node", ["apps/cli/dist/cli.mjs", "submit", path], { reject: false });
 
-  expect(run.exitCode).toBe(2);
+  expect(run.exitCode).toBe(7);
   expect(run.stderr).toContain('"error":"invalid_task_contract"');
   expect(run.stderr).toContain('"path":"repositoryId"');
 });
@@ -225,7 +312,7 @@ test("CLI rejects whitespace-only delivery branches before admission", async () 
     reject: false,
   });
 
-  expect(run.exitCode).toBe(2);
+  expect(run.exitCode).toBe(7);
   expect(run.stderr).toContain('"error":"invalid_task_contract"');
   expect(run.stderr).toContain('"path":"delivery.branch"');
   await expect(access(join(directory, "state"))).rejects.toMatchObject({ code: "ENOENT" });
