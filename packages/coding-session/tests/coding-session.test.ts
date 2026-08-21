@@ -6,6 +6,7 @@ import { Codex, type RunResult, type ThreadOptions, type TurnOptions } from "@op
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
+  createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
   explicitWorkerEnvironment,
   implementerOutputSchema,
@@ -182,6 +183,7 @@ describe("Coding Session", () => {
   test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
       OPENAI_API_KEY: "secret",
+      USINE_ROLE_OUTPUT_API_KEY: "coordinator-secret",
       GITHUB_TOKEN: "secret",
       AWS_SECRET_ACCESS_KEY: "cloud-secret",
       NPM_TOKEN: "package-secret",
@@ -196,6 +198,7 @@ describe("Coding Session", () => {
       CODEX_HOME: "codex-home-sentinel",
     });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(env).not.toHaveProperty("USINE_ROLE_OUTPUT_API_KEY");
     expect(env).not.toHaveProperty("GITHUB_TOKEN");
     expect(env).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(env).not.toHaveProperty("NPM_TOKEN");
@@ -203,17 +206,26 @@ describe("Coding Session", () => {
 
   test("maps SDK terminal output through the task-oriented port", async () => {
     let requestOptions: TurnOptions | undefined;
-    const session = new CodexCodingSession(async () =>
-      testClient(async (_prompt, options) => {
-        requestOptions = options;
-        return sdkTurn(JSON.stringify({ status: "proposed", summary: "done" }), {
-          input_tokens: 12,
-          cached_input_tokens: 0,
-          cache_write_input_tokens: 0,
-          output_tokens: 7,
-          reasoning_output_tokens: 3,
-        });
-      }, "opaque-thread"),
+    let transformCalls = 0;
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(async (_prompt, options) => {
+          requestOptions = options;
+          return sdkTurn(JSON.stringify({ status: "proposed", summary: "done" }), {
+            input_tokens: 12,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 7,
+            reasoning_output_tokens: 3,
+          });
+        }, "opaque-thread"),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async () => {
+          transformCalls += 1;
+          return { status: "blocked", summary: "unexpected normalization" };
+        },
+      },
     );
     const observation = await session.run<{ status: string; summary: string }>({
       role: "implementer",
@@ -232,6 +244,7 @@ describe("Coding Session", () => {
       output: { status: "proposed" },
       usage: { inputTokens: 12, outputTokens: 7 },
     });
+    expect(transformCalls).toBe(0);
     expect(requestOptions).toMatchObject({
       outputSchema: {
         type: "object",
@@ -244,6 +257,113 @@ describe("Coding Session", () => {
       },
     });
     expect(requestOptions).not.toHaveProperty("env");
+  });
+
+  test("normalizes one prose-wrapped reviewer response through the coordinator transform", async () => {
+    const reviewer = {
+      sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse = [
+      "The fresh review is complete.",
+      "",
+      "```json",
+      JSON.stringify(reviewer),
+      "```",
+      "",
+      "No further findings.",
+    ].join("\n");
+    let transformCalls = 0;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async ({ finalResponse: response, outputSchema, signal }) => {
+          transformCalls += 1;
+          expect(response).toBe(finalResponse);
+          expect(signal.aborted).toBe(false);
+          return outputSchema.parse(reviewer);
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+    });
+
+    expect(transformCalls).toBe(1);
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: reviewer,
+      failure: null,
+    });
+  });
+
+  test("uses chat completions for the schema-constrained production transform", async () => {
+    const reviewer = {
+      sha,
+      verdict: "approved",
+      summary: "ok",
+      findings: [],
+    } as const;
+    const apiKey = "fixture-only-key";
+    const model = "fixture-model";
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const transform = createOpenAICompatibleRoleOutputTransform({
+      apiKey,
+      baseURL: "https://fixture.invalid/v1",
+      model,
+      fetch: async (input, init) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        requests.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            id: "fixture-completion",
+            object: "chat.completion",
+            created: 0,
+            model,
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: JSON.stringify(reviewer) },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    const output = await transform({
+      finalResponse: "The review is wrapped in harmless prose.",
+      outputSchema: reviewerOutputSchema,
+      signal: new AbortController().signal,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0].url).pathname).toBe("/v1/chat/completions");
+    if (typeof requests[0].init?.body !== "string") throw new Error("expected JSON request body");
+    const body = JSON.parse(requests[0].init.body) as Record<string, unknown>;
+    expect(body.model).toBe(model);
+    expect(body).toHaveProperty("response_format");
+    expect(JSON.stringify(body)).toContain("findings");
+    expect(JSON.stringify(body)).not.toContain(apiKey);
+    expect(new Headers(requests[0].init?.headers).get("authorization")).toBe(`Bearer ${apiKey}`);
+    expect(output).toEqual(reviewer);
+    expect(JSON.stringify(output)).not.toContain(apiKey);
   });
 
   test("propagates caller cancellation to the SDK turn", async () => {
@@ -278,6 +398,81 @@ describe("Coding Session", () => {
     controller.abort();
     const observation = await pending;
     expect(sdkSignal?.aborted).toBe(true);
+    expect(observation).toMatchObject({ status: "cancelled", output: null });
+  });
+
+  test("propagates caller cancellation to the bounded output transform", async () => {
+    const controller = new AbortController();
+    const started = deferred<void>();
+    let transformSignal: AbortSignal | undefined;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async ({ signal }) => {
+          transformSignal = signal;
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("transform aborted")), {
+              once: true,
+            });
+          });
+        },
+      },
+    );
+    const pending = session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+      signal: controller.signal,
+    });
+
+    await started.promise;
+    controller.abort();
+    const observation = await pending;
+    expect(transformSignal?.aborted).toBe(true);
+    expect(observation).toMatchObject({ status: "cancelled", output: null });
+  });
+
+  test("bounds the output transform by the remaining deadline", async () => {
+    const started = deferred<void>();
+    let transformSignal: AbortSignal | undefined;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async ({ signal }) => {
+          transformSignal = signal;
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("transform timed out")), {
+              once: true,
+            });
+          });
+        },
+      },
+    );
+    const pending = session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 250,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+    });
+
+    await started.promise;
+    const observation = await pending;
+    expect(transformSignal?.aborted).toBe(true);
     expect(observation).toMatchObject({ status: "cancelled", output: null });
   });
 
@@ -327,7 +522,8 @@ describe("Coding Session", () => {
     expect(observation).toMatchObject({
       status: "failed",
       output: null,
-      failure: "coding session output did not match role schema",
+      failure: "coding session output normalization unavailable",
+      failureCode: "role_output_transform_unconfigured",
     });
   });
 
@@ -357,7 +553,95 @@ describe("Coding Session", () => {
     expect(observation).toMatchObject({
       status: "failed",
       output: null,
-      failure: "coding session output did not match role schema",
+      failure: "coding session output normalization unavailable",
+      failureCode: "role_output_transform_unconfigured",
     });
+  });
+
+  test("fails explicitly when normalization is needed but unconfigured", async () => {
+    const session = new CodexCodingSession(async () =>
+      testClient(async () => sdkTurn("The review could not be represented directly.")),
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failure: "coding session output normalization unavailable",
+      failureCode: "role_output_transform_unconfigured",
+    });
+  });
+
+  test("fails closed when the transform returns a schema-invalid result", async () => {
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async () => ({ verdict: "approved" }),
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failure: "coding session normalized output did not match role schema",
+      failureCode: "role_output_schema_invalid",
+    });
+  });
+
+  test("fails closed and bounds transform failures without exposing their details", async () => {
+    const secretDetail = "coordinator-transform-detail";
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        roleOutputTransform: async () => {
+          throw new Error(secretDetail);
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failure: "coding session output normalization failed",
+      failureCode: "role_output_transform_failed",
+    });
+    expect(JSON.stringify(observation)).not.toContain(secretDetail);
   });
 });
