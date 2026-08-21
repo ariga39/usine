@@ -65,6 +65,8 @@ describe("Task event stream", () => {
         type: "coding_tool_completed",
         role: "implementer",
         activation: 1,
+        sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:0:outcome",
         tool: "shell",
         outcome: "succeeded",
       },
@@ -90,6 +92,8 @@ describe("Task event stream", () => {
         type: "coding_tool_completed",
         role: "implementer",
         activation: 1,
+        sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:0:outcome",
         tool: "shell",
         outcome: "succeeded",
       },
@@ -110,13 +114,123 @@ describe("Task event stream", () => {
         type: "coding_tool_completed",
         role: "implementer",
         activation: 1,
+        sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:unsafe:outcome",
         tool: "shell",
         outcome: "succeeded",
         stdout: "private-key",
       },
     } as unknown as TaskObservationEventInput;
+    const oversized = {
+      eventId: "oversized",
+      occurredAtEpochMs: 201,
+      data: {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "s".repeat(97),
+      },
+    } as unknown as TaskObservationEventInput;
 
     await expect(authority.appendObservation(taskId, unsafe)).rejects.toThrow();
+    await expect(authority.appendObservation(taskId, oversized)).rejects.toThrow();
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
+  });
+
+  test("keeps a complete coding activation observation sequence beside its authoritative result", async () => {
+    const taskId = `activation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    const activation = await authority.reserveActivation(taskId, 2);
+    const sessionId = "coding-session:1:implementer";
+    const observations: TaskObservationEventInput[] = [
+      {
+        eventId: "coding:1:session-started",
+        occurredAtEpochMs: 10,
+        data: { type: "coding_session_started", role: "implementer", activation: 1, sessionId },
+      },
+      {
+        eventId: "coding:1:thread-started",
+        occurredAtEpochMs: 11,
+        data: { type: "coding_thread_started", role: "implementer", activation: 1, sessionId },
+      },
+      {
+        eventId: "coding:1:turn-started",
+        occurredAtEpochMs: 12,
+        data: {
+          type: "coding_turn_started",
+          role: "implementer",
+          activation: 1,
+          turn: 1,
+          sessionId,
+        },
+      },
+      {
+        eventId: "coding:1:tool-completed",
+        occurredAtEpochMs: 13,
+        data: {
+          type: "coding_tool_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId,
+          outcomeId: "coding:1:tool:outcome",
+          tool: "shell",
+          outcome: "succeeded",
+        },
+      },
+      {
+        eventId: "coding:1:turn-completed",
+        occurredAtEpochMs: 14,
+        data: {
+          type: "coding_turn_completed",
+          role: "implementer",
+          activation: 1,
+          turn: 1,
+          sessionId,
+          outcomeId: "coding:1:turn:outcome",
+          outcome: "succeeded",
+        },
+      },
+      {
+        eventId: "coding:1:session-completed",
+        occurredAtEpochMs: 15,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId,
+          outcome: "succeeded",
+        },
+      },
+    ];
+    for (const observation of observations) await authority.appendObservation(taskId, observation);
+
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    const terminal = await authority.block(
+      { taskId, revision: candidate.revision },
+      "activation evidence test complete",
+    );
+    const events = await authority.listEvents(taskId);
+    expect(events.slice(2).map((event) => event.data.type)).toEqual([
+      "coding_session_started",
+      "coding_thread_started",
+      "coding_turn_started",
+      "coding_tool_completed",
+      "coding_turn_completed",
+      "coding_session_completed",
+      "candidate_frozen",
+      "task_blocked",
+      "task_terminal",
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      data: { type: "task_terminal", state: terminal.state },
+    });
+    expect(events.find((event) => event.data.type === "candidate_frozen")).toMatchObject({
+      data: { type: "candidate_frozen", sha: candidate.candidateSha, fence: 1 },
+    });
+    expect(candidate.state).toBe("candidate");
+    expect(terminal.state).toBe("blocked");
   });
 });

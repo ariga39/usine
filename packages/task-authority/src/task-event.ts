@@ -1,6 +1,9 @@
 import { Predicate, Schema } from "effect";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
+const safeObservationId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
+);
 const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
@@ -18,17 +21,20 @@ const eventData = Schema.Union([
     type: Schema.Literal("coding_session_started"),
     role,
     activation: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
     role,
     activation: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_turn_started"),
     role,
     activation: Schema.Natural,
     turn: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_tool_completed"),
@@ -36,6 +42,8 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     tool,
     outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_turn_completed"),
@@ -43,12 +51,15 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     turn: Schema.Natural,
     outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_session_completed"),
     role,
     activation: Schema.Natural,
     outcome,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({ type: Schema.Literal("candidate_frozen"), sha: exactSha, fence: Schema.Natural }),
   Schema.Struct({
@@ -126,17 +137,20 @@ const observationData = Schema.Union([
     type: Schema.Literal("coding_session_started"),
     role,
     activation: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
     role,
     activation: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_turn_started"),
     role,
     activation: Schema.Natural,
     turn: Schema.Natural,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_tool_completed"),
@@ -144,6 +158,8 @@ const observationData = Schema.Union([
     activation: Schema.Natural,
     tool,
     outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_turn_completed"),
@@ -151,12 +167,15 @@ const observationData = Schema.Union([
     activation: Schema.Natural,
     turn: Schema.Natural,
     outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_session_completed"),
     role,
     activation: Schema.Natural,
     outcome,
+    sessionId: safeObservationId,
   }),
   Schema.Struct({
     type: Schema.Literal("recovery_observed"),
@@ -181,8 +200,15 @@ const taskEvent = Schema.Struct({
   data: eventData,
 });
 
+const taskEventPage = Schema.Struct({
+  taskId: safeEventId,
+  events: Schema.Array(taskEvent),
+  nextSequence: Schema.Natural,
+});
+
 export type TaskObservationEventInput = Schema.Schema.Type<typeof taskObservationEventInput>;
 export type TaskEvent = Schema.Schema.Type<typeof taskEvent>;
+export type TaskEventPage = Schema.Schema.Type<typeof taskEventPage>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
   assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
@@ -196,15 +222,39 @@ export function decodeTaskEvent(input: unknown): TaskEvent {
   return Schema.decodeUnknownSync(taskEvent)(input);
 }
 
+export function decodeTaskEventPage(input: unknown): TaskEventPage {
+  assertExactKeys(input, ["taskId", "events", "nextSequence"]);
+  if (Predicate.isObject(input) && Array.isArray(input.events)) {
+    for (const event of input.events) decodeTaskEvent(event);
+  }
+  return Schema.decodeUnknownSync(taskEventPage)(input);
+}
+
 const dataFields: Record<string, readonly string[]> = {
   task_admitted: ["type", "contractHash"],
   activation_reserved: ["type", "activation", "recovery"],
-  coding_session_started: ["type", "role", "activation"],
-  coding_thread_started: ["type", "role", "activation"],
-  coding_turn_started: ["type", "role", "activation", "turn"],
-  coding_tool_completed: ["type", "role", "activation", "tool", "outcome"],
-  coding_turn_completed: ["type", "role", "activation", "turn", "outcome"],
-  coding_session_completed: ["type", "role", "activation", "outcome"],
+  coding_session_started: ["type", "role", "activation", "sessionId"],
+  coding_thread_started: ["type", "role", "activation", "sessionId"],
+  coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
+  coding_tool_completed: [
+    "type",
+    "role",
+    "activation",
+    "tool",
+    "outcome",
+    "sessionId",
+    "outcomeId",
+  ],
+  coding_turn_completed: [
+    "type",
+    "role",
+    "activation",
+    "turn",
+    "outcome",
+    "sessionId",
+    "outcomeId",
+  ],
+  coding_session_completed: ["type", "role", "activation", "outcome", "sessionId"],
   candidate_frozen: ["type", "sha", "fence"],
   project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
   review_completed: ["type", "sha", "cycle", "verdict"],

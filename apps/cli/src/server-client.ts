@@ -1,11 +1,10 @@
 import { Clock, Duration, Effect } from "effect";
 import {
   decodeCurrentTaskResult,
-  decodeCurrentTaskStatus,
-  taskProgressFromResult,
-  type TaskProgress,
+  decodeTaskEventPage,
+  type TaskEvent,
+  type TaskEventPage,
   type TaskResult,
-  type TaskStatus,
   repositoryRegistrationSchema,
   type RepositorySnapshot,
   isTerminalState,
@@ -95,15 +94,40 @@ export async function inspectRepository(
   }
 }
 
-export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskStatus | null> {
+export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResult | null> {
   const response = await fetch(new URL(`/v1/tasks/${encodeURIComponent(taskId)}`, serverUrl));
   if (response.status === 404) return null;
-  return readStatusResponse(response);
+  return readResponse(response);
+}
+
+export async function taskEvents(
+  serverUrl: string,
+  taskId: string,
+  afterSequence = 0,
+  limit = 200,
+): Promise<TaskEventPage> {
+  const path = `/v1/tasks/${encodeURIComponent(taskId)}/events?after=${afterSequence}&limit=${limit}`;
+  const response = await fetch(new URL(path, serverUrl));
+  const parsed = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(parsed, "task events request failed"),
+      response.status,
+    );
+  try {
+    return decodeTaskEventPage(parsed);
+  } catch {
+    throw new ServerClientError(
+      "server returned invalid TaskEventPage (" + response.status + ")",
+      response.status,
+    );
+  }
 }
 
 export interface FollowOptions {
   intervalMs?: number;
-  onProgress?: (progress: TaskProgress) => void;
+  afterSequence?: number;
+  onEvent?: (event: TaskEvent) => void;
 }
 
 export async function followTask(
@@ -112,13 +136,17 @@ export async function followTask(
   options: FollowOptions = {},
 ): Promise<TaskResult> {
   const intervalMs = options.intervalMs ?? 100;
-  let lastRevision = -1;
+  let afterSequence = options.afterSequence ?? 0;
   while (true) {
     const result = await taskStatus(serverUrl, taskId);
     if (!result) throw new ServerClientError(`task not found: ${taskId}`, 404);
-    if (result.revision > lastRevision) {
-      lastRevision = result.revision;
-      options.onProgress?.(taskProgressFromResult(result));
+    while (true) {
+      const page = await taskEvents(serverUrl, taskId, afterSequence, 200);
+      for (const event of page.events) {
+        options.onEvent?.(event);
+        afterSequence = event.sequence;
+      }
+      if (page.events.length < 200) break;
     }
     if (isTerminalState(result.state)) return result;
     const remainingMs = result.deadlineEpochMs - (await Effect.runPromise(Clock.currentTimeMillis));
@@ -167,32 +195,4 @@ function responseMessage(body: unknown, fallback: string): string {
   return typeof body === "object" && body !== null && "message" in body
     ? String(body.message)
     : fallback;
-}
-
-async function readStatusResponse(response: Response): Promise<TaskStatus> {
-  const body = await response.text();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    throw new ServerClientError(
-      `server returned invalid JSON (${response.status})`,
-      response.status,
-    );
-  }
-  if (!response.ok) {
-    const message =
-      typeof parsed === "object" && parsed !== null && "message" in parsed
-        ? String(parsed.message)
-        : `server request failed (${response.status})`;
-    throw new ServerClientError(message, response.status);
-  }
-  try {
-    return decodeCurrentTaskStatus(parsed);
-  } catch {
-    throw new ServerClientError(
-      "server returned invalid TaskStatus (" + response.status + ")",
-      response.status,
-    );
-  }
 }

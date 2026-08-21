@@ -1,23 +1,64 @@
-import type { DeliveryRunServices } from "./delivery-run.js";
-import {
-  taskProgressFromResult,
-  type TaskHistoryRecordInput,
-  type TaskResult,
+import type { CodingSessionObservation } from "@usine/coding-session";
+import type {
+  TaskObservationEventData,
+  TaskObservationEventInput,
+  TaskResult,
 } from "@usine/task-authority";
+import type { DeliveryRunServices } from "./delivery-run.js";
 
-export function reportProgress(services: DeliveryRunServices, result: TaskResult): void {
-  try {
-    services.onProgress?.(taskProgressFromResult(result));
-  } catch {
-    // Progress is an observation only; a failed sink cannot alter authority.
-  }
+export function emitObservation(
+  services: DeliveryRunServices,
+  taskId: string,
+  input: TaskObservationEventInput,
+): Promise<unknown> {
+  return services.authority.appendObservation(taskId, input);
 }
 
-export async function recordHistory(
+export function emitCodingObservation(
   services: DeliveryRunServices,
-  input: TaskHistoryRecordInput,
+  taskId: string,
+  role: "implementer" | "reviewer",
+  activation: number,
+  sessionId: string,
+  eventPrefix: string,
+  counter: { value: number },
+  observation: CodingSessionObservation,
 ): Promise<void> {
-  await services.authority.appendHistory(input);
+  const data: TaskObservationEventData = (() => {
+    switch (observation.type) {
+      case "thread_started":
+        return { type: "coding_thread_started", role, activation, sessionId };
+      case "turn_started":
+        return { type: "coding_turn_started", role, activation, turn: observation.turn, sessionId };
+      case "tool_completed":
+        return {
+          type: "coding_tool_completed",
+          role,
+          activation,
+          sessionId,
+          outcomeId: `${eventPrefix}:${counter.value}:outcome`,
+          tool: observation.tool,
+          outcome: observation.outcome,
+        };
+      case "turn_completed":
+        return {
+          type: "coding_turn_completed",
+          role,
+          activation,
+          sessionId,
+          outcomeId: `${eventPrefix}:${counter.value}:outcome`,
+          turn: observation.turn,
+          outcome: observation.outcome,
+        };
+      default:
+        throw new Error("unknown coding session observation");
+    }
+  })();
+  return emitObservation(services, taskId, {
+    eventId: `${eventPrefix}:${counter.value++}:${data.type}`,
+    occurredAtEpochMs: Date.now(),
+    data,
+  }).then(() => undefined);
 }
 
 export async function blockTask(
@@ -25,10 +66,5 @@ export async function blockTask(
   result: TaskResult,
   blocker: string,
 ): Promise<TaskResult> {
-  const blocked = await services.authority.block(
-    { taskId: result.taskId, revision: result.revision },
-    blocker,
-  );
-  reportProgress(services, blocked);
-  return blocked;
+  return services.authority.block({ taskId: result.taskId, revision: result.revision }, blocker);
 }

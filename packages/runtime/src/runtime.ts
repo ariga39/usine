@@ -1,4 +1,5 @@
 import { access, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
   applyMigrations,
@@ -11,11 +12,9 @@ import {
   type TaskExecutionInput,
   type RepositorySnapshot,
   type ResolvedTaskContract,
-  type TaskProgress,
+  type TaskEvent,
   type TaskResult,
-  type TaskStatus,
-  type TaskHistoryKind,
-  taskProgressFromResult,
+  type TaskObservationEventInput,
   isTerminalState,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
@@ -80,7 +79,7 @@ export async function inspectRepository(
 export async function lookupTaskStatus(
   stateDirectory: string,
   taskId: string,
-): Promise<TaskStatus | null> {
+): Promise<TaskResult | null> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   try {
     await access(databasePath);
@@ -91,7 +90,35 @@ export async function lookupTaskStatus(
 
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
-    return await new TaskAuthority(handle.database).lookupStatus(taskId);
+    return await new TaskAuthority(handle.database).lookup(taskId);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupTaskEvents(
+  stateDirectory: string,
+  taskId: string,
+  afterSequence = 0,
+  limit = 200,
+): Promise<{ taskId: string; events: TaskEvent[]; nextSequence: number } | null> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const authority = new TaskAuthority(handle.database);
+    if (!(await authority.lookup(taskId))) return null;
+    const events = await authority.listEvents(taskId, afterSequence, limit);
+    return {
+      taskId,
+      events,
+      nextSequence: events.at(-1)?.sequence ?? afterSequence,
+    };
   } finally {
     handle.close();
   }
@@ -115,35 +142,19 @@ export async function lookupRestartableTasks(
   }
 }
 
-export async function recordExecutionObservation(
+export async function recordRecoveryObservation(
   stateDirectory: string,
-  result: TaskResult,
-  kind: Extract<TaskHistoryKind, "coordinator_restart" | "execution_owner_change">,
-  executionOwner: string,
-  previousExecutionOwner: string,
+  taskId: string,
+  kind: "server_restart" | "execution_owner_changed",
 ): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
-    const now = Date.now();
-    await new TaskAuthority(handle.database).appendHistory({
-      taskId: result.taskId,
-      kind,
-      activation: result.activeActivation,
-      cycle: result.evidence.reviewCycles || null,
-      role: "coordinator",
-      executionOwner,
-      previousExecutionOwner,
-      startedAtEpochMs: now,
-      endedAtEpochMs: now,
-      outcome: "observed",
-      failure: null,
-      candidateSha: result.candidateSha,
-      candidateFence: result.candidateFence,
-      profile: null,
-      observedModel: null,
-      observedProvider: null,
-      tokenUsage: null,
-    });
+    const input: TaskObservationEventInput = {
+      eventId: `recovery:${kind}:${randomUUID()}`,
+      occurredAtEpochMs: Date.now(),
+      data: { type: "recovery_observed", kind },
+    };
+    await new TaskAuthority(handle.database).appendObservation(taskId, input);
   } finally {
     handle.close();
   }
@@ -154,7 +165,6 @@ export async function admitTask(
   rawContract: string,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
-  onProgress?: (progress: TaskProgress) => void,
 ): Promise<TaskResult> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
@@ -166,13 +176,6 @@ export async function admitTask(
   const database = handle.database;
   const authority = new TaskAuthority(database);
   try {
-    const reportProgress = (result: TaskResult): void => {
-      try {
-        onProgress?.(taskProgressFromResult(result));
-      } catch {
-        // Progress is an observation only; a failed sink cannot alter authority.
-      }
-    };
     const existing = await authority.lookupExisting(contract.id, contractHash);
     const registeredRepository = await authority.lookupRepository(contract.repositoryId);
     const repository = existing?.repository ?? registeredRepository;
@@ -189,7 +192,6 @@ export async function admitTask(
         { taskId: existing.taskId, revision: existing.revision },
         "elapsed budget exhausted",
       );
-      reportProgress(blocked);
       return blocked;
     };
     if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
@@ -219,13 +221,11 @@ export async function admitTask(
       },
       { contractPath, rawContract },
     );
-    reportProgress(admitted);
     if (deadlineExpired(admitted.deadlineEpochMs)) {
       const blocked = await authority.block(
         { taskId: admitted.taskId, revision: admitted.revision },
         "elapsed budget exhausted",
       );
-      reportProgress(blocked);
       return blocked;
     }
     return admitted;
@@ -238,7 +238,6 @@ export async function executeAdmittedTask(
   input: TaskExecutionInput,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
-  onProgress?: (progress: TaskProgress) => void,
   signal?: AbortSignal,
 ): Promise<TaskResult> {
   if (signal?.aborted) throw new Error("task execution was aborted");
@@ -276,7 +275,6 @@ export async function executeAdmittedTask(
       forgePolicy,
       authority,
       deadlineEpochMs: existing.deadlineEpochMs,
-      onProgress,
       signal,
     });
   } catch (error) {
@@ -288,11 +286,6 @@ export async function executeAdmittedTask(
         { taskId: current.taskId, revision: current.revision },
         blocker,
       );
-      try {
-        onProgress?.(taskProgressFromResult(blocked));
-      } catch {
-        // Progress is an observation only; a failed sink cannot alter authority.
-      }
       return blocked;
     }
     throw error;
@@ -311,7 +304,6 @@ async function executeWithServices(options: {
   forgePolicy: ForgePolicy;
   authority: TaskAuthority;
   deadlineEpochMs: number;
-  onProgress?: (progress: TaskProgress) => void;
   signal?: AbortSignal;
 }): Promise<TaskResult> {
   const {
@@ -324,7 +316,6 @@ async function executeWithServices(options: {
     forgePolicy,
     authority,
     deadlineEpochMs,
-    onProgress,
   } = options;
   const workspace = new CandidateWorkspace({
     repository,
@@ -369,7 +360,6 @@ async function executeWithServices(options: {
     session,
     quality,
     forge,
-    onProgress,
   });
 }
 

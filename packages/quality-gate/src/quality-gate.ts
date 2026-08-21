@@ -2,12 +2,9 @@ import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import { reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
-import {
-  remainingUntil,
-  type CheckResult,
-  type ReviewVerdict,
-  type TaskHistoryTokenUsage,
-} from "@usine/task-authority";
+import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
+
+type SessionUsage = { inputTokens?: number; outputTokens?: number };
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -30,7 +27,7 @@ export interface QualityGateOptions {
 
 export interface ReviewAttemptObservation {
   review: ReviewVerdict;
-  usage: TaskHistoryTokenUsage | null;
+  usage: SessionUsage | null;
 }
 
 interface QualityGateWorkspace {
@@ -41,7 +38,7 @@ interface QualityGateSession {
   run(request: SessionRequest<ReviewerOutput>): Promise<
     Pick<SessionObservation<ReviewerOutput>, "status" | "output"> &
       Pick<SessionObservation<ReviewerOutput>, "summary" | "failure"> & {
-        usage?: TaskHistoryTokenUsage | null;
+        usage?: SessionUsage | null;
       }
   >;
 }
@@ -119,6 +116,7 @@ export class QualityGate {
     sha: string,
     check: CheckResult,
     cycle: number,
+    onObservation?: SessionRequest<ReviewerOutput>["onObservation"],
   ): Promise<ReviewAttemptObservation> {
     if (check.status !== "passed" || check.sha !== sha)
       throw new Error("review requires a passing exact-SHA check");
@@ -151,6 +149,7 @@ export class QualityGate {
           },
           environment: this.options.environment,
           signal: this.options.signal,
+          onObservation,
         });
         if (observation.status !== "completed" || !observation.output)
           return {

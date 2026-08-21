@@ -1,17 +1,9 @@
-import { and, desc, eq, sql } from "drizzle-orm";
-import {
-  repositories,
-  repositoryLeases,
-  taskEvents,
-  taskHistory,
-  taskQuarantines,
-  taskRuns,
-} from "./schema.js";
+import { and, eq, sql } from "drizzle-orm";
+import { repositories, repositoryLeases, taskEvents, taskQuarantines, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
   decodeRawPersistedTaskResult,
-  decodeTaskHistoryRecord,
   TaskStateQuarantinedError,
   TASK_RESULT_SCHEMA_VERSION,
 } from "./task-state-schema.js";
@@ -33,10 +25,7 @@ import {
   type TaskFact,
   type TaskObservation,
   type TaskExecutionInput,
-  type TaskHistoryRecord,
-  type TaskHistoryRecordInput,
   type TaskResult,
-  type TaskStatus,
 } from "./task-state.js";
 import {
   snapshotFromRegistration,
@@ -53,16 +42,17 @@ export type {
   ReviewVerdict,
   TaskFact,
   TaskExecutionInput,
-  TaskHistoryRecord,
-  TaskHistoryRecordInput,
-  TaskHistoryTokenUsage,
   TaskObservation,
   TaskResult,
-  TaskStatus,
 } from "./task-state.js";
-export { decodeTaskEvent, decodeTaskObservationEventInput } from "./task-event.js";
+export {
+  decodeTaskEvent,
+  decodeTaskEventPage,
+  decodeTaskObservationEventInput,
+} from "./task-event.js";
 export type {
   TaskEvent,
+  TaskEventPage,
   TaskEventData,
   TaskObservationEventData,
   TaskObservationEventInput,
@@ -75,7 +65,6 @@ export type {
 
 type AuthorityDatabase = RuntimeDatabase;
 
-const MAX_HISTORY_LIMIT = 100;
 const MAX_EVENT_LIMIT = 200;
 
 export class TaskAuthority {
@@ -173,39 +162,6 @@ export class TaskAuthority {
     return result;
   }
 
-  async appendHistory(input: TaskHistoryRecordInput): Promise<TaskHistoryRecord> {
-    const append = async (database: AuthorityDatabase): Promise<TaskHistoryRecord> => {
-      const current = await TaskAuthority.currentTask(database, input.taskId);
-      if (!current) throw new Error("task is not admitted");
-      const inserted = await database
-        .insert(taskHistory)
-        .values({
-          taskId: input.taskId,
-          kind: input.kind,
-          activation: input.activation,
-          cycle: input.cycle,
-          role: input.role,
-          profile: input.profile,
-          observedModel: input.observedModel,
-          observedProvider: input.observedProvider,
-          executionOwner: input.executionOwner ?? null,
-          previousExecutionOwner: input.previousExecutionOwner ?? null,
-          startedAtEpochMs: input.startedAtEpochMs,
-          endedAtEpochMs: input.endedAtEpochMs,
-          outcome: input.outcome,
-          failure: input.failure,
-          candidateSha: input.candidateSha,
-          candidateFence: input.candidateFence,
-          tokenUsage: input.tokenUsage,
-        })
-        .returning();
-      const row = inserted[0];
-      if (!row) throw new Error("history record was not persisted");
-      return decodeTaskHistoryRecord(row);
-    };
-    return this.inTransaction(append);
-  }
-
   async appendObservation(taskId: string, input: TaskObservationEventInput): Promise<TaskEvent> {
     const decoded = decodeTaskObservationEventInput(input);
     return this.inTransaction(async (database) => {
@@ -228,23 +184,6 @@ export class TaskAuthority {
       .orderBy(taskEvents.sequence)
       .limit(boundedLimit);
     return rows.map(decodeTaskEvent);
-  }
-
-  async listHistory(taskId: string, limit = MAX_HISTORY_LIMIT): Promise<TaskHistoryRecord[]> {
-    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_HISTORY_LIMIT);
-    const rows = await this.database
-      .select()
-      .from(taskHistory)
-      .where(eq(taskHistory.taskId, taskId))
-      .orderBy(desc(taskHistory.id))
-      .limit(boundedLimit);
-    return rows.reverse().map(decodeTaskHistoryRecord);
-  }
-
-  async lookupStatus(taskId: string, limit = MAX_HISTORY_LIMIT): Promise<TaskStatus | null> {
-    const result = await this.lookup(taskId);
-    if (!result) return null;
-    return { ...result, history: await this.listHistory(taskId, limit) };
   }
 
   async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {

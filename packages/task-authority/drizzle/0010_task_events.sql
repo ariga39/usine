@@ -19,7 +19,7 @@ SELECT
 		'type', 'legacy_observation',
 		'kind', CASE WHEN `kind` IN ('implementer', 'project_check', 'fresh_review', 'forge_delivery', 'coordinator_restart', 'execution_owner_change') THEN `kind` ELSE 'unknown' END,
 		'outcome', CASE WHEN `outcome` IN ('running', 'succeeded', 'failed', 'cancelled', 'blocked', 'observed') THEN `outcome` ELSE 'unknown' END,
-		'complete', 0
+		'complete', json('false')
 	)
 FROM `task_history`;
 --> statement-breakpoint
@@ -29,7 +29,7 @@ SELECT
 	COUNT(*) + 1,
 	'legacy-import-incomplete',
 	CAST(strftime('%s', 'now') AS INTEGER) * 1000,
-	json_object('type', 'legacy_import_incomplete', 'importedCount', COUNT(*), 'complete', 0)
+	json_object('type', 'legacy_import_incomplete', 'importedCount', COUNT(*), 'complete', json('false'))
 FROM `task_history`
 GROUP BY `task_id`;
 --> statement-breakpoint
@@ -39,6 +39,8 @@ SELECT
 	1,
 	'legacy-import-incomplete',
 	CAST(strftime('%s', 'now') AS INTEGER) * 1000,
-	json_object('type', 'legacy_import_incomplete', 'importedCount', 0, 'complete', 0)
+	json_object('type', 'legacy_import_incomplete', 'importedCount', 0, 'complete', json('false'))
 FROM `task_runs`
 WHERE `task_id` NOT IN (SELECT DISTINCT `task_id` FROM `task_history`);
+--> statement-breakpoint
+DROP TABLE `task_history`;

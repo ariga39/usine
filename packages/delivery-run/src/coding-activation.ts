@@ -1,13 +1,8 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { implementerOutputSchema } from "@usine/coding-session";
-import type {
-  CheckResult,
-  TaskHistoryOutcome,
-  TaskHistoryTokenUsage,
-  TaskResult,
-} from "@usine/task-authority";
+import type { CheckResult, TaskObservationEventData, TaskResult } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
-import { blockTask, recordHistory, reportProgress } from "./delivery-progress.js";
+import { blockTask, emitCodingObservation } from "./delivery-progress.js";
 
 function implementerPrompt(
   input: DeliveryRunInput,
@@ -49,38 +44,38 @@ async function runCodingAttempt(
     input.contract.id,
     input.contract.budget.maxImplementerActivations,
   );
-  reportProgress(services, reservation.result);
   await services.workspace.quarantinePriorWriters(input.contract.id, reservation.activation);
   const workspace = await services.workspace.prepareWriter(
     input.contract.id,
     reservation.activation,
     previousSha,
   );
-  const startedAtEpochMs = Date.now();
-  const record = async (detail: {
-    outcome: TaskHistoryOutcome;
-    endedAtEpochMs?: number;
-    failure?: string | null;
-    candidateSha?: string | null;
-    tokenUsage?: TaskHistoryTokenUsage | null;
-  }): Promise<void> =>
-    recordHistory(services, {
-      taskId: reservation.result.taskId,
-      kind: "implementer",
-      activation: reservation.activation,
-      cycle: null,
-      role: input.implementer.role,
-      profile: input.implementer.profile,
-      observedModel: null,
-      observedProvider: null,
-      startedAtEpochMs,
-      endedAtEpochMs: detail.endedAtEpochMs ?? Date.now(),
-      outcome: detail.outcome,
-      failure: detail.failure ?? null,
-      candidateSha: detail.candidateSha ?? null,
-      candidateFence: reservation.activation,
-      tokenUsage: detail.tokenUsage ?? null,
+  const observationCounter = { value: 0 };
+  const sessionId = `coding-session:${reservation.activation}:${input.implementer.role}`;
+  const emit = async (data: TaskObservationEventData): Promise<void> => {
+    await services.authority.appendObservation(reservation.result.taskId, {
+      eventId: `coding:${reservation.activation}:${observationCounter.value++}:${data.type}`,
+      occurredAtEpochMs: Date.now(),
+      data,
     });
+  };
+  const emitSessionObservation = (observation: Parameters<typeof emitCodingObservation>[7]) =>
+    emitCodingObservation(
+      services,
+      reservation.result.taskId,
+      input.implementer.role,
+      reservation.activation,
+      sessionId,
+      `coding:${reservation.activation}`,
+      observationCounter,
+      observation,
+    );
+  await emit({
+    type: "coding_session_started",
+    role: input.implementer.role,
+    activation: reservation.activation,
+    sessionId,
+  });
   const observation = await services.session.run({
     role: input.implementer.role,
     workspace: workspace.path,
@@ -96,67 +91,70 @@ async function runCodingAttempt(
       attempt: String(reservation.activation),
     },
     signal: input.signal,
+    onObservation: emitSessionObservation,
   });
   if (input.signal?.aborted) {
     await services.workspace.quarantine(workspace);
-    await record({ outcome: "cancelled", failure: "coding session cancelled" });
+    await emit({
+      type: "coding_session_completed",
+      role: input.implementer.role,
+      activation: reservation.activation,
+      outcome: "cancelled",
+      sessionId,
+    });
     throw new Error("task execution cancelled");
   }
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
-    await record({
+    await emit({
+      type: "coding_session_completed",
+      role: input.implementer.role,
+      activation: reservation.activation,
       outcome: observation.status === "cancelled" ? "cancelled" : "failed",
-      failure: observation.failure ?? observation.summary,
-      tokenUsage: observation.usage,
+      sessionId,
     });
     return {
       status: "failed",
       result: reservation.result,
-      reason: `implementer failed: ${observation.failure ?? observation.summary}`,
+      reason: "implementer coding session failed",
     };
   }
   const output = observation.output;
   if (output.status === "blocked") {
     await services.workspace.quarantine(workspace);
-    await record({ outcome: "blocked", failure: output.summary, tokenUsage: observation.usage });
+    await emit({
+      type: "coding_session_completed",
+      role: input.implementer.role,
+      activation: reservation.activation,
+      outcome: "blocked",
+      sessionId,
+    });
     return {
       status: "failed",
       result: reservation.result,
-      reason: `implementer blocked: ${output.summary}`,
+      reason: "implementer coding session blocked",
     };
   }
+  await emit({
+    type: "coding_session_completed",
+    role: input.implementer.role,
+    activation: reservation.activation,
+    outcome: "succeeded",
+    sessionId,
+  });
   try {
     const candidate = await services.workspace.freeze(workspace, previousSha, input.contract);
     const accepted = await services.authority.recordCandidate(
       { taskId: reservation.result.taskId, revision: reservation.result.revision },
-      {
-        sha: candidate.sha,
-        baseSha: candidate.baseSha,
-        fence: reservation.activation,
-      },
+      { sha: candidate.sha, baseSha: candidate.baseSha, fence: reservation.activation },
     );
-    reportProgress(services, accepted);
-    await record({
-      outcome: "succeeded",
-      candidateSha: candidate.sha,
-      tokenUsage: observation.usage,
-    });
     return {
       status: "succeeded",
       result: accepted,
       candidate: { ...candidate, workspace },
     };
   } catch (error) {
-    if (input.signal?.aborted) {
-      await services.workspace.quarantine(workspace);
-      throw error;
-    }
     await services.workspace.quarantine(workspace);
-    await record({
-      outcome: "failed",
-      failure: error instanceof Error ? error.message : String(error),
-      tokenUsage: observation.usage,
-    });
     return {
       status: "failed",
       result: reservation.result,

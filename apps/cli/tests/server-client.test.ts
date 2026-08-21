@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskResult } from "@usine/task-authority";
+import type { TaskEvent, TaskResult } from "@usine/task-authority";
 import {
   followTask,
   ServerClientError,
   serverUrlFromEnvironment,
+  taskEvents,
   taskStatus,
 } from "../src/server-client.js";
 
@@ -11,7 +12,7 @@ function result(taskId: string, revision: number, state: TaskResult["state"]): T
   return {
     schemaVersion: 2,
     taskId,
-    contractHash: "contract-hash",
+    contractHash: "a".repeat(64),
     revision,
     deadlineEpochMs: Date.now() + 30_000,
     state,
@@ -33,24 +34,37 @@ function result(taskId: string, revision: number, state: TaskResult["state"]): T
   };
 }
 
+function event(taskId: string, sequence: number, data: TaskEvent["data"]): TaskEvent {
+  return { taskId, sequence, eventId: `event-${sequence}`, occurredAtEpochMs: sequence, data };
+}
+
 describe("server client follow", () => {
   test("derives the client URL from the configured server host and port", () => {
-    expect(
-      serverUrlFromEnvironment({
-        USINE_SERVER_HOST: "::1",
-        USINE_SERVER_PORT: "4321",
-      }),
-    ).toBe("http://[::1]:4321");
+    expect(serverUrlFromEnvironment({ USINE_SERVER_HOST: "::1", USINE_SERVER_PORT: "4321" })).toBe(
+      "http://[::1]:4321",
+    );
+  });
+
+  test("decodes a strict cursor event page", async () => {
+    const originalFetch = globalThis.fetch;
+    const taskId = "event-page";
+    const page = {
+      taskId,
+      events: [event(taskId, 201, { type: "recovery_observed", kind: "server_restart" })],
+      nextSequence: 201,
+    };
+    globalThis.fetch = async () => new Response(JSON.stringify(page), { status: 200 });
+    try {
+      await expect(taskEvents("http://server.test", taskId, 200)).resolves.toEqual(page);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("rejects malformed successful TaskResult responses", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () =>
-      new Response(JSON.stringify({ taskId: "malformed", state: "admitted" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-
+      new Response(JSON.stringify({ taskId: "malformed", state: "admitted" }), { status: 200 });
     try {
       await expect(taskStatus("http://server.test", "malformed")).rejects.toMatchObject({
         name: "ServerClientError",
@@ -61,102 +75,102 @@ describe("server client follow", () => {
     }
   });
 
-  test("decodes bounded history alongside the current TaskResult projection", async () => {
-    const task = result("history-status", 3, "admitted");
+  test("follows events by cursor and returns the authoritative terminal snapshot", async () => {
+    const taskId = "follow-events";
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response(
-        JSON.stringify({
-          ...task,
-          history: [
+    let state: TaskResult["state"] = "admitted";
+    const received: TaskEvent[] = [];
+    const requestedAfter: number[] = [];
+    let sequenceNumber = 0;
+    globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+      if (url.includes("/events")) {
+        requestedAfter.push(Number(new URL(url).searchParams.get("after")));
+        if (state === "blocked")
+          return new Response(
+            JSON.stringify({ taskId, events: [], nextSequence: sequenceNumber }),
             {
-              id: 1,
-              taskId: task.taskId,
-              kind: "implementer",
-              activation: 1,
-              cycle: null,
-              role: "implementer",
-              profile: "writer-profile",
-              executionOwner: null,
-              previousExecutionOwner: null,
-              startedAtEpochMs: 10,
-              endedAtEpochMs: 20,
-              outcome: "succeeded",
-              failure: null,
-              candidateSha: null,
-              candidateFence: 1,
-              tokenUsage: { inputTokens: 12, outputTokens: 7 },
+              status: 200,
             },
-          ],
-        }),
-        { status: 200 },
-      );
-
-    try {
-      const status = await taskStatus("http://server.test", task.taskId);
-      expect(status).toMatchObject({ ...task, history: [{ kind: "implementer" }] });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("rejects a valid TaskResult response without history", async () => {
-    const task = result("missing-history", 1, "admitted");
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify(task), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-
-    try {
-      await expect(taskStatus("http://server.test", task.taskId)).rejects.toMatchObject({
-        name: "ServerClientError",
-        status: 200,
-      } satisfies Partial<ServerClientError>);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("uses the durable deadline instead of a default poll-count bound", async () => {
-    const taskId = "long-follow-test";
-    const originalFetch = globalThis.fetch;
-    let requestCount = 0;
-    globalThis.fetch = async () => {
-      const revision = requestCount++;
-      const state = revision === 600 ? "blocked" : "admitted";
-      return new Response(JSON.stringify({ ...result(taskId, revision, state), history: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+          );
+        const sequence = ++sequenceNumber;
+        const data: TaskEvent["data"] =
+          sequence === 1
+            ? {
+                type: "coding_session_started",
+                role: "implementer",
+                activation: 1,
+                sessionId: "coding-session:1:implementer",
+              }
+            : { type: "task_terminal", state: "blocked" };
+        const next = event(taskId, sequence, data);
+        state = sequence === 1 ? "admitted" : "blocked";
+        return new Response(JSON.stringify({ taskId, events: [next], nextSequence: sequence }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(result(taskId, sequenceNumber, state)), { status: 200 });
     };
-
-    try {
-      const terminal = await followTask("http://server.test", taskId, { intervalMs: 0 });
-      expect(terminal.state).toBe("blocked");
-      expect(requestCount).toBe(601);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("follows an authorized task through the merged terminal state", async () => {
-    const task = result("merged-follow", 9, "merged");
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify({ ...task, history: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
     try {
       await expect(
-        followTask("http://server.test", task.taskId, { intervalMs: 0 }),
-      ).resolves.toMatchObject({
-        state: "merged",
-      });
+        followTask("http://server.test", taskId, {
+          intervalMs: 0,
+          onEvent: (value) => received.push(value),
+        }),
+      ).resolves.toMatchObject({ state: "blocked" });
     } finally {
       globalThis.fetch = originalFetch;
     }
+    expect(received.map((value) => value.data.type)).toEqual([
+      "coding_session_started",
+      "task_terminal",
+    ]);
+    expect(requestedAfter).toEqual([0, 1, 2]);
+    expect(new Set(received.map((value) => value.sequence)).size).toBe(received.length);
+    expect(received.every((value) => value.data.type.length > 0)).toBe(true);
+  });
+
+  test("drains every cursor page before returning an already-terminal snapshot", async () => {
+    const taskId = "follow-many-events";
+    const originalFetch = globalThis.fetch;
+    const allEvents = Array.from({ length: 201 }, (_, index) =>
+      event(
+        taskId,
+        index + 1,
+        index === 200
+          ? { type: "task_terminal", state: "blocked" }
+          : { type: "recovery_observed", kind: "server_restart" },
+      ),
+    );
+    const requestedAfter: number[] = [];
+    globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+      if (url.includes("/events")) {
+        const after = Number(new URL(url).searchParams.get("after"));
+        requestedAfter.push(after);
+        const events = allEvents.slice(after, after + 200);
+        return new Response(
+          JSON.stringify({ taskId, events, nextSequence: events.at(-1)?.sequence ?? after }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify(result(taskId, 201, "blocked")), { status: 200 });
+    };
+    const received: TaskEvent[] = [];
+    try {
+      await expect(
+        followTask("http://server.test", taskId, {
+          intervalMs: 0,
+          onEvent: (value) => received.push(value),
+        }),
+      ).resolves.toMatchObject({ taskId, state: "blocked" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requestedAfter).toEqual([0, 200]);
+    expect(received.map((value) => value.sequence)).toEqual(
+      Array.from({ length: 201 }, (_, index) => index + 1),
+    );
+    expect(received.at(-1)?.data).toEqual({ type: "task_terminal", state: "blocked" });
   });
 });

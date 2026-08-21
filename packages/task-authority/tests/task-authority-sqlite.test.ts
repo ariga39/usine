@@ -1,15 +1,16 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { migrate } from "drizzle-orm/sqlite-proxy/migrator";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
-  type TaskHistoryRecordInput,
   type TaskResult,
 } from "@usine/task-authority";
 
@@ -41,6 +42,49 @@ function makeContract(taskId: string, merge = false): TaskContract {
 async function makeDatabase() {
   const directory = await mkdtemp(join(tmpdir(), "usine-authority-"));
   const path = join(directory, "state.sqlite");
+  await applyMigrations(path);
+  return path;
+}
+
+async function makePreTaskEventsDatabase(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "usine-authority-upgrade-"));
+  const path = join(directory, "state.sqlite");
+  const sourceDirectory = fileURLToPath(new URL("../drizzle/", import.meta.url));
+  const migrationsDirectory = join(directory, "migrations");
+  await mkdir(join(migrationsDirectory, "meta"), { recursive: true });
+  for (const name of (await readdir(sourceDirectory)).filter((entry) => entry.endsWith(".sql")))
+    await copyFile(join(sourceDirectory, name), join(migrationsDirectory, name));
+  const journal = JSON.parse(
+    await readFile(join(sourceDirectory, "meta/_journal.json"), "utf8"),
+  ) as { version: string; dialect: string; entries: unknown[] };
+  await writeFile(
+    join(migrationsDirectory, "meta/_journal.json"),
+    JSON.stringify({ ...journal, entries: journal.entries.slice(0, 10) }),
+  );
+
+  const prior = openSqliteDatabase(path);
+  try {
+    await prior.exclusiveTransaction(() =>
+      migrate(prior.database, prior.migrate, { migrationsFolder: migrationsDirectory }),
+    );
+  } finally {
+    prior.close();
+  }
+
+  const legacy = new DatabaseSync(path);
+  const deadline = Date.now() + 30_000;
+  const taskRuns = legacy.prepare(
+    "INSERT INTO task_runs (task_id, result, created_at, updated_at) VALUES (?, ?, ?, ?)",
+  );
+  for (const taskId of ["legacy-with-history", "legacy-without-history"])
+    taskRuns.run(taskId, "{}", deadline, deadline);
+  const history = legacy.prepare(
+    "INSERT INTO task_history (task_id, kind, started_at_epoch_ms, outcome) VALUES (?, ?, ?, ?)",
+  );
+  history.run("legacy-with-history", "implementer", 100, "succeeded");
+  history.run("legacy-with-history", "project_check", 200, "failed");
+  legacy.close();
+
   await applyMigrations(path);
   return path;
 }
@@ -100,72 +144,64 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
-  test("persists a bounded append-only safe history through the authority path", async () => {
-    const path = await makeDatabase();
-    const taskId = `authority-history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  test("upgrades task history into ordered decodable events and removes the legacy table", async () => {
+    const path = await makePreTaskEventsDatabase();
     const authority = authorityAt(path);
-    const admitted = await authority.admit({
-      contract: makeContract(taskId),
-      contractHash: "authority-history-hash",
-      repositoryIdentity: `authority/history-${taskId}`,
-      deadlineEpochMs: Date.now() + 30_000,
-    });
+    const withHistory = await authority.listEvents("legacy-with-history");
+    const withoutHistory = await authority.listEvents("legacy-without-history");
 
-    const first: TaskHistoryRecordInput = {
-      taskId,
-      kind: "implementer",
-      activation: 1,
-      cycle: null,
-      role: "implementer",
-      profile: "implementer-profile",
-      observedModel: null,
-      observedProvider: null,
-      startedAtEpochMs: 100,
-      endedAtEpochMs: 150,
-      outcome: "failed",
-      failure: "worker stopped before candidate",
-      candidateSha: null,
-      candidateFence: 1,
-      tokenUsage: { inputTokens: 12, outputTokens: 7 },
-    };
-    const second: TaskHistoryRecordInput = {
-      taskId,
-      kind: "coordinator_restart",
-      activation: null,
-      cycle: null,
-      role: null,
-      profile: null,
-      observedModel: null,
-      observedProvider: null,
-      startedAtEpochMs: 200,
-      endedAtEpochMs: 200,
-      outcome: "observed",
-      failure: null,
-      candidateSha: null,
-      candidateFence: null,
-      tokenUsage: null,
-    };
-
-    await expect(authority.appendHistory(first)).resolves.toMatchObject({
-      id: 1,
-      taskId,
-      kind: "implementer",
-      outcome: "failed",
-      tokenUsage: { inputTokens: 12, outputTokens: 7 },
-    });
-    await authority.appendHistory(second);
-
-    const reopened = authorityAt(path);
-    await expect(reopened.listHistory(taskId, 1)).resolves.toMatchObject([
-      { id: 2, kind: "coordinator_restart", outcome: "observed" },
+    expect(withHistory.map((event) => [event.sequence, event.eventId, event.data])).toEqual([
+      [
+        1,
+        "legacy-history-1",
+        {
+          type: "legacy_observation",
+          kind: "implementer",
+          outcome: "succeeded",
+          complete: false,
+        },
+      ],
+      [
+        2,
+        "legacy-history-2",
+        {
+          type: "legacy_observation",
+          kind: "project_check",
+          outcome: "failed",
+          complete: false,
+        },
+      ],
+      [
+        3,
+        "legacy-import-incomplete",
+        { type: "legacy_import_incomplete", importedCount: 2, complete: false },
+      ],
     ]);
-    await expect(reopened.listHistory(taskId, 10)).resolves.toMatchObject([
-      { id: 1, kind: "implementer", startedAtEpochMs: 100, endedAtEpochMs: 150 },
-      { id: 2, kind: "coordinator_restart", startedAtEpochMs: 200, endedAtEpochMs: 200 },
+    expect(
+      withHistory.every(
+        (event) =>
+          (event.data.type === "legacy_observation" ||
+            event.data.type === "legacy_import_incomplete") &&
+          !event.data.complete,
+      ),
+    ).toBe(true);
+    expect(withoutHistory).toEqual([
+      {
+        taskId: "legacy-without-history",
+        sequence: 1,
+        eventId: "legacy-import-incomplete",
+        occurredAtEpochMs: expect.any(Number),
+        data: { type: "legacy_import_incomplete", importedCount: 0, complete: false },
+      },
     ]);
-    expect(await reopened.lookup(taskId)).toEqual(admitted);
-    const serialized = JSON.stringify(await reopened.listHistory(taskId, 10));
-    expect(serialized).not.toMatch(/prompt|stdout|stderr|credential|transcript|source/i);
+
+    const inspection = new DatabaseSync(path);
+    expect(
+      inspection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_history'")
+        .get(),
+    ).toBeUndefined();
+    inspection.close();
   });
 
   test("quarantines unsupported durable state at the lookup boundary", async () => {
@@ -222,46 +258,6 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       schemaVersion: 2,
       mergeAuthorized: false,
       state: "admitted",
-    });
-  });
-
-  test("quarantines malformed persisted history at the status boundary", async () => {
-    const path = await makeDatabase();
-    const taskId = `authority-malformed-history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const authority = authorityAt(path);
-    await authority.admit({
-      contract: makeContract(taskId),
-      contractHash: "authority-malformed-history-hash",
-      repositoryIdentity: `authority/malformed-history-${taskId}`,
-      deadlineEpochMs: Date.now() + 30_000,
-    });
-    await authority.appendHistory({
-      taskId,
-      kind: "coordinator_restart",
-      activation: null,
-      cycle: null,
-      role: null,
-      profile: null,
-      observedModel: null,
-      observedProvider: null,
-      startedAtEpochMs: 200,
-      endedAtEpochMs: 200,
-      outcome: "observed",
-      failure: null,
-      candidateSha: null,
-      candidateFence: null,
-      tokenUsage: null,
-    });
-
-    const inspection = new DatabaseSync(path);
-    inspection
-      .prepare("UPDATE task_history SET kind = ? WHERE task_id = ?")
-      .run("malformed-history-kind", taskId);
-    inspection.close();
-
-    await expect(authority.lookupStatus(taskId)).rejects.toMatchObject({
-      code: "task_state_quarantined",
-      message: "durable task state quarantined",
     });
   });
 

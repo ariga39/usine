@@ -444,7 +444,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
     const task = { ...contract("forge-auth-capability"), baseSha: fixture.actualBaseSha };
     const input = {
       contract: task,
-      contractHash: "forge-auth-capability-contract",
+      contractHash: "a".repeat(64),
       repositoryIdentity: "owner/repo",
       deadlineEpochMs: Date.now() + 60_000,
       implementer: {
@@ -489,7 +489,6 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       check,
     );
     await authority.recordReview({ taskId: checked.taskId, revision: checked.revision }, review);
-    const progress: Array<{ state: string }> = [];
     try {
       const result = await executeDeliveryRun(input, {
         authority,
@@ -519,24 +518,16 @@ describe.sequential("Forge Delivery controlled protocol", () => {
           },
         },
         forge: forgeDelivery,
-        onProgress: (value) => progress.push(value),
       });
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toBe("forge authentication capability is unavailable");
       expect(result.blocker).not.toContain(privateKeyPath);
-      const history = await authority.listHistory(result.taskId);
-      expect(history.at(-1)).toMatchObject({
-        kind: "forge_delivery",
-        outcome: "blocked",
-        failure: "forge authentication capability is unavailable",
-      });
-      expect(history.at(-1)?.failure).not.toContain(privateKeyPath);
-      const status = await authority.lookupStatus(result.taskId);
+      const status = await authority.lookup(result.taskId);
       expect(status?.state).toBe("blocked");
-      expect(JSON.stringify(status)).not.toContain(privateKeyPath);
-      expect(progress.at(-1)?.state).toBe("blocked");
-      expect(JSON.stringify(history)).not.toContain(privateKeyPath);
+      const events = await authority.listEvents(result.taskId);
+      expect(events.at(-1)).toMatchObject({ data: { type: "task_terminal", state: "blocked" } });
+      expect(JSON.stringify(events)).not.toContain(privateKeyPath);
     } finally {
       database.close();
     }

@@ -73,26 +73,6 @@ export interface TaskResult {
   };
 }
 
-export interface TaskProgress {
-  event: "progress";
-  taskId: string;
-  revision: number;
-  state: TaskState;
-  activeActivation: number | null;
-  candidateSha: string | null;
-}
-
-export function taskProgressFromResult(result: TaskResult): TaskProgress {
-  return {
-    event: "progress",
-    taskId: result.taskId,
-    revision: result.revision,
-    state: result.state,
-    activeActivation: result.activeActivation,
-    candidateSha: result.candidateSha,
-  };
-}
-
 export function isTerminalState(state: TaskState): boolean {
   return state === "reviewed_pr" || state === "merged" || state === "blocked";
 }
@@ -128,56 +108,6 @@ export interface AuthorityInput {
 export interface TaskExecutionInput {
   contractPath: string;
   rawContract: string;
-}
-
-export type TaskHistoryKind =
-  | "implementer"
-  | "project_check"
-  | "fresh_review"
-  | "forge_delivery"
-  | "coordinator_restart"
-  | "execution_owner_change";
-
-export type TaskHistoryOutcome =
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "cancelled"
-  | "blocked"
-  | "observed";
-
-export interface TaskHistoryTokenUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-}
-
-export interface TaskHistoryRecordInput {
-  taskId: string;
-  kind: TaskHistoryKind;
-  activation: number | null;
-  cycle: number | null;
-  role: string | null;
-  profile: string | null;
-  observedModel: string | null;
-  observedProvider: string | null;
-  executionOwner?: string | null;
-  previousExecutionOwner?: string | null;
-  startedAtEpochMs: number;
-  endedAtEpochMs: number | null;
-  outcome: TaskHistoryOutcome;
-  failure: string | null;
-  candidateSha: string | null;
-  candidateFence: number | null;
-  tokenUsage: TaskHistoryTokenUsage | null;
-}
-
-export interface TaskHistoryRecord extends TaskHistoryRecordInput {
-  id: number;
-}
-
-export interface TaskStatus extends TaskResult {
-  history: TaskHistoryRecord[];
 }
 
 const transitions: Record<TaskState, readonly TaskState[]> = {

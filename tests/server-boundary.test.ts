@@ -152,7 +152,7 @@ describe("CLI/server boundary", () => {
         env: { USINE_SERVER_URL: server.url },
       });
       const observed = JSON.parse(status.stdout);
-      expect(observed).toMatchObject({ ...submitted, history: [] });
+      expect(observed).toEqual(submitted);
       expect(JSON.stringify(observed)).not.toContain("boundary-private-key-181");
 
       delete serverEnvironment.USINE_FORGE_PROFILE_DEFAULT_APP_SLUG;
