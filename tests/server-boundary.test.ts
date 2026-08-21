@@ -7,7 +7,10 @@ import { startUsineServer } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
 import {
   inspectRepository,
+  listRepositories,
+  listTasks,
   registerRepository,
+  serverSnapshot,
   submitTask,
 } from "../apps/cli/src/server-client.js";
 
@@ -104,18 +107,15 @@ describe("CLI/server boundary", () => {
         state: "admitted",
         repository: {
           id: taskId,
-          path: trustedPath,
           owner: "example",
           name: taskId,
           baseBranch: "main",
-          projectCheck: { command: "true", timeoutMs: 1_000 },
-          gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
         },
       });
+      expect(JSON.stringify(submitted)).not.toContain(trustedPath);
 
       await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
         id: taskId,
-        path: trustedPath,
         owner: "example",
         name: taskId,
       });
@@ -135,16 +135,15 @@ describe("CLI/server boundary", () => {
       });
       await expect(inspectRepository(server.url, taskId)).resolves.toMatchObject({
         baseBranch: "release",
-        implementerProfile: "updated-writer-profile",
-        reviewerProfile: "updated-reviewer-profile",
-        forgeProfile: "default",
-        projectCheck: { command: "false", timeoutMs: 2_000 },
+        revision: 2,
       });
+      const updatedRepositoryStatus = await inspectRepository(server.url, taskId);
+      expect(updatedRepositoryStatus).not.toHaveProperty("implementerProfile");
+      expect(updatedRepositoryStatus).not.toHaveProperty("reviewerProfile");
+      expect(updatedRepositoryStatus).not.toHaveProperty("forgeProfile");
       const admittedAgain = await submitTask(server.url, { contractPath, repositoryId: taskId });
       expect(admittedAgain.repository).toMatchObject({
         baseBranch: "main",
-        projectCheck: { command: "true", timeoutMs: 1_000 },
-        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
 
       const status = await execa("node", [cliPath, "status", taskId], {
@@ -288,6 +287,17 @@ describe("CLI/server boundary", () => {
       expect(seen.get("profiles-one")).toEqual(["one-writer", "one-reviewer", "app", "one-app", 2]);
       expect(seen.get("profiles-two")).toEqual(["two-writer", "two-reviewer", "app", "two-app", 4]);
 
+      await expect(listRepositories(server.url, 1)).resolves.toMatchObject({
+        repositories: [{ id: "profiles-one" }],
+      });
+      await expect(listTasks(server.url, 1)).resolves.toMatchObject({
+        tasks: [{ taskId: "profiles-one" }],
+      });
+      await expect(serverSnapshot(server.url, 1)).resolves.toMatchObject({
+        repositories: [{ id: "profiles-one" }],
+        tasks: [{ taskId: "profiles-one" }],
+      });
+
       await registerRepository(server.url, {
         id: "profiles-one",
         path: await realpath(first.path),
@@ -301,9 +311,13 @@ describe("CLI/server boundary", () => {
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
       await expect(inspectRepository(server.url, "profiles-two")).resolves.toMatchObject({
-        implementerProfile: "two-writer",
-        reviewerProfile: "two-reviewer",
+        id: "profiles-two",
+        revision: 1,
       });
+      const unchangedRepository = await inspectRepository(server.url, "profiles-two");
+      expect(unchangedRepository).not.toHaveProperty("implementerProfile");
+      expect(unchangedRepository).not.toHaveProperty("reviewerProfile");
+      expect(unchangedRepository).not.toHaveProperty("forgeProfile");
 
       const nextTaskId = "profiles-one-next";
       const nextContractPath = join(first.path, "task-next.json");

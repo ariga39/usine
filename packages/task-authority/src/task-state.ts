@@ -73,6 +73,130 @@ export interface TaskResult {
   };
 }
 
+export interface TaskRepositoryResource {
+  id: string;
+  owner: string;
+  name: string;
+  baseBranch: string;
+}
+
+export interface PublicCheckResult {
+  sha: string;
+  status: "passed" | "failed";
+  exitCode: number;
+}
+
+export type TaskBlockerClassification =
+  | "elapsed_budget"
+  | "invalid_phase"
+  | "missing_evidence"
+  | "provider_failure"
+  | "project_check_failure"
+  | "review_inconclusive"
+  | "delivery_failure"
+  | "unknown";
+
+export interface PublicReviewVerdict {
+  sha: string;
+  verdict: ReviewVerdict["verdict"];
+  classification: ReviewVerdict["verdict"];
+  findingCount: number;
+}
+
+export interface PublicBlockerDiagnostic {
+  classification: TaskBlockerClassification;
+}
+
+export interface TaskResource {
+  schemaVersion: 2;
+  taskId: string;
+  contractHash: string;
+  revision: number;
+  deadlineEpochMs: number;
+  state: TaskState;
+  mergeAuthorized: boolean;
+  candidateSha: string | null;
+  candidateFence: number | null;
+  check: PublicCheckResult | null;
+  review: PublicReviewVerdict | null;
+  delivery: DeliveryEffect | null;
+  blocker: PublicBlockerDiagnostic | null;
+  activeActivation: number | null;
+  writer: { repositoryIdentity: string };
+  repository?: TaskRepositoryResource;
+  evidence: TaskResult["evidence"];
+}
+
+export function taskResourceFromResult(result: TaskResult): TaskResource {
+  return {
+    schemaVersion: 2,
+    taskId: result.taskId,
+    contractHash: result.contractHash,
+    revision: result.revision,
+    deadlineEpochMs: result.deadlineEpochMs,
+    state: result.state,
+    mergeAuthorized: result.mergeAuthorized,
+    candidateSha: result.candidateSha,
+    candidateFence: result.candidateFence,
+    check: result.check
+      ? { sha: result.check.sha, status: result.check.status, exitCode: result.check.exitCode }
+      : null,
+    review: result.review
+      ? {
+          sha: result.review.sha,
+          verdict: result.review.verdict,
+          classification: result.review.verdict,
+          findingCount: result.review.findings.length,
+        }
+      : null,
+    delivery: result.delivery
+      ? {
+          sha: result.delivery.sha,
+          effect: result.delivery.effect,
+          prNumber: result.delivery.prNumber,
+          url: result.delivery.url,
+          attestationId: result.delivery.attestationId,
+          merge: result.delivery.merge ? { ...result.delivery.merge } : null,
+        }
+      : null,
+    blocker: result.blocker ? publicBlockerFromText(result.blocker) : null,
+    activeActivation: result.activeActivation,
+    writer: { ...result.writer },
+    repository: result.repository
+      ? {
+          id: result.repository.id,
+          owner: result.repository.owner,
+          name: result.repository.name,
+          baseBranch: result.repository.baseBranch,
+        }
+      : undefined,
+    evidence: { ...result.evidence },
+  };
+}
+
+export function publicBlockerFromText(blocker: string): PublicBlockerDiagnostic {
+  const normalized = blocker.toLowerCase();
+  const classification: TaskBlockerClassification =
+    normalized.includes("elapsed") ||
+    normalized.includes("deadline") ||
+    normalized.includes("budget")
+      ? "elapsed_budget"
+      : normalized.includes("invalid phase")
+        ? "invalid_phase"
+        : normalized.includes("missing") && normalized.includes("evidence")
+          ? "missing_evidence"
+          : normalized.includes("provider")
+            ? "provider_failure"
+            : normalized.includes("project check") || normalized.includes("check failure")
+              ? "project_check_failure"
+              : normalized.includes("review") && normalized.includes("inconclusive")
+                ? "review_inconclusive"
+                : normalized.includes("delivery") || normalized.includes("merge")
+                  ? "delivery_failure"
+                  : "unknown";
+  return { classification };
+}
+
 export function isTerminalState(state: TaskState): boolean {
   return state === "reviewed_pr" || state === "merged" || state === "blocked";
 }

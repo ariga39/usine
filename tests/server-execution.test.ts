@@ -19,6 +19,7 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
+  type TaskResource,
   type TaskResult,
   type RepositorySnapshot,
 } from "@usine/task-authority";
@@ -108,9 +109,9 @@ function environment(stateDirectory: string, repositoryName: string): NodeJS.Pro
 }
 
 async function waitFor(
-  read: () => Promise<TaskResult | null>,
-  predicate: (result: TaskResult) => boolean,
-): Promise<TaskResult> {
+  read: () => Promise<TaskResource | null>,
+  predicate: (result: TaskResource) => boolean,
+): Promise<TaskResource> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const result = await read();
     if (result && predicate(result)) return result;
@@ -233,7 +234,7 @@ describe("server-owned execution", () => {
         () => taskStatus(server.url, admitted.taskId),
         (result) => result.state === "blocked",
       );
-      expect(completed.blocker).toBe("fake execution complete");
+      expect(completed.blocker).toEqual({ classification: "unknown" });
       expect(JSON.stringify(completed)).not.toContain(forgeSecretToken);
       expect(JSON.stringify(completed)).not.toContain(forgeSecretKeyPath);
       expect(seen).toEqual([admitted.taskId]);
@@ -285,7 +286,7 @@ describe("server-owned execution", () => {
         () => taskStatus(second.url, admitted.taskId),
         (result) => result.state === "blocked",
       );
-      expect(completed.blocker).toBe("fake execution complete");
+      expect(completed.blocker).toEqual({ classification: "unknown" });
       expect(firstSeen).toEqual([admitted.taskId]);
       expect(restartedSeen).toEqual([admitted.taskId]);
       expect(completed.evidence.restartRecoveries).toBe(1);
@@ -349,8 +350,30 @@ describe("server-owned execution", () => {
         error: "task_state_quarantined",
       });
 
-      const corrupt = await taskStatus(second.url, corruptTaskId);
-      expect(corrupt?.state).toBe("blocked");
+      const quarantinedListResponse = await fetch(new URL("/v1/tasks", second.url));
+      expect(quarantinedListResponse.status).toBe(503);
+      expect(await quarantinedListResponse.json()).toEqual({
+        taskId: corruptTaskId,
+        error: "task_state_quarantined",
+      });
+
+      const quarantinedEventsResponse = await fetch(
+        new URL(`/v1/tasks/${encodeURIComponent(corruptTaskId)}/events`, second.url),
+      );
+      expect(quarantinedEventsResponse.status).toBe(503);
+      expect(await quarantinedEventsResponse.json()).toEqual({
+        taskId: corruptTaskId,
+        error: "task_state_quarantined",
+      });
+
+      const corruptResponse = await fetch(
+        new URL(`/v1/tasks/${encodeURIComponent(corruptTaskId)}`, second.url),
+      );
+      expect(corruptResponse.status).toBe(503);
+      expect(await corruptResponse.json()).toEqual({
+        taskId: corruptTaskId,
+        error: "task_state_quarantined",
+      });
       await healthyStarted.promise;
       expect((await taskStatus(second.url, admitted.taskId))?.taskId).toBe(admitted.taskId);
       expect(reentered).toEqual([admitted.taskId]);

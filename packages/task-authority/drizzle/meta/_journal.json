@@ -78,6 +78,13 @@
       "when": 1787356800002,
       "tag": "0010_task_events",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787356800003,
+      "tag": "0011_repository_resource_revision",
+      "breakpoints": true
     }
   ]
 }

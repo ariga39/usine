@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskEvent, TaskResult, TaskState } from "@usine/task-authority";
+import type { TaskEvent, TaskResource, TaskState } from "@usine/task-authority";
 
-function result(taskId: string, revision: number, state: TaskState): TaskResult {
+function result(taskId: string, revision: number, state: TaskState): TaskResource {
   return {
     schemaVersion: 2,
     taskId,
@@ -17,7 +17,7 @@ function result(taskId: string, revision: number, state: TaskState): TaskResult 
     check: null,
     review: null,
     delivery: null,
-    blocker: state === "blocked" ? "operator stopped task" : null,
+    blocker: state === "blocked" ? { classification: "unknown" } : null,
     activeActivation: state === "admitted" ? 1 : null,
     writer: { repositoryIdentity: "example/repository" },
     evidence: {

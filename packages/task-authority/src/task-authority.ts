@@ -1,10 +1,11 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { repositories, repositoryLeases, taskEvents, taskQuarantines, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
   decodePersistedTaskResult,
   decodeRawPersistedTaskResult,
   TaskStateQuarantinedError,
+  isTaskStateQuarantinedError,
   TASK_RESULT_SCHEMA_VERSION,
 } from "./task-state-schema.js";
 import {
@@ -29,8 +30,10 @@ import {
 } from "./task-state.js";
 import {
   snapshotFromRegistration,
+  repositoryResourceFromSnapshot,
   taskSnapshotFromRegistration,
   type RepositoryRegistration,
+  type RepositoryResource,
   type RepositorySnapshot,
 } from "./repository.js";
 
@@ -44,7 +47,10 @@ export type {
   TaskExecutionInput,
   TaskObservation,
   TaskResult,
+  TaskResource,
 } from "./task-state.js";
+import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
+import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
 export {
   decodeTaskEvent,
   decodeTaskEventPage,
@@ -59,6 +65,7 @@ export type {
 } from "./task-event.js";
 export type {
   RepositoryRegistration,
+  RepositoryResource,
   RepositorySnapshot,
   TaskRepositorySnapshot,
 } from "./repository.js";
@@ -66,6 +73,11 @@ export type {
 type AuthorityDatabase = RuntimeDatabase;
 
 const MAX_EVENT_LIMIT = 200;
+const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
+
+function saturatingAdd(left: number, right: number): number {
+  return left >= MAX_DURABLE_REVISION - right ? MAX_DURABLE_REVISION : left + right;
+}
 
 export class TaskAuthority {
   constructor(private readonly database: AuthorityDatabase) {}
@@ -87,6 +99,7 @@ export class TaskAuthority {
             implementerProfile: input.implementerProfile,
             reviewerProfile: input.reviewerProfile,
             forgeProfile: input.forgeProfile,
+            revision: sql`${repositories.revision} + 1`,
             projectCheckCommand: input.projectCheck.command,
             projectCheckTimeoutMs: input.projectCheck.timeoutMs,
             gitAuthorName: input.gitAuthor.name,
@@ -138,6 +151,140 @@ export class TaskAuthority {
       : null;
   }
 
+  async lookupRepositoryResource(id: string): Promise<RepositoryResource | null> {
+    const row = await this.database.query.repositories.findFirst({
+      where: eq(repositories.id, id),
+    });
+    if (!row) return null;
+    return repositoryResourceFromSnapshot(
+      {
+        id: row.id,
+        path: row.path,
+        owner: row.owner,
+        name: row.name,
+        baseBranch: row.baseBranch,
+        implementerProfile: row.implementerProfile,
+        reviewerProfile: row.reviewerProfile,
+        forgeProfile: row.forgeProfile,
+        projectCheck: { command: row.projectCheckCommand, timeoutMs: row.projectCheckTimeoutMs },
+        gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
+      },
+      row.revision,
+    );
+  }
+
+  async listRepositories(limit = 100): Promise<RepositoryResource[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), 200);
+    const rows = await this.database
+      .select()
+      .from(repositories)
+      .orderBy(asc(repositories.id))
+      .limit(boundedLimit);
+    return rows.map((row) =>
+      repositoryResourceFromSnapshot(
+        {
+          id: row.id,
+          path: row.path,
+          owner: row.owner,
+          name: row.name,
+          baseBranch: row.baseBranch,
+          implementerProfile: row.implementerProfile,
+          reviewerProfile: row.reviewerProfile,
+          forgeProfile: row.forgeProfile,
+          projectCheck: { command: row.projectCheckCommand, timeoutMs: row.projectCheckTimeoutMs },
+          gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
+        },
+        row.revision,
+      ),
+    );
+  }
+
+  async listCodingSessions(limit = 100): Promise<CodingSessionResource[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), 100);
+    const rows = await this.database
+      .select()
+      .from(taskEvents)
+      .orderBy(asc(taskEvents.taskId), asc(taskEvents.sequence));
+    const active = new Map<string, CodingSessionResource>();
+    for (const row of rows) {
+      let event: TaskEvent;
+      try {
+        event = decodeTaskEvent(row);
+      } catch {
+        throw new TaskStateQuarantinedError(row.taskId);
+      }
+      if (
+        event.data.type === "coding_session_started" ||
+        event.data.type === "coding_thread_started"
+      ) {
+        active.set(`${event.taskId}:${event.data.sessionId}`, {
+          taskId: event.taskId,
+          sessionId: event.data.sessionId,
+          role: event.data.role,
+          activation: event.data.activation,
+          revision: event.sequence,
+        });
+      } else if (event.data.type === "coding_session_completed") {
+        active.delete(`${event.taskId}:${event.data.sessionId}`);
+      }
+    }
+    return [...active.values()]
+      .toSorted((left, right) =>
+        `${left.taskId}:${left.sessionId}`.localeCompare(`${right.taskId}:${right.sessionId}`),
+      )
+      .slice(0, boundedLimit);
+  }
+
+  async durableRevision(): Promise<number> {
+    const repositoryRows = await this.database
+      .select({ revision: repositories.revision })
+      .from(repositories);
+    const eventRows = await this.database
+      .select({ taskId: taskEvents.taskId, sequence: taskEvents.sequence })
+      .from(taskEvents);
+    const taskRows = await this.database
+      .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
+      .from(taskRuns);
+    const quarantinedRows = await this.database
+      .select({ taskId: taskQuarantines.taskId })
+      .from(taskQuarantines);
+    let weightedRevision = 0;
+    let factCount = 0;
+    const addFact = (value: number): void => {
+      factCount = saturatingAdd(factCount, 1);
+      weightedRevision = saturatingAdd(weightedRevision, Math.max(0, value));
+    };
+    for (const row of repositoryRows) addFact(row.revision);
+    for (const row of eventRows) addFact(row.sequence);
+    for (const row of taskRows) {
+      try {
+        addFact(decodeRawPersistedTaskResult(row.rawResult).revision);
+      } catch {
+        throw new TaskStateQuarantinedError(row.taskId);
+      }
+    }
+    quarantinedRows.forEach(() => addFact(0));
+    return saturatingAdd(weightedRevision, factCount > 0 ? factCount - 1 : 0);
+  }
+
+  async readServerSnapshot(limit = 100): Promise<ServerSnapshot> {
+    return this.inReadTransaction(async (database) => {
+      const authority = new TaskAuthority(database);
+      const repositoryResources = await authority.listRepositories(limit);
+      const tasks = await authority.listTasks(limit);
+      const codingSessions = await authority.listCodingSessions(limit);
+      const revision = await authority.durableRevision();
+      return {
+        schemaVersion: 1,
+        revision,
+        server: { status: "ok", revision },
+        repositories: repositoryResources,
+        tasks,
+        codingSessions,
+      };
+    });
+  }
+
   async lookup(taskId: string): Promise<TaskResult | null> {
     const rows = await this.database
       .select({ rawResult: sql<string>`${taskRuns.result}` })
@@ -145,7 +292,14 @@ export class TaskAuthority {
       .where(eq(taskRuns.taskId, taskId))
       .limit(1);
     const row = rows[0];
-    if (row) return decodeRawPersistedTaskResult(row.rawResult);
+    if (row) {
+      try {
+        return decodeRawPersistedTaskResult(row.rawResult);
+      } catch (error) {
+        if (isTaskStateQuarantinedError(error)) throw new TaskStateQuarantinedError(taskId);
+        throw error;
+      }
+    }
     const quarantined = await this.database
       .select({ taskId: taskQuarantines.taskId })
       .from(taskQuarantines)
@@ -153,6 +307,29 @@ export class TaskAuthority {
       .limit(1);
     if (quarantined[0]) throw new TaskStateQuarantinedError();
     return null;
+  }
+
+  async listTasks(limit = 100): Promise<TaskListItem[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), 200);
+    const quarantined = await this.database
+      .select({ taskId: taskQuarantines.taskId })
+      .from(taskQuarantines)
+      .orderBy(asc(taskQuarantines.taskId));
+    if (quarantined[0]) throw new TaskStateQuarantinedError(quarantined[0].taskId);
+    const rows = await this.database
+      .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
+      .from(taskRuns)
+      .orderBy(asc(taskRuns.taskId));
+    const tasks: TaskListItem[] = [];
+    for (const row of rows) {
+      try {
+        tasks.push(taskListItemFromResult(decodeRawPersistedTaskResult(row.rawResult)));
+      } catch (error) {
+        if (isTaskStateQuarantinedError(error)) throw new TaskStateQuarantinedError(row.taskId);
+        throw error;
+      }
+    }
+    return tasks.slice(0, boundedLimit);
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {
@@ -447,6 +624,19 @@ export class TaskAuthority {
     };
     if (!database.transaction) return callback(this.database);
     return database.transaction(callback, { behavior: "immediate" });
+  }
+
+  private async inReadTransaction<T>(
+    callback: (database: AuthorityDatabase) => Promise<T>,
+  ): Promise<T> {
+    const database = this.database as AuthorityDatabase & {
+      transaction?: (
+        callback: (transaction: AuthorityDatabase) => Promise<T>,
+        config?: { behavior?: "deferred" | "immediate" | "exclusive" },
+      ) => Promise<T>;
+    };
+    if (!database.transaction) return callback(this.database);
+    return database.transaction(callback, { behavior: "deferred" });
   }
 
   private static async appendFactEvents(

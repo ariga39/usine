@@ -144,6 +144,26 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("fails closed when Task discovery encounters malformed durable state", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-list-quarantine-${Date.now()}`;
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-list-quarantine-hash",
+      repositoryIdentity: `authority/list-quarantine-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    const database = new DatabaseSync(path);
+    database.prepare("UPDATE task_runs SET result = ? WHERE task_id = ?").run("{ invalid", taskId);
+    database.close();
+
+    await expect(authority.listTasks()).rejects.toMatchObject({
+      code: "task_state_quarantined",
+    });
+  });
+
   test("upgrades task history into ordered decodable events and removes the legacy table", async () => {
     const path = await makePreTaskEventsDatabase();
     const authority = authorityAt(path);

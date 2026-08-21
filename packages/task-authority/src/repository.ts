@@ -38,6 +38,18 @@ export const repositoryRegistrationSchema = z
 
 export type RepositoryRegistration = z.infer<typeof repositoryRegistrationSchema>;
 
+export const repositoryResourceSchema = z
+  .object({
+    id: identifier,
+    revision: z.number().int().nonnegative(),
+    owner: nonBlank,
+    name: nonBlank,
+    baseBranch: nonBlank,
+  })
+  .strict();
+
+export type RepositoryResource = z.infer<typeof repositoryResourceSchema>;
+
 /** The immutable repository facts copied into an admitted Task. */
 export type RepositorySnapshot = RepositoryRegistration;
 export type TaskRepositorySnapshot = Omit<
@@ -68,5 +80,18 @@ export function snapshotFromRegistration(registration: RepositoryRegistration): 
     ...registration,
     projectCheck: { ...registration.projectCheck },
     gitAuthor: { ...registration.gitAuthor },
+  };
+}
+
+export function repositoryResourceFromSnapshot(
+  snapshot: RepositorySnapshot,
+  revision: number,
+): RepositoryResource {
+  return {
+    id: snapshot.id,
+    revision,
+    owner: snapshot.owner,
+    name: snapshot.name,
+    baseBranch: snapshot.baseBranch,
   };
 }

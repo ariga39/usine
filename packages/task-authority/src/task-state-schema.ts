@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import type { TaskResult } from "./task-state.js";
+import type { TaskResource } from "./task-state.js";
 
 export const TASK_RESULT_SCHEMA_VERSION = 2 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
@@ -7,7 +8,7 @@ export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined"
 export class TaskStateQuarantinedError extends Error {
   readonly code = "task_state_quarantined";
 
-  constructor() {
+  constructor(readonly taskId?: string) {
     super(TASK_STATE_QUARANTINE_DIAGNOSTIC);
     this.name = "TaskStateQuarantinedError";
   }
@@ -104,6 +105,84 @@ const currentTaskResult = Schema.Struct({
   schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
   ...taskResultFields,
 });
+
+export const taskListItemSchema = Schema.Struct({
+  taskId: Schema.String,
+  revision: Schema.Natural,
+  deadlineEpochMs: Schema.Int,
+  state: taskState,
+  candidateSha: Schema.NullOr(exactSha),
+  activeActivation: Schema.NullOr(Schema.Natural),
+  writer: Schema.Struct({ repositoryIdentity: Schema.String }),
+  evidence: Schema.Struct({
+    implementerActivations: Schema.Natural,
+    reviewCycles: Schema.Natural,
+    changesRequestedBatches: Schema.Natural,
+    restartRecoveries: Schema.Natural,
+  }),
+});
+
+export const taskListPageSchema = Schema.Struct({
+  tasks: Schema.Array(taskListItemSchema),
+});
+
+const publicCheckResult = Schema.Struct({
+  sha: exactSha,
+  status: Schema.Literals(["passed", "failed"]),
+  exitCode: Schema.Int,
+});
+const publicReviewVerdict = Schema.Struct({
+  sha: exactSha,
+  verdict: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
+  classification: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
+  findingCount: Schema.Natural,
+});
+const publicBlockerDiagnostic = Schema.Struct({
+  classification: Schema.Literals([
+    "elapsed_budget",
+    "invalid_phase",
+    "missing_evidence",
+    "provider_failure",
+    "project_check_failure",
+    "review_inconclusive",
+    "delivery_failure",
+    "unknown",
+  ]),
+});
+const publicTaskRepository = Schema.Struct({
+  id: Schema.String,
+  owner: Schema.String,
+  name: Schema.String,
+  baseBranch: Schema.String,
+});
+const publicTaskResource = Schema.Struct({
+  schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
+  taskId: Schema.String,
+  contractHash: Schema.String,
+  revision: Schema.Natural,
+  deadlineEpochMs: Schema.Int,
+  state: taskState,
+  mergeAuthorized: Schema.Boolean,
+  candidateSha: Schema.NullOr(exactSha),
+  candidateFence: Schema.NullOr(Schema.Natural),
+  check: Schema.NullOr(publicCheckResult),
+  review: Schema.NullOr(publicReviewVerdict),
+  delivery: Schema.NullOr(deliveryEffect),
+  blocker: Schema.NullOr(publicBlockerDiagnostic),
+  activeActivation: Schema.NullOr(Schema.Natural),
+  writer: Schema.Struct({ repositoryIdentity: Schema.String }),
+  repository: Schema.optional(publicTaskRepository),
+  evidence: Schema.Struct({
+    implementerActivations: Schema.Natural,
+    reviewCycles: Schema.Natural,
+    changesRequestedBatches: Schema.Natural,
+    restartRecoveries: Schema.Natural,
+  }),
+});
+
+export type TaskListItem = Schema.Schema.Type<typeof taskListItemSchema>;
+export type TaskListPage = Schema.Schema.Type<typeof taskListPageSchema>;
+export type DecodedTaskResource = Schema.Schema.Type<typeof publicTaskResource>;
 
 const legacyTaskResultFields = {
   taskId: Schema.String,
@@ -218,4 +297,49 @@ export function decodeRawPersistedTaskResult(input: string): TaskResult {
 
 export function decodeCurrentTaskResult(input: unknown): TaskResult {
   return projectDecodedResult(Schema.decodeUnknownSync(currentTaskResult)(input));
+}
+
+export function decodeTaskResource(input: unknown): TaskResource {
+  const decoded = Schema.decodeUnknownSync(publicTaskResource)(input);
+  return {
+    schemaVersion: decoded.schemaVersion,
+    taskId: decoded.taskId,
+    contractHash: decoded.contractHash,
+    revision: decoded.revision,
+    deadlineEpochMs: decoded.deadlineEpochMs,
+    state: decoded.state,
+    mergeAuthorized: decoded.mergeAuthorized,
+    candidateSha: decoded.candidateSha,
+    candidateFence: decoded.candidateFence,
+    check: decoded.check ? { ...decoded.check } : null,
+    review: decoded.review ? { ...decoded.review } : null,
+    delivery: decoded.delivery
+      ? {
+          ...decoded.delivery,
+          merge: decoded.delivery.merge ? { ...decoded.delivery.merge } : null,
+        }
+      : null,
+    blocker: decoded.blocker,
+    activeActivation: decoded.activeActivation,
+    writer: { ...decoded.writer },
+    repository: decoded.repository ? { ...decoded.repository } : undefined,
+    evidence: { ...decoded.evidence },
+  };
+}
+
+export function taskListItemFromResult(result: TaskResult): TaskListItem {
+  return {
+    taskId: result.taskId,
+    revision: result.revision,
+    deadlineEpochMs: result.deadlineEpochMs,
+    state: result.state,
+    candidateSha: result.candidateSha,
+    activeActivation: result.activeActivation,
+    writer: { repositoryIdentity: result.writer.repositoryIdentity },
+    evidence: { ...result.evidence },
+  };
+}
+
+export function decodeTaskListPage(input: unknown): TaskListPage {
+  return Schema.decodeUnknownSync(taskListPageSchema)(input);
 }

@@ -22,17 +22,24 @@ USINE_ROLE_OUTPUT_MODEL=placeholder-normalization-model \
 node apps/cli/dist/cli.mjs server
 ```
 
-另一个 CLI 进程必须先注册 Repository，再通过同一 local server 提交并跟随 Task：
+另一个 CLI 进程必须先注册 Repository，再通过同一 local server 发现并跟随 Task：
 
 ```sh
 node apps/cli/dist/cli.mjs register ./repository-registration.json
-node apps/cli/dist/cli.mjs inspect <repository-id>
+node apps/cli/dist/cli.mjs server health
+node apps/cli/dist/cli.mjs server snapshot
+node apps/cli/dist/cli.mjs repository list
+node apps/cli/dist/cli.mjs repository get <repository-id>
 node apps/cli/dist/cli.mjs submit ./committed-task-contract.json
-node apps/cli/dist/cli.mjs status <task-id>
-node apps/cli/dist/cli.mjs follow <task-id>
+node apps/cli/dist/cli.mjs task list
+node apps/cli/dist/cli.mjs task get <task-id>
+node apps/cli/dist/cli.mjs task history --after <sequence> <task-id>
+node apps/cli/dist/cli.mjs task watch --after <sequence> <task-id>
 ```
 
-当前 CLI 命令只有 `server`、`register`、`inspect`、`submit`、`status` 和 `follow`。Resource CLI work is not complete; in particular, do not infer completion for Issue #188 from this command surface.
+Operator reads use `server health|snapshot`, `repository list|get`, and `task list|get|history|watch`. Human-readable output is the default; append `--json` for stable machine-readable resources. Watch and history accept recognized options before or after the Task ID. The existing `register` and `submit` commands remain the mutation entry points. `inspect` is a compatibility alias for `repository get`, while `status` and `follow` are compatibility aliases for `task get` and `task watch`; their output is the same safe resource projection and never includes repository paths or private policy facts.
+
+CLI exit codes are stable: usage `2`, not-found `3`, timeout `4`, connection `5`, server `6`, and validation `7`. Invalid task contracts and server-side validation now use `7`; callers that previously treated those failures as usage must migrate their checks.
 
 完整交付需要为每个已注册 Repository 配置其 `forgeProfile` 对应的 `USINE_FORGE_PROFILE_<PROFILE>_*` GitHub App 变量。配置只在 host runtime 使用；Repository durable facts 保存 profile 名称，不保存凭据。上面的数值、身份、路径和任务文件名都是占位符。
 

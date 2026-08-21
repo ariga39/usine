@@ -16,6 +16,7 @@ export const taskRuns = sqliteTable("task_runs", {
 
 export const repositories = sqliteTable("repositories", {
   id: text("id").primaryKey(),
+  revision: integer("revision").notNull().default(1),
   path: text("path").notNull(),
   owner: text("owner").notNull(),
   name: text("name").notNull(),
