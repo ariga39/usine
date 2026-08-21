@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import type { TaskHistoryRecord, TaskResult, TaskStatus } from "./task-state.js";
 
-export const TASK_RESULT_SCHEMA_VERSION = 1 as const;
+export const TASK_RESULT_SCHEMA_VERSION = 2 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
 
 export class TaskStateQuarantinedError extends Error {
@@ -29,6 +29,7 @@ const taskState = Schema.Literals([
   "checked",
   "reviewed",
   "reviewed_pr",
+  "merged",
   "blocked",
 ]);
 const checkResult = Schema.Struct({
@@ -45,7 +46,21 @@ const reviewVerdict = Schema.Struct({
   summary: Schema.String,
   findings: Schema.Array(Schema.String),
 });
+const mergeEffect = Schema.Struct({
+  prNumber: Schema.Natural,
+  approvedHeadSha: exactSha,
+  mergeCommitSha: exactSha,
+  observedState: Schema.Literal("merged"),
+});
 const deliveryEffect = Schema.Struct({
+  sha: exactSha,
+  effect: Schema.Literal("github"),
+  prNumber: Schema.Natural,
+  url: Schema.String,
+  attestationId: Schema.String,
+  merge: Schema.NullOr(mergeEffect),
+});
+const legacyDeliveryEffect = Schema.Struct({
   sha: exactSha,
   effect: Schema.Literal("github"),
   prNumber: Schema.Natural,
@@ -101,6 +116,7 @@ const taskResultFields = {
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
   state: taskState,
+  mergeAuthorized: Schema.Boolean,
   candidateSha: Schema.NullOr(exactSha),
   candidateFence: Schema.NullOr(Schema.Natural),
   check: Schema.NullOr(checkResult),
@@ -128,13 +144,46 @@ const currentTaskStatus = Schema.Struct({
   history: Schema.Array(historyRecord),
 });
 
-/** The unversioned result written by the current main branch. */
+const legacyTaskResultFields = {
+  taskId: Schema.String,
+  contractHash: Schema.String,
+  revision: Schema.Natural,
+  deadlineEpochMs: Schema.Int,
+  state: Schema.Literals([
+    "admitted",
+    "candidate",
+    "checked",
+    "reviewed",
+    "reviewed_pr",
+    "blocked",
+  ]),
+  candidateSha: Schema.NullOr(exactSha),
+  candidateFence: Schema.NullOr(Schema.Natural),
+  check: Schema.NullOr(checkResult),
+  review: Schema.NullOr(reviewVerdict),
+  delivery: Schema.NullOr(legacyDeliveryEffect),
+  blocker: Schema.NullOr(Schema.String),
+  activeActivation: Schema.NullOr(Schema.Natural),
+  writer: Schema.Struct({ repositoryIdentity: Schema.String }),
+  evidence: Schema.Struct({
+    implementerActivations: Schema.Natural,
+    reviewCycles: Schema.Natural,
+    changesRequestedBatches: Schema.Natural,
+    restartRecoveries: Schema.Natural,
+  }),
+  repository: Schema.optional(repositorySnapshot),
+} as const;
+const legacyTaskResult = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  ...legacyTaskResultFields,
+});
+/** The unversioned result written by the pre-versioned main branch. */
 const priorTaskResult = Schema.Struct({
   schemaVersion: Schema.optional(Schema.Undefined),
-  ...taskResultFields,
+  ...legacyTaskResultFields,
 });
 
-const persistedTaskResult = Schema.Union([currentTaskResult, priorTaskResult]);
+const persistedTaskResult = Schema.Union([currentTaskResult, legacyTaskResult, priorTaskResult]);
 type DecodedPersistedTaskResult = Schema.Schema.Type<typeof persistedTaskResult>;
 
 function projectHistoryRecord(decoded: DecodedHistoryRecord): TaskHistoryRecord {
@@ -182,6 +231,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     revision: decoded.revision,
     deadlineEpochMs: decoded.deadlineEpochMs,
     state: decoded.state,
+    mergeAuthorized: "mergeAuthorized" in decoded ? decoded.mergeAuthorized : false,
     candidateSha: decoded.candidateSha,
     candidateFence: decoded.candidateFence,
     check: decoded.check,
@@ -193,7 +243,16 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
           findings: [...decoded.review.findings],
         }
       : null,
-    delivery: decoded.delivery,
+    delivery: decoded.delivery
+      ? {
+          sha: decoded.delivery.sha,
+          effect: decoded.delivery.effect,
+          prNumber: decoded.delivery.prNumber,
+          url: decoded.delivery.url,
+          attestationId: decoded.delivery.attestationId,
+          merge: "merge" in decoded.delivery ? decoded.delivery.merge : null,
+        }
+      : null,
     blocker: decoded.blocker,
     activeActivation: decoded.activeActivation,
     writer: { repositoryIdentity: decoded.writer.repositoryIdentity },

@@ -16,6 +16,7 @@ import {
 } from "./task-state-schema.js";
 import {
   applyTaskFact,
+  isTerminalState,
   type AuthorityInput,
   type CandidateFact,
   type CheckResult,
@@ -222,7 +223,7 @@ export class TaskAuthority {
       } catch {
         continue;
       }
-      if (result.state === "reviewed_pr" || result.state === "blocked") continue;
+      if (isTerminalState(result.state)) continue;
       if (!row.contractPath || !row.rawContract || !result.repository) continue;
       restartable.push({
         result,
@@ -248,6 +249,8 @@ export class TaskAuthority {
       throw new Error("admitted contract is immutable");
     if (result.writer.repositoryIdentity !== input.repositoryIdentity)
       throw new Error("task repository identity is immutable");
+    if (result.mergeAuthorized !== (input.contract.authorization.merge === true))
+      throw new Error("task merge authority is immutable");
     if (
       input.repository &&
       (!result.repository ||
@@ -310,6 +313,7 @@ export class TaskAuthority {
         revision: 0,
         deadlineEpochMs: input.deadlineEpochMs,
         state: "admitted",
+        mergeAuthorized: input.contract.authorization.merge === true,
         candidateSha: null,
         candidateFence: null,
         check: null,
@@ -359,7 +363,7 @@ export class TaskAuthority {
         .update(taskRuns)
         .set({ result: saved, updatedAt: new Date() })
         .where(eq(taskRuns.taskId, observation.taskId));
-      if (saved.state === "reviewed_pr" || saved.state === "blocked") {
+      if (isTerminalState(saved.state)) {
         await database
           .delete(repositoryLeases)
           .where(
@@ -408,8 +412,7 @@ export class TaskAuthority {
       const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
       const prior = decodePersistedTaskResult(current.result);
-      if (prior.state === "reviewed_pr" || prior.state === "blocked")
-        throw new Error("task is terminal");
+      if (isTerminalState(prior.state)) throw new Error("task is terminal");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
       });

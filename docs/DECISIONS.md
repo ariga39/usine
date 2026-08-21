@@ -1,7 +1,7 @@
 ---
 status: current
-updated: 2026-08-18
-issue: https://github.com/ariga39/usine/issues/1
+updated: 2026-08-22
+issue: https://github.com/ariga39/usine/issues/199
 ---
 
 # 当前决策
@@ -17,11 +17,11 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-005 | 领域数据默认使用 Drizzle ORM + Drizzle Kit，并直接使用 Node 24 `node:sqlite` transaction | 减少原始 SQL、repository boilerplate、migration 重复实现，同时保留轻量、显式的 TypeScript schema；attempt fence、effect identity 和 state transition 在同一 SQLite 事实库原子提交。 |
 | D-006 | Domain-facing Coding Session 保持 task-oriented `run(request) -> typed observation`；当前只有一个 supported adapter：官方 `@openai/codex-sdk`。Coordinator config 在 activation 前把一个 opaque named profile 解析为 exactly one adapter；没有 fallback、registry、capability negotiation 或 automatic routing。Herdr/transcript 不进入 production correctness path，profile 内的 model、provider、reasoning、service tier 与 credentials 不进入 durable model | #192 已证明当前 SDK lifecycle：thread start/run、thread ID、final schema output、usage、cancellation 和 failure。provider execution semantics 由 adapter 拥有；Coding Session 不承诺非-Codex compatibility。#195 已授权以验证静态共存的 app-server adapter，但尚未证明。 |
 | D-007 | `ai` + `@ai-sdk/openai` 只作为 optional final role-output normalization adapter；它不承担一般 classification、extraction 或 summary，也不取得 task authority | API key 只留在 coordinator；agent prose、provider success 和 process exit 都不授予 task authority。 |
-| D-008 | 当前 classification 为 `correct_before_expansion`。Coding Session、Task Authority、Delivery Run、Candidate Workspace、Quality Gate 和 Forge Delivery 已组成当前 serial path；每个 repository 只有一个 writer lease | #82/#83 与 #153 的 evidence 保持 bounded；#176 是 first real persistent-server delivery falsifier。第二 runtime/forge、分布式 runner、自动 merge authority 或更高并发需要授权 Issue 与实证。 |
-| D-009 | Candidate、checks、review verdict 和投影出的 attestation 全部绑定 immutable exact SHA | 防止 stale evidence 和“agent 说完成了”成为交付依据。 |
+| D-008 | 当前 classification 为 `correct_before_expansion`。Coding Session、Task Authority、Delivery Run、Candidate Workspace、Quality Gate 和 Forge Delivery 已组成当前 serial path；每个 repository 只有一个 writer lease | #82/#83 与 #153 的 evidence 保持 bounded；#176 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance，目标 PR 已交付并手工合并；#199 只保留窄的 hermetic exact-head merge evidence，不证明 production merge。第二 runtime/forge、分布式 runner、更宽的 merge authority 或更高并发仍需要授权 Issue 与实证。 |
+| D-009 | Candidate、checks、review verdict、投影出的 attestation 和 merge effect 全部绑定 immutable exact SHA | 防止 stale evidence、错误 merge head 和“agent 说完成了”成为交付依据。 |
 | D-010 | Reviewer 必须 fresh、可读取完整 codebase，并提交 explicit verdict；exact-SHA `approved` verdict 是 semantic approval，review run 完成与批准是两个事实 | 保留独立判断；delivery executor 只能投影 verdict，不能制造批准。需要 GitHub 原生 approval 时使用不同于 PR author/delivery identity 的 reviewer capability。 |
 | D-011 | GitHub 是当前 forge/delivery surface；每个 Repository 选择 opaque `forgeProfile`，host 按该 profile 解析 Octokit + GitHub App 短期 installation token；不保留 global credential selection，profile resolution failure blocks activation | 现有 private repos 已安装 App；不同 Repository 必须能使用不同 installation capability，且凭据不能进入 Task Contract、durable facts 或 worker。 |
-| D-012 | 第一项产品行为终止于带 exact-SHA semantic approval attestation 的 reviewed PR；自动 merge 位于同一 exact-head gate 后的后续 authority adapter | 先证明完整 review delivery；平台原生 approval 是仓库 ruleset 要求的额外事实，不得与 Usine verdict 混为一谈。 |
+| D-012 | 已由 D-026 supersede：第一项产品行为的终点由 Task Contract 的 immutable merge authority 决定 | 保留原 reviewed-PR pause 作为无 merge authority 的终态；授权的 exact-head merge 由同一 delivery reconciliation path 完成。 |
 | D-013 | Codex sandbox/host permissions 是默认 isolation；worker 无 delivery credential | 在 macOS/Linux 上先使用已存在能力，容器不是默认前置。 |
 | D-014 | GitHub Issue → branch/worktree → PR 是开发 Usine 自身的任务流；第一处 checkable/green state 以小 commit 形成可检查 checkpoint | Git 提供恢复、可见性、所有权和 integration，而不是进展代理。每个 Issue 仍需 coherent outcome；历史结构迁移不产生新的 authority。 |
 | D-015 | Canonical files + Issue/Git bootstrap 是 context 恢复真相；主编排 profile 可使用更大 window，worker/reviewer 使用 task-sized context | Window 只减少 compact，不替代 durable principles；分角色 context 降低旧讨论污染。 |
@@ -35,8 +35,9 @@ issue: https://github.com/ariga39/usine/issues/1
 | D-023 | Issue #116 将六个 canonical product modules 固定为真实 pnpm workspace packages：`@usine/task-authority`、`@usine/delivery-run`、`@usine/coding-session`、`@usine/candidate-workspace`、`@usine/quality-gate` 和 `@usine/forge-delivery`。生产代码与测试只能经声明依赖的 package exports 访问；图必须无环；CLI 与 `@usine/runtime` 是 composition root，不是第七个 behavior package。此决定 supersedes 8 节原先“模块不预先等同于 package、留在少量 workspace package 内”的可选边界方向。 | POC 将扩展，物理 package boundary 现在就是 ownership、测试 locality 和依赖图的可检查证据；Delivery Run 不再接收无关 capability bundle，旧 runtime 私有 source/dist route 也不保留兼容层。 |
 | D-024 | Effect 4 RC 从不可信 durable-state decode boundary 增量进入现有 module；首个 production caller 是 Task Authority 的 SQLite `TaskResult` decoder。现有 Zod Task Contract 边界、Promise-based module ports、Drizzle persistence 和六个 package ownership 不因采用 Effect 而迁移。后续 Effect 使用必须由当前 caller 证明能删除重复 validation、错误映射或资源 lifecycle code | 用 Effect Schema 替换未经验证的 persisted JSON assertion 有直接 safety 收益；把既有 module 机械改写为 Effect services/layers 只会增加 caller knowledge 和迁移成本。RC 期间使用精确版本并通过 package source/guide确认 API。 |
 | D-025 | Persistent local server 是当前 coordinator host；它拥有 Effect Scope、HTTP resource、task fibers、durable re-entry、cleanup invocation 和 AbortSignal propagation。Provider execution semantics 由 Coding Session adapter 拥有。CLI 命令为 `server`、`register`、`inspect`、`submit`、`status`、`follow`；server restart 从 SQLite 重入 nonterminal Task | Effect 只接管 composition-root lifecycle，Codex SDK、Execa、Octokit、Node HTTP 与 SQLite 仍是窄 adapter。Project checks 在 disposable exact-SHA checkout 中以 reduced explicit environment 运行并共享 host filesystem/network permissions；只有 Forge credentials 不传入环境。#153 使用 stubbed Codex adapter，#192/#193 已合并，#195 已授权但 app-server 未证明。 |
+| D-026 | **supersedes D-012**：Task Contract admission 冻结显式 `authorization.merge`。无 merge authority 的 exact-SHA reviewed delivery 持久化 `reviewed_pr` 且不调用 merge；有 authority 时 Forge 必须重新验证 live PR、attestation 和 approved SHA，并让 GitHub merge endpoint 作为最终 platform-policy gate，成功后持久化带 PR、approved head、merge commit 和 observed state 的 `merged` effect | Issue #199 的 hermetic Forge/server evidence boundedly proves this accepted outcome, not production merge; it also preserves old contract/result readability, lease/restart invariants, and platform-native approval independence. changed head、attestation identity mismatch、proved refusal 和 ambiguous non-merged response 都不能产生 delivery fact。 |
 
-当前 classification 为 `correct_before_expansion`。#176 是 first real persistent-server delivery falsifier；#178 在 pilot 或 measured need 之前不 eligible，#151 在出现真实 retryable sample 之前不 eligible。#187、#188、#189 是彼此独立的 future outcomes，不构成永久顺序；它们以及 #195 都不能在没有 caller/evidence 时扩张当前 architecture。
+当前 classification 为 `correct_before_expansion`。#176 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance，目标 PR 已交付并手工合并；它只保留 bounded real-pilot evidence。#199 保留 hermetic authorized-merge evidence，不证明 production merge。#178 在 pilot 或 measured need 之前不 eligible，#151 在出现真实 retryable sample 之前不 eligible。#187、#188、#189 是彼此独立的 future outcomes，不构成永久顺序；它们以及 #195 都不能在没有 caller/evidence 时扩张当前 architecture。
 
 ## 已确定的依赖方向
 
@@ -61,7 +62,7 @@ Domain policy 不 import Drizzle、Git、GitHub、subprocess 或 HTTP implementa
 | ACP runtime protocol | 延期 | 当前 Codex adapter 无法提供所需的 turn observation/cancellation，或 ACP 已有稳定实现并能删除当前 adapter 的实质复杂度。 |
 | OpenCode runtime adapter | 延期 | 必需模型无法通过 Codex Responses provider 使用，或 Codex adapter 成为可测的成本/能力瓶颈。 |
 | Stop hook | 非 authority 的可选优化 | Delivery Run 外层恢复已正确，且运行数据表明 hook 能显著降低延迟/token；hook 仍不得创建 activation、fence 或 completion authority。 |
-| 自动 merge | 后续 narrow adapter | reviewed PR exact-head gate 与 delivery reconciliation 已稳定，且 GitHub App 身份/权限已验证。 |
+| 自动 merge | #199 已交付 narrow authorized exact-head path；更宽的 merge policy 仍延期 | 需要真实 pilot 证明 GitHub App 身份/权限、仓库 ruleset 与平台 merge refusal 的生产行为，且不能扩大为 queue、merge service 或并发 writer。 |
 | Gitea/其它 forge | 延期 | GitHub API、私有仓库能力、成本或外部 contributor workflow 形成真实限制。 |
 | Durable queue/workflow engine 或分布式 runner | 延期 | 多个独立 runner、durable delayed scheduling、数据库 polling/竞争形成实测瓶颈，或 reconciler 开始实现通用 queue/timer/DAG。届时优先采用成熟库，不扩张自制 control plane。 |
 | 容器/轻量 VM provider | 延期 | Codex sandbox + host permissions 无法隔离某类实际 candidate，或项目依赖要求可销毁 OS image。 |

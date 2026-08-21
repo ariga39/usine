@@ -8,6 +8,7 @@ export type TaskState =
   | "checked"
   | "reviewed"
   | "reviewed_pr"
+  | "merged"
   | "blocked";
 
 export interface CheckResult {
@@ -32,11 +33,19 @@ export interface DeliveryEffect {
   prNumber: number;
   url: string;
   attestationId: string;
+  merge?: MergeEffect | null;
+}
+
+export interface MergeEffect {
+  prNumber: number;
+  approvedHeadSha: string;
+  mergeCommitSha: string;
+  observedState: "merged";
 }
 
 export interface TaskResult {
   /** Version of the durable Task Authority result projection. */
-  schemaVersion: 1;
+  schemaVersion: 2;
   taskId: string;
   contractHash: string;
   /** Durable compare-and-set identity for this observation. */
@@ -44,6 +53,8 @@ export interface TaskResult {
   /** The first admission deadline, reused for every recovery. */
   deadlineEpochMs: number;
   state: TaskState;
+  /** Immutable projection of Task Contract authorization.merge. */
+  mergeAuthorized: boolean;
   candidateSha: string | null;
   candidateFence: number | null;
   check: CheckResult | null;
@@ -80,6 +91,10 @@ export function taskProgressFromResult(result: TaskResult): TaskProgress {
     activeActivation: result.activeActivation,
     candidateSha: result.candidateSha,
   };
+}
+
+export function isTerminalState(state: TaskState): boolean {
+  return state === "reviewed_pr" || state === "merged" || state === "blocked";
 }
 
 export interface CandidateFact {
@@ -169,7 +184,8 @@ const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "blocked"],
   candidate: ["candidate", "checked", "blocked"],
   checked: ["checked", "candidate", "reviewed", "blocked"],
-  reviewed: ["reviewed", "candidate", "reviewed_pr", "blocked"],
+  reviewed: ["reviewed", "candidate", "reviewed_pr", "merged", "blocked"],
+  merged: ["merged"],
   reviewed_pr: ["reviewed_pr"],
   blocked: ["blocked"],
 };
@@ -238,8 +254,11 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       };
     }
     case "delivery": {
-      if (!canTransition(result.state, "reviewed_pr"))
-        throw new Error(`illegal task state transition: ${result.state} -> reviewed_pr`);
+      const mergeEffect = fact.delivery.merge;
+      const merged = mergeEffect != null;
+      const nextState = merged ? "merged" : "reviewed_pr";
+      if (!canTransition(result.state, nextState))
+        throw new Error(`illegal task state transition: ${result.state} -> ${nextState}`);
       if (
         !result.candidateSha ||
         !result.check ||
@@ -247,11 +266,23 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         !result.review ||
         result.review.verdict !== "approved" ||
         fact.delivery.sha !== result.candidateSha ||
-        fact.delivery.sha !== result.review.sha
+        fact.delivery.sha !== result.review.sha ||
+        (result.mergeAuthorized && !merged) ||
+        (merged && !result.mergeAuthorized) ||
+        (merged && mergeEffect.approvedHeadSha !== fact.delivery.sha) ||
+        (merged && mergeEffect.prNumber !== fact.delivery.prNumber)
       )
         throw new Error("delivery is not bound to an exact approved candidate");
       requireExactSha(fact.delivery.sha);
-      return { ...result, state: "reviewed_pr", delivery: fact.delivery };
+      if (merged) {
+        requireExactSha(mergeEffect.approvedHeadSha);
+        requireExactSha(mergeEffect.mergeCommitSha);
+      }
+      return {
+        ...result,
+        state: nextState,
+        delivery: { ...fact.delivery, merge: fact.delivery.merge ?? null },
+      };
     }
     case "repair_batch":
       if (result.state !== "reviewed" || result.review?.verdict !== "changes_requested")

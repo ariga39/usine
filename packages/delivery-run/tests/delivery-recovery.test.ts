@@ -9,6 +9,7 @@ import {
   type ResolvedTaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
+import { DeliveryQuarantineError } from "@usine/forge-delivery";
 import {
   applyTaskFact,
   type CandidateFact,
@@ -30,7 +31,7 @@ const implementer = {
   profile: "implementer-profile",
   sandbox: "workspace-write" as const,
 };
-function contract(id: string): ResolvedTaskContract {
+function contract(id: string, merge = false): ResolvedTaskContract {
   return {
     id,
     repositoryId: "recovery-repository",
@@ -41,7 +42,7 @@ function contract(id: string): ResolvedTaskContract {
     nonGoals: [],
     projectCheck: { command: "true", timeoutMs: 1_000 },
     budget: { maxImplementerActivations: 2, maxReviewCycles: 2, maxElapsedMs: 60_000 },
-    authorization: { source: "recovery test", delivery: true },
+    authorization: { source: "recovery test", delivery: true, ...(merge ? { merge: true } : {}) },
     delivery: {
       baseBranch: "main",
       branch: "agent/recovery",
@@ -52,14 +53,19 @@ function contract(id: string): ResolvedTaskContract {
   };
 }
 
-function persistedResult(state: TaskResult["state"], id: string): TaskResult {
+function persistedResult(
+  state: TaskResult["state"],
+  id: string,
+  mergeAuthorized = false,
+): TaskResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: id,
     contractHash: "hash",
     revision: 4,
     deadlineEpochMs: Date.now() + 30_000,
     state,
+    mergeAuthorized,
     candidateSha: state === "admitted" ? null : sha,
     candidateFence: state === "admitted" ? null : 1,
     check:
@@ -298,6 +304,152 @@ describe("Delivery Run durable phase recovery", () => {
       outcome: "succeeded",
       candidateSha: sha,
     });
+  });
+
+  test("persists an authorized exact-head merge effect as the merged terminal state", async () => {
+    const id = "authorized-merge-boundary";
+    const fake = fakeAuthority(persistedResult("reviewed", id, true));
+    const mergeCommitSha = "c".repeat(40);
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id, true),
+        contractHash: "authorized-merge-boundary-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("unexpected check");
+          },
+          reviewWithObservation: async () => {
+            throw new Error("unexpected review");
+          },
+        },
+        {
+          deliver: async () => ({
+            sha,
+            effect: "github" as const,
+            prNumber: 80,
+            url: "https://example.invalid/pr/80",
+            attestationId: "authorized",
+            merge: {
+              prNumber: 80,
+              approvedHeadSha: sha,
+              mergeCommitSha,
+              observedState: "merged" as const,
+            },
+          }),
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "merged",
+      mergeAuthorized: true,
+      delivery: {
+        sha,
+        attestationId: "authorized",
+        merge: { prNumber: 80, approvedHeadSha: sha, mergeCommitSha, observedState: "merged" },
+      },
+    });
+  });
+
+  test("turns a proved platform merge refusal into a blocker without a delivery fact", async () => {
+    const id = "platform-refusal-boundary";
+    const fake = fakeAuthority(persistedResult("reviewed", id, true));
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id, true),
+        contractHash: "platform-refusal-boundary-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("unexpected check");
+          },
+          reviewWithObservation: async () => {
+            throw new Error("unexpected review");
+          },
+        },
+        {
+          deliver: async () => {
+            throw new DeliveryQuarantineError(
+              "platform merge refused after authoritative probe: required check is pending",
+            );
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "blocked",
+      blocker: "platform merge refused after authoritative probe: required check is pending",
+      delivery: null,
+    });
+    expect(fake.getStored().delivery).toBeNull();
+  });
+
+  test("re-enters an authorized pre-merge result and records one recovered merge effect", async () => {
+    const id = "authorized-merge-reentry";
+    const fake = fakeAuthority(persistedResult("reviewed", id, true));
+    const mergeCommitSha = "d".repeat(40);
+    let calls = 0;
+    const forge = {
+      deliver: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("merge response lost after platform acceptance");
+        return {
+          sha,
+          effect: "github" as const,
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "recovered-merge",
+          merge: {
+            prNumber: 80,
+            approvedHeadSha: sha,
+            mergeCommitSha,
+            observedState: "merged" as const,
+          },
+        };
+      },
+    };
+    const input = {
+      contract: contract(id, true),
+      contractHash: "authorized-merge-reentry-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+    const noOpQuality = {
+      check: async () => {
+        throw new Error("unexpected check");
+      },
+      reviewWithObservation: async () => {
+        throw new Error("unexpected review");
+      },
+    };
+
+    await expect(
+      executeDeliveryRun(input, servicesFor(fake.authority, noOpQuality, forge)),
+    ).rejects.toThrow("merge response lost after platform acceptance");
+    expect(fake.getStored()).toMatchObject({ state: "reviewed", delivery: null });
+
+    const recovered = await executeDeliveryRun(
+      input,
+      servicesFor(fake.authority, noOpQuality, forge),
+    );
+    expect(recovered).toMatchObject({
+      state: "merged",
+      delivery: { attestationId: "recovered-merge", merge: { mergeCommitSha } },
+    });
+    expect(calls).toBe(2);
   });
 
   test("stops before recording candidate evidence when cancelled", async () => {

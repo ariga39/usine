@@ -3,6 +3,7 @@ import { Duration, Effect } from "effect";
 import type {
   CheckResult,
   DeliveryEffect,
+  MergeEffect,
   ReviewVerdict,
   ResolvedTaskContract,
 } from "@usine/task-authority";
@@ -31,6 +32,8 @@ export class ForgeDelivery {
     check: CheckResult,
     review: ReviewVerdict,
   ): Promise<DeliveryEffect> {
+    if (check.sha !== sha || check.status !== "passed")
+      throw new Error("delivery requires a passed exact-SHA project check");
     if (review.sha !== sha || review.verdict !== "approved")
       throw new Error("delivery requires exact-SHA semantic approval");
     let lastError: unknown;
@@ -68,6 +71,8 @@ export class ForgeDelivery {
     const client = await createForgeClient(this.options);
     const { owner, name: repo } = contract.repository;
     const { branch, baseBranch } = contract.delivery;
+    const body = approvalAttestationBody(contract, sha, check, review);
+    const marker = `<!-- usine-approval:${contract.id}:${sha} -->`;
     let observedHead: string | null = null;
     try {
       observedHead = (
@@ -103,11 +108,28 @@ export class ForgeDelivery {
       throw new DeliveryQuarantineError(
         `multiple delivery PRs target candidate ${sha}; delivery quarantined`,
       );
-    const existing = matching[0];
-    if (existing && existing.state !== "open")
+    const existing = matching[0] as LivePullRequest | undefined;
+    if (existing && existing.state !== "open") {
+      if (mergedEffect(existing, sha)) {
+        if (contract.authorization.merge !== true)
+          throw new DeliveryQuarantineError(
+            `merged delivery PR #${existing.number} was observed without explicit merge authority; delivery quarantined`,
+          );
+        const recovered = await this.probeMerged(
+          client,
+          owner,
+          repo,
+          existing.number,
+          sha,
+          marker,
+          body,
+        );
+        if (recovered) return recovered;
+      }
       throw new DeliveryQuarantineError(
         `closed delivery PR #${existing.number} already targets candidate ${sha}; delivery quarantined`,
       );
+    }
     if (!existing && pullRequests.data.length > 0)
       throw new DeliveryQuarantineError(
         `open delivery PR #${pullRequests.data[0]?.number ?? "unknown"} has a conflicting head; delivery quarantined`,
@@ -139,8 +161,7 @@ export class ForgeDelivery {
         },
       );
     }
-    const pullRequest =
-      existing ??
+    const pullRequest = (existing ??
       (
         await client.octokit.rest.pulls.create({
           owner,
@@ -156,17 +177,143 @@ export class ForgeDelivery {
             signal: this.options.signal,
           },
         })
-      ).data;
+      ).data) as LivePullRequest;
     if (pullRequest.state !== "open" || pullRequest.head.sha !== sha)
       throw new DeliveryQuarantineError(
         `delivery PR #${pullRequest.number} does not target the approved open head; delivery quarantined`,
       );
-    const body = approvalAttestationBody(contract, sha, check, review);
-    const marker = `<!-- usine-approval:${contract.id}:${sha} -->`;
+    const attestation = await this.ensureAttestation(
+      client,
+      owner,
+      repo,
+      pullRequest.number,
+      marker,
+      body,
+    );
+    const delivered = deliveryEffect(pullRequest, sha, null, requireAttestationId(attestation));
+    if (contract.authorization.merge !== true) return delivered;
+
+    const livePullRequest = (
+      await client.octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullRequest.number,
+        request: {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      })
+    ).data as LivePullRequest;
+    const alreadyMerged = mergedEffect(livePullRequest, sha);
+    if (alreadyMerged) {
+      const recovered = await this.probeMerged(
+        client,
+        owner,
+        repo,
+        livePullRequest.number,
+        sha,
+        marker,
+        body,
+      );
+      if (recovered) return recovered;
+    }
+    if (livePullRequest.state !== "open" || livePullRequest.head.sha !== sha)
+      throw new DeliveryQuarantineError(
+        `live delivery PR #${pullRequest.number} does not target the approved open head; merge blocked`,
+      );
+    await this.ensureAttestation(client, owner, repo, livePullRequest.number, marker, body);
+    let mergeResponse: Awaited<ReturnType<typeof client.octokit.rest.pulls.merge>>;
+    try {
+      mergeResponse = await client.octokit.rest.pulls.merge({
+        owner,
+        repo,
+        pull_number: livePullRequest.number,
+        sha,
+        request: {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      });
+    } catch (error) {
+      const recovered = await this.probeMerged(
+        client,
+        owner,
+        repo,
+        livePullRequest.number,
+        sha,
+        marker,
+        body,
+      );
+      if (recovered) return recovered;
+      if (isMergeRefusal(error))
+        throw new DeliveryQuarantineError(
+          `GitHub refused merge for PR #${livePullRequest.number} after live probe (mergeable=${String(livePullRequest.mergeable)}, mergeable_state=${livePullRequest.mergeable_state ?? "unknown"}); platform policy blocked merge`,
+        );
+      throw error;
+    }
+    if (!mergeResponse.data.merged)
+      throw new DeliveryQuarantineError(
+        `GitHub refused merge for PR #${livePullRequest.number}: ${mergeResponse.data.message ?? "platform policy rejected merge"} (mergeable=${String(livePullRequest.mergeable)}, mergeable_state=${livePullRequest.mergeable_state ?? "unknown"})`,
+      );
+    const mergeCommitSha = mergeResponse.data.sha;
+    if (!isExactSha(mergeCommitSha))
+      throw new DeliveryQuarantineError(
+        `GitHub accepted merge for PR #${livePullRequest.number} without a merge commit SHA`,
+      );
+    return deliveryEffect(
+      livePullRequest,
+      sha,
+      {
+        prNumber: livePullRequest.number,
+        approvedHeadSha: sha,
+        mergeCommitSha,
+        observedState: "merged",
+      },
+      requireAttestationId(attestation),
+    );
+  }
+
+  private async probeMerged(
+    client: Awaited<ReturnType<typeof createForgeClient>>,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    sha: string,
+    marker: string,
+    body: string,
+  ): Promise<DeliveryEffect | null> {
+    const authoritative = (
+      await client.octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        request: {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      })
+    ).data as LivePullRequest;
+    const merge = mergedEffect(authoritative, sha);
+    if (!merge) return null;
+    const attestation = await this.ensureAttestation(client, owner, repo, pullNumber, marker, body);
+    return deliveryEffect(authoritative, sha, merge, requireAttestationId(attestation));
+  }
+
+  private async ensureAttestation(
+    client: Awaited<ReturnType<typeof createForgeClient>>,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    marker: string,
+    body: string,
+  ) {
     const comments = await client.octokit.paginate(client.octokit.rest.issues.listComments, {
       owner,
       repo,
-      issue_number: pullRequest.number,
+      issue_number: pullNumber,
       per_page: 100,
       request: {
         timeout: remainingUntil(this.options.deadlineEpochMs),
@@ -177,7 +324,7 @@ export class ForgeDelivery {
     const marked = comments.filter((comment) => comment.body?.includes(marker));
     if (marked.length > 1)
       throw new DeliveryQuarantineError(
-        `multiple approval attestations exist for candidate ${sha}; delivery quarantined`,
+        `multiple approval attestations exist for candidate ${marker}; delivery quarantined`,
       );
     const existingAttestation = marked[0];
     let attestation = existingAttestation;
@@ -200,7 +347,7 @@ export class ForgeDelivery {
         await client.octokit.rest.issues.createComment({
           owner,
           repo,
-          issue_number: pullRequest.number,
+          issue_number: pullNumber,
           body,
           request: {
             timeout: remainingUntil(this.options.deadlineEpochMs),
@@ -222,12 +369,67 @@ export class ForgeDelivery {
         );
     }
     if (!attestation) throw new DeliveryQuarantineError("approval attestation was not observed");
-    return {
-      sha,
-      effect: "github",
-      prNumber: pullRequest.number,
-      url: pullRequest.html_url,
-      attestationId: String(attestation.id),
-    };
+    return attestation;
   }
+}
+
+type LivePullRequest = {
+  number: number;
+  state: "open" | "closed";
+  head: { sha: string };
+  html_url: string;
+  merged?: boolean | null;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
+};
+
+function isExactSha(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+
+function isMergeRefusal(error: unknown): boolean {
+  const status = statusOf(error);
+  return status === 405 || status === 409 || status === 422;
+}
+
+function requireAttestationId(attestation: { id?: unknown }): string {
+  const id =
+    typeof attestation.id === "string" || typeof attestation.id === "number"
+      ? String(attestation.id)
+      : "";
+  if (id.length === 0) throw new DeliveryQuarantineError("approval attestation has no durable ID");
+  return id;
+}
+
+function mergedEffect(pullRequest: LivePullRequest, sha: string): MergeEffect | null {
+  if (
+    pullRequest.head.sha !== sha ||
+    (pullRequest.merged !== true && pullRequest.merged_at == null) ||
+    !isExactSha(pullRequest.merge_commit_sha)
+  )
+    return null;
+  return {
+    prNumber: pullRequest.number,
+    approvedHeadSha: sha,
+    mergeCommitSha: pullRequest.merge_commit_sha,
+    observedState: "merged",
+  };
+}
+
+function deliveryEffect(
+  pullRequest: LivePullRequest,
+  sha: string,
+  merge: MergeEffect | null,
+  attestationId: string,
+): DeliveryEffect {
+  return {
+    sha,
+    effect: "github",
+    prNumber: pullRequest.number,
+    url: pullRequest.html_url,
+    attestationId,
+    merge,
+  };
 }

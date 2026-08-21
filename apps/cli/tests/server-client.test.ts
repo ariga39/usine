@@ -9,12 +9,13 @@ import {
 
 function result(taskId: string, revision: number, state: TaskResult["state"]): TaskResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId,
     contractHash: "contract-hash",
     revision,
     deadlineEpochMs: Date.now() + 30_000,
     state,
+    mergeAuthorized: false,
     candidateSha: null,
     candidateFence: null,
     check: null,
@@ -135,6 +136,25 @@ describe("server client follow", () => {
       const terminal = await followTask("http://server.test", taskId, { intervalMs: 0 });
       expect(terminal.state).toBe("blocked");
       expect(requestCount).toBe(601);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("follows an authorized task through the merged terminal state", async () => {
+    const task = result("merged-follow", 9, "merged");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ...task, history: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    try {
+      await expect(
+        followTask("http://server.test", task.taskId, { intervalMs: 0 }),
+      ).resolves.toMatchObject({
+        state: "merged",
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

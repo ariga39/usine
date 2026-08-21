@@ -16,6 +16,7 @@ import {
   type TaskStatus,
   type TaskHistoryKind,
   taskProgressFromResult,
+  isTerminalState,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import { CodexCodingSession, type CodingSessionRuntimeAdapter } from "@usine/coding-session";
@@ -181,7 +182,7 @@ export async function admitTask(
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
-    if (existing?.state === "reviewed_pr" || existing?.state === "blocked") return existing;
+    if (existing && isTerminalState(existing.state)) return existing;
     const blockExpiredExisting = async (): Promise<TaskResult> => {
       if (!existing) throw new Error("cannot expire a task before admission");
       const blocked = await authority.block(
@@ -252,7 +253,7 @@ export async function executeAdmittedTask(
   try {
     const existing = await authority.lookup(contract.id);
     if (!existing) throw new Error("task is not admitted");
-    if (existing.state === "reviewed_pr" || existing.state === "blocked") return existing;
+    if (isTerminalState(existing.state)) return existing;
     if (hashTaskContract(input.rawContract) !== existing.contractHash)
       throw new Error("persisted task contract bytes do not match admission");
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
@@ -281,7 +282,7 @@ export async function executeAdmittedTask(
   } catch (error) {
     if (signal?.aborted) throw error;
     const current = await authority.lookup(contract.id);
-    if (current && current.state !== "reviewed_pr" && current.state !== "blocked") {
+    if (current && !isTerminalState(current.state)) {
       const blocker = error instanceof Error ? error.message : String(error);
       const blocked = await authority.block(
         { taskId: current.taskId, revision: current.revision },

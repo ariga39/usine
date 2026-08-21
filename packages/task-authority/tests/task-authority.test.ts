@@ -9,16 +9,18 @@ describe("Task Authority module contract", () => {
   test("accepts only legal lifecycle transitions", () => {
     expect(canTransition("admitted", "candidate")).toBe(true);
     expect(canTransition("reviewed_pr", "candidate")).toBe(false);
+    expect(canTransition("reviewed", "merged")).toBe(true);
   });
 
   test("applies legal facts and rejects stale fences without persistence", () => {
     const admitted: TaskResult = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
       deadlineEpochMs: 10_000,
       state: "admitted",
+      mergeAuthorized: false,
       candidateSha: null,
       candidateFence: null,
       check: null,
@@ -49,5 +51,72 @@ describe("Task Authority module contract", () => {
         candidate: { sha, baseSha: sha, fence: 0 },
       }),
     ).toThrow("stale");
+  });
+
+  test("requires an authorized merge effect for the merged terminal state", () => {
+    const reviewed: TaskResult = {
+      schemaVersion: 2,
+      taskId: contract.id,
+      contractHash: "hash",
+      revision: 4,
+      deadlineEpochMs: 10_000,
+      state: "reviewed",
+      mergeAuthorized: true,
+      candidateSha: sha,
+      candidateFence: 1,
+      check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+      review: { sha, verdict: "approved", summary: "approved", findings: [] },
+      delivery: null,
+      blocker: null,
+      activeActivation: null,
+      writer: { repositoryIdentity: "owner/repo" },
+      evidence: {
+        implementerActivations: 1,
+        reviewCycles: 1,
+        changesRequestedBatches: 0,
+        restartRecoveries: 0,
+      },
+    };
+    const delivery = {
+      sha,
+      effect: "github" as const,
+      prNumber: 199,
+      url: "https://example.invalid/pr/199",
+      attestationId: "attestation",
+    };
+    expect(() => applyTaskFact(reviewed, { type: "delivery", delivery })).toThrow(
+      "delivery is not bound",
+    );
+    expect(() =>
+      applyTaskFact(
+        { ...reviewed, mergeAuthorized: false },
+        {
+          type: "delivery",
+          delivery: {
+            ...delivery,
+            merge: {
+              prNumber: 199,
+              approvedHeadSha: sha,
+              mergeCommitSha: "b".repeat(40),
+              observedState: "merged",
+            },
+          },
+        },
+      ),
+    ).toThrow("delivery is not bound");
+    expect(
+      applyTaskFact(reviewed, {
+        type: "delivery",
+        delivery: {
+          ...delivery,
+          merge: {
+            prNumber: 199,
+            approvedHeadSha: sha,
+            mergeCommitSha: "b".repeat(40),
+            observedState: "merged",
+          },
+        },
+      }),
+    ).toMatchObject({ state: "merged", delivery: { merge: { mergeCommitSha: "b".repeat(40) } } });
   });
 });

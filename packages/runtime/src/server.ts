@@ -16,6 +16,7 @@ import {
   type TaskExecutionInput,
   type TaskResult,
   type TaskStatus,
+  isTerminalState,
 } from "@usine/task-authority";
 import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
 import {
@@ -253,7 +254,7 @@ async function executeServerTask(
   const authority = new TaskAuthority(handle.database);
   try {
     const current = await authority.lookup(task.result.taskId);
-    if (!current || current.state === "reviewed_pr" || current.state === "blocked") {
+    if (!current || isTerminalState(current.state)) {
       return current ?? task.result;
     }
     try {
@@ -267,7 +268,7 @@ async function executeServerTask(
       });
     } catch (error) {
       const latest = await authority.lookup(current.taskId);
-      if (!latest || latest.state === "reviewed_pr" || latest.state === "blocked") throw error;
+      if (!latest || isTerminalState(latest.state)) throw error;
       return await authority.block(
         { taskId: latest.taskId, revision: latest.revision },
         error instanceof Error ? error.message : String(error),
@@ -288,7 +289,7 @@ async function blockPersistedTask(
   try {
     const current = await authority.lookup(taskId);
     if (!current) throw new Error(`cannot block missing task ${taskId}: ${String(error)}`);
-    if (current.state === "reviewed_pr" || current.state === "blocked") return current;
+    if (isTerminalState(current.state)) return current;
     return await authority.block(
       { taskId: current.taskId, revision: current.revision },
       error instanceof Error ? error.message : String(error),
@@ -405,7 +406,7 @@ async function handleRequest(
     if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
     const policy = runtimePolicyFromEnvironment(environment, repository);
     const result = await admitTask(submission.contractPath, rawContract, contract, policy);
-    if (result.state !== "reviewed_pr" && result.state !== "blocked") {
+    if (!isTerminalState(result.state)) {
       launch({
         input: { ...submission, rawContract },
         contract,

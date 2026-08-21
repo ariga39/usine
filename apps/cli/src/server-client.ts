@@ -8,6 +8,7 @@ import {
   type TaskStatus,
   repositoryRegistrationSchema,
   type RepositorySnapshot,
+  isTerminalState,
 } from "@usine/task-authority";
 
 export interface TaskSubmission {
@@ -119,7 +120,7 @@ export async function followTask(
       lastRevision = result.revision;
       options.onProgress?.(taskProgressFromResult(result));
     }
-    if (result.state === "reviewed_pr" || result.state === "blocked") return result;
+    if (isTerminalState(result.state)) return result;
     const remainingMs = result.deadlineEpochMs - (await Effect.runPromise(Clock.currentTimeMillis));
     if (remainingMs <= 0)
       throw new ServerClientError("task follow reached its durable deadline", 408);

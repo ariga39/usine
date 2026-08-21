@@ -19,7 +19,7 @@ afterEach(() => {
   while (handles.length > 0) handles.pop()?.close();
 });
 
-function makeContract(taskId: string): TaskContract {
+function makeContract(taskId: string, merge = false): TaskContract {
   return {
     id: taskId,
     repositoryId: "authority-repository",
@@ -28,7 +28,7 @@ function makeContract(taskId: string): TaskContract {
     acceptance: ["authority is correct"],
     nonGoals: [],
     budget: { maxImplementerActivations: 3, maxReviewCycles: 2, maxElapsedMs: 30_000 },
-    authorization: { source: "authority test", delivery: true },
+    authorization: { source: "authority test", delivery: true, ...(merge ? { merge: true } : {}) },
     delivery: {
       branch: `agent/${taskId}`,
       issue: 80,
@@ -190,13 +190,38 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const inspection = new DatabaseSync(path);
     inspection
       .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
-      .run(taskId, JSON.stringify({ schemaVersion: 1, taskId }));
+      .run(taskId, JSON.stringify({ schemaVersion: 2, taskId }));
     inspection.close();
 
     const authority = authorityAt(path);
     await expect(authority.lookupExisting(taskId, "unused-contract-hash")).rejects.toMatchObject({
       code: "task_state_quarantined",
       message: "durable task state quarantined",
+    });
+  });
+
+  test("decodes a version-one persisted result as an unauthorized current result", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-legacy-result-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-legacy-result-hash",
+      repositoryIdentity: `authority/legacy-result-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const inspection = new DatabaseSync(path);
+    const legacy = { ...admitted, schemaVersion: 1 } as Record<string, unknown>;
+    delete legacy.mergeAuthorized;
+    inspection
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(legacy), taskId);
+    inspection.close();
+
+    await expect(authority.lookup(taskId)).resolves.toMatchObject({
+      schemaVersion: 2,
+      mergeAuthorized: false,
+      state: "admitted",
     });
   });
 
@@ -257,7 +282,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const admittedRow = inspection
       .prepare("SELECT result FROM task_runs WHERE task_id = ?")
       .get(taskId) as { result: string };
-    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 1 });
+    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 2 });
     expect(JSON.parse(admittedRow.result).writer).toEqual(admitted.writer);
     expect(admittedRow.result).not.toContain('"repository"');
 
@@ -601,6 +626,78 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     ).rejects.toThrow("exact approved candidate");
     expect(checkedOne.review).toBeNull();
   }, 30_000);
+
+  test("holds an authorized writer lease until a valid merged fact", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const inspection = new DatabaseSync(path);
+    const taskId = `authority-merge-lease-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId, true),
+      contractHash: "authority-merge-lease-hash",
+      repositoryIdentity: `authority/merge-lease-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const reservation = await authority.reserveActivation(taskId, 3);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: reservation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: reservation.activation },
+    );
+    const checked = await authority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const reviewed = await authority.recordReview(
+      { taskId, revision: checked.revision },
+      { sha: "b".repeat(40), verdict: "approved", summary: "approved", findings: [] },
+    );
+    const delivery = {
+      sha: "b".repeat(40),
+      effect: "github" as const,
+      prNumber: 199,
+      url: "https://example.invalid/pr/199",
+      attestationId: "attestation",
+    };
+    await expect(
+      authority.recordDelivery({ taskId, revision: reviewed.revision }, delivery),
+    ).rejects.toThrow("exact approved candidate");
+    expect(
+      inspection
+        .prepare("SELECT task_id FROM repository_leases WHERE repository_identity = ?")
+        .get(admitted.writer.repositoryIdentity),
+    ).toMatchObject({ task_id: taskId });
+
+    const merged = await authority.recordDelivery(
+      { taskId, revision: reviewed.revision },
+      {
+        ...delivery,
+        merge: {
+          prNumber: 199,
+          approvedHeadSha: "b".repeat(40),
+          mergeCommitSha: "c".repeat(40),
+          observedState: "merged" as const,
+        },
+      },
+    );
+    expect(merged).toMatchObject({
+      state: "merged",
+      mergeAuthorized: true,
+      delivery: { merge: { approvedHeadSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) } },
+    });
+    expect(
+      inspection
+        .prepare("SELECT task_id FROM repository_leases WHERE repository_identity = ?")
+        .get(admitted.writer.repositoryIdentity),
+    ).toBeUndefined();
+    inspection.close();
+  });
 
   test("atomically admits one immutable task and one lease for concurrent same-ID requests", async () => {
     const path = await makeDatabase();

@@ -1,8 +1,8 @@
 ---
 status: current
 design_version: 0.7
-updated: 2026-08-19
-issue: https://github.com/ariga39/usine/issues/1
+updated: 2026-08-22
+issue: https://github.com/ariga39/usine/issues/199
 ---
 
 # Usine 当前设计
@@ -25,7 +25,7 @@ human interventions × elapsed time × cost
 
 ## 2. 第一项有用行为
 
-Usine 的第一个完整产品行为是：接收一项已经授权、边界明确的真实开发任务，在无人再次发送“继续”的情况下，产出一个经过项目检查和独立 reviewer 明确批准、绑定 exact SHA 的 PR；若实现者提前停止、协调器重启或 reviewer 要求修改，系统能够在预算内恢复并继续。
+Usine 的第一个完整产品行为是：接收一项已经授权、边界明确的真实开发任务，在无人再次发送“继续”的情况下，产出一个经过项目检查和独立 reviewer 明确批准、绑定 exact SHA 的 PR；若 Task Contract 明确授予 merge authority，系统还会重新验证 live PR 并合并该 exact approved head，持久化 `merged` 结果；没有该 authority 时则停在 `reviewed_pr`。若实现者提前停止、协调器重启或 reviewer 要求修改，系统能够在预算内恢复并继续。
 
 这是一条持续投入真实工作的路径，不是先做完才允许继续建设的孤立实验。它定义的是产品必须尽早具备的纵向行为，而不是旧式任务分解。
 
@@ -37,7 +37,7 @@ Usine 的第一个完整产品行为是：接收一项已经授权、边界明�
 - 分布式调度、跨主机迁移或多 forge 同步；
 - Web dashboard、Mem0、session 向量数据库；
 - 对 Git 对象库、SQLite catalog 或敌对 host 的穷举式证明；
-- 无条件自动 merge。
+- 不受 Task Contract 明确 authority 约束的自动 merge。
 
 这些能力并未被永久否决。只有观察到明确需求穿透现有边界时，才按 `DECISIONS.md` 中的 re-entry trigger 重新讨论。
 
@@ -71,6 +71,19 @@ project checks    fresh independent reviewer
 credential-scoped GitHub delivery
         ▼
 reviewed PR + explicit approval attestation
+        │
+        ├── no merge authority ──▶ reviewed_pr
+        │
+        └── explicit merge authority
+                    │
+                    ▼
+         live exact-head revalidation
+                    │
+                    ▼
+            GitHub merge endpoint
+                    │
+                    ▼
+                 merged
 ```
 
 当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture。它们不证明第二 runtime、额外容量或 production Codex turn。
@@ -91,12 +104,12 @@ V0 的 LLM 只承担 Implementer 和 Reviewer 的 coding-agent work。`ai` + `@a
 
 ### 4.2 最小状态事实
 
-- **Task Contract**：任务意义、范围、non-goals、acceptance、授权来源、预算和风险；admission 后不可原地修改。
+- **Task Contract**：任务意义、范围、non-goals、acceptance、授权来源、不可变的 delivery/merge authority、预算和风险；admission 后不可原地修改。
 - **Run**：一次 agent/process 尝试及其 context、workspace、模型、预算和 observation。
 - **Candidate**：从记录的 base 产生、由 host 验证并冻结的 Git commit SHA。
 - **Check Result**：项目原生命令在该 Candidate 上产生的机器事实。
 - **Review Verdict**：fresh non-author reviewer 对该 Candidate 的 `approved`、`changes_requested` 或 `inconclusive`；其中 exact-SHA `approved` 是 Usine 的 semantic approval 事实。
-- **Delivery Effect**：branch、push、PR、review attestation projection 和未来 merge 的外部副作用及 probe 结果。
+- **Delivery Effect**：branch、push、PR、review attestation projection，以及在显式 merge authority 下产生的 exact-head merge effect 和 probe 结果。
 
 进程退出、Codex hook、agent 最后一条消息、测试命令 exit 0 和 CI job 正常结束都只是一项 evidence。Task 的终态只能由完整 gate 对同一 SHA 的事实归并得到。
 
@@ -107,6 +120,8 @@ V0 的 LLM 只承担 Implementer 和 Reviewer 的 coding-agent work。`ai` + `@a
 - 确认已发生的 effect，记录成功；
 - 可证明未发生的 effect，按相同 identity 重试；
 - 无法确定的 effect，先 probe，仍不确定则 quarantine；
+- merge 前重新读取 live PR 和 exact-head attestation；GitHub merge endpoint 是平台 policy 的最终 gate，refusal 只产生 concrete blocker，不产生 delivery fact；
+- 丢失 merge response 时 probe 已合并的 exact PR，成功观察后只记录一个 merge effect；
 - agent 已停止而 Task 未到 terminal gate，按预算恢复或重新激活；
 - 不因 timeout 自动授予第二个 writer。
 
@@ -135,7 +150,7 @@ Project checks 和 reviewer 是两个独立事实。Reviewer 可以读取完整 
 
 GitHub 是当前 forge 与交付 surface，不是核心 task domain。每个 registered Repository 只保存一个 opaque `forgeProfile` 名称；local host 在 execution boundary 将它解析为该 Repository 绑定的 GitHub App capability。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据，profile secrets 不进入 Task Contract、durable facts、history、logs 或 status。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
 
-fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。第一项产品行为停在带 exact-SHA approval attestation 的 reviewed PR；未来自动 merge 仍须重新读取 live head，并验证 checks、verdict、attestation 与任何 platform approval 都绑定该 head。
+fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。Task Contract 的 `authorization.merge` 必须是 admission 时冻结的显式 authority；delivery authority 不隐含 merge authority。没有它，第一项产品行为在带 exact-SHA approval attestation 的 `reviewed_pr` 终止；有它，Forge Delivery 在 merge 前重新读取 live head、attestation 和诊断性 platform fields，向 GitHub merge endpoint 提交 approved SHA，由平台 policy 最终决定。changed head、attestation/App identity 不匹配或 proved platform refusal 都 quarantine 为 concrete blocker；lost response 先 probe，只有观察到 exact merged PR 才记录 `merged`。
 
 ## 7. Context 模型
 
@@ -156,7 +171,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 | **Coding Session** | role/profile/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | 当前唯一 supported adapter 使用官方 Codex SDK；thread start/run、thread ID、final schema output、usage、cancellation 和 failure 留在 adapter 内，agent result 永不授予 task terminal authority |
 | **Candidate Workspace** | isolated writer worktree、explicit Git environment、host-side commit/finalize、ancestry/cleanliness、disposable exact-SHA checkout | prepare writer、freeze Candidate、以 SHA 提供 disposable checkout | 系统 Git CLI 的窄 argv adapter；不拥有 retry、review 或 delivery policy |
 | **Quality Gate** | 分别产生 project check 与 fresh exact-SHA review facts，并聚合 findings | `check(candidate, contract)` 返回 exact-SHA Check Result；`review(candidate, contract, check)` 返回 fresh exact-SHA Review Verdict | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
-| **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` | Octokit 与 credential-scoped Git push；不运行 candidate code，也不能制造 semantic approval |
+| **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、exact-head merge authority、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` 返回 reviewed-PR 或 merged effect | Octokit 与 credential-scoped Git push/merge；不运行 candidate code，也不能制造 semantic approval |
 
 依赖只向产品 policy 内侧流动：runtime 中的 local server 组合 Delivery Run 与 adapter，CLI 只依赖 typed server client；Delivery Run 独占 activation/retry/budget policy 并使用其余五个 package；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。依赖图必须有向无环，生产代码和测试只能使用声明依赖的 package exports，不能穿透其它 package 的 `src` 或 `dist`。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral typed observation，不传递 HTTP request、Effect Fiber、Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。每个 package 必须拥有真实 caller 与有意义的 policy；共享 option/type 归消费它的 module，Delivery Run 不接收无关的 environment 或 credential capability bundle。
 
@@ -216,7 +231,8 @@ Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 
 | #153 | stubbed Codex adapter 的 persistent-server lifecycle fixture；不证明 production Codex turn。 |
 | #192/#193 | 已合并，证明当前 SDK lifecycle 与 attestation facts。 |
 | #195 | 已授权的 app-server runtime outcome，尚未证明；app-server 不能取得 Task authority。 |
-| #176 | 第一项真实 persistent-server delivery 的 falsifier；当前 classification 为 `correct_before_expansion`。 |
+| #199 | hermetic authorized exact-head merge evidence；不证明 production merge。 |
+| #176 | 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并，仅保留 bounded real-pilot evidence。 |
 | #178 / #151 | 分别在 pilot/measured need、真实 retryable sample 出现前不 eligible。 |
 | #187 / #188 / #189 | 分别拥有独立 future outcome；transient order 不构成永久 architecture。#188 resource CLI 尚未完成。 |
 
