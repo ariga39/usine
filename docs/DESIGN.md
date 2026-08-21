@@ -231,7 +231,8 @@ Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 
 | #153 | stubbed Codex adapter 的 persistent-server lifecycle fixture；不证明 production Codex turn。 |
 | #192/#193 | 已合并，证明当前 SDK lifecycle 与 attestation facts。 |
 | #195 | 已授权的 app-server runtime outcome，尚未证明；app-server 不能取得 Task authority。 |
-| #176 | 第一项真实 persistent-server delivery 的 falsifier；当前 classification 为 `correct_before_expansion`。 |
+| #199 | hermetic authorized exact-head merge evidence；不证明 production merge。 |
+| #176 | 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并，仅保留 bounded real-pilot evidence。 |
 | #178 / #151 | 分别在 pilot/measured need、真实 retryable sample 出现前不 eligible。 |
 | #187 / #188 / #189 | 分别拥有独立 future outcome；transient order 不构成永久 architecture。#188 resource CLI 尚未完成。 |
 
