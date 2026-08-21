@@ -15,7 +15,7 @@ import {
   type TaskContract,
   type TaskExecutionInput,
   type TaskResult,
-  type TaskStatus,
+  type TaskEventPage,
   isTerminalState,
 } from "@usine/task-authority";
 import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
@@ -26,7 +26,8 @@ import {
   registerRepository,
   lookupRestartableTasks,
   lookupTaskStatus,
-  recordExecutionObservation,
+  lookupTaskEvents,
+  recordRecoveryObservation,
   runtimePolicyFromEnvironment,
   stateDirectoryFromEnvironment,
   ForgeProfileResolutionError,
@@ -132,19 +133,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           try: async () => {
             if (options.executionAdapter)
               await options.executionAdapter.reapOwned(stateDirectory, task.result.taskId);
-            await recordExecutionObservation(
+            await recordRecoveryObservation(stateDirectory, task.result.taskId, "server_restart");
+            await recordRecoveryObservation(
               stateDirectory,
-              task.result,
-              "coordinator_restart",
-              "persistent-server",
-              "prior-coordinator",
-            );
-            await recordExecutionObservation(
-              stateDirectory,
-              task.result,
-              "execution_owner_change",
-              "persistent-server",
-              "prior-coordinator",
+              task.result.taskId,
+              "execution_owner_changed",
             );
             const contract = parseContract(task.input.rawContract);
             launchTask({ input: task.input, contract, result: task.result });
@@ -246,7 +239,7 @@ async function executeServerTask(
     return blockPersistedTask(stateDirectory, task.result.taskId, error);
   }
   if (!execute) {
-    return executeAdmittedTask(task.input, task.contract, policy, undefined, signal);
+    return executeAdmittedTask(task.input, task.contract, policy, signal);
   }
 
   const databasePath = resolve(stateDirectory, "usine.sqlite");
@@ -345,11 +338,26 @@ async function handleRequest(
   launch: (task: AdmittedTask) => void,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
+  if (request.method === "GET" && taskEventsPath) {
+    const requestedTaskId = decodeURIComponent(taskEventsPath);
+    const afterSequence = parseCursor(url.searchParams.get("after"), "after");
+    const limit = parseCursor(url.searchParams.get("limit"), "limit", 200);
+    const page = await lookupTaskEvents(stateDirectory, requestedTaskId, afterSequence, limit);
+    if (!page) {
+      response.statusCode = 404;
+      writeJson(response, { message: "task not found" });
+      return;
+    }
+    const typedPage: TaskEventPage = page;
+    writeJson(response, typedPage);
+    return;
+  }
   if (request.method === "GET" && taskId) {
     const requestedTaskId = decodeURIComponent(taskId);
-    let result: TaskStatus | null;
+    let result: TaskResult | null;
     try {
       result = await lookupTaskStatus(stateDirectory, requestedTaskId);
     } catch (error) {
@@ -419,6 +427,15 @@ async function handleRequest(
 
   response.statusCode = 404;
   writeJson(response, { message: "route not found" });
+}
+
+function parseCursor(value: string | null, name: string, fallback = 0): number {
+  if (value == null || value === "") return fallback;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a non-negative integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`${name} is out of range`);
+  if (name === "limit" && (parsed < 1 || parsed > 200)) throw new Error(`${name} is out of range`);
+  return parsed;
 }
 
 function parseSubmission(body: string): TaskSubmission {

@@ -13,17 +13,17 @@ import { DeliveryQuarantineError } from "@usine/forge-delivery";
 import {
   applyTaskFact,
   type CandidateFact,
-  type TaskHistoryRecordInput,
+  type TaskObservationEventInput,
   type TaskResult,
 } from "@usine/task-authority";
 
-type HistoryCapabilityIsRequired = DeliveryRunServices["authority"] extends {
-  appendHistory: (input: TaskHistoryRecordInput) => Promise<unknown>;
+type ObservationCapabilityIsRequired = DeliveryRunServices["authority"] extends {
+  appendObservation: (taskId: string, input: TaskObservationEventInput) => Promise<unknown>;
 }
   ? true
   : false;
-const historyCapabilityIsRequired: HistoryCapabilityIsRequired = true;
-void historyCapabilityIsRequired;
+const observationCapabilityIsRequired: ObservationCapabilityIsRequired = true;
+void observationCapabilityIsRequired;
 
 const sha = "b".repeat(40);
 const implementer = {
@@ -90,7 +90,7 @@ function persistedResult(
 function fakeAuthority(initial: TaskResult) {
   let stored = initial;
   let implementerActivations = 0;
-  const history: TaskHistoryRecordInput[] = [];
+  const observations: TaskObservationEventInput[] = [];
   const transition = async (
     observation: { taskId: string; revision: number },
     fact: Parameters<typeof applyTaskFact>[1],
@@ -120,8 +120,8 @@ function fakeAuthority(initial: TaskResult) {
     ) => transition(observation, { type: "delivery", delivery: delivery! }),
     block: (observation: { taskId: string; revision: number }, blocker: string) =>
       transition(observation, { type: "blocked", blocker }),
-    appendHistory: async (record: TaskHistoryRecordInput) => {
-      history.push(record);
+    appendObservation: async (_taskId: string, observation: TaskObservationEventInput) => {
+      observations.push(observation);
     },
     reserveActivation: async () => {
       implementerActivations += 1;
@@ -141,7 +141,7 @@ function fakeAuthority(initial: TaskResult) {
     authority,
     getStored: () => stored,
     getImplementerActivations: () => implementerActivations,
-    getHistory: () => history,
+    getObservations: () => observations,
   };
 }
 
@@ -206,7 +206,7 @@ describe("Delivery Run durable phase recovery", () => {
     expect(quality).toBe(legacyQuality);
   });
 
-  test("records typed observations for all four delivery attempt kinds", async () => {
+  test("records provider-neutral coding observations without raw session data", async () => {
     const id = `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fake = fakeAuthority(persistedResult("admitted", id));
     const result = await executeDeliveryRun(
@@ -272,38 +272,20 @@ describe("Delivery Run durable phase recovery", () => {
     );
 
     expect(result.state).toBe("reviewed_pr");
-    expect(fake.getHistory().map(({ kind }) => kind)).toEqual([
-      "implementer",
-      "project_check",
-      "fresh_review",
-      "forge_delivery",
+    expect(fake.getObservations().map(({ data }) => data.type)).toEqual([
+      "coding_session_started",
+      "coding_session_completed",
+      "coding_session_started",
+      "coding_session_completed",
     ]);
-    expect(fake.getHistory()[0]).toMatchObject({
-      activation: 1,
-      role: "implementer",
-      profile: "implementer-profile",
-      outcome: "succeeded",
-      tokenUsage: { inputTokens: 12, outputTokens: 7 },
-      candidateSha: sha,
-      candidateFence: 1,
-    });
-    expect(fake.getHistory()[1]).toMatchObject({
-      cycle: 1,
-      outcome: "succeeded",
-      candidateSha: sha,
-      candidateFence: 1,
-    });
-    expect(fake.getHistory()[2]).toMatchObject({
-      cycle: 1,
-      role: "reviewer",
-      outcome: "succeeded",
-      candidateSha: sha,
-      tokenUsage: { inputTokens: 5, outputTokens: 3 },
-    });
-    expect(fake.getHistory()[3]).toMatchObject({
-      outcome: "succeeded",
-      candidateSha: sha,
-    });
+    expect(
+      fake
+        .getObservations()
+        .map(({ data }) => (data.type === "coding_session_started" ? data.sessionId : null)),
+    ).toEqual(["coding-session:1:implementer", null, "review-session:1:reviewer", null]);
+    expect(JSON.stringify(fake.getObservations())).not.toMatch(
+      /prompt|stdout|stderr|profile|token/i,
+    );
   });
 
   test("persists an authorized exact-head merge effect as the merged terminal state", async () => {

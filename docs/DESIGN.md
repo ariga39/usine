@@ -100,7 +100,7 @@ Activation coupling 仍应很弱：普通消息不会广播唤醒其他角色；
 
 V0 的 LLM 只承担 Implementer 和 Reviewer 的 coding-agent work。`ai` + `@ai-sdk/openai` 只在配置时作为 optional final role-output normalization adapter；它不承担一般 classification、extraction 或 summary，也不取得 lifecycle authority。协调器仍负责输入投影、schema 校验、exact-SHA 校验和 lifecycle authority。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
 
-正常推进和恢复使用同一条 deterministic reconcile 路径：读取持久事实与外部 observation，事务性保留一个带 stable identity 的 next action，执行后再记录 observation。Persistent local server 拥有 Effect scope、HTTP resource、task fibers、durable re-entry、cleanup invocation 和 AbortSignal propagation；provider execution semantics 由 Coding Session adapter 拥有。CLI 通过 loopback typed API 提供 `server`、`register`、`inspect`、`submit`、`status` 和 `follow`，提交进程退出不改变已 admission 的 task。server 启动时从 SQLite 重新进入 nonterminal Task，不延长 durable deadline，也不维护第二套 operation-index replay 或 scheduler control plane。只有出现多个独立 runner、durable delayed scheduling 或数据库 polling/竞争成为实测瓶颈时，才引入成熟 queue/workflow library。
+正常推进和恢复使用同一条 deterministic reconcile 路径：读取持久事实与外部 observation，事务性保留一个带 stable identity 的 next action，执行后再记录 observation。Persistent local server 拥有 Effect scope、HTTP resource、task fibers、durable re-entry、cleanup invocation 和 AbortSignal propagation；provider execution semantics 由 Coding Session adapter 拥有。CLI 通过 loopback typed API 提供 `server`、`register`、`inspect`、`submit`、`status` 和 `follow`，提交进程退出不改变已 admission 的 task。Operator follow/replay 使用 Task-local `task_events` 单一有序流，通过 `GET /v1/tasks/:id/events?after=<sequence>&limit=<bounded>` 按 cursor 重放或继续 live polling；事件是已清洗的非权威观察，不能被 reconciliation 读取来决定 lifecycle、retry、authority 或 delivery。server 启动时从 SQLite 重新进入 nonterminal Task，不延长 durable deadline，也不维护第二套 operation-index replay 或 scheduler control plane。只有出现多个独立 runner、durable delayed scheduling 或数据库 polling/竞争成为实测瓶颈时，才引入成熟 queue/workflow library。
 
 ### 4.2 最小状态事实
 
@@ -148,7 +148,7 @@ Project checks 和 reviewer 是两个独立事实。Reviewer 可以读取完整 
 
 所有 gate 绑定 exact Candidate SHA。新 commit 自动使旧 check、review verdict 和 attestation stale。`changes_requested` 先聚合为一个 finding batch，再激活一次 implementer；不会让每条评论分别激活 agent。重复不收敛按预算进入 blocker/diagnosis，不形成无限 review 风暴。
 
-GitHub 是当前 forge 与交付 surface，不是核心 task domain。每个 registered Repository 只保存一个 opaque `forgeProfile` 名称；local host 在 execution boundary 将它解析为该 Repository 绑定的 GitHub App capability。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据，profile secrets 不进入 Task Contract、durable facts、history、logs 或 status。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
+GitHub 是当前 forge 与交付 surface，不是核心 task domain。每个 registered Repository 只保存一个 opaque `forgeProfile` 名称；local host 在 execution boundary 将它解析为该 Repository 绑定的 GitHub App capability。Octokit 使用 GitHub App 生成短期 installation token；worker 不接触该凭据，profile secrets 不进入 Task Contract、durable facts、event stream、logs 或 status。branch、PR 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
 
 fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。Task Contract 的 `authorization.merge` 必须是 admission 时冻结的显式 authority；delivery authority 不隐含 merge authority。没有它，第一项产品行为在带 exact-SHA approval attestation 的 `reviewed_pr` 终止；有它，Forge Delivery 在 merge 前重新读取 live head、attestation 和诊断性 platform fields，向 GitHub merge endpoint 提交 approved SHA，由平台 policy 最终决定。changed head、attestation/App identity 不匹配或 proved platform refusal 都 quarantine 为 concrete blocker；lost response 先 probe，只有观察到 exact merged PR 才记录 `merged`。
 
@@ -166,7 +166,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 
 | 模块 | 隐藏的 policy | 外部 caller 只知道 | 允许的内部 seams 与 change locality |
 |---|---|---|---|
-| **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、接受或拒绝领域事实、exact-SHA evidence invalidation | `admit`、读取当前 Run、事务性保留或提交一个待验证领域事实 | 纯 reducer + Drizzle persistence；独占 stale-evidence acceptance policy，不 import Git、Codex、GitHub 或 subprocess |
+| **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、接受或拒绝领域事实、exact-SHA evidence invalidation，以及 Task-local event projection | `admit`、读取当前 Run、事务性保留或提交一个待验证领域事实、按 cursor 读取清洗事件 | 纯 reducer + Drizzle persistence；事件不参与 reconciliation，不 import Git、Codex、GitHub 或 subprocess |
 | **Delivery Run** | deterministic reconcile 顺序、activation/review budget、retry、restart recovery、next action | `run(authorized contract)` 返回 durable task result | 一次只根据 durable facts 执行一个已保留 action；它不解析 provider events、不拼 Git argv、不调用 Octokit endpoint，也不维护第二套 replay log |
 | **Coding Session** | role/profile/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | 当前唯一 supported adapter 使用官方 Codex SDK；thread start/run、thread ID、final schema output、usage、cancellation 和 failure 留在 adapter 内，agent result 永不授予 task terminal authority |
 | **Candidate Workspace** | isolated writer worktree、explicit Git environment、host-side commit/finalize、ancestry/cleanliness、disposable exact-SHA checkout | prepare writer、freeze Candidate、以 SHA 提供 disposable checkout | 系统 Git CLI 的窄 argv adapter；不拥有 retry、review 或 delivery policy |
@@ -177,7 +177,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 
 ### 8.1 Coding Session 的最小 contract
 
-Coordinator 只提供 role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline 和 output schema。Coding Session 只返回 task-oriented `run(request) -> typed observation` 的 terminal status、schema-valid final role output、usage、cancellation 或 failure。它必须支持 cancellation/timeout；provider execution lifecycle 由 adapter 拥有，其他模块看不到 Codex thread 或 event 类型。
+Coordinator 只提供 role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline 和 output schema。Coding Session 只返回 task-oriented `run(request) -> typed observation` 的 terminal status、schema-valid final role output、usage、cancellation 或 failure；其 streamed lifecycle 通过受限 callback 投影为 provider-neutral observation。Task event 中的 session/outcome identifier 只由 activation 或 review cycle 与 durable event identity 派生，不暴露 Codex thread ID 或 SDK payload。它必须支持 cancellation/timeout；provider execution lifecycle 由 adapter 拥有，其他模块看不到 Codex thread 或 event 类型。
 
 Candidate SHA、workspace cleanliness、project checks、review freshness、delivery eligibility 和 Task terminal state都不由该 contract 决定。Codex `turn.completed` 是一次 semantic worker attempt 的完成证据，不是 Task 完成。
 

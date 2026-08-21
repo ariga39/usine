@@ -6,7 +6,8 @@ import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import {
   lookupTaskStatus,
-  recordExecutionObservation,
+  lookupTaskEvents,
+  recordRecoveryObservation,
   startUsineServer,
   registerRepository,
   type ServerExecutionContext,
@@ -144,7 +145,7 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 }
 
 describe("server-owned execution", () => {
-  test("persists restart and owner-change facts in the bounded status history", async () => {
+  test("persists sanitized restart observations in the durable event stream", async () => {
     const { contractPath, stateDirectory } = await fixture();
     const rawContract = await readFile(contractPath, "utf8");
     const contract = JSON.parse(rawContract) as TaskContract;
@@ -176,40 +177,29 @@ describe("server-owned execution", () => {
     );
     handle.close();
 
-    await recordExecutionObservation(
-      stateDirectory,
-      admitted,
-      "coordinator_restart",
-      "persistent-server",
-      "prior-coordinator",
-    );
-    await recordExecutionObservation(
-      stateDirectory,
-      admitted,
-      "execution_owner_change",
-      "persistent-server",
-      "prior-coordinator",
-    );
+    await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
+    await recordRecoveryObservation(stateDirectory, admitted.taskId, "execution_owner_changed");
+    await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
+    await recordRecoveryObservation(stateDirectory, admitted.taskId, "execution_owner_changed");
 
     const status = await lookupTaskStatus(stateDirectory, admitted.taskId);
-    expect(status).toMatchObject({
-      ...admitted,
-      history: [
-        {
-          kind: "coordinator_restart",
-          outcome: "observed",
-          executionOwner: "persistent-server",
-          previousExecutionOwner: "prior-coordinator",
-        },
-        {
-          kind: "execution_owner_change",
-          outcome: "observed",
-          executionOwner: "persistent-server",
-          previousExecutionOwner: "prior-coordinator",
-        },
-      ],
-    });
-    expect(status?.history).toHaveLength(2);
+    expect(status).toEqual(admitted);
+    const events = (await lookupTaskEvents(stateDirectory, admitted.taskId, 1, 10))!;
+    expect(events.events.map((event) => event.data)).toEqual([
+      { type: "recovery_observed", kind: "server_restart" },
+      { type: "recovery_observed", kind: "execution_owner_changed" },
+      { type: "recovery_observed", kind: "server_restart" },
+      { type: "recovery_observed", kind: "execution_owner_changed" },
+    ]);
+    expect(new Set(events.events.map((event) => event.eventId)).size).toBe(4);
+    expect(events.events.map((event) => event.eventId)).toEqual(
+      (await lookupTaskEvents(stateDirectory, admitted.taskId, 1, 10))!.events.map(
+        (event) => event.eventId,
+      ),
+    );
+    const replay = await lookupTaskEvents(stateDirectory, admitted.taskId, 2, 2);
+    expect(replay?.events.map((event) => event.sequence)).toEqual([3, 4]);
+    expect(replay?.nextSequence).toBe(4);
     expect(status?.revision).toBe(admitted.revision);
   });
 

@@ -143,7 +143,7 @@ export async function main(): Promise<void> {
     }
     try {
       const result = await followTask(serverUrlFromEnvironment(process.env), contractPath, {
-        onProgress: (progress) => process.stderr.write(`${JSON.stringify(progress)}\n`),
+        onEvent: (event) => process.stderr.write(`${JSON.stringify(event)}\n`),
       });
       process.stdout.write(`${JSON.stringify(result)}\n`);
     } catch (error) {

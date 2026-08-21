@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const taskRuns = sqliteTable("task_runs", {
   taskId: text("task_id").primaryKey(),
@@ -55,29 +55,20 @@ export const repositoryLeases = sqliteTable("repository_leases", {
     .notNull(),
 });
 
-export const taskHistory = sqliteTable(
-  "task_history",
+export const taskEvents = sqliteTable(
+  "task_events",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
     taskId: text("task_id").notNull(),
-    kind: text("kind").notNull(),
-    activation: integer("activation"),
-    cycle: integer("cycle"),
-    role: text("role"),
-    profile: text("profile"),
-    observedModel: text("observed_model"),
-    observedProvider: text("observed_provider"),
-    executionOwner: text("execution_owner"),
-    previousExecutionOwner: text("previous_execution_owner"),
-    startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
-    endedAtEpochMs: integer("ended_at_epoch_ms"),
-    outcome: text("outcome").notNull(),
-    failure: text("failure"),
-    candidateSha: text("candidate_sha"),
-    candidateFence: integer("candidate_fence"),
-    tokenUsage: text("token_usage", { mode: "json" }),
+    sequence: integer("sequence").notNull(),
+    eventId: text("event_id").notNull(),
+    occurredAtEpochMs: integer("occurred_at_epoch_ms").notNull(),
+    data: text("data", { mode: "json" }).notNull(),
   },
   (table) => ({
-    taskHistoryTaskIdId: index("task_history_task_id_id_index").on(table.taskId, table.id),
+    taskEventsPrimaryKey: primaryKey({ columns: [table.taskId, table.sequence] }),
+    taskEventsTaskIdEventId: uniqueIndex("task_events_task_id_event_id_index").on(
+      table.taskId,
+      table.eventId,
+    ),
   }),
 );

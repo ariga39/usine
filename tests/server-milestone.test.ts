@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
 import { codexExecutionIdentityPath } from "@usine/coding-session";
-import { lookupTaskStatus } from "@usine/runtime";
+import { lookupTaskEvents, lookupTaskStatus } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 
 const fakeCodexExecutable = (
@@ -561,25 +561,32 @@ describe("server-owned delivery milestone", () => {
         delivery: { prNumber: 1, attestationId: "7" },
       });
       expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
-      const progress = follow.stderr
+      const events = follow.stderr
         .trim()
         .split("\n")
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as { revision: number; state: string });
-      expect(progress.length).toBeGreaterThanOrEqual(2);
-      const revisions = progress.map((entry) => entry.revision);
-      expect(new Set(revisions).size).toBe(revisions.length);
+        .map((line) => JSON.parse(line) as { sequence: number; data: { type: string } });
+      expect(events.length).toBeGreaterThanOrEqual(2);
+      const sequences = events.map((entry) => entry.sequence);
+      expect(new Set(sequences).size).toBe(sequences.length);
       expect(
-        revisions.every((revision, index) => {
-          const previous = revisions[index - 1];
-          return index === 0 || (previous !== undefined && revision > previous);
+        sequences.every((sequence, index) => {
+          const previous = sequences[index - 1];
+          return index === 0 || (previous !== undefined && sequence > previous);
         }),
       ).toBe(true);
-      expect(progress.at(-1)).toMatchObject({ state: "reviewed_pr" });
+      expect(events.at(-1)).toMatchObject({ data: { type: "task_terminal" } });
       expect(
-        progress
+        events
           .slice(0, -1)
-          .some((entry) => ["admitted", "candidate", "checked", "reviewed"].includes(entry.state)),
+          .some((entry) =>
+            [
+              "task_admitted",
+              "candidate_frozen",
+              "project_check_completed",
+              "review_completed",
+            ].includes(entry.data.type),
+          ),
       ).toBe(true);
       expect(forge.pullRequests).toBe(1);
       expect(forge.attestations).toBe(1);
@@ -704,11 +711,14 @@ describe("server-owned delivery milestone", () => {
       await stopServer(first);
       firstStopped = true;
       const interrupted = await lookupTaskStatus(fixtureValue.stateDirectory, fixtureValue.taskId);
-      expect(interrupted?.history[0]).toMatchObject({
-        kind: "implementer",
-        activation: 1,
-        outcome: "cancelled",
-      });
+      const interruptedEvents = await lookupTaskEvents(
+        fixtureValue.stateDirectory,
+        fixtureValue.taskId,
+      );
+      expect(interrupted).not.toBeNull();
+      expect(
+        interruptedEvents?.events.some((event) => event.data.type === "coding_session_started"),
+      ).toBe(true);
 
       await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
       await new Promise((resolve) => setTimeout(resolve, 100));

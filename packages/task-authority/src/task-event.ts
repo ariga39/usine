@@ -1,0 +1,283 @@
+import { Predicate, Schema } from "effect";
+
+const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
+const safeObservationId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
+);
+const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
+const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
+const outcome = Schema.Literals(["succeeded", "failed", "cancelled", "blocked"]);
+const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
+
+const eventData = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("task_admitted"), contractHash: exactHash }),
+  Schema.Struct({
+    type: Schema.Literal("activation_reserved"),
+    activation: Schema.Natural,
+    recovery: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_session_started"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_thread_started"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_turn_started"),
+    role,
+    activation: Schema.Natural,
+    turn: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_tool_completed"),
+    role,
+    activation: Schema.Natural,
+    tool,
+    outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_turn_completed"),
+    role,
+    activation: Schema.Natural,
+    turn: Schema.Natural,
+    outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_session_completed"),
+    role,
+    activation: Schema.Natural,
+    outcome,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({ type: Schema.Literal("candidate_frozen"), sha: exactSha, fence: Schema.Natural }),
+  Schema.Struct({
+    type: Schema.Literal("project_check_completed"),
+    sha: exactSha,
+    cycle: Schema.Natural,
+    outcome: Schema.Literals(["passed", "failed"]),
+    exitCode: Schema.Int,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("review_completed"),
+    sha: exactSha,
+    cycle: Schema.Natural,
+    verdict: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
+  }),
+  Schema.Struct({ type: Schema.Literal("repair_batch_recorded"), cycle: Schema.Natural }),
+  Schema.Struct({
+    type: Schema.Literal("delivery_completed"),
+    sha: exactSha,
+    prNumber: Schema.Natural,
+    merged: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("recovery_observed"),
+    kind: Schema.Literals(["server_restart", "execution_owner_changed"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("task_blocked"),
+    reason: Schema.Literals([
+      "elapsed_budget",
+      "invalid_phase",
+      "missing_evidence",
+      "provider_failure",
+      "project_check_failure",
+      "review_inconclusive",
+      "delivery_failure",
+      "unknown",
+    ]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("task_terminal"),
+    state: Schema.Literals(["reviewed_pr", "merged", "blocked"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("legacy_observation"),
+    kind: Schema.Literals([
+      "implementer",
+      "project_check",
+      "fresh_review",
+      "forge_delivery",
+      "coordinator_restart",
+      "execution_owner_change",
+      "unknown",
+    ]),
+    outcome: Schema.Literals([
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "blocked",
+      "observed",
+      "unknown",
+    ]),
+    complete: Schema.Literal(false),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("legacy_import_incomplete"),
+    importedCount: Schema.Natural,
+    complete: Schema.Literal(false),
+  }),
+]);
+
+const observationData = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("coding_session_started"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_thread_started"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_turn_started"),
+    role,
+    activation: Schema.Natural,
+    turn: Schema.Natural,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_tool_completed"),
+    role,
+    activation: Schema.Natural,
+    tool,
+    outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_turn_completed"),
+    role,
+    activation: Schema.Natural,
+    turn: Schema.Natural,
+    outcome,
+    sessionId: safeObservationId,
+    outcomeId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_session_completed"),
+    role,
+    activation: Schema.Natural,
+    outcome,
+    sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("recovery_observed"),
+    kind: Schema.Literals(["server_restart", "execution_owner_changed"]),
+  }),
+]);
+
+export type TaskEventData = Schema.Schema.Type<typeof eventData>;
+export type TaskObservationEventData = Schema.Schema.Type<typeof observationData>;
+
+const taskObservationEventInput = Schema.Struct({
+  eventId: safeEventId,
+  occurredAtEpochMs: Schema.Int,
+  data: observationData,
+});
+
+const taskEvent = Schema.Struct({
+  taskId: safeEventId,
+  sequence: Schema.Natural,
+  eventId: safeEventId,
+  occurredAtEpochMs: Schema.Int,
+  data: eventData,
+});
+
+const taskEventPage = Schema.Struct({
+  taskId: safeEventId,
+  events: Schema.Array(taskEvent),
+  nextSequence: Schema.Natural,
+});
+
+export type TaskObservationEventInput = Schema.Schema.Type<typeof taskObservationEventInput>;
+export type TaskEvent = Schema.Schema.Type<typeof taskEvent>;
+export type TaskEventPage = Schema.Schema.Type<typeof taskEventPage>;
+
+export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
+  assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
+  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
+  return Schema.decodeUnknownSync(taskObservationEventInput)(input);
+}
+
+export function decodeTaskEvent(input: unknown): TaskEvent {
+  assertExactKeys(input, ["taskId", "sequence", "eventId", "occurredAtEpochMs", "data"]);
+  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
+  return Schema.decodeUnknownSync(taskEvent)(input);
+}
+
+export function decodeTaskEventPage(input: unknown): TaskEventPage {
+  assertExactKeys(input, ["taskId", "events", "nextSequence"]);
+  if (Predicate.isObject(input) && Array.isArray(input.events)) {
+    for (const event of input.events) decodeTaskEvent(event);
+  }
+  return Schema.decodeUnknownSync(taskEventPage)(input);
+}
+
+const dataFields: Record<string, readonly string[]> = {
+  task_admitted: ["type", "contractHash"],
+  activation_reserved: ["type", "activation", "recovery"],
+  coding_session_started: ["type", "role", "activation", "sessionId"],
+  coding_thread_started: ["type", "role", "activation", "sessionId"],
+  coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
+  coding_tool_completed: [
+    "type",
+    "role",
+    "activation",
+    "tool",
+    "outcome",
+    "sessionId",
+    "outcomeId",
+  ],
+  coding_turn_completed: [
+    "type",
+    "role",
+    "activation",
+    "turn",
+    "outcome",
+    "sessionId",
+    "outcomeId",
+  ],
+  coding_session_completed: ["type", "role", "activation", "outcome", "sessionId"],
+  candidate_frozen: ["type", "sha", "fence"],
+  project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
+  review_completed: ["type", "sha", "cycle", "verdict"],
+  repair_batch_recorded: ["type", "cycle"],
+  delivery_completed: ["type", "sha", "prNumber", "merged"],
+  recovery_observed: ["type", "kind"],
+  task_blocked: ["type", "reason"],
+  task_terminal: ["type", "state"],
+  legacy_observation: ["type", "kind", "outcome", "complete"],
+  legacy_import_incomplete: ["type", "importedCount", "complete"],
+};
+
+function assertExactKeys(input: unknown, expected: readonly string[]): void {
+  if (!Predicate.isObject(input)) throw new Error("event must be an object");
+  const actual = Object.keys(input).sort();
+  const allowed = [...expected].sort();
+  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index]))
+    throw new Error("event contains fields outside its allowlist");
+}
+
+function assertExactDataKeys(input: Record<string, unknown>): void {
+  if (typeof input.type !== "string") throw new Error("event data type is invalid");
+  const expected = dataFields[input.type];
+  if (!expected) throw new Error("event data type is invalid");
+  assertExactKeys(input, expected);
+}

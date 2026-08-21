@@ -2,7 +2,13 @@ import { access, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/pro
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Codex, type RunResult, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
+import {
+  Codex,
+  type RunResult,
+  type ThreadEvent,
+  type ThreadOptions,
+  type TurnOptions,
+} from "@openai/codex-sdk";
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
@@ -36,6 +42,28 @@ function testClient(
   const thread = client.startThread();
   Object.defineProperty(thread, "id", { configurable: true, value: id });
   thread.run = run;
+  thread.runStreamed = async (prompt, options) => ({
+    events: (async function* (): AsyncGenerator<ThreadEvent> {
+      if (typeof prompt !== "string") throw new Error("test prompt must be a string");
+      const result = await run(prompt, options);
+      yield { type: "thread.started", thread_id: id ?? "thread-test" };
+      yield { type: "turn.started" };
+      yield {
+        type: "item.completed",
+        item: { type: "agent_message", id: "message", text: result.finalResponse },
+      };
+      yield {
+        type: "turn.completed",
+        usage: result.usage ?? {
+          input_tokens: 0,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 0,
+          reasoning_output_tokens: 0,
+        },
+      };
+    })(),
+  });
   client.startThread = (options: ThreadOptions = {}) => {
     onStart?.(options);
     return thread;

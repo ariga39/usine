@@ -1,13 +1,13 @@
 import { createServer } from "node:http";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskResult, TaskState } from "@usine/task-authority";
+import type { TaskEvent, TaskResult, TaskState } from "@usine/task-authority";
 
 function result(taskId: string, revision: number, state: TaskState): TaskResult {
   return {
     schemaVersion: 2,
     taskId,
-    contractHash: "contract-hash",
+    contractHash: "a".repeat(64),
     revision,
     deadlineEpochMs: Date.now() + 30_000,
     state,
@@ -29,19 +29,35 @@ function result(taskId: string, revision: number, state: TaskState): TaskResult 
   };
 }
 
+function event(taskId: string, sequence: number, data: TaskEvent["data"]): TaskEvent {
+  return { taskId, sequence, eventId: `event-${sequence}`, occurredAtEpochMs: sequence, data };
+}
+
 describe("CLI follow boundary", () => {
-  test("polls bounded durable progress and prints one terminal result", async () => {
+  test("replays cursor events and prints one authoritative terminal result", async () => {
     const taskId = "follow-test";
-    const snapshots = [
-      result(taskId, 0, "admitted"),
-      result(taskId, 1, "candidate"),
-      result(taskId, 2, "blocked"),
-    ];
-    let requestCount = 0;
-    const server = createServer((_request, response) => {
-      const snapshot = snapshots[Math.min(requestCount++, snapshots.length - 1)];
+    let state: TaskState = "admitted";
+    let sequence = 0;
+    const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ ...snapshot, history: [] }));
+      if (request.url?.includes("/events")) {
+        if (state === "blocked") {
+          response.end(JSON.stringify({ taskId, events: [], nextSequence: sequence }));
+          return;
+        }
+        sequence += 1;
+        const current = event(
+          taskId,
+          sequence,
+          sequence === 1
+            ? { type: "task_admitted", contractHash: "a".repeat(64) }
+            : { type: "task_terminal", state: "blocked" },
+        );
+        if (sequence === 2) state = "blocked";
+        response.end(JSON.stringify({ taskId, events: [current], nextSequence: sequence }));
+        return;
+      }
+      response.end(JSON.stringify(result(taskId, sequence, state)));
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -57,13 +73,22 @@ describe("CLI follow boundary", () => {
       });
       expect(run.exitCode, run.stderr).toBe(0);
       expect(JSON.parse(run.stdout)).toMatchObject({ taskId, state: "blocked" });
-      const progress = run.stderr
+      const events = run.stderr
         .trim()
         .split("\n")
         .filter(Boolean)
-        .map((line) => JSON.parse(line));
-      expect(progress.map((entry) => entry.state)).toEqual(["admitted", "candidate", "blocked"]);
-      expect(progress.every((entry) => entry.event === "progress")).toBe(true);
+        .map((line) => JSON.parse(line) as TaskEvent);
+      expect(events.map((entry) => entry.sequence)).toEqual([1, 2]);
+      expect(
+        events.every(
+          (entry) =>
+            typeof entry.taskId === "string" &&
+            typeof entry.eventId === "string" &&
+            typeof entry.occurredAtEpochMs === "number" &&
+            typeof entry.data.type === "string",
+        ),
+      ).toBe(true);
+      expect(events.at(-1)?.data).toMatchObject({ type: "task_terminal", state: "blocked" });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

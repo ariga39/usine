@@ -3,6 +3,7 @@ import {
   type CodexOptions,
   type RunResult,
   type Thread,
+  type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
   type Usage,
@@ -110,7 +111,18 @@ export interface SessionRequest<Output = unknown> {
   execution: ExecutionReference;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
 }
+
+export type CodingSessionObservation =
+  | { type: "thread_started" }
+  | { type: "turn_started"; turn: number }
+  | {
+      type: "tool_completed";
+      tool: "shell" | "apply_patch" | "search" | "unknown";
+      outcome: "succeeded" | "failed";
+    }
+  | { type: "turn_completed"; turn: number; outcome: "succeeded" | "failed" };
 
 export interface RoleOutputTransformRequest {
   finalResponse: string;
@@ -389,7 +401,12 @@ export class CodexCodingSession {
         signal: abortSignal,
         outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),
       };
-      const result: RunResult = await thread.run(request.prompt, turnOptions);
+      const result = await runStreamedTurn(
+        thread,
+        request.prompt,
+        turnOptions,
+        request.onObservation,
+      );
       let parsed = request.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
@@ -491,6 +508,84 @@ export class CodexCodingSession {
         USINE_CODEX_WORKSPACE: request.workspace,
       },
     });
+  }
+}
+
+async function runStreamedTurn(
+  thread: Thread,
+  prompt: string,
+  options: TurnOptions,
+  onObservation?: SessionRequest["onObservation"],
+): Promise<RunResult> {
+  const streamed = await thread.runStreamed(prompt, options);
+  const items: ThreadItem[] = [];
+  let finalResponse = "";
+  let usage: RunResult["usage"] = null;
+  let turn = 0;
+  for await (const event of streamed.events) {
+    switch (event.type) {
+      case "thread.started":
+        await onObservation?.({ type: "thread_started" });
+        break;
+      case "turn.started":
+        turn += 1;
+        await onObservation?.({ type: "turn_started", turn });
+        break;
+      case "item.completed":
+        items.push(event.item);
+        if (event.item.type === "agent_message") finalResponse = event.item.text;
+        await emitCompletedItem(event.item, onObservation);
+        break;
+      case "item.updated":
+        if (event.item.type === "agent_message") finalResponse = event.item.text;
+        break;
+      case "turn.completed":
+        usage = event.usage;
+        await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
+        break;
+      case "turn.failed":
+        await onObservation?.({ type: "turn_completed", turn, outcome: "failed" });
+        throw new Error("coding turn failed");
+      case "error":
+        throw new Error("coding session stream failed");
+      case "item.started":
+        break;
+    }
+  }
+  return { items, finalResponse, usage };
+}
+
+async function emitCompletedItem(
+  item: ThreadItem,
+  onObservation?: SessionRequest["onObservation"],
+): Promise<void> {
+  switch (item.type) {
+    case "command_execution":
+      await onObservation?.({
+        type: "tool_completed",
+        tool: "shell",
+        outcome: item.status === "completed" ? "succeeded" : "failed",
+      });
+      break;
+    case "file_change":
+      await onObservation?.({
+        type: "tool_completed",
+        tool: "apply_patch",
+        outcome: item.status === "completed" ? "succeeded" : "failed",
+      });
+      break;
+    case "mcp_tool_call":
+      await onObservation?.({
+        type: "tool_completed",
+        tool: "unknown",
+        outcome: item.status === "completed" ? "succeeded" : "failed",
+      });
+      break;
+    case "web_search":
+      await onObservation?.({ type: "tool_completed", tool: "search", outcome: "succeeded" });
+      break;
+    default:
+      break;
   }
 }
 

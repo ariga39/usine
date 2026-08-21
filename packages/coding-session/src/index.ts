@@ -13,6 +13,7 @@ export {
   type OpenAICompatibleRoleOutputTransformConfig,
   type SandboxMode,
   type SessionObservation,
+  type CodingSessionObservation,
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
