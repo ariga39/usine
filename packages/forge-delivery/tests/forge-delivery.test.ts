@@ -52,6 +52,7 @@ describe("Forge Delivery module", () => {
     const unsafeContract: ResolvedTaskContract = {
       ...simpleContract,
       repository: { ...simpleContract.repository, path: sentinels.localPath },
+      projectCheck: { ...simpleContract.projectCheck, command: excludedContent },
       instructions: excludedContent,
       acceptance: [excludedContent],
       nonGoals: [excludedContent],
@@ -323,6 +324,7 @@ function unsafeAttestationContract(id: string): ResolvedTaskContract {
   return {
     ...task,
     repository: { ...task.repository, path: attestationSentinels[0] },
+    projectCheck: { ...task.projectCheck, command: excludedAttestationContent },
     instructions: excludedAttestationContent,
     acceptance: [excludedAttestationContent],
     nonGoals: [excludedAttestationContent],
