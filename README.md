@@ -58,6 +58,10 @@ CLI exit codes are stable: usage `2`, not-found `3`, timeout `4`, connection `5`
 - `USINE_GITHUB_READ_PROFILE_<PROFILE>_REPOSITORY`：read profile 允许访问的 `owner/name`，必须与注册 Repository 一致；其它 `USINE_GITHUB_READ_PROFILE_<PROFILE>_*` 变量只在 host runtime 解析，具体 credential mode 与 role tool allowlists 由 profile 配置提供。
 - `USINE_ROLE_OUTPUT_API_KEY`、`USINE_ROLE_OUTPUT_API_URL`、`USINE_ROLE_OUTPUT_MODEL`：协调器用于规范化非直接 JSON role output 的 OpenAI-compatible API 配置；三项必须同时提供，示例中的值均为占位符。
 
+Repository 的 implementer 与 reviewer 只保存 opaque Codex profile 名称。host 在 `CODEX_HOME` 下解析对应的 `<profile>.config.toml`；model selection is primary through `model` and optional `model_reasoning_effort`, followed by the secondary optional nonblank `developer_instructions` string. The resolver forwards exactly these additional Codex keys when present: `model_catalog_json`, `model_provider`, `model_providers`, `model_reasoning_summary`, `model_verbosity`, `personality`, and `service_tier`. These host-private fields stay behind the Coding Session adapter boundary and do not enter Repository, Task Contract, durable facts/events, logs, the coordinator user-prompt projection, MCP config, or worker environment.
+
+`developer_instructions` 只是额外的 Codex developer instructions；冻结的 Task Contract、coordinator role prompt、output schema、sandbox、approval、deadline、credential separation 和 MCP allowlist 仍由 Usine 负责。缺失、不可读、格式错误或不支持的相关 profile 配置会在 provider 启动前以 `codex_profile_unusable` 拒绝。
+
 Repository validation uses the Vite+ command surface: `vp fmt`, `vp lint`,
 `vp check --no-fmt --no-lint`, `corepack pnpm test`, and `vp run --filter '@usine/cli...' build`.
 The root `corepack pnpm test` command runs the root public-seam suite and every workspace package

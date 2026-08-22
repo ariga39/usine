@@ -470,7 +470,7 @@ export class CodexCodingSession {
           profileSelection,
         });
       } else {
-        const client = await this.createClient(effectiveRequest, profileName, profileSelection);
+        const client = await this.createClient(effectiveRequest, profileSelection);
         const threadOptions: ThreadOptions = {
           sandboxMode: effectiveRequest.sandbox,
           workingDirectory: effectiveRequest.workspace,
@@ -569,7 +569,6 @@ export class CodexCodingSession {
 
   private async createClient(
     request: SessionRequest,
-    profileName: string,
     profileSelection: ResolvedCodexProfile,
   ): Promise<Codex> {
     if (this.clientFactory) return this.clientFactory(request);
@@ -584,7 +583,6 @@ export class CodexCodingSession {
     const launcher = await createCodexLauncher(
       this.options.executionStateDirectory,
       request.workspace,
-      profileName,
       request.execution,
     );
     return new Codex({

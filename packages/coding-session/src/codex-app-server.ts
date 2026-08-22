@@ -279,9 +279,7 @@ export async function runCodexAppServer({
   const launcher = await createCodexLauncher(
     executionStateDirectory,
     request.workspace,
-    request.profile,
     request.execution,
-    { appServer: true },
   );
   const child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
     cwd: request.workspace,

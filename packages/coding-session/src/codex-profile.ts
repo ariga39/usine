@@ -10,7 +10,7 @@ type CodexConfig = NonNullable<CodexOptions["config"]>;
 const modelReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
 const profileConfigFieldsSchema = z
   .object({
-    features: z.record(z.string(), z.unknown()).optional(),
+    developer_instructions: z.string().trim().min(1).optional(),
     model_catalog_json: z.string().optional(),
     model_provider: z.string().trim().min(1).optional(),
     model_providers: z.record(z.string(), z.unknown()).optional(),
@@ -25,16 +25,20 @@ const profileFileSchema = z
   .object({
     model: z.string().trim().min(1),
     model_reasoning_effort: modelReasoningEffortSchema.optional(),
+    developer_instructions: z.string().trim().min(1).optional(),
   })
   .passthrough();
-const profileSelectionSchema = z.object({
-  model: z.string().trim().min(1),
-  modelReasoningEffort: modelReasoningEffortSchema.optional(),
-  config: z.record(z.string(), z.unknown()).optional(),
-});
+const profileSelectionSchema = z
+  .object({
+    model: z.string().trim().min(1),
+    modelReasoningEffort: modelReasoningEffortSchema.optional(),
+    developerInstructions: z.string().trim().min(1).optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
 
 const PROFILE_CONFIG_KEYS = new Set([
-  "features",
+  "developer_instructions",
   "model",
   "model_catalog_json",
   "model_provider",
@@ -65,9 +69,14 @@ export function validateCodexProfile(profile: string): string {
   return normalized;
 }
 
+function hasDisallowedFeatures(value: unknown): boolean {
+  return typeof value === "object" && value !== null && Object.hasOwn(value, "features");
+}
+
 export interface CodexProfileSelection {
   model: string;
   modelReasoningEffort?: ModelReasoningEffort;
+  developerInstructions?: string;
 }
 
 interface ResolvedCodexProfile extends CodexProfileSelection {
@@ -101,6 +110,11 @@ export const resolveCodexProfile: CodexProfileResolver = async (
       normalized,
       `named profile "${normalized}" has malformed or unsupported model configuration`,
     );
+  if (hasDisallowedFeatures(profileConfig.data))
+    throw new CodexProfileSelectionError(
+      normalized,
+      `named profile "${normalized}" has malformed or unsupported model configuration`,
+    );
   const supportedConfig = profileConfigFieldsSchema.safeParse(profileConfig.data);
   if (!supportedConfig.success)
     throw new CodexProfileSelectionError(
@@ -114,6 +128,7 @@ export const resolveCodexProfile: CodexProfileResolver = async (
   return {
     model: profileConfig.data.model,
     modelReasoningEffort: profileConfig.data.model_reasoning_effort,
+    developerInstructions: profileConfig.data.developer_instructions,
     config,
   };
 };
@@ -135,17 +150,28 @@ export function normalizeCodexProfileSelection(
       profile,
       `named profile "${profile}" has malformed or unsupported model configuration`,
     );
+  if (hasDisallowedFeatures(parsed.data.config))
+    throw new CodexProfileSelectionError(
+      profile,
+      `named profile "${profile}" has malformed or unsupported model configuration`,
+    );
   const config = Object.fromEntries(
-    Object.entries(profileConfig.data).filter(([key]) => PROFILE_CONFIG_KEYS.has(key)),
+    Object.entries(profileConfig.data).filter(
+      ([key]) => PROFILE_CONFIG_KEYS.has(key) && key !== "developer_instructions",
+    ),
   ) as CodexConfig;
   return {
     model: parsed.data.model,
     modelReasoningEffort: parsed.data.modelReasoningEffort,
+    developerInstructions: parsed.data.developerInstructions,
     config: {
       ...config,
       model: parsed.data.model,
       ...(parsed.data.modelReasoningEffort
         ? { model_reasoning_effort: parsed.data.modelReasoningEffort }
+        : {}),
+      ...(parsed.data.developerInstructions
+        ? { developer_instructions: parsed.data.developerInstructions }
         : {}),
     },
   };
