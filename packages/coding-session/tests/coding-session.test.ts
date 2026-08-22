@@ -407,6 +407,35 @@ describe("Coding Session", () => {
     expect(sandboxes).toEqual(["workspace-write", "read-only"]);
   });
 
+  test("pre-approves exactly the enabled MCP tools", () => {
+    const enabledTools = ["github_issue_get", "github_pull_request_reviews"] as const;
+    const server = {
+      name: "github_read",
+      url: "https://github.example.test/mcp",
+      enabledTools,
+      startupTimeoutMs: 5_000,
+      toolTimeoutMs: 5_000,
+      required: true,
+    } as const;
+    const config = z
+      .object({
+        approval_policy: z.literal("never"),
+        mcp_servers: z.record(
+          z.string(),
+          z.object({
+            enabled_tools: z.array(z.string()),
+            tools: z.record(z.string(), z.object({ approval_mode: z.literal("approve") })),
+          }),
+        ),
+      })
+      .parse(JSON.parse(JSON.stringify(codexMcpConfig(server))));
+    const configured = config.mcp_servers[server.name];
+    expect(config.approval_policy).toBe("never");
+    expect(configured.enabled_tools).toEqual([...enabledTools]);
+    expect(Object.keys(configured.tools)).toEqual([...enabledTools]);
+    for (const tool of enabledTools) expect(configured.tools[tool]?.approval_mode).toBe("approve");
+  });
+
   test("reads the admitted Issue through read-only MCP without giving the worker credentials", async () => {
     const host = await startFakeGithubHost();
     const observations: unknown[] = [];

@@ -1,7 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, test } from "vite-plus/test";
-import { createGithubReadMcpServer } from "../src/index.js";
+import {
+  createGithubReadMcpServer,
+  startGithubReadMcpHttp,
+  type GithubReadMcpHttpHandle,
+} from "../src/index.js";
 
 const exactSha = "a".repeat(40);
 
@@ -12,6 +17,7 @@ describe("host-owned GitHub read MCP", () => {
       path: string;
       query: string;
       authorization: string | null;
+      body: string | null;
     }> = [];
     const server = createGithubReadMcpServer({
       repository: { owner: "example", name: "authorized" },
@@ -44,6 +50,7 @@ describe("host-owned GitHub read MCP", () => {
           path: url.pathname,
           query: url.search,
           authorization: new Headers(init?.headers).get("authorization"),
+          body: typeof init?.body === "string" ? init.body : null,
         });
         if (path === "/repos/example/authorized/issues/189")
           return Response.json({
@@ -69,16 +76,34 @@ describe("host-owned GitHub read MCP", () => {
           return Response.json([
             { id: 2, state: "APPROVED", body: "approved", user: { login: "reviewer" } },
           ]);
-        if (path === "/repos/example/authorized/pulls/7/comments")
-          return Response.json([
-            {
-              id: 4,
-              body: "review thread",
-              user: { login: "reviewer" },
-              path: "src/index.ts",
-              line: 1,
+        if (path === "/graphql")
+          return Response.json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "thread-1",
+                        isResolved: true,
+                        comments: {
+                          nodes: [
+                            {
+                              databaseId: 4,
+                              body: "review thread",
+                              author: { login: "reviewer" },
+                              path: "src/index.ts",
+                              line: 1,
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
             },
-          ]);
+          });
         if (path === `/repos/example/authorized/commits/${exactSha}/check-runs`)
           return Response.json({
             check_runs: [{ id: 3, name: "checks", status: "completed", conclusion: "success" }],
@@ -175,9 +200,25 @@ describe("host-owned GitHub read MCP", () => {
         expect(JSON.stringify(result)).not.toContain("host-read-credential");
       }
       expect(JSON.stringify(reviews)).toContain("review thread");
-      expect(JSON.stringify(reviews)).toContain("reviewComments");
-      expect(requests.filter(({ path }) => path.endsWith("/comments"))).toHaveLength(2);
+      expect(JSON.stringify(reviews)).toContain("reviewThreads");
+      expect(JSON.stringify(reviews)).toContain('\\"isResolved\\":true');
+      expect(requests.filter(({ path }) => path.endsWith("/comments"))).toHaveLength(1);
       expect(requests.filter(({ path }) => path.endsWith("/reviews"))).toHaveLength(1);
+      const graphQlRequests = requests.filter(({ path }) => path === "/graphql");
+      expect(graphQlRequests).toHaveLength(1);
+      const graphQlBody = JSON.parse(graphQlRequests[0]?.body ?? "{}");
+      expect(graphQlBody.variables).toMatchObject({
+        owner: "example",
+        repo: "authorized",
+        pullRequest: 7,
+        threadLimit: 50,
+        commentLimit: 50,
+      });
+      expect(graphQlBody.query).toContain("reviewThreads");
+      expect(graphQlBody.query).not.toContain("after");
+      expect(requests.find(({ path }) => path.endsWith("/reviews"))?.query).toContain(
+        "per_page=50",
+      );
       expect(requests.some(({ query }) => query.includes("page=2"))).toBe(false);
 
       const crossRepository = await client.callTool({
@@ -223,4 +264,158 @@ describe("host-owned GitHub read MCP", () => {
       await server.close();
     }
   });
+
+  test("serves the public MCP contract through official Streamable HTTP", async ({ skip }) => {
+    const apiRequests: string[] = [];
+    let handle: GithubReadMcpHttpHandle;
+    try {
+      handle = await startGithubReadMcpHttp({
+        repository: { owner: "example", name: "authorized" },
+        issueNumber: 189,
+        role: "reviewer",
+        tools: ["github_issue_get"],
+        policy: {
+          mode: "test",
+          appSlug: "read-only-app",
+          token: "host-read-credential",
+          apiUrl: "https://fake-github.invalid",
+        },
+        deadlineEpochMs: Date.now() + 5_000,
+        fetch: async (input) => {
+          const url = new URL(
+            typeof input === "string" ? input : input instanceof URL ? input : input.url,
+          );
+          apiRequests.push(url.pathname);
+          return Response.json({
+            number: 189,
+            title: "Authorized issue over HTTP",
+            body: "bounded issue body",
+            state: "open",
+          });
+        },
+      });
+    } catch (error) {
+      if (isListenPermissionError(error)) {
+        skip();
+        return;
+      }
+      throw error;
+    }
+    const transport = new StreamableHTTPClientTransport(new URL(handle.url));
+    const client = new Client({ name: "github-read-http-test", version: "1.0.0" });
+    let clientClosed = false;
+    let hostClosed = false;
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "github_issue_get",
+        arguments: { owner: "example", repository: "authorized", issue: 189 },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(JSON.stringify(result)).toContain("Authorized issue over HTTP");
+      expect(apiRequests).toEqual(["/repos/example/authorized/issues/189"]);
+      process.on("unhandledRejection", onUnhandledRejection);
+      await client.close();
+      clientClosed = true;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toHaveLength(0);
+      await handle.close();
+      hostClosed = true;
+      await expect(handle.close()).resolves.toBeUndefined();
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      if (!clientClosed) await client.close();
+      if (!hostClosed) await handle.close();
+    }
+  });
+
+  test.each([
+    ["implementer", ["github_issue_get", "github_issue_comments"]],
+    ["reviewer", ["github_pull_request_get", "github_pull_request_reviews"]],
+  ] as const)("keeps the %s public tool scope independent", async (role, tools) => {
+    const server = createGithubReadMcpServer({
+      repository: { owner: "example", name: "authorized" },
+      issueNumber: 189,
+      pullRequestNumber: 7,
+      role,
+      tools,
+      policy: {
+        mode: "test",
+        appSlug: "read-only-app",
+        token: "host-read-credential",
+        apiUrl: "https://fake-github.invalid",
+      },
+      deadlineEpochMs: Date.now() + 5_000,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: `github-read-${role}-scope-test`, version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools.map((tool) => tool.name)).toEqual([...tools]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("fails closed when the fake host exceeds the read deadline", async () => {
+    const server = createGithubReadMcpServer({
+      repository: { owner: "example", name: "authorized" },
+      issueNumber: 189,
+      role: "implementer",
+      tools: ["github_issue_get"],
+      policy: {
+        mode: "test",
+        appSlug: "read-only-app",
+        token: "host-read-credential",
+        apiUrl: "https://fake-github.invalid",
+      },
+      deadlineEpochMs: Date.now() + 5_000,
+      requestTimeoutMs: 5,
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          const timeout = setTimeout(() => reject(new Error("fake host did not respond")), 1_000);
+          if (signal?.aborted) {
+            clearTimeout(timeout);
+            reject(new Error("fake host request timed out"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timeout);
+              reject(new Error("fake host request timed out"));
+            },
+            { once: true },
+          );
+        }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "github-read-timeout-test", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({
+        name: "github_issue_get",
+        arguments: { owner: "example", repository: "authorized", issue: 189 },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain("GitHub read unavailable");
+      expect(JSON.stringify(result)).not.toContain("host-read-credential");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 });
+
+function isListenPermissionError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EPERM";
+}

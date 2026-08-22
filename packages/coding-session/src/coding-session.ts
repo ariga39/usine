@@ -133,6 +133,9 @@ export function codexMcpConfig(server: CodingSessionMcpServer): CodexConfig {
       [name]: {
         url: server.url,
         enabled_tools: [...server.enabledTools],
+        tools: Object.fromEntries(
+          server.enabledTools.map((tool) => [tool, { approval_mode: "approve" }]),
+        ),
         startup_timeout_sec: server.startupTimeoutMs / 1_000,
         tool_timeout_sec: server.toolTimeoutMs / 1_000,
         required: server.required,

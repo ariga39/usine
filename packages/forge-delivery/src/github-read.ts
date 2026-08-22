@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -72,8 +72,7 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         description: "Read the task's authorized GitHub Issue.",
         inputSchema: { ...requestShape, issue: z.number().int() },
       },
-      async (input: IssueArguments) =>
-        callSafely(clientPromise, () => readIssue(clientPromise, options, input)),
+      async (input: IssueArguments) => callSafely(() => readIssue(clientPromise, options, input)),
     ),
   );
   register("github_issue_comments", () =>
@@ -84,7 +83,7 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         inputSchema: { ...requestShape, issue: z.number().int() },
       },
       async (input: IssueArguments) =>
-        callSafely(clientPromise, () => readIssueComments(clientPromise, options, input)),
+        callSafely(() => readIssueComments(clientPromise, options, input)),
     ),
   );
   register("github_pull_request_get", () =>
@@ -95,7 +94,7 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         inputSchema: { ...requestShape, pullRequest: z.number().int() },
       },
       async (input: PullRequestArguments) =>
-        callSafely(clientPromise, () => readPullRequest(clientPromise, options, input)),
+        callSafely(() => readPullRequest(clientPromise, options, input)),
     ),
   );
   register("github_pull_request_reviews", () =>
@@ -103,11 +102,11 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
       "github_pull_request_reviews",
       {
         description:
-          "Read bounded review decisions and inline review comments on the authorized Pull Request; REST does not expose resolved-thread state.",
+          "Read bounded review decisions and resolved review threads on the authorized Pull Request.",
         inputSchema: { ...requestShape, pullRequest: z.number().int() },
       },
       async (input: PullRequestArguments) =>
-        callSafely(clientPromise, () => readPullRequestReviews(clientPromise, options, input)),
+        callSafely(() => readPullRequestReviews(clientPromise, options, input)),
     ),
   );
   register("github_pull_request_checks", () =>
@@ -118,7 +117,7 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         inputSchema: { ...requestShape, pullRequest: z.number().int() },
       },
       async (input: PullRequestArguments) =>
-        callSafely(clientPromise, () => readPullRequestChecks(clientPromise, options, input)),
+        callSafely(() => readPullRequestChecks(clientPromise, options, input)),
     ),
   );
   register("github_file_get", () =>
@@ -128,8 +127,7 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         description: "Read one exact file at one exact commit SHA.",
         inputSchema: { ...requestShape, commitSha: z.string(), path: z.string() },
       },
-      async (input: FileArguments) =>
-        callSafely(clientPromise, () => readFile(clientPromise, options, input)),
+      async (input: FileArguments) => callSafely(() => readFile(clientPromise, options, input)),
     ),
   );
   register("github_commit_get", () =>
@@ -139,14 +137,13 @@ export function createGithubReadMcpServer(options: GithubReadMcpOptions): McpSer
         description: "Read one exact Git commit and bounded changed-file metadata.",
         inputSchema: { ...requestShape, commitSha: z.string() },
       },
-      async (input: CommitArguments) =>
-        callSafely(clientPromise, () => readCommit(clientPromise, options, input)),
+      async (input: CommitArguments) => callSafely(() => readCommit(clientPromise, options, input)),
     ),
   );
   return server;
 }
 
-async function callSafely<T>(clientPromise: Promise<ForgeClient>, operation: () => Promise<T>) {
+async function callSafely<T>(operation: () => Promise<T>) {
   try {
     return await operation();
   } catch {
@@ -166,12 +163,14 @@ async function readIssue(
 ) {
   assertIssue(options, input);
   const client = await clientPromise;
-  const issue = await client.octokit.rest.issues.get({
-    owner: input.owner,
-    repo: input.repository,
-    issue_number: input.issue,
-    request: requestOptions(options),
-  });
+  const issue = await withRequestOptions(options, (request) =>
+    client.octokit.rest.issues.get({
+      owner: input.owner,
+      repo: input.repository,
+      issue_number: input.issue,
+      request,
+    }),
+  );
   return project("issue", options, {
     number: issue.data.number,
     title: bounded(issue.data.title),
@@ -189,13 +188,15 @@ async function readIssueComments(
   assertIssue(options, input);
   const client = await clientPromise;
   const comments = (
-    await client.octokit.rest.issues.listComments({
-      owner: input.owner,
-      repo: input.repository,
-      issue_number: input.issue,
-      per_page: MAX_ITEMS,
-      request: requestOptions(options),
-    })
+    await withRequestOptions(options, (request) =>
+      client.octokit.rest.issues.listComments({
+        owner: input.owner,
+        repo: input.repository,
+        issue_number: input.issue,
+        per_page: MAX_ITEMS,
+        request,
+      }),
+    )
   ).data;
   return project("issue_comments", options, {
     issue: input.issue,
@@ -214,12 +215,14 @@ async function readPullRequest(
 ) {
   assertPullRequest(options, input);
   const client = await clientPromise;
-  const pullRequest = await client.octokit.rest.pulls.get({
-    owner: input.owner,
-    repo: input.repository,
-    pull_number: input.pullRequest,
-    request: requestOptions(options),
-  });
+  const pullRequest = await withRequestOptions(options, (request) =>
+    client.octokit.rest.pulls.get({
+      owner: input.owner,
+      repo: input.repository,
+      pull_number: input.pullRequest,
+      request,
+    }),
+  );
   return project("pull_request", options, {
     number: pullRequest.data.number,
     title: bounded(pullRequest.data.title),
@@ -239,23 +242,56 @@ async function readPullRequestReviews(
   assertPullRequest(options, input);
   const client = await clientPromise;
   const reviews = (
-    await client.octokit.rest.pulls.listReviews({
-      owner: input.owner,
-      repo: input.repository,
-      pull_number: input.pullRequest,
-      per_page: MAX_ITEMS,
-      request: requestOptions(options),
-    })
+    await withRequestOptions(options, (request) =>
+      client.octokit.rest.pulls.listReviews({
+        owner: input.owner,
+        repo: input.repository,
+        pull_number: input.pullRequest,
+        per_page: MAX_ITEMS,
+        request,
+      }),
+    )
   ).data;
-  const reviewComments = (
-    await client.octokit.rest.pulls.listReviewComments({
-      owner: input.owner,
-      repo: input.repository,
-      pull_number: input.pullRequest,
-      per_page: MAX_ITEMS,
-      request: requestOptions(options),
-    })
-  ).data;
+  const threads = await withRequestOptions(options, (request) =>
+    client.octokit.graphql<ReviewThreadsResponse>(
+      `
+      query($owner: String!, $repo: String!, $pullRequest: Int!, $threadLimit: Int!, $commentLimit: Int!) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $pullRequest) {
+            reviewThreads(first: $threadLimit) {
+              nodes {
+                id
+                isResolved
+                comments(first: $commentLimit) {
+                  nodes {
+                    databaseId
+                    body
+                    author { login }
+                    path
+                    line
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      `,
+      {
+        owner: input.owner,
+        repo: input.repository,
+        pullRequest: input.pullRequest,
+        threadLimit: MAX_ITEMS,
+        commentLimit: MAX_ITEMS,
+        request,
+      },
+    ),
+  );
+  const pullRequest = threads.repository?.pullRequest;
+  if (!pullRequest) throw new Error("authorized Pull Request was not returned by GraphQL");
+  const reviewThreads = pullRequest.reviewThreads.nodes.filter(
+    (thread): thread is NonNullable<typeof thread> => thread !== null,
+  );
   return project("pull_request_reviews", options, {
     pullRequest: input.pullRequest,
     reviews: reviews.slice(0, MAX_ITEMS).map((review) => ({
@@ -264,14 +300,43 @@ async function readPullRequestReviews(
       body: bounded(review.body),
       author: bounded(review.user?.login),
     })),
-    reviewComments: reviewComments.slice(0, MAX_ITEMS).map((comment) => ({
-      id: comment.id,
-      body: bounded(comment.body),
-      author: bounded(comment.user?.login),
-      path: bounded(comment.path),
-      line: comment.line ?? comment.original_line ?? null,
+    reviewThreads: reviewThreads.slice(0, MAX_ITEMS).map((thread) => ({
+      id: thread.id,
+      isResolved: thread.isResolved,
+      comments: thread.comments.nodes
+        .filter((comment): comment is NonNullable<typeof comment> => comment !== null)
+        .slice(0, MAX_ITEMS)
+        .map((comment) => ({
+          id: comment.databaseId,
+          body: bounded(comment.body),
+          author: bounded(comment.author?.login),
+          path: bounded(comment.path),
+          line: comment.line ?? null,
+        })),
     })),
   });
+}
+
+interface ReviewThreadsResponse {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        nodes: Array<{
+          id: string;
+          isResolved: boolean;
+          comments: {
+            nodes: Array<{
+              databaseId: number;
+              body: string;
+              author: { login: string } | null;
+              path: string | null;
+              line: number | null;
+            } | null>;
+          };
+        } | null>;
+      };
+    } | null;
+  } | null;
 }
 
 async function readPullRequestChecks(
@@ -281,19 +346,23 @@ async function readPullRequestChecks(
 ) {
   assertPullRequest(options, input);
   const client = await clientPromise;
-  const pullRequest = await client.octokit.rest.pulls.get({
-    owner: input.owner,
-    repo: input.repository,
-    pull_number: input.pullRequest,
-    request: requestOptions(options),
-  });
-  const checks = await client.octokit.rest.checks.listForRef({
-    owner: input.owner,
-    repo: input.repository,
-    ref: pullRequest.data.head.sha,
-    per_page: MAX_ITEMS,
-    request: requestOptions(options),
-  });
+  const pullRequest = await withRequestOptions(options, (request) =>
+    client.octokit.rest.pulls.get({
+      owner: input.owner,
+      repo: input.repository,
+      pull_number: input.pullRequest,
+      request,
+    }),
+  );
+  const checks = await withRequestOptions(options, (request) =>
+    client.octokit.rest.checks.listForRef({
+      owner: input.owner,
+      repo: input.repository,
+      ref: pullRequest.data.head.sha,
+      per_page: MAX_ITEMS,
+      request,
+    }),
+  );
   return project("pull_request_checks", options, {
     pullRequest: input.pullRequest,
     commitSha: pullRequest.data.head.sha,
@@ -314,13 +383,15 @@ async function readFile(
   assertRepository(options, input);
   assertExactFile(input.commitSha, input.path);
   const client = await clientPromise;
-  const response = await client.octokit.rest.repos.getContent({
-    owner: input.owner,
-    repo: input.repository,
-    path: input.path,
-    ref: input.commitSha,
-    request: requestOptions(options),
-  });
+  const response = await withRequestOptions(options, (request) =>
+    client.octokit.rest.repos.getContent({
+      owner: input.owner,
+      repo: input.repository,
+      path: input.path,
+      ref: input.commitSha,
+      request,
+    }),
+  );
   if (Array.isArray(response.data) || response.data.type !== "file")
     throw new Error("exact file read did not return one file");
   const content =
@@ -343,12 +414,14 @@ async function readCommit(
   assertRepository(options, input);
   if (!exactSha.test(input.commitSha)) throw new Error("commit reads require an exact commit SHA");
   const client = await clientPromise;
-  const commit = await client.octokit.rest.repos.getCommit({
-    owner: input.owner,
-    repo: input.repository,
-    ref: input.commitSha,
-    request: requestOptions(options),
-  });
+  const commit = await withRequestOptions(options, (request) =>
+    client.octokit.rest.repos.getCommit({
+      owner: input.owner,
+      repo: input.repository,
+      ref: input.commitSha,
+      request,
+    }),
+  );
   return project("commit", options, {
     commitSha: commit.data.sha,
     message: bounded(commit.data.commit.message),
@@ -410,11 +483,48 @@ function bounded(value: string | null | undefined): string {
   return typeof value === "string" ? value.slice(0, MAX_TEXT) : "";
 }
 
-function requestOptions(options: GithubReadMcpOptions) {
+async function withRequestOptions<T>(
+  options: GithubReadMcpOptions,
+  operation: (request: RequestOptions) => Promise<T>,
+): Promise<T> {
+  const { request, dispose } = requestOptions(options);
+  try {
+    return await operation(request);
+  } finally {
+    dispose();
+  }
+}
+
+type RequestOptions = {
+  timeout: number;
+  retries: 0;
+  signal: AbortSignal;
+};
+
+function requestOptions(options: GithubReadMcpOptions): {
+  request: RequestOptions;
+  dispose: () => void;
+} {
+  const timeout = Math.max(
+    1,
+    Math.min(options.requestTimeoutMs ?? 10_000, remainingUntil(options.deadlineEpochMs)),
+  );
+  const timeoutController = new AbortController();
+  const timer = setTimeout(
+    () => timeoutController.abort(new DOMException("The operation timed out", "TimeoutError")),
+    timeout,
+  );
+  timer.unref();
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutController.signal])
+    : timeoutController.signal;
   return {
-    timeout: Math.min(options.requestTimeoutMs ?? 10_000, remainingUntil(options.deadlineEpochMs)),
-    retries: 0,
-    signal: options.signal,
+    request: {
+      timeout,
+      retries: 0,
+      signal,
+    },
+    dispose: () => clearTimeout(timer),
   };
 }
 
@@ -459,7 +569,6 @@ export async function startGithubReadMcpHttp(
         transport.onclose = () => {
           if (transport.sessionId) {
             transports.delete(transport.sessionId);
-            void server.close();
           }
         };
         await server.connect(transport);
@@ -481,16 +590,18 @@ export async function startGithubReadMcpHttp(
   });
   const address = http.address();
   if (!address || typeof address === "string") throw new Error("GitHub read MCP host did not bind");
+  let closePromise: Promise<void> | undefined;
   return {
     url: `http://${options.host ?? "127.0.0.1"}:${address.port}/mcp`,
-    close: async () => {
-      for (const { transport, server } of transports.values()) {
-        await transport.close();
-        await server.close();
-      }
-      await new Promise<void>((resolve, reject) =>
-        http.close((error) => (error ? reject(error) : resolve())),
-      );
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        for (const { server } of transports.values()) await server.close();
+        await new Promise<void>((resolve, reject) =>
+          http.close((error) => (error ? reject(error) : resolve())),
+        );
+      })();
+      return closePromise;
     },
   };
 }

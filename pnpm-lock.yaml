@@ -197,6 +197,9 @@ importers:
         specifier: latest
         version: 4.4.3
     devDependencies:
+      '@usine/coding-session':
+        specifier: workspace:*
+        version: link:../coding-session
       '@types/node':
         specifier: latest
         version: 26.2.0

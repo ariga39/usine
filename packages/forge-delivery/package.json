@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "vp pack",
-    "test": "vp test"
+    "test": "vp test",
+    "test:private": "vp test --config vite.private.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@usine/coding-session": "workspace:*",
     "typescript": "latest",
     "vite": "catalog:",
     "vite-plus": "catalog:"
