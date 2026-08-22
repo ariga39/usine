@@ -153,6 +153,44 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 }
 
 describe("server-owned execution", () => {
+  test("shares repeated close completion across task interruption and cleanup", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const started = deferred<void>();
+    const lifecycle: string[] = [];
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      codingSession: {
+        cleanupTask: async () => undefined,
+        cleanupOwned: async () => {
+          lifecycle.push("cleanup");
+        },
+      },
+      execute: async ({ result, signal }) => {
+        lifecycle.push("started");
+        started.resolve();
+        await new Promise<void>((resolve) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              lifecycle.push("interrupted");
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+        return result;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+
+    await submitTask(server.url, submission);
+    await started.promise;
+    await Promise.all([server.close(), server.close(), server.close()]);
+
+    expect(lifecycle).toEqual(["started", "interrupted", "cleanup"]);
+  });
+
   test("persists bounded provider interruption evidence through Delivery Run and the server", async () => {
     const { submission, stateDirectory, repositoryName } = await fixture();
     const server = await startUsineServer({

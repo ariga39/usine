@@ -7,7 +7,6 @@ import {
   Duration,
   Effect,
   Exit,
-  Fiber,
   FiberMap,
   Layer,
   Option,
@@ -238,134 +237,125 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   if (activeTaskCount > activeTaskCapacity)
     throw new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount);
 
-  let resolveReady: (server: RunningUsineServer) => void = () => undefined;
-  let rejectReady: (error: unknown) => void = () => undefined;
-  const ready = new Promise<RunningUsineServer>((resolveReadyValue, reject) => {
-    resolveReady = resolveReadyValue;
-    rejectReady = reject;
+  const scope = await Effect.runPromise(Scope.make("sequential"));
+  const program = Effect.gen(function* () {
+    yield* Effect.acquireRelease(Effect.succeed(eventHub), (hub) =>
+      Effect.sync(() => hub.shutdown()),
+    );
+    yield* Effect.acquireRelease(Effect.void, () =>
+      options.codingSession
+        ? Effect.tryPromise({
+            try: () => options.codingSession!.cleanupOwned(stateDirectory),
+            catch: (cause) => new Error(`server execution cleanup failed: ${String(cause)}`),
+          }).pipe(Effect.ignore)
+        : Effect.void,
+    );
+
+    const runTask = yield* FiberMap.makeRuntime<never, string>();
+    let launchTask: (task: AdmittedTask) => void = () => undefined;
+    const api = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        createApiWebHandler({
+          environment: options.environment,
+          launch: (task) => launchTask(task),
+          activeTaskCapacity,
+          onEvent,
+          eventHub,
+        }),
+      ),
+      (value) =>
+        Effect.tryPromise({
+          try: () => value.dispose(),
+          catch: (cause) => new Error(`server API cleanup failed: ${String(cause)}`),
+        }).pipe(Effect.ignore),
+    );
+    const server = yield* Effect.acquireRelease(
+      Effect.tryPromise({
+        try: () => listen(host, port, api.handler),
+        catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
+      }),
+      (value) =>
+        Effect.tryPromise({
+          try: async () => {
+            eventHub.shutdown();
+            await close(value);
+          },
+          catch: (cause) => new Error(`server failed to close: ${String(cause)}`),
+        }).pipe(Effect.ignore),
+    );
+
+    launchTask = (task) => {
+      runTask(
+        task.result.taskId,
+        Effect.tryPromise({
+          try: (signal) =>
+            executeServerTask(
+              task,
+              options.environment,
+              stateDirectory,
+              options.execute,
+              signal,
+              onEvent,
+            ),
+          catch: (cause) => cause,
+        }).pipe(Effect.asVoid),
+        { onlyIfMissing: true },
+      );
+    };
+
+    for (const task of restartable) {
+      yield* Effect.tryPromise({
+        try: async () => {
+          if (options.codingSession)
+            await options.codingSession.cleanupTask(stateDirectory, task.result.taskId);
+          await recordRecoveryObservation(
+            stateDirectory,
+            task.result.taskId,
+            "server_restart",
+            onEvent,
+          );
+          await recordRecoveryObservation(
+            stateDirectory,
+            task.result.taskId,
+            "execution_owner_changed",
+            onEvent,
+          );
+          const contract = parseContract(task.input.rawContract);
+          launchTask({ input: task.input, contract, result: task.result });
+        },
+        catch: (cause) => cause,
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.tryPromise({
+            try: () => blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent),
+            catch: (cause) => cause,
+          }).pipe(
+            Effect.asVoid,
+            Effect.catch(() => Effect.succeed(undefined)),
+          ),
+        ),
+      );
+    }
+
+    return {
+      host,
+      port: server.addressPort,
+      url: `http://${urlHost}:${server.addressPort}`,
+    };
   });
 
-  const program = Effect.scoped(
-    Effect.gen(function* () {
-      const runTask = yield* FiberMap.makeRuntime<never, string>();
-      let launchTask: (task: AdmittedTask) => void = () => undefined;
-      const api = createApiWebHandler({
-        environment: options.environment,
-        launch: (task) => launchTask(task),
-        activeTaskCapacity,
-        onEvent,
-        eventHub,
-      });
-      const server = yield* Effect.acquireRelease(
-        Effect.tryPromise({
-          try: () => listen(host, port, api.handler),
-          catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
-        }),
-        (value) =>
-          Effect.tryPromise({
-            try: async () => {
-              await close(value);
-              await api.dispose();
-            },
-            catch: (cause) => new Error(`server failed to close: ${String(cause)}`),
-          }).pipe(Effect.ignore),
-      );
-
-      launchTask = (task) => {
-        runTask(
-          task.result.taskId,
-          Effect.tryPromise({
-            try: (signal) =>
-              executeServerTask(
-                task,
-                options.environment,
-                stateDirectory,
-                options.execute,
-                signal,
-                onEvent,
-              ),
-            catch: (cause) => cause,
-          }).pipe(Effect.asVoid),
-          { onlyIfMissing: true },
-        );
-      };
-
-      const running: RunningUsineServer = {
-        host,
-        port: server.addressPort,
-        url: `http://${urlHost}:${server.addressPort}`,
-        close: async () => undefined,
-      };
-      for (const task of restartable) {
-        yield* Effect.tryPromise({
-          try: async () => {
-            if (options.codingSession)
-              await options.codingSession.cleanupTask(stateDirectory, task.result.taskId);
-            await recordRecoveryObservation(
-              stateDirectory,
-              task.result.taskId,
-              "server_restart",
-              onEvent,
-            );
-            await recordRecoveryObservation(
-              stateDirectory,
-              task.result.taskId,
-              "execution_owner_changed",
-              onEvent,
-            );
-            const contract = parseContract(task.input.rawContract);
-            launchTask({ input: task.input, contract, result: task.result });
-          },
-          catch: (cause) => cause,
-        }).pipe(
-          Effect.catch((error) =>
-            Effect.tryPromise({
-              try: () => blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent),
-              catch: (cause) => cause,
-            }).pipe(
-              Effect.asVoid,
-              Effect.catch(() => Effect.succeed(undefined)),
-            ),
-          ),
-        );
-      }
-      resolveReady(running);
-      yield* Effect.never;
-    }),
-  );
-  const fiber = Effect.runFork(
-    program.pipe(
-      Effect.catchCause((cause) =>
-        Effect.sync(() => rejectReady(new Error(`server failed: ${String(cause)}`))),
-      ),
-    ),
-  );
-  const running = await ready;
-  return {
-    ...running,
-    close: async () => {
-      eventHub.shutdown();
-      const initial = await Promise.allSettled([
-        options.codingSession
-          ? options.codingSession.cleanupOwned(stateDirectory)
-          : Promise.resolve(),
-        Effect.runPromise(Fiber.interrupt(fiber)),
-      ]);
-      const initialFailure = initial.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected",
-      );
-      let finalFailure: unknown;
-      if (options.codingSession) {
-        try {
-          await options.codingSession.cleanupOwned(stateDirectory);
-        } catch (error) {
-          finalFailure = error;
-        }
-      }
-      if (initialFailure) throw initialFailure.reason;
-      if (finalFailure) throw finalFailure;
-    },
-  };
+  try {
+    const running = await Effect.runPromise(Effect.provideService(program, Scope.Scope, scope));
+    let closePromise: Promise<void> | undefined;
+    return {
+      ...running,
+      close: () =>
+        (closePromise ??= Effect.runPromise(Scope.close(scope, Exit.void)).then(() => undefined)),
+    };
+  } catch (error) {
+    await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
+    throw error;
+  }
 }
 
 function isLoopbackHost(host: string): boolean {
