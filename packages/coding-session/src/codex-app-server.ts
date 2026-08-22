@@ -157,18 +157,11 @@ function classifiedFailure(
   return new Error(`${prefix}${classification ? ` (${classification})` : ""}`);
 }
 
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-}
-
 class AppServerClient {
-  private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly lines;
   private nextId = 1;
   private closed = false;
   private failure: Error | null = null;
-  private onNotification: ((method: string, params: unknown) => Promise<void> | void) | undefined;
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -191,104 +184,37 @@ class AppServerClient {
     );
   }
 
-  setNotificationHandler(handler: (method: string, params: unknown) => Promise<void> | void): void {
-    this.onNotification = handler;
-  }
-
-  request(method: string, params: unknown): Promise<unknown> {
-    if (this.closed)
-      return Promise.reject(this.failure ?? new Error("app-server transport closed"));
+  request(method: string, params: unknown): JsonRpcId {
+    if (this.closed) throw this.failure ?? new Error("app-server transport closed");
     const id = this.nextId++;
-    const promise = new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-    });
     this.write({ jsonrpc: "2.0", id, method, params });
-    return promise;
+    return id;
   }
 
   notify(method: string, params: unknown): void {
-    if (this.closed) throw this.failure ?? new Error("app-server transport closed");
     this.write({ jsonrpc: "2.0", method, params });
   }
 
-  rejectServerRequest(id: JsonRpcId): void {
-    if (this.closed) return;
-    this.write({
-      jsonrpc: "2.0",
-      id,
-      error: { code: -32601, message: "unsupported app-server request" },
-    });
-    this.fail(new Error("app-server requested an unsupported capability"));
-  }
-
-  closeTransport(error?: Error): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.failure = error ?? this.failure ?? new Error("app-server transport closed");
-    this.lines.close();
-    this.child.stdin.end();
-    this.rejectPending(this.failure);
-  }
-
-  failTransport(error: Error): void {
-    this.fail(error);
-  }
-
-  private write(message: unknown): void {
+  write(message: unknown): void {
+    if (this.closed) throw this.failure ?? new Error("app-server transport closed");
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  async receive(line: string): Promise<void> {
-    if (!line.trim()) return;
-    const parsed = jsonRpcMessageSchema.safeParse(parseJson(line));
-    if (!parsed.success) {
-      const failure = new Error("app-server protocol message is malformed");
-      this.fail(failure);
-      throw failure;
-    }
-    const message = parsed.data;
-    if (message.id !== undefined && message.method === undefined) {
-      const pending = this.pending.get(message.id);
-      if (!pending) {
-        const failure = new Error("app-server response identity is unknown");
-        this.fail(failure);
-        throw failure;
-      }
-      this.pending.delete(message.id);
-      if (message.error !== undefined) pending.reject(new Error("app-server request failed"));
-      else if (message.result !== undefined) pending.resolve(message.result);
-      else {
-        const failure = new Error("app-server response is malformed");
-        pending.reject(failure);
-        this.fail(failure);
-        throw failure;
-      }
-      return;
-    }
-    if (message.method !== undefined) {
-      if (message.id !== undefined) {
-        this.rejectServerRequest(message.id);
-        throw new Error("app-server requested an unsupported capability");
-      } else await this.onNotification?.(message.method, message.params);
-      return;
-    }
-    const failure = new Error("app-server protocol message has no response or method");
-    this.fail(failure);
-    throw failure;
+  closeTransport(error?: Error): void {
+    this.close(error ?? this.failure ?? new Error("app-server transport closed"), false);
   }
 
-  private fail(error: Error): void {
+  failTransport(error: Error): void {
+    this.close(error, true);
+  }
+
+  private close(error: Error, destroy: boolean): void {
     if (this.closed) return;
     this.closed = true;
     this.failure = error;
     this.lines.close();
-    this.child.stdin.destroy();
-    this.rejectPending(error);
-  }
-
-  private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
+    if (destroy) this.child.stdin.destroy();
+    else this.child.stdin.end();
   }
 }
 
@@ -333,11 +259,16 @@ export async function runCodexAppServer({
       Effect.gen(function* () {
         const messages = yield* Queue.bounded<AppServerMessage>(64);
         const terminal = yield* Deferred.make<AppServerRunResult, Error>();
-        const failTerminal = (error: Error): void => {
-          Effect.runSync(Deferred.fail(terminal, error));
-          client?.failTransport(error);
-        };
-        client = yield* Effect.acquireRelease(
+        let currentResponse:
+          | { id: JsonRpcId; deferred: Deferred.Deferred<unknown, Error> }
+          | undefined;
+        const failTerminal = (error: Error): Effect.Effect<void> =>
+          Effect.gen(function* () {
+            if (currentResponse) yield* Deferred.fail(currentResponse.deferred, error);
+            yield* Deferred.fail(terminal, error);
+            yield* Effect.sync(() => client?.failTransport(error));
+          });
+        const transport = yield* Effect.acquireRelease(
           Effect.sync(
             () =>
               new AppServerClient(
@@ -345,144 +276,203 @@ export async function runCodexAppServer({
                 () => stderr.classification(),
                 (message) => {
                   if (!Queue.offerUnsafe(messages, message))
-                    failTerminal(new Error("app-server notification queue is full"));
+                    Effect.runSync(
+                      failTerminal(new Error("app-server notification queue is full")),
+                    );
                 },
               ),
           ),
           (transport) => Effect.sync(() => transport.closeTransport()),
         );
-        client.setNotificationHandler(async (method, params) => {
-          switch (method) {
-            case "thread/started": {
-              const event = threadStartedSchema.parse(params);
-              if (!threadId || event.thread.id !== threadId) throw identityMismatch();
-              await request.onObservation?.({ type: "thread_started" });
-              break;
+        client = transport;
+
+        const requestAppServer = (method: string, params: unknown) =>
+          Effect.gen(function* () {
+            const deferred = yield* Deferred.make<unknown, Error>();
+            const id = yield* Effect.sync(() => transport.request(method, params));
+            currentResponse = { id, deferred };
+            return yield* Deferred.await(deferred).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (currentResponse?.deferred === deferred) currentResponse = undefined;
+                }),
+              ),
+            );
+          });
+
+        const observe = (
+          observation: Parameters<NonNullable<SessionRequest["onObservation"]>>[0],
+        ) =>
+          Effect.tryPromise({
+            try: async () => await request.onObservation?.(observation),
+            catch: asError,
+          });
+        const assertIdentity = (eventThreadId: string, eventTurnId: string): void => {
+          if (!threadId || !turnId || eventThreadId !== threadId || eventTurnId !== turnId)
+            throw identityMismatch();
+        };
+
+        const processMessages = Effect.gen(function* () {
+          while (true) {
+            const message = yield* Queue.take(messages);
+            if (message.type === "failure") {
+              yield* failTerminal(message.error);
+              return;
             }
-            case "turn/started": {
-              const event = turnStartedSchema.parse(params);
-              if (!threadId || !turnId || event.threadId !== threadId || event.turn.id !== turnId)
-                throw identityMismatch();
-              turnNumber += 1;
-              if (turnNumber !== 1) throw new Error("app-server started more than one turn");
-              await request.onObservation?.({ type: "turn_started", turn: turnNumber });
-              break;
-            }
-            case "item/agentMessage/delta": {
-              const event = itemDeltaSchema.parse(params);
-              if (!threadId || !turnId || event.threadId !== threadId || event.turnId !== turnId)
-                throw identityMismatch();
-              finalResponse += event.delta;
-              break;
-            }
-            case "item/completed": {
-              const event = itemCompletedSchema.parse(params);
-              if (!threadId || !turnId || event.threadId !== threadId || event.turnId !== turnId)
-                throw identityMismatch();
-              const item = event.item;
-              if (item.type === "agentMessage" && typeof item.text === "string")
-                finalResponse = item.text;
-              await emitAppServerItem(item, request.onObservation);
-              break;
-            }
-            case "thread/tokenUsage/updated": {
-              const event = tokenUsageSchema.parse(params);
-              if (!threadId || !turnId || event.threadId !== threadId || event.turnId !== turnId)
-                throw identityMismatch();
-              usage = {
-                input_tokens: event.tokenUsage.last.inputTokens,
-                output_tokens: event.tokenUsage.last.outputTokens,
-              };
-              break;
-            }
-            case "turn/completed": {
-              const event = turnCompletedSchema.parse(params);
-              if (!threadId || !turnId || event.threadId !== threadId || event.turn.id !== turnId)
-                throw identityMismatch();
-              if (event.turn.status === "completed") {
-                await request.onObservation?.({
-                  type: "turn_completed",
-                  turn: turnNumber,
-                  outcome: "succeeded",
-                });
-                Effect.runSync(
-                  Deferred.succeed(terminal, { finalResponse, usage, sessionId: threadId }),
-                );
-              } else if (event.turn.status === "interrupted" && request.signal?.aborted) {
-                await request.onObservation?.({
-                  type: "turn_completed",
-                  turn: turnNumber,
-                  outcome: "failed",
-                });
-                failTerminal(new AppServerCancelled("coding session cancelled"));
-              } else {
-                await request.onObservation?.({
-                  type: "turn_completed",
-                  turn: turnNumber,
-                  outcome: "failed",
-                });
-                failTerminal(new Error("app-server turn failed"));
+            if (!message.line.trim()) continue;
+            try {
+              const parsed = jsonRpcMessageSchema.safeParse(parseJson(message.line));
+              if (!parsed.success) throw new Error("app-server protocol message is malformed");
+              const incoming = parsed.data;
+              if (incoming.id !== undefined && incoming.method === undefined) {
+                const response = currentResponse;
+                if (!response || response.id !== incoming.id)
+                  throw new Error("app-server response identity is unknown");
+                currentResponse = undefined;
+                if (incoming.error !== undefined) {
+                  yield* Deferred.fail(response.deferred, new Error("app-server request failed"));
+                } else if (incoming.result !== undefined) {
+                  yield* Deferred.succeed(response.deferred, incoming.result);
+                } else {
+                  const failure = new Error("app-server response is malformed");
+                  yield* Deferred.fail(response.deferred, failure);
+                  throw failure;
+                }
+                continue;
               }
-              break;
+              if (incoming.method !== undefined) {
+                if (incoming.id !== undefined) {
+                  transport.write({
+                    jsonrpc: "2.0",
+                    id: incoming.id,
+                    error: { code: -32601, message: "unsupported app-server request" },
+                  });
+                  throw new Error("app-server requested an unsupported capability");
+                }
+                switch (incoming.method) {
+                  case "thread/started": {
+                    const event = threadStartedSchema.parse(incoming.params);
+                    if (!threadId || event.thread.id !== threadId) throw identityMismatch();
+                    yield* observe({ type: "thread_started" });
+                    break;
+                  }
+                  case "turn/started": {
+                    const event = turnStartedSchema.parse(incoming.params);
+                    assertIdentity(event.threadId, event.turn.id);
+                    turnNumber += 1;
+                    if (turnNumber !== 1) throw new Error("app-server started more than one turn");
+                    yield* observe({ type: "turn_started", turn: turnNumber });
+                    break;
+                  }
+                  case "item/agentMessage/delta": {
+                    const event = itemDeltaSchema.parse(incoming.params);
+                    assertIdentity(event.threadId, event.turnId);
+                    finalResponse += event.delta;
+                    break;
+                  }
+                  case "item/completed": {
+                    const event = itemCompletedSchema.parse(incoming.params);
+                    assertIdentity(event.threadId, event.turnId);
+                    const item = event.item;
+                    if (item.type === "agentMessage" && typeof item.text === "string")
+                      finalResponse = item.text;
+                    yield* Effect.tryPromise({
+                      try: () => emitAppServerItem(item, request.onObservation),
+                      catch: asError,
+                    });
+                    break;
+                  }
+                  case "thread/tokenUsage/updated": {
+                    const event = tokenUsageSchema.parse(incoming.params);
+                    assertIdentity(event.threadId, event.turnId);
+                    usage = {
+                      input_tokens: event.tokenUsage.last.inputTokens,
+                      output_tokens: event.tokenUsage.last.outputTokens,
+                    };
+                    break;
+                  }
+                  case "turn/completed": {
+                    const event = turnCompletedSchema.parse(incoming.params);
+                    assertIdentity(event.threadId, event.turn.id);
+                    if (!threadId) throw identityMismatch();
+                    yield* observe({
+                      type: "turn_completed",
+                      turn: turnNumber,
+                      outcome: event.turn.status === "completed" ? "succeeded" : "failed",
+                    });
+                    if (event.turn.status === "completed") {
+                      yield* Deferred.succeed(terminal, {
+                        finalResponse,
+                        usage,
+                        sessionId: threadId,
+                      });
+                    } else if (event.turn.status === "interrupted" && request.signal?.aborted) {
+                      yield* failTerminal(new AppServerCancelled("coding session cancelled"));
+                      return;
+                    } else {
+                      yield* failTerminal(new Error("app-server turn failed"));
+                      return;
+                    }
+                    break;
+                  }
+                  case "error":
+                    throw new Error("app-server stream failed");
+                  default:
+                    break;
+                }
+                continue;
+              }
+              throw new Error("app-server protocol message has no response or method");
+            } catch (error) {
+              yield* failTerminal(asError(error));
+              return;
             }
-            case "error":
-              throw new Error("app-server stream failed");
-            default:
-              break;
           }
         });
-        yield* processAppServerMessages(messages, client, failTerminal).pipe(
-          Effect.catch((error) => Effect.sync(() => failTerminal(asError(error)))),
-          Effect.forkScoped,
-        );
+        yield* processMessages.pipe(Effect.forkScoped);
         if (request.signal)
           yield* Effect.forkScoped(
-            appServerCancellation(request.signal, client, messages, terminal, () => ({
-              threadId,
-              turnId,
-            })),
+            appServerCancellation(
+              request.signal,
+              transport,
+              messages,
+              terminal,
+              () => ({
+                threadId,
+                turnId,
+              }),
+              () => currentResponse?.deferred,
+            ),
           );
 
-        yield* Effect.tryPromise({
-          try: () =>
-            client!.request("initialize", {
-              clientInfo: { name: "usine-coding-session", version: "0.1.0" },
-              capabilities: null,
-            }),
-          catch: asError,
+        yield* requestAppServer("initialize", {
+          clientInfo: { name: "usine-coding-session", version: "0.1.0" },
+          capabilities: null,
         });
         throwIfAborted(request.signal);
-        client.notify("initialized", {});
+        transport.notify("initialized", {});
         phase = "thread";
         const thread = threadStartResponseSchema.parse(
-          yield* Effect.tryPromise({
-            try: () =>
-              client!.request("thread/start", {
-                cwd: request.workspace,
-                approvalPolicy: "never",
-                sandbox: request.sandbox,
-                config: codexAdapterConfig(
-                  profileSelection,
-                  request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
-                ),
-                ephemeral: true,
-              }),
-            catch: asError,
+          yield* requestAppServer("thread/start", {
+            cwd: request.workspace,
+            approvalPolicy: "never",
+            sandbox: request.sandbox,
+            config: codexAdapterConfig(
+              profileSelection,
+              request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
+            ),
+            ephemeral: true,
           }),
         );
         threadId = thread.thread.id;
         throwIfAborted(request.signal);
         phase = "turn";
         const turn = turnStartResponseSchema.parse(
-          yield* Effect.tryPromise({
-            try: () =>
-              client!.request("turn/start", {
-                threadId,
-                input: [{ type: "text", text: request.prompt, text_elements: [] }],
-                cwd: request.workspace,
-                outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),
-              }),
-            catch: asError,
+          yield* requestAppServer("turn/start", {
+            threadId,
+            input: [{ type: "text", text: request.prompt, text_elements: [] }],
+            cwd: request.workspace,
+            outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),
           }),
         );
         turnId = turn.turn.id;
@@ -509,35 +499,13 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error("app-server request failed");
 }
 
-function processAppServerMessages(
-  messages: Queue.Queue<AppServerMessage>,
-  client: AppServerClient,
-  failTerminal: (error: Error) => void,
-): Effect.Effect<void, Error> {
-  return Effect.gen(function* () {
-    while (true) {
-      const message = yield* Queue.take(messages);
-      if (message.type === "failure") {
-        failTerminal(message.error);
-        return;
-      }
-      try {
-        yield* Effect.tryPromise({ try: () => client.receive(message.line), catch: asError });
-      } catch (error) {
-        const failure = asError(error);
-        failTerminal(failure);
-        return;
-      }
-    }
-  });
-}
-
 function appServerCancellation(
   signal: AbortSignal,
   client: AppServerClient,
   messages: Queue.Queue<AppServerMessage>,
   terminal: Deferred.Deferred<AppServerRunResult, Error>,
   ids: () => { threadId: string | undefined; turnId: string | undefined },
+  currentResponse: () => Deferred.Deferred<unknown, Error> | undefined,
 ): Effect.Effect<void> {
   return Effect.callback<void>((resume) => {
     const onAbort = (): void => resume(Effect.void);
@@ -546,13 +514,17 @@ function appServerCancellation(
     return Effect.sync(() => signal.removeEventListener("abort", onAbort));
   }).pipe(
     Effect.tap(() =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         const { threadId, turnId } = ids();
-        if (threadId && turnId) client.notify("turn/interrupt", { threadId, turnId });
+        if (threadId && turnId)
+          yield* Effect.sync(() => client.notify("turn/interrupt", { threadId, turnId })).pipe(
+            Effect.catch(() => Effect.void),
+          );
         const cancellation = new AppServerCancelled("coding session cancelled");
-        client.closeTransport(cancellation);
-        Effect.runSync(Queue.shutdown(messages));
-        Effect.runSync(Deferred.fail(terminal, cancellation));
+        const response = currentResponse();
+        if (response) yield* Deferred.fail(response, cancellation);
+        yield* Queue.shutdown(messages);
+        yield* Deferred.fail(terminal, cancellation);
       }),
     ),
     Effect.asVoid,
