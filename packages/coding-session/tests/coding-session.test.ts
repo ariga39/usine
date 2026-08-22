@@ -1191,7 +1191,47 @@ describe("Coding Session", () => {
     expect(requestOptions).not.toHaveProperty("env");
   });
 
-  test("normalizes one prose-wrapped reviewer response through the coordinator transform", async () => {
+  test("accepts one fenced reviewer object through the Coding Session seam", async () => {
+    const reviewer = {
+      sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse = [
+      "The fresh review is complete.",
+      "",
+      "```json",
+      JSON.stringify(reviewer, null, 2),
+      "```",
+    ].join("\n");
+
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      { environment: { CI: "true" } },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: reviewer,
+      failure: null,
+    });
+  });
+
+  test("normalizes an ambiguous reviewer response through the coordinator transform", async () => {
     const reviewer = {
       sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",
       verdict: "approved",
@@ -1205,7 +1245,11 @@ describe("Coding Session", () => {
       JSON.stringify(reviewer),
       "```",
       "",
-      "No further findings.",
+      "Another candidate result:",
+      "",
+      "```json",
+      JSON.stringify(reviewer),
+      "```",
     ].join("\n");
     let transformCalls = 0;
     const session = new CodexCodingSession(

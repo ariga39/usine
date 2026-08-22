@@ -279,7 +279,18 @@ function outputFrom(result: ProviderTurnResult): unknown {
   try {
     return JSON.parse(result.finalResponse) as unknown;
   } catch {
-    return undefined;
+    const fencedJson = [
+      ...result.finalResponse.matchAll(
+        /^ {0,3}```json[ \t]*\r?\n([\s\S]*?)\r?\n {0,3}```[ \t]*$/gm,
+      ),
+    ];
+    const fencedJsonBody = fencedJson[0]?.[1];
+    if (fencedJson.length !== 1 || fencedJsonBody === undefined) return undefined;
+    try {
+      return JSON.parse(fencedJsonBody) as unknown;
+    } catch {
+      return undefined;
+    }
   }
 }
 
