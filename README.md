@@ -53,6 +53,7 @@ CLI exit codes are stable: usage `2`, not-found `3`, timeout `4`, connection `5`
 - `USINE_SERVER_HOST`：local server 监听地址，默认 `127.0.0.1`，只接受 loopback host；
 - `USINE_SERVER_PORT`：local server 监听端口，默认 `8787`；
 - `USINE_SERVER_URL`：client 使用的 server URL，默认 `http://127.0.0.1:8787`；
+- `USINE_ACTIVE_TASK_CAPACITY`：local server 同时接受的 nonterminal Task 数量，必须是正的有限整数，默认 `1`；容量已满时返回可重试的 `429`，不会 admission 新 Task；
 - `USINE_FORGE_PROFILE_<PROFILE>_GIT_URL`：profile 的 forge Git URL，默认由已注册 Repository 的 owner/name 组成。
 - `USINE_GITHUB_READ_PROFILE_<PROFILE>_REPOSITORY`：read profile 允许访问的 `owner/name`，必须与注册 Repository 一致；其它 `USINE_GITHUB_READ_PROFILE_<PROFILE>_*` 变量只在 host runtime 解析，具体 credential mode 与 role tool allowlists 由 profile 配置提供。
 - `USINE_ROLE_OUTPUT_API_KEY`、`USINE_ROLE_OUTPUT_API_URL`、`USINE_ROLE_OUTPUT_MODEL`：协调器用于规范化非直接 JSON role output 的 OpenAI-compatible API 配置；三项必须同时提供，示例中的值均为占位符。

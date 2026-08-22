@@ -56,8 +56,17 @@ export function reportCommandFailure(
     cause instanceof Error && "diagnostic" in cause
       ? (cause as { diagnostic?: string }).diagnostic
       : undefined;
+  const typedError =
+    cause instanceof Error && "code" in cause
+      ? (cause as { code?: string; retryable?: boolean })
+      : undefined;
   process.stderr.write(
-    `${JSON.stringify({ error: diagnostic ?? fallback, kind, message: failureMessage(cause) })}\n`,
+    `${JSON.stringify({
+      error: typedError?.code ?? diagnostic ?? fallback,
+      kind,
+      ...(typedError?.retryable ? { retryable: true } : {}),
+      message: failureMessage(cause),
+    })}\n`,
   );
   process.exitCode = exitCodeForKind(kind);
 }

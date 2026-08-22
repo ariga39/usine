@@ -281,6 +281,7 @@ export async function admitTask(
   rawContract: string,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
+  activeTaskCapacity?: number,
 ): Promise<TaskResult> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
@@ -336,6 +337,7 @@ export async function admitTask(
         deadlineEpochMs,
       },
       { contractPath, rawContract },
+      activeTaskCapacity,
     );
     if (deadlineExpired(admitted.deadlineEpochMs)) {
       const blocked = await authority.block(

@@ -8,6 +8,7 @@ import {
   contractIssues,
   openSqliteDatabase,
   TaskAuthority,
+  TaskCapacityError,
   isTaskStateQuarantinedError,
   taskContractSchema,
   repositoryRegistrationSchema,
@@ -94,6 +95,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   if (!isLoopbackHost(host)) throw new Error("server host must be loopback");
   const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
+  const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
 
@@ -112,7 +114,13 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         Effect.tryPromise({
           try: () =>
             listen(host, port, async (request, response) => {
-              await handleRequest(request, response, options.environment, launchTask);
+              await handleRequest(
+                request,
+                response,
+                options.environment,
+                launchTask,
+                activeTaskCapacity,
+              );
             }),
           catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
         }),
@@ -216,6 +224,17 @@ function isLoopbackHost(host: string): boolean {
   return isIP(normalized) === 4 && normalized.startsWith("127.");
 }
 
+function activeTaskCapacityFromEnvironment(environment: NodeJS.ProcessEnv): number {
+  const configured = environment.USINE_ACTIVE_TASK_CAPACITY?.trim();
+  if (!configured) return 1;
+  if (!/^\d+$/.test(configured))
+    throw new Error("USINE_ACTIVE_TASK_CAPACITY must be a positive finite integer");
+  const capacity = Number(configured);
+  if (!Number.isSafeInteger(capacity) || capacity < 1)
+    throw new Error("USINE_ACTIVE_TASK_CAPACITY must be a positive finite integer");
+  return capacity;
+}
+
 async function executeServerTask(
   task: AdmittedTask,
   environment: NodeJS.ProcessEnv,
@@ -300,7 +319,12 @@ function listen(
     const server = createServer((request, response) => {
       void handler(request, response).catch((error) => {
         if (!response.headersSent) {
-          response.statusCode = error instanceof ServerValidationError ? 400 : 500;
+          response.statusCode =
+            error instanceof TaskCapacityError
+              ? 429
+              : error instanceof ServerValidationError
+                ? 400
+                : 500;
           writeJson(response, errorProjection(error));
         } else {
           response.destroy(error instanceof Error ? error : undefined);
@@ -330,6 +354,7 @@ async function handleRequest(
   response: ServerResponse,
   environment: NodeJS.ProcessEnv,
   launch: (task: AdmittedTask) => void,
+  activeTaskCapacity: number,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
@@ -469,7 +494,13 @@ async function handleRequest(
     const repository = await inspectRepository(stateDirectory, contract.repositoryId);
     if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
     const policy = runtimePolicyFromEnvironment(environment, repository);
-    const result = await admitTask(submission.contractPath, rawContract, contract, policy);
+    const result = await admitTask(
+      submission.contractPath,
+      rawContract,
+      contract,
+      policy,
+      activeTaskCapacity,
+    );
     if (!isTerminalState(result.state)) {
       launch({
         input: { ...submission, rawContract },
@@ -553,8 +584,10 @@ function writeJson(response: ServerResponse, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
-function errorProjection(error: unknown): { message: string; code?: string } {
+function errorProjection(error: unknown): { message: string; code?: string; retryable?: boolean } {
   if (error instanceof ServerValidationError) return { code: error.code, message: error.message };
+  if (error instanceof TaskCapacityError)
+    return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof ForgeProfileResolutionError)
     return { code: error.code, message: error.message };
   return { code: "server_error", message: "server request failed" };
