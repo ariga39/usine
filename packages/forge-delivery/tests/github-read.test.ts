@@ -365,6 +365,7 @@ describe("host-owned GitHub read MCP", () => {
   });
 
   test("fails closed when the fake host exceeds the read deadline", async () => {
+    let underlyingRequestSignal: AbortSignal | undefined;
     const server = createGithubReadMcpServer({
       repository: { owner: "example", name: "authorized" },
       issueNumber: 189,
@@ -377,10 +378,11 @@ describe("host-owned GitHub read MCP", () => {
         apiUrl: "https://fake-github.invalid",
       },
       deadlineEpochMs: Date.now() + 5_000,
-      requestTimeoutMs: 5,
+      requestTimeoutMs: 25,
       fetch: async (_input, init) =>
         new Promise<Response>((_resolve, reject) => {
           const signal = init?.signal;
+          underlyingRequestSignal = signal ?? undefined;
           const timeout = setTimeout(() => reject(new Error("fake host did not respond")), 1_000);
           if (signal?.aborted) {
             clearTimeout(timeout);
@@ -409,6 +411,67 @@ describe("host-owned GitHub read MCP", () => {
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).toContain("GitHub read unavailable");
       expect(JSON.stringify(result)).not.toContain("host-read-credential");
+      expect(underlyingRequestSignal?.aborted).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("cancelling the caller aborts the underlying GitHub request", async () => {
+    const caller = new AbortController();
+    let resolveFetchStarted!: (signal: AbortSignal) => void;
+    const fetchStarted = new Promise<AbortSignal>((resolve) => {
+      resolveFetchStarted = resolve;
+    });
+    const server = createGithubReadMcpServer({
+      repository: { owner: "example", name: "authorized" },
+      issueNumber: 189,
+      role: "implementer",
+      tools: ["github_issue_get"],
+      policy: {
+        mode: "test",
+        appSlug: "read-only-app",
+        token: "host-read-credential",
+        apiUrl: "https://fake-github.invalid",
+      },
+      deadlineEpochMs: Date.now() + 5_000,
+      signal: caller.signal,
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) {
+            reject(new Error("GitHub request signal is missing"));
+            return;
+          }
+          resolveFetchStarted(signal);
+          if (signal.aborted) {
+            reject(new Error("GitHub request was cancelled"));
+            return;
+          }
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("GitHub request was cancelled")),
+            { once: true },
+          );
+        }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "github-read-cancellation-test", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const resultPromise = client.callTool({
+        name: "github_issue_get",
+        arguments: { owner: "example", repository: "authorized", issue: 189 },
+      });
+      const underlyingRequestSignal = await fetchStarted;
+      caller.abort();
+      const result = await resultPromise;
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain("GitHub read unavailable");
+      expect(JSON.stringify(result)).not.toContain("host-read-credential");
+      expect(underlyingRequestSignal.aborted).toBe(true);
     } finally {
       await client.close();
       await server.close();

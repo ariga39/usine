@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { remainingUntil } from "@usine/task-authority";
+import { Duration, Effect } from "effect";
 import type { GithubApiPolicy, ForgeClient } from "./forge-policy.js";
 import { createGithubApiClient } from "./forge-policy.js";
 import { z } from "zod";
@@ -487,12 +488,22 @@ async function withRequestOptions<T>(
   options: GithubReadMcpOptions,
   operation: (request: RequestOptions) => Promise<T>,
 ): Promise<T> {
-  const { request, dispose } = requestOptions(options);
-  try {
-    return await operation(request);
-  } finally {
-    dispose();
-  }
+  const timeout = Math.max(
+    1,
+    Math.min(options.requestTimeoutMs ?? 10_000, remainingUntil(options.deadlineEpochMs)),
+  );
+  return Effect.runPromise(
+    Effect.tryPromise({
+      try: (signal) =>
+        operation({
+          timeout,
+          retries: 0,
+          signal,
+        }),
+      catch: (error) => error,
+    }).pipe(Effect.timeout(Duration.millis(timeout))),
+    { signal: options.signal },
+  );
 }
 
 type RequestOptions = {
@@ -500,33 +511,6 @@ type RequestOptions = {
   retries: 0;
   signal: AbortSignal;
 };
-
-function requestOptions(options: GithubReadMcpOptions): {
-  request: RequestOptions;
-  dispose: () => void;
-} {
-  const timeout = Math.max(
-    1,
-    Math.min(options.requestTimeoutMs ?? 10_000, remainingUntil(options.deadlineEpochMs)),
-  );
-  const timeoutController = new AbortController();
-  const timer = setTimeout(
-    () => timeoutController.abort(new DOMException("The operation timed out", "TimeoutError")),
-    timeout,
-  );
-  timer.unref();
-  const signal = options.signal
-    ? AbortSignal.any([options.signal, timeoutController.signal])
-    : timeoutController.signal;
-  return {
-    request: {
-      timeout,
-      retries: 0,
-      signal,
-    },
-    dispose: () => clearTimeout(timer),
-  };
-}
 
 export interface GithubReadMcpHttpOptions extends GithubReadMcpOptions {
   host?: string;
