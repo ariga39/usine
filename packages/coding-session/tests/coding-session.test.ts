@@ -93,13 +93,19 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-async function flushMicrotasksUntilTimerPending(initialTimerCount: number): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (vi.getTimerCount() > initialTimerCount) return;
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-  }
-  throw new Error("execution ownership poll was not scheduled");
+function observeExecutionPollSchedule(): {
+  scheduled: Promise<void>;
+  restore: () => void;
+} {
+  const scheduled = deferred<void>();
+  const schedule = globalThis.setTimeout;
+  const timerSpy = vi
+    .spyOn(globalThis, "setTimeout")
+    .mockImplementation((handler, timeout, ...args) => {
+      if (timeout === 10) scheduled.resolve();
+      return schedule(handler, timeout, ...args);
+    });
+  return { scheduled: scheduled.promise, restore: () => timerSpy.mockRestore() };
 }
 
 async function fakeAppServerEnvironment(
@@ -1370,7 +1376,7 @@ describe("Coding Session", () => {
       },
     );
 
-    const initialTimerCount = vi.getTimerCount();
+    const executionPoll = observeExecutionPollSchedule();
     const pending = session.run({
       role: "implementer",
       workspace: join(stateDirectory, "writer"),
@@ -1386,7 +1392,7 @@ describe("Coding Session", () => {
     });
 
     try {
-      await flushMicrotasksUntilTimerPending(initialTimerCount);
+      await executionPoll.scheduled;
       const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
         encoding: "utf8",
       }).trim();
@@ -1419,6 +1425,7 @@ describe("Coding Session", () => {
       }
       if (child.exitCode === null && child.signalCode === null)
         await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      executionPoll.restore();
       vi.useRealTimers();
     }
   });
@@ -1452,7 +1459,7 @@ describe("Coding Session", () => {
       { environment: { CI: "true" }, executionStateDirectory: stateDirectory },
     );
 
-    const initialTimerCount = vi.getTimerCount();
+    const executionPoll = observeExecutionPollSchedule();
     const pending = session.run({
       role: "implementer",
       workspace: join(stateDirectory, "writer"),
@@ -1469,7 +1476,7 @@ describe("Coding Session", () => {
 
     try {
       await providerStarted.promise;
-      await flushMicrotasksUntilTimerPending(initialTimerCount);
+      await executionPoll.scheduled;
       await vi.advanceTimersByTimeAsync(500);
       await expect(pending).rejects.toMatchObject({
         code: "codex_execution_ownership_error",
@@ -1482,6 +1489,7 @@ describe("Coding Session", () => {
         "const child = spawn",
       );
     } finally {
+      executionPoll.restore();
       vi.useRealTimers();
     }
   });
