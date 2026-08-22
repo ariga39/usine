@@ -164,6 +164,40 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
+  test("preserves legacy admission payloads while assigning a server cursor", async () => {
+    const path = await makeDatabase();
+    const handle = openSqliteDatabase(path);
+    handles.push(handle);
+    const observed: unknown[] = [];
+    const authority = new TaskAuthority(handle.database, {
+      onEvent: (event) => observed.push(event),
+    });
+    const taskId = `authority-legacy-admission-${Date.now()}`;
+    const contractHash = "authority-legacy-admission-hash";
+
+    await expect(
+      authority.admit({
+        contract: makeContract(taskId),
+        contractHash,
+        repositoryIdentity: `authority/legacy-admission-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      }),
+    ).resolves.toMatchObject({ taskId, state: "admitted" });
+
+    const inspection = new DatabaseSync(path);
+    const event = inspection
+      .prepare("SELECT server_cursor, data FROM task_events WHERE task_id = ?")
+      .get(taskId) as { server_cursor: number; data: string };
+    inspection.close();
+    expect(event.server_cursor).toBe(1);
+    expect(JSON.parse(event.data)).toMatchObject({
+      type: "task_admitted",
+      contractHash,
+    });
+    expect(observed).toEqual([]);
+    await expect(authority.listEvents(taskId)).rejects.toThrow(/\^\[0-9a-f\]\{64\}\$/);
+  });
+
   test("isolates corrupt rows during capacity admission without acquiring a rejected lease", async () => {
     const path = await makeDatabase();
     const corruptTaskId = `authority-capacity-corrupt-${Date.now()}`;

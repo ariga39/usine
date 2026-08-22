@@ -15,6 +15,7 @@ import {
   type RepositorySnapshot,
   type TaskContract,
   type TaskExecutionInput,
+  type TaskEvent,
   type TaskResult,
   type TaskEventPage,
   type TaskListPage,
@@ -33,6 +34,7 @@ import {
   lookupRestartableTasks,
   lookupTaskStatus,
   lookupTaskEvents,
+  lookupServerEvents,
   lookupTasks,
   lookupServerHealth,
   lookupServerSnapshot,
@@ -101,6 +103,53 @@ interface AdmittedTask {
   result: TaskResult;
 }
 
+class EventWakeupHub {
+  private revision = 0;
+  private readonly waiters = new Set<() => void>();
+
+  notify(): void {
+    this.revision += 1;
+    const waiters = [...this.waiters];
+    this.waiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
+  subscribe(): {
+    revision: () => number;
+    wait: (observedRevision: number) => Promise<void>;
+    close: () => void;
+  } {
+    let closed = false;
+    const waiters = new Set<() => void>();
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      for (const resolve of waiters) {
+        this.waiters.delete(resolve);
+        resolve();
+      }
+      waiters.clear();
+    };
+    return {
+      revision: () => this.revision,
+      wait: (observedRevision) => {
+        if (closed || this.revision !== observedRevision) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          const wake = (): void => {
+            this.waiters.delete(wake);
+            waiters.delete(wake);
+            resolve();
+          };
+          waiters.add(wake);
+          this.waiters.add(wake);
+          if (closed || this.revision !== observedRevision) wake();
+        });
+      },
+      close,
+    };
+  }
+}
+
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
@@ -108,6 +157,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
+  const eventWakeups = new EventWakeupHub();
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
   const restartState = await lookupRestartableTasks(stateDirectory);
@@ -118,7 +168,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       parseContract(task.input.rawContract);
       restartable.push(task);
     } catch (error) {
-      await blockPersistedTask(stateDirectory, task.result.taskId, error);
+      await blockPersistedTask(stateDirectory, task.result.taskId, error, () =>
+        eventWakeups.notify(),
+      );
       activeTaskCount -= 1;
     }
   }
@@ -146,6 +198,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
                 options.environment,
                 launchTask,
                 activeTaskCapacity,
+                () => eventWakeups.notify(),
+                eventWakeups,
               );
             }),
           catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
@@ -162,7 +216,14 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           task.result.taskId,
           Effect.tryPromise({
             try: (signal) =>
-              executeServerTask(task, options.environment, stateDirectory, options.execute, signal),
+              executeServerTask(
+                task,
+                options.environment,
+                stateDirectory,
+                options.execute,
+                signal,
+                () => eventWakeups.notify(),
+              ),
             catch: (cause) => cause,
           }).pipe(Effect.asVoid),
           { onlyIfMissing: true },
@@ -180,11 +241,17 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           try: async () => {
             if (options.codingSession)
               await options.codingSession.cleanupTask(stateDirectory, task.result.taskId);
-            await recordRecoveryObservation(stateDirectory, task.result.taskId, "server_restart");
+            await recordRecoveryObservation(
+              stateDirectory,
+              task.result.taskId,
+              "server_restart",
+              () => eventWakeups.notify(),
+            );
             await recordRecoveryObservation(
               stateDirectory,
               task.result.taskId,
               "execution_owner_changed",
+              () => eventWakeups.notify(),
             );
             const contract = parseContract(task.input.rawContract);
             launchTask({ input: task.input, contract, result: task.result });
@@ -193,7 +260,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         }).pipe(
           Effect.catch((error) =>
             Effect.tryPromise({
-              try: () => blockPersistedTask(stateDirectory, task.result.taskId, error),
+              try: () =>
+                blockPersistedTask(stateDirectory, task.result.taskId, error, () =>
+                  eventWakeups.notify(),
+                ),
               catch: (cause) => cause,
             }).pipe(
               Effect.asVoid,
@@ -263,6 +333,7 @@ async function executeServerTask(
   stateDirectory: string,
   execute: ServerExecution | undefined,
   signal: AbortSignal,
+  onEvent: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   let policy: RuntimePolicy;
   try {
@@ -271,15 +342,15 @@ async function executeServerTask(
     if (!repository) throw new Error("registered repository is missing");
     policy = runtimePolicyFromEnvironment(environment, repository);
   } catch (error) {
-    return blockPersistedTask(stateDirectory, task.result.taskId, error);
+    return blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
   }
   if (!execute) {
-    return executeAdmittedTask(task.input, task.contract, policy, signal);
+    return executeAdmittedTask(task.input, task.contract, policy, signal, onEvent);
   }
 
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath);
-  const authority = new TaskAuthority(handle.database);
+  const authority = new TaskAuthority(handle.database, { onEvent });
   try {
     const current = await authority.lookup(task.result.taskId);
     if (!current || isTerminalState(current.state)) {
@@ -311,9 +382,10 @@ async function blockPersistedTask(
   stateDirectory: string,
   taskId: string,
   error: unknown,
+  onEvent?: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
-  const authority = new TaskAuthority(handle.database);
+  const authority = new TaskAuthority(handle.database, { onEvent });
   try {
     const current = await authority.lookup(taskId);
     if (!current) throw new Error(`cannot block missing task ${taskId}: ${String(error)}`);
@@ -371,17 +443,64 @@ function close(server: BoundServer): Promise<void> {
   });
 }
 
+async function streamServerEvents(
+  response: ServerResponse,
+  stateDirectory: string,
+  afterCursor: number,
+  limit: number,
+  eventWakeups: EventWakeupHub,
+): Promise<void> {
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/event-stream");
+  response.setHeader("cache-control", "no-cache");
+  response.setHeader("connection", "keep-alive");
+  const subscription = eventWakeups.subscribe();
+  let closed = false;
+  response.once("close", () => {
+    closed = true;
+    subscription.close();
+  });
+  response.write(": connected\n\n");
+  let cursor = afterCursor;
+  try {
+    while (!closed && !response.destroyed) {
+      const events = await lookupServerEvents(stateDirectory, cursor, limit);
+      if (events.length > 0) {
+        for (const envelope of events) {
+          if (!response.write(`data: ${JSON.stringify(envelope)}\n\n`)) {
+            response.end();
+            return;
+          }
+          cursor = envelope.cursor;
+        }
+        continue;
+      }
+      await subscription.wait(subscription.revision());
+    }
+  } finally {
+    subscription.close();
+  }
+}
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   environment: NodeJS.ProcessEnv,
   launch: (task: AdmittedTask) => void,
   activeTaskCapacity: number,
+  onEvent: (event: TaskEvent) => void,
+  eventWakeups: EventWakeupHub,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
+  if (request.method === "GET" && url.pathname === "/v1/events") {
+    const afterCursor = parseCursor(url.searchParams.get("after"), "after");
+    const limit = parseCursor(url.searchParams.get("limit"), "limit", 200);
+    await streamServerEvents(response, stateDirectory, afterCursor, limit, eventWakeups);
+    return;
+  }
   if (request.method === "GET" && ["/v1/health", "/v1/server/health"].includes(url.pathname)) {
     try {
       writeJson(response, await lookupServerHealth(stateDirectory));
@@ -522,6 +641,7 @@ async function handleRequest(
       contract,
       policy,
       activeTaskCapacity,
+      onEvent,
     );
     if (!isTerminalState(result.state)) {
       launch({

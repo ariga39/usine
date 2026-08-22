@@ -2,10 +2,12 @@ import { Clock, Duration, Effect } from "effect";
 import {
   decodeTaskResource,
   decodeTaskEventPage,
+  decodeServerEventEnvelope,
   decodeTaskListPage,
   decodeServerHealth,
   decodeServerSnapshot,
   type TaskEvent,
+  type ServerEventEnvelope,
   type TaskEventPage,
   type TaskListPage,
   type TaskResource,
@@ -249,6 +251,102 @@ export async function taskEvents(
       "server returned invalid TaskEventPage (" + response.status + ")",
       response.status,
     );
+  }
+}
+
+export interface ServerEventListener extends AsyncIterable<ServerEventEnvelope> {
+  close(): void;
+}
+
+export interface ServerEventListenerOptions {
+  afterCursor?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}
+
+export async function openServerEventListener(
+  serverUrl: string,
+  options: ServerEventListenerOptions = {},
+): Promise<ServerEventListener> {
+  const afterCursor = options.afterCursor ?? 0;
+  const limit = options.limit ?? 200;
+  validateCursor(afterCursor, "after");
+  validateLimit(limit);
+  const controller = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  const response = await fetchServer(
+    new URL(`/v1/events?after=${afterCursor}&limit=${limit}`, serverUrl),
+    { signal },
+  );
+  if (!response.ok) {
+    const body = await readJson(response);
+    throw new ServerClientError(
+      responseMessage(body, "server event listener failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  }
+  if (!response.body)
+    throw new ServerClientError("server event listener has no response body", 500);
+  const iterator = parseServerEventStream(response.body);
+  let closed = false;
+  const stop = (): void => {
+    if (closed) return;
+    closed = true;
+    controller.abort();
+    try {
+      void iterator.return?.(undefined)?.catch(() => undefined);
+    } catch {
+      // Closing an already-ended transport is intentionally best effort.
+    }
+  };
+  const listener: ServerEventListener & AsyncIterator<ServerEventEnvelope> = {
+    next: () => (closed ? Promise.resolve({ done: true, value: undefined }) : iterator.next()),
+    return: async () => {
+      stop();
+      return { done: true, value: undefined };
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    close: stop,
+  };
+  return listener;
+}
+
+async function* parseServerEventStream(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<ServerEventEnvelope> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    while (true) {
+      const separator = buffer.indexOf("\n\n");
+      if (separator < 0) break;
+      const frame = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      const data = frame
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart())
+        .join("\n");
+      if (!data) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        throw new ServerClientError("server returned invalid event JSON", 500);
+      }
+      try {
+        yield decodeServerEventEnvelope(parsed);
+      } catch {
+        throw new ServerClientError("server returned invalid ServerEventEnvelope", 500);
+      }
+    }
   }
 }
 

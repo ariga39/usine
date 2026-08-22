@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import { repositories, repositoryLeases, taskEvents, taskQuarantines, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
@@ -11,6 +11,7 @@ import {
 import {
   decodeTaskEvent,
   decodeTaskObservationEventInput,
+  type ServerEventEnvelope,
   type TaskEvent,
   type TaskEventData,
   type TaskObservationEventInput,
@@ -75,6 +76,10 @@ type AuthorityDatabase = RuntimeDatabase;
 const MAX_EVENT_LIMIT = 200;
 const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
 
+export interface TaskAuthorityOptions {
+  onEvent?: (event: TaskEvent) => void;
+}
+
 export class TaskCapacityError extends Error {
   readonly code = "active_task_capacity";
   readonly retryable = true;
@@ -93,7 +98,14 @@ function saturatingAdd(left: number, right: number): number {
 }
 
 export class TaskAuthority {
-  constructor(private readonly database: AuthorityDatabase) {}
+  private readonly onEvent: ((event: TaskEvent) => void) | undefined;
+
+  constructor(
+    private readonly database: AuthorityDatabase,
+    options: TaskAuthorityOptions = {},
+  ) {
+    this.onEvent = options.onEvent;
+  }
 
   async registerRepository(input: RepositoryRegistration): Promise<RepositorySnapshot> {
     const register = async (database: AuthorityDatabase): Promise<RepositorySnapshot> => {
@@ -227,7 +239,7 @@ export class TaskAuthority {
     for (const row of rows) {
       let event: TaskEvent;
       try {
-        event = decodeTaskEvent(row);
+        event = decodeStoredTaskEvent(row);
       } catch {
         throw new TaskStateQuarantinedError(row.taskId);
       }
@@ -359,11 +371,13 @@ export class TaskAuthority {
 
   async appendObservation(taskId: string, input: TaskObservationEventInput): Promise<TaskEvent> {
     const decoded = decodeTaskObservationEventInput(input);
-    return this.inTransaction(async (database) => {
+    const event = await this.inTransaction(async (database) => {
       const current = await TaskAuthority.currentTask(database, taskId);
       if (!current) throw new Error("task is not admitted");
       return TaskAuthority.appendEvent(database, taskId, decoded);
     });
+    this.emit([event]);
+    return event;
   }
 
   async listEvents(
@@ -378,7 +392,21 @@ export class TaskAuthority {
       .where(and(eq(taskEvents.taskId, taskId), sql`${taskEvents.sequence} > ${afterSequence}`))
       .orderBy(taskEvents.sequence)
       .limit(boundedLimit);
-    return rows.map(decodeTaskEvent);
+    return rows.map(decodeStoredTaskEvent);
+  }
+
+  async listServerEvents(afterCursor = 0, limit = MAX_EVENT_LIMIT): Promise<ServerEventEnvelope[]> {
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_EVENT_LIMIT);
+    const rows = await this.database
+      .select()
+      .from(taskEvents)
+      .where(gt(taskEvents.serverCursor, afterCursor))
+      .orderBy(asc(taskEvents.serverCursor))
+      .limit(boundedLimit);
+    return rows.map((row) => {
+      const event = decodeStoredTaskEvent(row);
+      return { cursor: row.serverCursor, taskId: event.taskId, event };
+    });
   }
 
   async listRestartable(): Promise<{
@@ -445,6 +473,7 @@ export class TaskAuthority {
     executionInput?: TaskExecutionInput,
     activeTaskCapacity?: number,
   ): Promise<TaskResult> {
+    let admissionEvent: typeof taskEvents.$inferSelect | undefined;
     const admit = async (database: AuthorityDatabase): Promise<TaskResult> => {
       // The task row is immutable.  Lock it when it already exists so a
       // concurrent admission cannot observe a half-updated lifecycle.
@@ -535,20 +564,45 @@ export class TaskAuthority {
         result,
         ...executionInput,
       });
-      await database.insert(taskEvents).values({
-        taskId: result.taskId,
-        sequence: 1,
-        eventId: "task-admitted",
-        occurredAtEpochMs: Date.now(),
-        data: { type: "task_admitted", contractHash: result.contractHash },
-      });
+      const latestCursor = await database
+        .select({ cursor: sql<number>`coalesce(max(${taskEvents.serverCursor}), 0)` })
+        .from(taskEvents);
+      const serverCursor = (latestCursor[0]?.cursor ?? 0) + 1;
+      const insertedEvent = await database
+        .insert(taskEvents)
+        .values({
+          taskId: result.taskId,
+          sequence: 1,
+          serverCursor,
+          eventId: "task-admitted",
+          occurredAtEpochMs: Date.now(),
+          // Admission intentionally preserves its historical storage contract.
+          // Public decoding is reserved for replay and decodable notifications.
+          data: { type: "task_admitted", contractHash: result.contractHash },
+        })
+        .returning();
+      admissionEvent = insertedEvent[0];
       return result;
     };
-    return this.inTransaction(admit);
+    const result = await this.inTransaction(admit);
+    if (admissionEvent && this.onEvent) {
+      let event: TaskEvent;
+      try {
+        event = decodeStoredTaskEvent(admissionEvent);
+      } catch {
+        // Legacy admission payloads remain durable; strict list/replay decoding
+        // continues to reject them rather than weakening the public schema.
+        return result;
+      }
+      this.emit([event]);
+    }
+    return result;
   }
 
   private async persistFact(observation: TaskObservation, fact: TaskFact): Promise<TaskResult> {
-    const persist = async (database: AuthorityDatabase): Promise<TaskResult> => {
+    const persist = async (
+      database: AuthorityDatabase,
+    ): Promise<{ saved: TaskResult; events: TaskEvent[] }> => {
       const current = await TaskAuthority.currentTask(database, observation.taskId);
       if (!current) throw new Error("task is not admitted");
       const prior = decodePersistedTaskResult(current.result);
@@ -568,7 +622,7 @@ export class TaskAuthority {
         .update(taskRuns)
         .set({ result: saved, updatedAt: new Date() })
         .where(eq(taskRuns.taskId, observation.taskId));
-      await TaskAuthority.appendFactEvents(database, prior, fact, saved);
+      const events = await TaskAuthority.appendFactEvents(database, prior, fact, saved);
       if (isTerminalState(saved.state)) {
         await database
           .delete(repositoryLeases)
@@ -579,9 +633,11 @@ export class TaskAuthority {
             ),
           );
       }
-      return saved;
+      return { saved, events };
     };
-    return this.inTransaction(persist);
+    const { saved, events } = await this.inTransaction(persist);
+    this.emit(events);
+    return saved;
   }
 
   recordCandidate(observation: TaskObservation, candidate: CandidateFact): Promise<TaskResult> {
@@ -652,7 +708,22 @@ export class TaskAuthority {
       });
       return { result, activation };
     };
-    return this.inTransaction(reserve);
+    const reserved = await this.inTransaction(async (database) => {
+      const result = await reserve(database);
+      const event = await database
+        .select()
+        .from(taskEvents)
+        .where(
+          and(
+            eq(taskEvents.taskId, taskId),
+            eq(taskEvents.eventId, `activation:${result.activation}`),
+          ),
+        )
+        .limit(1);
+      return { result, event: event[0] ? decodeStoredTaskEvent(event[0]) : null };
+    });
+    if (reserved.event) this.emit([reserved.event]);
+    return reserved.result;
   }
 
   private async inTransaction<T>(
@@ -686,16 +757,20 @@ export class TaskAuthority {
     prior: TaskResult,
     fact: TaskFact,
     saved: TaskResult,
-  ): Promise<void> {
+  ): Promise<TaskEvent[]> {
+    const events: TaskEvent[] = [];
     const event = factEvent(prior, fact);
-    if (event) await TaskAuthority.appendEvent(database, saved.taskId, event);
+    if (event) events.push(await TaskAuthority.appendEvent(database, saved.taskId, event));
     if (saved.state === "reviewed_pr" || saved.state === "merged" || saved.state === "blocked") {
-      await TaskAuthority.appendEvent(database, saved.taskId, {
-        eventId: `terminal:${saved.state}`,
-        occurredAtEpochMs: Date.now(),
-        data: { type: "task_terminal", state: saved.state },
-      });
+      events.push(
+        await TaskAuthority.appendEvent(database, saved.taskId, {
+          eventId: `terminal:${saved.state}`,
+          occurredAtEpochMs: Date.now(),
+          data: { type: "task_terminal", state: saved.state },
+        }),
+      );
     }
+    return events;
   }
 
   private static async appendEvent(
@@ -708,17 +783,22 @@ export class TaskAuthority {
       .from(taskEvents)
       .where(and(eq(taskEvents.taskId, taskId), eq(taskEvents.eventId, input.eventId)))
       .limit(1);
-    if (existing[0]) return decodeTaskEvent(existing[0]);
+    if (existing[0]) return decodeStoredTaskEvent(existing[0]);
     const latest = await database
       .select({ sequence: sql<number>`coalesce(max(${taskEvents.sequence}), 0)` })
       .from(taskEvents)
       .where(eq(taskEvents.taskId, taskId));
     const sequence = (latest[0]?.sequence ?? 0) + 1;
+    const latestCursor = await database
+      .select({ cursor: sql<number>`coalesce(max(${taskEvents.serverCursor}), 0)` })
+      .from(taskEvents);
+    const serverCursor = (latestCursor[0]?.cursor ?? 0) + 1;
     const inserted = await database
       .insert(taskEvents)
       .values({
         taskId,
         sequence,
+        serverCursor,
         eventId: input.eventId,
         occurredAtEpochMs: input.occurredAtEpochMs,
         data: input.data,
@@ -726,15 +806,30 @@ export class TaskAuthority {
       .onConflictDoNothing()
       .returning();
     const row = inserted[0];
-    if (row) return decodeTaskEvent(row);
+    if (row) return decodeStoredTaskEvent(row);
     const winner = await database
       .select()
       .from(taskEvents)
       .where(and(eq(taskEvents.taskId, taskId), eq(taskEvents.eventId, input.eventId)))
       .limit(1);
     if (!winner[0]) throw new Error("task event was not persisted");
-    return decodeTaskEvent(winner[0]);
+    return decodeStoredTaskEvent(winner[0]);
   }
+
+  private emit(events: readonly TaskEvent[]): void {
+    if (!this.onEvent) return;
+    for (const event of events) this.onEvent(event);
+  }
+}
+
+function decodeStoredTaskEvent(row: typeof taskEvents.$inferSelect): TaskEvent {
+  return decodeTaskEvent({
+    taskId: row.taskId,
+    sequence: row.sequence,
+    eventId: row.eventId,
+    occurredAtEpochMs: row.occurredAtEpochMs,
+    data: row.data,
+  });
 }
 
 function factEvent(

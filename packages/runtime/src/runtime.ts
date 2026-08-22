@@ -13,6 +13,7 @@ import {
   type RepositorySnapshot,
   type RepositoryResource,
   type ResolvedTaskContract,
+  type ServerEventEnvelope,
   type TaskEvent,
   type TaskListItem,
   type TaskResult,
@@ -240,6 +241,26 @@ export async function lookupTaskEvents(
   }
 }
 
+export async function lookupServerEvents(
+  stateDirectory: string,
+  afterCursor = 0,
+  limit = 200,
+): Promise<ServerEventEnvelope[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).listServerEvents(afterCursor, limit);
+  } finally {
+    handle.close();
+  }
+}
+
 export async function lookupRestartableTasks(stateDirectory: string): Promise<{
   restartable: Array<{ result: TaskResult; input: TaskExecutionInput }>;
   activeTaskCount: number;
@@ -264,6 +285,7 @@ export async function recordRecoveryObservation(
   stateDirectory: string,
   taskId: string,
   kind: "server_restart" | "execution_owner_changed",
+  onEvent?: (event: TaskEvent) => void,
 ): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
@@ -272,7 +294,7 @@ export async function recordRecoveryObservation(
       occurredAtEpochMs: Date.now(),
       data: { type: "recovery_observed", kind },
     };
-    await new TaskAuthority(handle.database).appendObservation(taskId, input);
+    await new TaskAuthority(handle.database, { onEvent }).appendObservation(taskId, input);
   } finally {
     handle.close();
   }
@@ -284,6 +306,7 @@ export async function admitTask(
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
   activeTaskCapacity?: number,
+  onEvent?: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
@@ -293,7 +316,7 @@ export async function admitTask(
   const contractHash = hashTaskContract(rawContract);
   const handle = openSqliteDatabase(databasePath);
   const database = handle.database;
-  const authority = new TaskAuthority(database);
+  const authority = new TaskAuthority(database, { onEvent });
   try {
     const existing = await authority.lookupExisting(contract.id, contractHash);
     const registeredRepository = await authority.lookupRepository(contract.repositoryId);
@@ -359,6 +382,7 @@ export async function executeAdmittedTask(
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
   signal?: AbortSignal,
+  onEvent?: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   if (signal?.aborted) throw new Error("task execution was aborted");
   const policy = suppliedPolicy;
@@ -368,7 +392,7 @@ export async function executeAdmittedTask(
   await applyMigrations(databasePath);
   const handle = openSqliteDatabase(databasePath);
   const database = handle.database;
-  const authority = new TaskAuthority(database);
+  const authority = new TaskAuthority(database, { onEvent });
   try {
     const existing = await authority.lookup(contract.id);
     if (!existing) throw new Error("task is not admitted");
