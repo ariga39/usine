@@ -845,12 +845,14 @@ describe("Coding Session", () => {
     };
     const fixture = await fakeAppServerEnvironment("success", codexMcpConfig(mcpServer));
     const observations: CodingSessionObservation[] = [];
+    const finalObservationEntered = deferred<void>();
+    const releaseFinalObservation = deferred<void>();
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
       appServerProfiles: ["reviewer-profile"],
     });
-    const observation = await session.run({
+    const pending = session.run({
       role: "reviewer",
       workspace: join(fixture.stateDirectory, "reviewer"),
       contract,
@@ -861,10 +863,18 @@ describe("Coding Session", () => {
       outputSchema: reviewerOutputSchema,
       mcpServer,
       execution: reviewerExecution,
-      onObservation: (event) => {
+      onObservation: async (event) => {
         observations.push(event);
+        if (event.type === "turn_completed") {
+          finalObservationEntered.resolve();
+          return releaseFinalObservation.promise;
+        }
       },
     });
+    await finalObservationEntered.promise;
+    expect(observations).toHaveLength(5);
+    releaseFinalObservation.resolve();
+    const observation = await pending;
     expect(observation).toMatchObject({
       status: "completed",
       sessionId: "thread-fixture",
@@ -890,6 +900,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("interrupt");
     const controller = new AbortController();
     const started = deferred<void>();
+    const observations: CodingSessionObservation[] = [];
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
@@ -907,12 +918,16 @@ describe("Coding Session", () => {
       execution: reviewerExecution,
       signal: controller.signal,
       onObservation: (event) => {
+        observations.push(event);
         if (event.type === "turn_started") started.resolve();
       },
     });
     await started.promise;
     controller.abort();
     await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
+    const observationCount = observations.length;
+    await Promise.resolve();
+    expect(observations).toHaveLength(observationCount);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
