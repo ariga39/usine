@@ -86,7 +86,7 @@ reviewed PR + explicit approval attestation
                  merged
 ```
 
-当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture。它们不证明第二 runtime、额外容量或 production Codex turn。
+当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture。它们不证明 app-server adapter、额外容量或 production Codex turn。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
@@ -129,7 +129,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-当前 evidence 仍是 serial：每个 repository 只有一个有效 writer lease。每个 activation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。产品不据此宣称多 Task capacity；第二 runtime/forge、分布式 runner 或更高并发须由授权 Issue 和实证支持。
+当前 evidence 仍是 serial：每个 repository 只有一个有效 writer lease。每个 activation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。产品不据此宣称多 Task capacity；更宽的 runtime/forge、分布式 runner 或更高并发须由授权 Issue 和实证支持。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -168,7 +168,7 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 |---|---|---|---|
 | **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、接受或拒绝领域事实、exact-SHA evidence invalidation，以及 Task-local event projection | `admit`、读取当前 Run、事务性保留或提交一个待验证领域事实、按 cursor 读取清洗事件 | 纯 reducer + Drizzle persistence；事件不参与 reconciliation，不 import Git、Codex、GitHub 或 subprocess |
 | **Delivery Run** | deterministic reconcile 顺序、activation/review budget、retry、restart recovery、next action | `run(authorized contract)` 返回 durable task result | 一次只根据 durable facts 执行一个已保留 action；它不解析 provider events、不拼 Git argv、不调用 Octokit endpoint，也不维护第二套 replay log |
-| **Coding Session** | role/profile/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | 当前唯一 supported adapter 使用官方 Codex SDK；thread start/run、thread ID、final schema output、usage、cancellation 和 failure 留在 adapter 内，agent result 永不授予 task terminal authority |
+| **Coding Session** | role/profile/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | supported provider remains Codex；静态 opaque profile composition 可选择官方 Codex SDK adapter 或 bounded local Codex App Server adapter；thread/turn lifecycle、final schema output、usage、cancellation 和 failure 留在 adapter 内，agent result 永不授予 task terminal authority |
 | **Candidate Workspace** | isolated writer worktree、explicit Git environment、host-side commit/finalize、ancestry/cleanliness、disposable exact-SHA checkout | prepare writer、freeze Candidate、以 SHA 提供 disposable checkout | 系统 Git CLI 的窄 argv adapter；不拥有 retry、review 或 delivery policy |
 | **Quality Gate** | 分别产生 project check 与 fresh exact-SHA review facts，并聚合 findings | `check(candidate, contract)` 返回 exact-SHA Check Result；`review(candidate, contract, check)` 返回 fresh exact-SHA Review Verdict | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
 | **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、exact-head merge authority、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` 返回 reviewed-PR 或 merged effect | Octokit 与 credential-scoped Git push/merge；不运行 candidate code，也不能制造 semantic approval |
@@ -177,9 +177,9 @@ Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 c
 
 ### 8.1 Coding Session 的最小 contract
 
-Coordinator 只提供 role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline 和 output schema。Coding Session 只返回 task-oriented `run(request) -> typed observation` 的 terminal status、schema-valid final role output、usage、cancellation 或 failure；其 streamed lifecycle 通过受限 callback 投影为 provider-neutral observation。Task event 中的 session/outcome identifier 只由 activation 或 review cycle 与 durable event identity 派生，不暴露 Codex thread ID 或 SDK payload。它必须支持 cancellation/timeout；provider execution lifecycle 由 adapter 拥有，其他模块看不到 Codex thread 或 event 类型。
+Coordinator 只提供 role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline 和 output schema。Coding Session 只返回 task-oriented `run(request) -> typed observation` 的 terminal status、schema-valid final role output、usage、cancellation 或 failure；其 streamed lifecycle 通过受限 callback 投影为 provider-neutral observation。Task event 中的 session/outcome identifier 只由 activation 或 review cycle 与 durable event identity 派生，不暴露 provider thread/event payload。它必须支持 cancellation/timeout；provider execution lifecycle 由 adapter 拥有，其他模块看不到 provider thread 或 event 类型。
 
-Candidate SHA、workspace cleanliness、project checks、review freshness、delivery eligibility 和 Task terminal state都不由该 contract 决定。Codex `turn.completed` 是一次 semantic worker attempt 的完成证据，不是 Task 完成。
+Candidate SHA、workspace cleanliness、project checks、review freshness、delivery eligibility 和 Task terminal state都不由该 contract 决定。Provider turn completion 是一次 semantic worker attempt 的完成证据，不是 Task 完成。
 
 Implementer 的 Task/PR authority 由冻结 Task Contract 提供。可选的 GitHub context 不可用时，Task Contract 仍是足够的 authority；Coding Session 不因此等待用户，也不把 app-server 或其它 adapter 变成 task authority。
 
@@ -190,26 +190,26 @@ Implementer 的 Task/PR authority 由冻结 Task Contract 提供。可选的 Git
 | **Task-oriented turn port**：`run(request) -> typed observation` | role、workspace、deadline、schema 和 domain output；不知道 process、pane、event protocol 或 provider command | **选择**。provider lifecycle 留在 adapter；Delivery Run 只根据 durable domain fact retry。 |
 | **Session supervisor handle**：`start / observe / prompt / interrupt / stop` | caller 必须拥有 session state、event ordering、process cleanup 和 provider error mapping | 拒绝。它会把 Gas City/Herdr 的通用 runtime surface重新搬进 coordinator，并诱发自写 supervisor；只有同时出现第二个 runtime 和交互式 session caller 才 re-enter。 |
 
-这个 port 是当前 domain-facing seam，不是兼容性承诺或预建 provider framework。当前 supported adapter 是 Codex；#195 已授权以验证一个静态共存的 App Server adapter，但尚未证明。Coordinator config 在 activation 前把一个 opaque named profile 解析为 exactly one supported adapter；没有 automatic fallback、registry、capability negotiation 或 automatic routing。Task Authority、Delivery Run、Candidate、Quality 和 Forge 不随 provider execution semantics 改变。
+这个 port 是当前 domain-facing seam，不是兼容性承诺或预建 provider framework。Supported provider remains Codex；static opaque profile composition 在 activation 前选择 exactly one of the official Codex SDK adapter or the bounded local Codex App Server adapter。两个 adapter 都留在这个 provider-neutral Coding Session port 后面；没有 fallback、registry、capability negotiation、automatic routing 或第三个/non-Codex provider，app-server 也不能取得 Task authority。Task Authority、Delivery Run、Candidate、Quality 和 Forge 不随 provider execution semantics 改变。
 
 ### 8.2 Reuse strategy decision
 
 | 候选 | 可删除的自写 surface | 决定 |
 |---|---|---|
-| [OpenAI Codex SDK](https://developers.openai.com/codex/sdk/) | CLI argv、JSONL parser、output-schema temp plumbing、provider execution lifecycle glue | **选择**。当前 adapter 使用 thread start/run、thread ID、final schema output、usage、cancellation 和 failure；Usine 只包 role policy 与 product evidence projection。 |
+| [OpenAI Codex SDK](https://developers.openai.com/codex/sdk/) | CLI argv、JSONL parser、output-schema temp plumbing、provider execution lifecycle glue | **选择为官方 SDK adapter**。它使用 thread start/run、thread ID、final schema output、usage、cancellation 和 failure；Usine 只包 role policy 与 product evidence projection。 |
 | [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) `SandboxAgent` / tracing | agent loop、sandbox capability binding、session/tracing | 不作为 V0 runtime。它适合更广泛 agent application，但会在当前一个 Codex specialist 内重复 Codex agent loop，并与 Usine task authority 重叠；sandbox capability model 只作为设计 donor。Experimental `codexTool` 不是生产依赖。 |
-| Codex App Server | 独立的 JSON-RPC lifecycle client | #195 已授权但尚未证明；它可作为静态共存的 adapter，由 named profile 在 activation 前明确选择。没有 automatic fallback 或 routing，且 app-server 不能取得 task authority。 |
+| Codex App Server | 独立的 JSON-RPC lifecycle client | **选择为 bounded local adapter，已由 #195 证明**；由 opaque named profile 在 activation 前静态选择。没有 fallback、registry、capability negotiation 或 automatic routing，且 app-server 不能取得 task authority。 |
 | [Gas City runtime/session design](https://github.com/gastownhall/gascity/blob/main/engdocs/architecture/session.md) + Herdr | runtime/session ownership ideas | 作为 donor，不采用通用 provider。Herdr pane、prompt settlement、screen state 和 rendered transcript 不进入 production correctness path；它们不能成为 completion evidence。 |
 | [AgentRouter](https://github.com/perixtar/AgentRouter) / [Cezar](https://github.com/open-mercato/cezar) | persisted run/event、sandbox、multi-provider examples、worktree/event UI patterns | 不采用。前者仍为 alpha 且引入 Daytona/R2/第二套 remote database control plane，后者主要是本地 cockpit；两者都会复制当前 Task Authority/Forge ownership。只借鉴公开的 event mapping、credential separation 和 worktree examples。 |
 
-选择 Codex SDK 作为当前 adapter，因为 #192 已证明当前 SDK lifecycle。Repository 只向 Coding Session 提供不透明的 named profile；profile 内的 model、provider、reasoning、service tier 和 credentials 不进入 Usine contract。Usine 仍独立强制 role sandbox、workspace、freshness 和 credential separation。#195 已获授权以验证静态共存的 app-server adapter，但尚未证明；它不能宣称非-Codex compatibility或取得 task authority。
+Supported provider remains Codex。Repository 只向 Coding Session 提供不透明的 named profile；static profile composition 可在 activation 前选择 official Codex SDK adapter 或 bounded local Codex App Server adapter，两个 adapter 都复用同一个 provider-neutral Coding Session port。profile 内的 model、provider、reasoning、service tier 和 credentials 不进入 Usine contract。Usine 仍独立强制 role sandbox、workspace、freshness 和 credential separation。#192 证明 SDK lifecycle，#195 证明 app-server lifecycle；这不引入 fallback、registry、capability negotiation、automatic routing、第三个/non-Codex provider，app-server 也不能取得 task authority。
 
 默认依赖选择：
 
 - Node 24 `node:sqlite` + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
 - Zod：现有 Task Contract 外部 JSON/schema 边界；Effect 4 RC Schema：Task Authority 的不可信 durable-state decode boundary；Effect Scope、FiberMap 与 cancellation：local server composition root 的 task lifecycle、资源释放与 AbortSignal propagation。六个领域 package 不机械迁移为 Effect Service/Layer；Promise/SDK/subprocess/HTTP adapter 只在 Effect 边界桥接；
 - Octokit：GitHub App authentication 与 REST/GraphQL client；
-- `@openai/codex-sdk`：当前唯一 supported coding-agent adapter；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：可选的 final role-output normalization；
+- `@openai/codex-sdk`：官方 Codex SDK adapter；Codex App Server：bounded local Codex adapter；两个 adapter 都留在 Coding Session port 后面；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：可选的 final role-output normalization；
 - Vitest：公共行为测试，SQLite public-seam tests 覆盖独立连接与 hard-kill recovery；
 - Vite+：workspace 唯一的 format、lint、type-check、test 与 package command/config surface；其内部使用 tsdown、Oxlint、Oxfmt 与 Vitest；`vp check` 的 type-check 独立于 `vp pack`。
 
@@ -227,10 +227,10 @@ Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 
 
 | Evidence / outcome | 当前边界 |
 |---|---|
-| #82/#83 | 真实 Codex executable delivery 与 restart evidence；不证明第二 runtime 或多 Task capacity。 |
+| #82/#83 | 真实 Codex executable delivery 与 restart evidence；不证明 app-server adapter 或多 Task capacity。 |
 | #153 | stubbed Codex adapter 的 persistent-server lifecycle fixture；不证明 production Codex turn。 |
 | #192/#193 | 已合并，证明当前 SDK lifecycle 与 attestation facts。 |
-| #195 | 已授权的 app-server runtime outcome，尚未证明；app-server 不能取得 Task authority。 |
+| #195 | 已证明 bounded local app-server runtime outcome 与静态 opaque profile composition；app-server 不能取得 Task authority。 |
 | #199 | hermetic authorized exact-head merge evidence；不证明 production merge。 |
 | #176 | 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并，仅保留 bounded real-pilot evidence。 |
 | #178 / #151 | 分别在 pilot/measured need、真实 retryable sample 出现前不 eligible。 |
