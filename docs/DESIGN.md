@@ -2,7 +2,7 @@
 status: current
 design_version: 0.7
 updated: 2026-08-22
-issue: https://github.com/ariga39/usine/issues/199
+issue: https://github.com/ariga39/usine/issues/217
 ---
 
 # Usine 当前设计
@@ -28,6 +28,8 @@ human interventions × elapsed time × cost
 Usine 的第一个完整产品行为是：接收一项已经授权、边界明确的真实开发任务，在无人再次发送“继续”的情况下，产出一个经过项目检查和独立 reviewer 明确批准、绑定 exact SHA 的 PR；若 Task Contract 明确授予 merge authority，系统还会重新验证 live PR 并合并该 exact approved head，持久化 `merged` 结果；没有该 authority 时则停在 `reviewed_pr`。若实现者提前停止、协调器重启或 reviewer 要求修改，系统能够在预算内恢复并继续。
 
 这是一条持续投入真实工作的路径，不是先做完才允许继续建设的孤立实验。它定义的是产品必须尽早具备的纵向行为，而不是旧式任务分解。
+
+[fund-manager Issue #52](https://github.com/ariga39/fund-manager/issues/52) 经 [PR #53](https://github.com/ariga39/fund-manager/pull/53) 完成了 bounded serial one-contract exact-head production merge。独立 reviewer 返回 approval；配置的 schema-constrained role-output normalizer 将最终响应投影为合法对象，协调器重新校验 schema 与 exact SHA 后才接受 verdict。live PR head、attestation、merge parents、Issue closure 与 durable `merged` result 一致。这项证据不扩大 merge policy、provider、runner 或 capacity claim。
 
 第一项行为不包含：
 
@@ -86,7 +88,7 @@ reviewed PR + explicit approval attestation
                  merged
 ```
 
-当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture。它们不证明 app-server adapter、额外容量或 production Codex turn。
+当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture；Issue #199 是 hermetic authorized exact-head merge precursor。fund-manager PR #53 提供 bounded serial one-contract production merge evidence；它不证明 retry recovery、ruleset refusal coverage、额外容量或更广的 merge policy。
 
 Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
 
@@ -129,7 +131,7 @@ Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 sign
 
 ## 5. 并发与隔离
 
-当前 evidence 仍是 serial：每个 repository 只有一个有效 writer lease。每个 activation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。产品不据此宣称多 Task capacity；更宽的 runtime/forge、分布式 runner 或更高并发须由授权 Issue 和实证支持。
+当前 evidence 仍限定为 bounded serial：production one-contract run 与现有 evidence 都只支持每个 repository 一个有效 writer lease。每个 activation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。产品不据此宣称 retry recovery、多 Task capacity、更宽的 runtime/forge、分布式 runner、更高并发或更广的 merge policy；这些仍须由授权 Issue 和实证支持。
 
 隔离按能力而不是 agent 名字定义：
 
@@ -231,9 +233,10 @@ Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 
 | #153 | stubbed Codex adapter 的 persistent-server lifecycle fixture；不证明 production Codex turn。 |
 | #192/#193 | 已合并，证明当前 SDK lifecycle 与 attestation facts。 |
 | #195 | 已证明 bounded local app-server runtime outcome 与静态 opaque profile composition；app-server 不能取得 Task authority。 |
-| #199 | hermetic authorized exact-head merge evidence；不证明 production merge。 |
-| #176 | 已关闭为 falsified：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并，仅保留 bounded real-pilot evidence。 |
-| #178 / #151 | 分别在 pilot/measured need、真实 retryable sample 出现前不 eligible。 |
+| #217 | 授权记录 fund-manager Issue #52 / PR #53 的 production run：一个 committed Task Contract、一次 implementer activation、一次 fresh review、完整 project check 与 exact-head merge。reviewer 的 approval 经 schema-constrained normalizer 投影后，由协调器重新校验 schema 与 exact SHA。仅证明 bounded serial one-contract production evidence。 |
+| #199 | hermetic authorized exact-head merge precursor；不单独证明 production merge。 |
+| #176 | historical falsification：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并。它不再是当前 bounded route blocker。 |
+| #178 / #151 | 分别保留 multi-project/measured capacity 与真实 retryable interruption sample 的 re-entry gate。 |
 | #187 / #188 / #189 | 分别拥有独立 outcome；#187 的 Task-local event stream 与 #188 的 resource CLI 已完成，#189 保持独立边界；transient order 不构成永久 architecture。 |
 
-Eligibility 仍按 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；证据保持 serial，每个 repository 一个 writer lease。Herdr、transcript、process state 和 adapter prose 不能恢复 product completion authority；probe-before-retry 与 deterministic reconciliation 仍由 durable facts 决定。
+当前 bounded serial product path 的 direction classification 为 `continue`。Eligibility 仍按 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；证据保持 serial，每个 repository 一个 writer lease。#151 与 #178 的 re-entry conditions 仍有效；#176 只保留历史 falsification，#199 只保留 hermetic precursor。Herdr、transcript、process state 和 adapter prose 不能恢复 product completion authority；probe-before-retry 与 deterministic reconciliation 仍由 durable facts 决定。
