@@ -16,6 +16,7 @@ import {
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
+  type CodingSessionMcpServer,
   type CodingSessionObservation,
   codexAppServerProfilesFromEnvironment,
   codexMcpConfig,
@@ -103,6 +104,7 @@ async function fakeAppServerEnvironment(
     | "schema-invalid"
     | "stderr"
     | "wait" = "success",
+  expectedMcpConfig: unknown = null,
 ): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
   const bin = join(root, "bin");
@@ -122,6 +124,7 @@ async function fakeAppServerEnvironment(
     `#!/usr/bin/env node
 const { readFileSync } = require("node:fs");
 const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
+const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
 if (process.argv[2] !== "app-server") {
   process.stderr.write("unknown option --profile secret=should-not-escape\\n");
   process.exit(2);
@@ -141,6 +144,7 @@ const emitTurn = () => {
     ? JSON.stringify({ invalid: true })
     : JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", status: "completed" } } });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: output } } });
   send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
@@ -150,6 +154,14 @@ const handle = (message) => {
   else if (message.method === "thread/start") {
     if (message.params?.config?.model !== "fixture-model") {
       process.stderr.write("profile configuration was not forwarded\\n");
+      process.exit(3);
+    }
+    if (
+      expectedMcpConfig !== null &&
+      (message.params?.config?.approval_policy !== expectedMcpConfig.approval_policy ||
+        JSON.stringify(message.params?.config?.mcp_servers) !== JSON.stringify(expectedMcpConfig.mcp_servers))
+    ) {
+      process.stderr.write("MCP configuration was not forwarded\\n");
       process.exit(3);
     }
     send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-fixture" } } });
@@ -577,7 +589,15 @@ describe("Coding Session", () => {
   });
 
   test("executes an app-server reviewer through the shared typed lifecycle and reaps its process", async () => {
-    const fixture = await fakeAppServerEnvironment();
+    const mcpServer: CodingSessionMcpServer = {
+      name: "github_read",
+      url: "https://github.example.test/mcp?task=session-test",
+      enabledTools: ["github_issue_get", "github_pull_request_reviews"],
+      startupTimeoutMs: 4_000,
+      toolTimeoutMs: 7_000,
+      required: true,
+    };
+    const fixture = await fakeAppServerEnvironment("success", codexMcpConfig(mcpServer));
     const observations: CodingSessionObservation[] = [];
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
@@ -593,6 +613,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
+      mcpServer,
       execution: reviewerExecution,
       onObservation: (event) => {
         observations.push(event);
@@ -608,6 +629,12 @@ describe("Coding Session", () => {
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       { type: "tool_completed", tool: "shell", outcome: "succeeded" },
+      {
+        type: "mcp_tool_completed",
+        server: "unknown",
+        tool: "unknown",
+        outcome: "succeeded",
+      },
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
@@ -793,6 +820,28 @@ describe("Coding Session", () => {
     expect(configured.enabled_tools).toEqual([...enabledTools]);
     expect(Object.keys(configured.tools)).toEqual([...enabledTools]);
     for (const tool of enabledTools) expect(configured.tools[tool]?.approval_mode).toBe("approve");
+  });
+
+  test("rejects unusable MCP server policy inputs", () => {
+    const server: CodingSessionMcpServer = {
+      name: "github_read",
+      url: "https://github.example.test/mcp",
+      enabledTools: ["github_issue_get"],
+      startupTimeoutMs: 5_000,
+      toolTimeoutMs: 5_000,
+      required: true,
+    };
+    const invalidServers: CodingSessionMcpServer[] = [
+      { ...server, name: "github/read" },
+      { ...server, url: "ftp://github.example.test/mcp" },
+      { ...server, url: "https://user:secret@github.example.test/mcp" },
+      { ...server, enabledTools: [] },
+      { ...server, enabledTools: [" "] },
+      { ...server, startupTimeoutMs: 0 },
+      { ...server, toolTimeoutMs: Number.POSITIVE_INFINITY },
+    ];
+    for (const invalidServer of invalidServers)
+      expect(() => codexMcpConfig(invalidServer)).toThrow();
   });
 
   test("reads the admitted Issue through read-only MCP without giving the worker credentials", async () => {
