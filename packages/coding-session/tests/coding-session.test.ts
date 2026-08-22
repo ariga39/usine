@@ -93,7 +93,15 @@ function deferred<T>(): {
 }
 
 async function fakeAppServerEnvironment(
-  mode: "success" | "interrupt" | "mismatch" = "success",
+  mode:
+    | "success"
+    | "interrupt"
+    | "mismatch"
+    | "malformed"
+    | "transport"
+    | "capability"
+    | "schema-invalid"
+    | "wait" = "success",
 ): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
   const bin = join(root, "bin");
@@ -109,9 +117,14 @@ let buffer = "";
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const emitTurn = () => {
   send({ method: "turn/started", params: { threadId: "thread-fixture", turn: { id: "turn-fixture" } } });
-  if (mode === "interrupt") return;
+  if (mode === "interrupt" || mode === "wait") return;
+  if (mode === "malformed") return process.stdout.write("malformed\\n");
+  if (mode === "transport") return setImmediate(() => process.exit(0));
+  const output = mode === "schema-invalid"
+    ? JSON.stringify({ invalid: true })
+    : JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
-  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] }) } } });
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: output } } });
   send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
 };
@@ -121,6 +134,10 @@ const handle = (message) => {
     send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-fixture" } } });
     setImmediate(() => send({ method: "thread/started", params: { thread: { id: "thread-fixture" } } }));
   } else if (message.method === "turn/start") {
+    if (mode === "capability") {
+      send({ method: "server/request", id: 99, params: { capability: "unsupported" } });
+      return;
+    }
     send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-fixture" } } });
     setImmediate(emitTurn);
   } else if (message.method === "turn/interrupt") {
@@ -604,6 +621,82 @@ describe("Coding Session", () => {
     await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
+
+  test("applies the shared schema-invalid terminal output behavior to app-server", async () => {
+    const fixture = await fakeAppServerEnvironment("schema-invalid");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+      roleOutputTransform: async () => ({ invalid: true }),
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failureCode: "role_output_schema_invalid",
+    });
+    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+  });
+
+  test("cancels a stalled app-server turn at its shared deadline", async () => {
+    const fixture = await fakeAppServerEnvironment("wait");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 500,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({ status: "cancelled", output: null });
+    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+  });
+
+  test.each(["malformed", "transport", "capability"] as const)(
+    "fails closed on app-server %s without starting a replacement",
+    async (mode) => {
+      const fixture = await fakeAppServerEnvironment(mode);
+      const session = new CodexCodingSession(undefined, {
+        environment: fixture.environment,
+        executionStateDirectory: fixture.stateDirectory,
+        appServerProfiles: ["reviewer-profile"],
+      });
+      const observation = await session.run({
+        role: "reviewer",
+        workspace: join(fixture.stateDirectory, "reviewer"),
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+      });
+      expect(observation).toMatchObject({ status: "failed", output: null });
+      await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
+        [],
+      );
+    },
+  );
 
   test("fails closed on an app-server identity mismatch and does not retry", async () => {
     const fixture = await fakeAppServerEnvironment("mismatch");

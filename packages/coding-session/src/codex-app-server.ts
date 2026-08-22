@@ -96,6 +96,7 @@ class AppServerClient {
   private nextId = 1;
   private closed = false;
   private failure: Error | null = null;
+  private onFailure: ((error: Error) => void) | undefined;
   private onNotification: ((method: string, params: unknown) => void) | undefined;
 
   constructor(private readonly child: ChildProcessWithoutNullStreams) {
@@ -108,8 +109,8 @@ class AppServerClient {
   }
 
   setFailureHandler(handler: (error: Error) => void): void {
-    this.child.once("error", handler);
-    this.child.once("close", () => handler(new Error("app-server transport closed")));
+    this.onFailure = handler;
+    if (this.failure) handler(this.failure);
   }
 
   setNotificationHandler(handler: (method: string, params: unknown) => void): void {
@@ -139,13 +140,20 @@ class AppServerClient {
       id,
       error: { code: -32601, message: "unsupported app-server request" },
     });
+    this.fail(new Error("app-server requested an unsupported capability"));
   }
 
-  closeTransport(): void {
+  closeTransport(error?: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.failure = error ?? this.failure;
     this.lines.close();
     this.child.stdin.end();
+    if (error) this.rejectPending(error);
+  }
+
+  failTransport(error: Error): void {
+    this.fail(error);
   }
 
   private write(message: unknown): void {
@@ -168,7 +176,12 @@ class AppServerClient {
       }
       this.pending.delete(message.id);
       if (message.error !== undefined) pending.reject(new Error("app-server request failed"));
-      else pending.resolve(message.result);
+      else if (message.result !== undefined) pending.resolve(message.result);
+      else {
+        const failure = new Error("app-server response is malformed");
+        pending.reject(failure);
+        this.fail(failure);
+      }
       return;
     }
     if (message.method !== undefined) {
@@ -185,6 +198,11 @@ class AppServerClient {
     this.failure = error;
     this.lines.close();
     this.child.stdin.destroy();
+    this.rejectPending(error);
+    this.onFailure?.(error);
+  }
+
+  private rejectPending(error: Error): void {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
@@ -228,8 +246,13 @@ export async function runCodexAppServer({
   client.setFailureHandler((error) => failTurn?.(error));
   let interruptPromise: Promise<void> | undefined;
   const abort = (): void => {
+    const cancellation = new AppServerCancelled("coding session cancelled");
+    failTurn?.(cancellation);
+    if (!threadId || !turnId) {
+      client.closeTransport(cancellation);
+      return;
+    }
     interruptPromise ??= (async () => {
-      if (!threadId || !turnId) return;
       try {
         await client.request("turn/interrupt", { threadId, turnId });
       } catch {
@@ -239,6 +262,7 @@ export async function runCodexAppServer({
     void interruptPromise;
   };
   request.signal?.addEventListener("abort", abort, { once: true });
+  if (request.signal?.aborted) abort();
 
   client.setNotificationHandler((method, params) => {
     eventChain = eventChain.then(async () => {
@@ -320,7 +344,9 @@ export async function runCodexAppServer({
             break;
         }
       } catch (error) {
-        failTurn?.(error instanceof Error ? error : new Error("app-server event is malformed"));
+        const failure = error instanceof Error ? error : new Error("app-server event is malformed");
+        failTurn?.(failure);
+        client.failTransport(failure);
       }
     });
   });

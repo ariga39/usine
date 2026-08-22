@@ -6,7 +6,6 @@ import {
   type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
-  type Usage,
 } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
