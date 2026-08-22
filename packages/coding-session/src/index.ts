@@ -1,6 +1,5 @@
 export {
   CodexCodingSession,
-  CodexProfileSelectionError,
   codexAppServerProfilesFromEnvironment,
   codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
@@ -10,7 +9,6 @@ export {
   type CodingSessionMcpServerFactory,
   type CodingSessionMcpServerResolution,
   explicitWorkerEnvironment,
-  validateCodexProfile,
   type CodingSessionClientFactory,
   type RolePolicy,
   type RoleOutputTransform,
@@ -22,6 +20,12 @@ export {
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
+export {
+  CodexProfileSelectionError,
+  validateCodexProfile,
+  type CodexProfileResolver,
+  type CodexProfileSelection,
+} from "./codex-profile.js";
 export {
   codexExecutionIdentityPath,
   createCodexLauncher,

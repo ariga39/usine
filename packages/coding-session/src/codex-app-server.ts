@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
 import { createCodexLauncher } from "./codex-execution.js";
+import { codexAdapterConfig, normalizeCodexProfileSelection } from "./codex-profile.js";
 import type { SessionRequest } from "./coding-session.js";
 import { z } from "zod";
 
@@ -15,7 +16,7 @@ interface AppServerRunOptions {
   request: SessionRequest;
   environment: NodeJS.ProcessEnv;
   executionStateDirectory: string;
-  profileConfig: Record<string, unknown>;
+  profileSelection: ReturnType<typeof normalizeCodexProfileSelection>;
 }
 
 class AppServerCancelled extends Error {}
@@ -273,7 +274,7 @@ export async function runCodexAppServer({
   request,
   environment,
   executionStateDirectory,
-  profileConfig,
+  profileSelection,
 }: AppServerRunOptions): Promise<AppServerRunResult> {
   const launcher = await createCodexLauncher(
     executionStateDirectory,
@@ -428,10 +429,10 @@ export async function runCodexAppServer({
         cwd: request.workspace,
         approvalPolicy: "never",
         sandbox: request.sandbox,
-        config: {
-          ...profileConfig,
-          ...(request.mcpServer ? codexMcpConfig(request.mcpServer) : {}),
-        },
+        config: codexAdapterConfig(
+          profileSelection,
+          request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
+        ),
         ephemeral: true,
       }),
     );

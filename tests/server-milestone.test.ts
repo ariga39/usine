@@ -171,8 +171,14 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   await execa("git", ["init", "--bare", remote]);
   await mkdir(join(root, "bin"));
   await mkdir(codexHome);
-  await writeFile(join(codexHome, "writer-profile.config.toml"), "# test profile\n");
-  await writeFile(join(codexHome, "reviewer-profile.config.toml"), "# test profile\n");
+  await writeFile(
+    join(codexHome, "writer-profile.config.toml"),
+    'model = "writer-fixture-model"\nmodel_reasoning_effort = "low"\n',
+  );
+  await writeFile(
+    join(codexHome, "reviewer-profile.config.toml"),
+    'model = "reviewer-fixture-model"\nmodel_reasoning_effort = "high"\n',
+  );
   await writeFile(
     fakeCodexPath,
     fakeCodexExecutable(name === "restart" || name === "graceful", name === "reviewer-shutdown"),
