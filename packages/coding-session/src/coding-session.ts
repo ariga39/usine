@@ -9,6 +9,7 @@ import {
 } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
+import { Effect } from "effect";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import {
@@ -16,7 +17,6 @@ import {
   executionLifecycle,
   listExecutionTaskIds,
   reapCodexExecution,
-  type ExecutionHandle,
   type ExecutionReference,
 } from "./codex-execution.js";
 import { isAppServerCancellation, runCodexAppServer } from "./codex-app-server.js";
@@ -226,85 +226,73 @@ function outputFrom(result: ProviderTurnResult): unknown {
   }
 }
 
-class RoleOutputTransformCancelled extends Error {}
-
-interface CodexSessionHandle<T> {
-  kind: "session";
-  controller: AbortController;
-  execution: ExecutionHandle;
-  promise: Promise<SessionObservation<T>>;
-  executionStateDirectory?: string;
+function identityError(error: unknown): unknown {
+  return error;
 }
 
-interface CodexOwnedHandle {
-  kind: "owned";
-  stateDirectory: string;
-  execution: ExecutionHandle;
+async function runRoleOutputTransform(
+  transform: RoleOutputTransform,
+  request: RoleOutputTransformRequest,
+): Promise<unknown> {
+  return Effect.runPromise(
+    Effect.raceFirst(
+      Effect.tryPromise({
+        try: (signal) =>
+          transform({ ...request, signal: AbortSignal.any([request.signal, signal]) }),
+        catch: identityError,
+      }),
+      Effect.callback<never>((resume) => {
+        const onAbort = (): void => resume(Effect.interrupt);
+        if (request.signal.aborted) {
+          onAbort();
+          return Effect.void;
+        }
+        request.signal.addEventListener("abort", onAbort, { once: true });
+        return Effect.sync(() => request.signal.removeEventListener("abort", onAbort));
+      }),
+    ),
+  );
 }
 
-class CodexRuntimeAdapter implements CodingSessionCleanup {
+export class CodexCodingSession {
+  private readonly appServerProfiles: ReadonlySet<string>;
+  private readonly profileResolver: CodexProfileResolver;
+
   constructor(
-    private readonly runProvider: <T>(request: SessionRequest<T>) => Promise<SessionObservation<T>>,
-    private readonly executionStateDirectory?: string,
-  ) {}
-
-  async start<T>(request: SessionRequest<T>): Promise<unknown> {
-    const controller = new AbortController();
-    const signal = request.signal
-      ? AbortSignal.any([request.signal, controller.signal])
-      : controller.signal;
-    return {
-      kind: "session",
-      controller,
-      execution: { reference: request.execution, workspace: request.workspace },
-      promise: this.runProvider({ ...request, signal }),
-      executionStateDirectory: this.executionStateDirectory,
-    } satisfies CodexSessionHandle<T>;
+    private readonly clientFactory?: CodingSessionClientFactory,
+    private readonly options: CodingSessionOptions = { environment: process.env },
+  ) {
+    this.appServerProfiles = new Set(options.appServerProfiles ?? []);
+    this.profileResolver = options.profileResolver ?? resolveCodexProfile;
   }
 
-  observe<T>(handle: unknown): Promise<SessionObservation<T>> {
-    if (!isCodexSessionHandle<T>(handle)) throw new Error("coding session handle is invalid");
-    return handle.promise;
-  }
-
-  async interrupt(handle: unknown): Promise<void> {
-    if (isCodexSessionHandle(handle)) {
-      handle.controller.abort();
-      return;
-    }
-    if (!isCodexOwnedHandle(handle)) throw new Error("coding session handle is invalid");
-    await executionLifecycle.interrupt(handle.stateDirectory, handle.execution);
-  }
-
-  async reap(handle: unknown): Promise<void> {
-    if (isCodexSessionHandle(handle)) {
-      try {
-        await handle.promise;
-      } finally {
-        if (handle.executionStateDirectory)
-          await reapCodexExecution(handle.executionStateDirectory, handle.execution);
-      }
-      return;
-    }
-    if (!isCodexOwnedHandle(handle)) throw new Error("coding session handle is invalid");
-    await executionLifecycle.reap(handle.stateDirectory, handle.execution);
-  }
-
-  async discoverOwned(stateDirectory: string, taskId: string): Promise<readonly unknown[]> {
-    return (await executionLifecycle.discover(stateDirectory, taskId)).map(
-      (execution) =>
-        ({
-          kind: "owned",
-          stateDirectory,
-          execution,
-        }) satisfies CodexOwnedHandle,
+  async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
+    const executionStateDirectory = this.options.executionStateDirectory;
+    const execution = { reference: request.execution, workspace: request.workspace };
+    return Effect.runPromise(
+      Effect.scoped(
+        Effect.acquireUseRelease(
+          Effect.void,
+          () => Effect.tryPromise({ try: () => this.runProvider(request), catch: identityError }),
+          () =>
+            executionStateDirectory
+              ? Effect.tryPromise({
+                  try: () => reapCodexExecution(executionStateDirectory, execution),
+                  catch: identityError,
+                }).pipe(Effect.asVoid)
+              : Effect.void,
+        ),
+      ),
     );
   }
 
   async cleanupTask(stateDirectory: string, taskId: string): Promise<void> {
-    const handles = await this.discoverOwned(stateDirectory, taskId);
+    const handles = await executionLifecycle.discover(stateDirectory, taskId);
     const cleanup = await Promise.allSettled(
-      handles.flatMap((handle) => [this.interrupt(handle), this.reap(handle)]),
+      handles.flatMap((handle) => [
+        executionLifecycle.interrupt(stateDirectory, handle),
+        executionLifecycle.reap(stateDirectory, handle),
+      ]),
     );
     const failure = cleanup.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -322,79 +310,6 @@ class CodexRuntimeAdapter implements CodingSessionCleanup {
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failure) throw failure.reason;
-  }
-}
-
-function isCodexSessionHandle<T>(value: unknown): value is CodexSessionHandle<T> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "kind" in value &&
-    value.kind === "session" &&
-    "promise" in value &&
-    value.promise instanceof Promise
-  );
-}
-
-function isCodexOwnedHandle(value: unknown): value is CodexOwnedHandle {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "kind" in value &&
-    value.kind === "owned" &&
-    "stateDirectory" in value &&
-    typeof value.stateDirectory === "string" &&
-    "execution" in value
-  );
-}
-
-async function runRoleOutputTransform(
-  transform: RoleOutputTransform,
-  request: RoleOutputTransformRequest,
-): Promise<unknown> {
-  if (request.signal.aborted) throw new RoleOutputTransformCancelled();
-  return new Promise((resolve, reject) => {
-    const onAbort = (): void => reject(new RoleOutputTransformCancelled());
-    request.signal.addEventListener("abort", onAbort, { once: true });
-    Promise.resolve()
-      .then(() => transform(request))
-      .then(resolve, reject)
-      .finally(() => request.signal.removeEventListener("abort", onAbort));
-  });
-}
-
-export class CodexCodingSession {
-  private readonly adapter: CodexRuntimeAdapter;
-  private readonly appServerProfiles: ReadonlySet<string>;
-  private readonly profileResolver: CodexProfileResolver;
-
-  constructor(
-    private readonly clientFactory?: CodingSessionClientFactory,
-    private readonly options: CodingSessionOptions = { environment: process.env },
-  ) {
-    this.appServerProfiles = new Set(options.appServerProfiles ?? []);
-    this.profileResolver = options.profileResolver ?? resolveCodexProfile;
-    this.adapter = new CodexRuntimeAdapter(
-      (request) => this.runProvider(request),
-      options.executionStateDirectory,
-    );
-  }
-
-  async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
-    const handle = await this.adapter.start(request);
-    try {
-      return await this.adapter.observe<T>(handle);
-    } finally {
-      await this.adapter.reap(handle);
-    }
-  }
-
-  cleanupTask(stateDirectory: string, taskId: string): Promise<void> {
-    return this.adapter.cleanupTask(stateDirectory, taskId);
-  }
-
-  cleanupOwned(stateDirectory: string): Promise<void> {
-    return this.adapter.cleanupOwned(stateDirectory);
   }
 
   private async runProvider<T = unknown>(
@@ -540,7 +455,7 @@ export class CodexCodingSession {
             signal: abortSignal,
           });
         } catch (error) {
-          if (error instanceof RoleOutputTransformCancelled && abortSignal.aborted)
+          if (abortSignal.aborted)
             return {
               status: "cancelled",
               sessionId: null,
