@@ -4,6 +4,9 @@ import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+const STARTING_OWNERSHIP_WAIT_MS = 500;
+const EXECUTION_POLL_INTERVAL_MS = 10;
+
 export interface ExecutionReference {
   taskId: string;
   role: "implementer" | "reviewer";
@@ -176,28 +179,49 @@ async function terminateCodexExecution(
       "Codex execution identity reference is mismatched",
       "mismatch",
     );
-  if (identity.state === "starting")
+  const ownedIdentity =
+    identity.state === "starting"
+      ? await waitForOwnership(stateDirectory, handle.reference, identity)
+      : identity;
+  if (!ownedIdentity) return;
+  if (ownedIdentity.state === "starting")
     throw new CodexExecutionOwnershipError(
       "Codex execution identity was interrupted before process ownership was recorded",
       "incomplete",
     );
-  let state = processState(identity);
+  let state = processState(ownedIdentity);
   if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
   if (state === "mismatch") throw ownershipMismatch();
 
-  state = sendTerminationSignal(identity, mode === "interrupt" ? "SIGTERM" : "SIGKILL");
+  state = sendTerminationSignal(ownedIdentity, mode === "interrupt" ? "SIGTERM" : "SIGKILL");
   if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
-  state = await waitForTermination(identity);
+  state = await waitForTermination(ownedIdentity);
   if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
   if (state === "mismatch") throw ownershipMismatch();
   if (mode === "reap") throw executionStillLive();
 
-  state = sendTerminationSignal(identity, "SIGKILL");
+  state = sendTerminationSignal(ownedIdentity, "SIGKILL");
   if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
-  state = await waitForTermination(identity);
+  state = await waitForTermination(ownedIdentity);
   if (state === "stopped") return cleanStoppedExecution(stateDirectory, handle.reference);
   if (state === "mismatch") throw ownershipMismatch();
   throw executionStillLive();
+}
+
+async function waitForOwnership(
+  stateDirectory: string,
+  reference: ExecutionReference,
+  initialIdentity: StartingCodexExecutionIdentity,
+): Promise<CodexExecutionIdentity | null> {
+  const deadline = Date.now() + STARTING_OWNERSHIP_WAIT_MS;
+  let identity: CodexExecutionIdentity = initialIdentity;
+  while (identity.state === "starting" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, EXECUTION_POLL_INTERVAL_MS));
+    const nextIdentity = await readExecutionIdentity(stateDirectory, reference);
+    if (!nextIdentity) return null;
+    identity = nextIdentity;
+  }
+  return identity;
 }
 
 function sendTerminationSignal(

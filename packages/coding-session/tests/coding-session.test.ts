@@ -13,7 +13,7 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   CodexCodingSession,
   type CodingSessionMcpServer,
@@ -91,6 +91,15 @@ function deferred<T>(): {
     resolve = resolveValue;
   });
   return { promise, resolve };
+}
+
+async function flushMicrotasksUntilTimerPending(initialTimerCount: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (vi.getTimerCount() > initialTimerCount) return;
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+  }
+  throw new Error("execution ownership poll was not scheduled");
 }
 
 async function fakeAppServerEnvironment(
@@ -1269,6 +1278,157 @@ describe("Coding Session", () => {
     const observation = await pending;
     expect(sdkSignal?.aborted).toBe(true);
     expect(observation).toMatchObject({ status: "cancelled", output: null });
+  });
+
+  test("reaps the exact process when cancellation crosses launcher ownership recording", async () => {
+    vi.useFakeTimers();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-starting-cancellation-"));
+    const launcher = await createCodexLauncher(
+      stateDirectory,
+      join(stateDirectory, "writer"),
+      "writer-profile",
+      implementerExecution,
+    );
+    const controller = new AbortController();
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    if (!child.pid) throw new Error("Codex child has no PID");
+    const session = new CodexCodingSession(
+      async () => {
+        controller.abort();
+        return testClient(async (_prompt, options) => {
+          if (options?.signal?.aborted) throw new Error("SDK turn aborted");
+          return new Promise<RunResult>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("SDK turn aborted")),
+              { once: true },
+            );
+          });
+        });
+      },
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+      },
+    );
+
+    const initialTimerCount = vi.getTimerCount();
+    const pending = session.run({
+      role: "implementer",
+      workspace: join(stateDirectory, "writer"),
+      contract,
+      prompt: "work",
+      profile: "writer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      environment: { CI: "true" },
+      signal: controller.signal,
+    });
+
+    try {
+      await flushMicrotasksUntilTimerPending(initialTimerCount);
+      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
+        encoding: "utf8",
+      }).trim();
+      await writeFile(
+        launcher.identityPath,
+        JSON.stringify({
+          version: 2,
+          state: "running",
+          reference: implementerExecution,
+          pid: child.pid,
+          startedAt,
+          workspace: join(stateDirectory, "writer"),
+        }) + "\n",
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toMatchObject({
+        status: "cancelled",
+        output: null,
+      });
+      await expect(discoverOwnedExecutions(stateDirectory, contract.id)).resolves.toEqual([]);
+      if (child.exitCode === null && child.signalCode === null)
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      expect(child.signalCode).toBe("SIGKILL");
+    } finally {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The shared termination transition may already have removed the group.
+      }
+      if (child.exitCode === null && child.signalCode === null)
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      vi.useRealTimers();
+    }
+  });
+
+  test("fails closed after a bounded starting wait and retains ownership evidence", async () => {
+    vi.useFakeTimers();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-starting-timeout-"));
+    const launcher = await createCodexLauncher(
+      stateDirectory,
+      join(stateDirectory, "writer"),
+      "writer-profile",
+      implementerExecution,
+    );
+    const controller = new AbortController();
+    const providerStarted = deferred<void>();
+    const session = new CodexCodingSession(
+      async () => {
+        providerStarted.resolve();
+        controller.abort();
+        return testClient(async (_prompt, options) => {
+          if (options?.signal?.aborted) throw new Error("SDK turn aborted");
+          return new Promise<RunResult>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("SDK turn aborted")),
+              { once: true },
+            );
+          });
+        });
+      },
+      { environment: { CI: "true" }, executionStateDirectory: stateDirectory },
+    );
+
+    const initialTimerCount = vi.getTimerCount();
+    const pending = session.run({
+      role: "implementer",
+      workspace: join(stateDirectory, "writer"),
+      contract,
+      prompt: "work",
+      profile: "writer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      environment: { CI: "true" },
+      signal: controller.signal,
+    });
+
+    try {
+      await providerStarted.promise;
+      await flushMicrotasksUntilTimerPending(initialTimerCount);
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(pending).rejects.toMatchObject({
+        code: "codex_execution_ownership_error",
+        reason: "incomplete",
+      });
+      await expect(readFile(launcher.identityPath, "utf8")).resolves.toContain(
+        '"state":"starting"',
+      );
+      await expect(readFile(launcher.launcherPath, "utf8")).resolves.toContain(
+        "const child = spawn",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("propagates caller cancellation to the bounded output transform", async () => {
