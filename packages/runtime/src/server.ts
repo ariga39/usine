@@ -16,6 +16,7 @@ import {
   type TaskContract,
   type TaskExecutionInput,
   type TaskEvent,
+  type ServerEventEnvelope,
   type TaskResult,
   type TaskEventPage,
   type TaskListPage,
@@ -149,6 +150,8 @@ class EventWakeupHub {
     };
   }
 }
+
+const SERVER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
 
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
@@ -467,10 +470,7 @@ async function streamServerEvents(
       const events = await lookupServerEvents(stateDirectory, cursor, limit);
       if (events.length > 0) {
         for (const envelope of events) {
-          if (!response.write(`data: ${JSON.stringify(envelope)}\n\n`)) {
-            response.end();
-            return;
-          }
+          if (!(await writeServerEvent(response, envelope))) return;
           cursor = envelope.cursor;
         }
         continue;
@@ -480,6 +480,34 @@ async function streamServerEvents(
   } finally {
     subscription.close();
   }
+}
+
+function writeServerEvent(
+  response: ServerResponse,
+  envelope: ServerEventEnvelope,
+): Promise<boolean> {
+  if (response.destroyed) return Promise.resolve(false);
+  if (response.write(`data: ${JSON.stringify(envelope)}\n\n`)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (accepted: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      response.removeListener("drain", onDrain);
+      response.removeListener("close", onClose);
+      resolve(accepted);
+    };
+    const onDrain = (): void => finish(true);
+    const onClose = (): void => finish(false);
+    response.once("drain", onDrain);
+    response.once("close", onClose);
+    timeout = setTimeout(() => {
+      response.destroy();
+      finish(false);
+    }, SERVER_EVENT_DRAIN_TIMEOUT_MS);
+  });
 }
 
 async function handleRequest(

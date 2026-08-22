@@ -335,4 +335,160 @@ describe("public server event listener", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("isolates a paused listener, resynchronizes it, and redacts public envelopes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-server-subscription-slow-"));
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const taskId = `subscription-slow-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const secretMaterial = "subscription-configured-secret";
+    const privateBlocker = "private blocker text with subscription-configured-secret";
+    await mkdir(repository);
+    await execa("git", ["init", "--initial-branch=main"], { cwd: repository });
+    await execa("git", ["config", "user.name", "Test"], { cwd: repository });
+    await execa("git", ["config", "user.email", "test@example.invalid"], { cwd: repository });
+    await writeFile(join(repository, "README.md"), "subscription slow listener\n");
+    await execa("git", ["add", "."], { cwd: repository });
+    await execa("git", ["commit", "-m", "base"], { cwd: repository });
+    const baseSha = await git(repository, "rev-parse", "HEAD");
+    const contractPath = join(repository, "task.json");
+    const contract: TaskContract = {
+      id: taskId,
+      repositoryId: taskId,
+      baseSha,
+      instructions: "Exercise slow public listener isolation.",
+      acceptance: ["A slow listener cannot delay execution or another listener."],
+      nonGoals: [],
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+      authorization: {
+        source: `https://github.com/example/${taskId}/issues/219`,
+        delivery: true,
+      },
+      delivery: {
+        branch: `agent/${taskId}`,
+        issue: 219,
+        title: "Slow public listener isolation",
+        body: "Slow public listener isolation",
+      },
+    };
+    await writeFile(contractPath, JSON.stringify(contract));
+    await execa("git", ["add", "task.json"], { cwd: repository });
+    await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+
+    const completed = deferred();
+    const requests: Array<{ method: string; url: URL }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      requests.push({ method: init?.method ?? "GET", url });
+      return originalFetch(input, init);
+    };
+    const execute = async ({
+      authority,
+      result,
+    }: Parameters<NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>>[0]) => {
+      for (let index = 0; index < 256; index += 1) {
+        await authority.appendObservation(result.taskId, {
+          eventId: `slow-observation:${index}`,
+          occurredAtEpochMs: index,
+          data: {
+            type: "coding_tool_completed",
+            role: "implementer",
+            activation: 1,
+            tool: "read",
+            outcome: "succeeded",
+            sessionId: "slow-session",
+            outcomeId: `slow-outcome:${index}`,
+          },
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const terminal = await authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        privateBlocker,
+      );
+      completed.resolve();
+      return terminal;
+    };
+
+    let server: Awaited<ReturnType<typeof startUsineServer>> | undefined;
+    let slow: Awaited<ReturnType<typeof openServerEventListener>> | undefined;
+    let fast: Awaited<ReturnType<typeof openServerEventListener>> | undefined;
+    let replay: Awaited<ReturnType<typeof openServerEventListener>> | undefined;
+    try {
+      server = await startUsineServer({
+        environment: {
+          USINE_STATE_DIR: stateDirectory,
+          USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "subscription-app",
+          USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: secretMaterial,
+          USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
+          USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${taskId}`,
+        },
+        execute,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      await registerRepository(server.url, {
+        id: taskId,
+        path: await realpath(repository),
+        owner: "example",
+        name: taskId,
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+      });
+
+      slow = await openServerEventListener(server.url);
+      const slowFirstEvent = slow[Symbol.asyncIterator]().next();
+      fast = await openServerEventListener(server.url);
+      const fastEventsPromise = collectThrough(fast, 259);
+      await submitTask(server.url, { contractPath, repositoryId: taskId });
+      await expect(slowFirstEvent).resolves.toMatchObject({
+        done: false,
+        value: { cursor: 1 },
+      });
+      await completed.promise;
+      const fastEvents = await fastEventsPromise;
+      expect(fastEvents.map(({ cursor }) => cursor)).toEqual(
+        Array.from({ length: 259 }, (_, index) => index + 1),
+      );
+      expect(fastEvents.at(-1)).toMatchObject({
+        taskId,
+        event: { data: { type: "task_terminal", state: "blocked" } },
+      });
+      expect(JSON.stringify(fastEvents)).not.toContain(secretMaterial);
+      expect(JSON.stringify(fastEvents)).not.toContain(privateBlocker);
+
+      slow.close();
+      fast.close();
+      fast = undefined;
+      replay = await openServerEventListener(server.url, { afterCursor: 1 });
+      const replayed = await collectThrough(replay, 259);
+      expect(replayed.map(({ cursor }) => cursor)).toEqual(
+        Array.from({ length: 258 }, (_, index) => index + 2),
+      );
+      expect(replayed.every(({ taskId: eventTaskId }) => eventTaskId === taskId)).toBe(true);
+      expect(JSON.stringify(replayed)).not.toContain(secretMaterial);
+      expect(JSON.stringify(replayed)).not.toContain(privateBlocker);
+      const eventGets = requests
+        .filter(({ method, url }) => method === "GET" && url.pathname === "/v1/events")
+        .map(({ url }) => `${url.pathname}${url.search}`);
+      expect(eventGets).toEqual([
+        "/v1/events?after=0&limit=200",
+        "/v1/events?after=0&limit=200",
+        "/v1/events?after=1&limit=200",
+      ]);
+    } finally {
+      replay?.close();
+      slow?.close();
+      fast?.close();
+      if (server) await server.close();
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

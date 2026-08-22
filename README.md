@@ -41,6 +41,14 @@ node apps/cli/dist/cli.mjs task watch --after <sequence> <task-id>
 
 Operator reads use `server health|snapshot`, `repository list|get`, and `task list|get|history|watch`. Human-readable output is the default; append `--json` for stable machine-readable resources. Watch and history accept recognized options before or after the Task ID. The existing `register` and `submit` commands remain the mutation entry points. `inspect` is a compatibility alias for `repository get`, while `status` and `follow` are compatibility aliases for `task get` and `task watch`; their output is the same safe resource projection and never includes repository paths or private policy facts.
 
+## Public server event subscription
+
+An external bridge can open one server-wide subscription at `GET /v1/events?after=<server-cursor>&limit=<bounded>`. The response is an SSE stream of typed `{ cursor, taskId, event }` envelopes; `event` is the existing sanitized `TaskEvent` schema. The initial connection replays durable events greater than `after`, then continues live from the same cursor, so the bridge does not list Tasks or poll individual Task event routes.
+
+The bridge records the highest cursor it has acknowledged after processing an envelope. On disconnect, it opens a new subscription with that cursor. The server does not mutate acknowledgement state or reconnect on the bridge’s behalf. Cursors and events are durable, so the same replay contract works after a server restart; the bridge may receive only events after its acknowledged cursor and must preserve that cursor until processing succeeds.
+
+A listener that cannot accept response writes is disconnected at the HTTP stream’s bounded backpressure point. The server does not retain an unbounded listener buffer, and the listener cannot block Task admission, Task execution, or another listener. Reconnecting from the last acknowledged cursor resynchronizes the bounded gap. Public envelopes contain only sanitized Task events and do not include configured secrets, repository paths, transcripts, or private blocker text.
+
 CLI exit codes are stable: usage `2`, not-found `3`, timeout `4`, connection `5`, server `6`, and validation `7`. Invalid task contracts and server-side validation now use `7`; callers that previously treated those failures as usage must migrate their checks.
 
 完整交付需要为每个已注册 Repository 配置其 `forgeProfile` 对应的 `USINE_FORGE_PROFILE_<PROFILE>_*` GitHub App 变量。配置只在 host runtime 使用；Repository durable facts 保存 profile 名称，不保存凭据。上面的数值、身份、路径和任务文件名都是占位符。
