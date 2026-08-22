@@ -1,26 +1,8 @@
-import { Predicate, Schema } from "effect";
-import { decodeTaskEvent, type TaskEvent } from "@usine/task-authority";
+import { decodeApiEventEnvelope, type ApiEventEnvelope } from "./http-api.js";
 
-const taskEventEnvelope = Schema.Struct({
-  taskId: Schema.String,
-  repositoryId: Schema.String,
-  event: Schema.Unknown,
-});
+export type TaskEventEnvelope = ApiEventEnvelope;
 
-export interface TaskEventEnvelope {
-  readonly taskId: string;
-  readonly repositoryId: string;
-  readonly event: TaskEvent;
-}
-
+/** Compatibility alias for callers that still import the historical decoder. */
 export function decodeTaskEventEnvelope(input: unknown): TaskEventEnvelope {
-  if (!Predicate.isObject(input)) throw new Error("TaskEventEnvelope must be an object");
-  const keys = Object.keys(input).sort();
-  if (keys.join(",") !== "event,repositoryId,taskId") {
-    throw new Error("TaskEventEnvelope has unexpected fields");
-  }
-  const decoded = Schema.decodeUnknownSync(taskEventEnvelope)(input);
-  const event = decodeTaskEvent(decoded.event);
-  if (event.taskId !== decoded.taskId) throw new Error("event envelope Task ID is inconsistent");
-  return { taskId: decoded.taskId, repositoryId: decoded.repositoryId, event };
+  return decodeApiEventEnvelope(input);
 }

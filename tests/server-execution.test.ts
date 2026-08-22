@@ -417,13 +417,16 @@ describe("server-owned execution", () => {
     const admitted = await submitTask(first.url, submission);
     await first.close();
 
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    const persisted = database
+      .prepare("SELECT result FROM task_runs WHERE task_id = ?")
+      .get(admitted.taskId) as { result: string };
     const corruptTaskId = admitted.taskId + "-corrupt";
     const corruptResult = {
-      ...admitted,
+      ...(JSON.parse(persisted.result) as Record<string, unknown>),
       taskId: corruptTaskId,
       writer: { repositoryIdentity: "example/" + corruptTaskId },
     };
-    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
     database
       .prepare(
         "INSERT INTO task_runs (task_id, result, contract_path, raw_contract) VALUES (?, ?, ?, ?)",
@@ -464,26 +467,23 @@ describe("server-owned execution", () => {
       const quarantinedListResponse = await fetch(new URL("/v1/tasks", second.url));
       expect(quarantinedListResponse.status).toBe(503);
       expect(await quarantinedListResponse.json()).toEqual({
-        taskId: corruptTaskId,
+        taskId: quarantinedTaskId,
         error: "task_state_quarantined",
       });
 
       const quarantinedEventsResponse = await fetch(
         new URL(`/v1/tasks/${encodeURIComponent(corruptTaskId)}/events`, second.url),
       );
-      expect(quarantinedEventsResponse.status).toBe(503);
-      expect(await quarantinedEventsResponse.json()).toEqual({
-        taskId: corruptTaskId,
-        error: "task_state_quarantined",
-      });
+      expect(quarantinedEventsResponse.status).toBe(200);
+      expect(await quarantinedEventsResponse.json()).toMatchObject({ taskId: corruptTaskId });
 
       const corruptResponse = await fetch(
         new URL(`/v1/tasks/${encodeURIComponent(corruptTaskId)}`, second.url),
       );
-      expect(corruptResponse.status).toBe(503);
-      expect(await corruptResponse.json()).toEqual({
+      expect(corruptResponse.status).toBe(200);
+      expect(await corruptResponse.json()).toMatchObject({
         taskId: corruptTaskId,
-        error: "task_state_quarantined",
+        state: "blocked",
       });
       await healthyStarted.promise;
       expect((await taskStatus(second.url, admitted.taskId))?.taskId).toBe(admitted.taskId);

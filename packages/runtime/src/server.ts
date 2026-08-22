@@ -2,7 +2,21 @@ import { readFile, mkdir, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { Duration, Effect, Exit, Fiber, FiberMap, Option, PubSub, Scope } from "effect";
+import {
+  Context,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  FiberMap,
+  Layer,
+  Option,
+  PubSub,
+  Scope,
+  Stream,
+} from "effect";
+import { HttpRouter, HttpServer, HttpServerResponse } from "effect/unstable/http";
+import { HttpApiBuilder } from "effect/unstable/httpapi";
 import {
   applyMigrations,
   contractIssues,
@@ -17,9 +31,6 @@ import {
   type TaskExecutionInput,
   type TaskEvent,
   type TaskResult,
-  type TaskEventPage,
-  type TaskListPage,
-  type ServerSnapshot,
   taskResourceFromResult,
   isTerminalState,
 } from "@usine/task-authority";
@@ -43,12 +54,20 @@ import {
   ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
-import type { TaskEventEnvelope } from "./server-events.js";
+import {
+  UsineApi,
+  type ApiError,
+  type ApiEventEnvelope,
+  type ApiEventQuery,
+  type ApiEventScope,
+  type ApiEventStreamValue,
+  type ApiTaskSubmission,
+  type ApiTaskResource,
+  encodeApiWaitResponse,
+} from "./http-api.js";
+type TaskEventEnvelope = ApiEventEnvelope;
 
-export interface TaskSubmission {
-  contractPath: string;
-  repositoryId?: string;
-}
+export type TaskSubmission = ApiTaskSubmission;
 
 export interface ServerExecutionContext {
   input: TaskExecutionInput;
@@ -112,7 +131,7 @@ interface AdmittedTask {
   result: TaskResult;
 }
 
-type EventScope = { readonly taskId?: string; readonly repositoryId?: string };
+type EventScope = ApiEventScope;
 
 interface TransientEventListener {
   readonly scope: EventScope;
@@ -180,9 +199,9 @@ class TransientEventHub {
   }
 }
 
-const SERVER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
 const DEFAULT_EVENT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_EVENT_WAIT_TIMEOUT_MS = 60_000;
+const SERVER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
 
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
@@ -230,25 +249,24 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     Effect.gen(function* () {
       const runTask = yield* FiberMap.makeRuntime<never, string>();
       let launchTask: (task: AdmittedTask) => void = () => undefined;
+      const api = createApiWebHandler({
+        environment: options.environment,
+        launch: (task) => launchTask(task),
+        activeTaskCapacity,
+        onEvent,
+        eventHub,
+      });
       const server = yield* Effect.acquireRelease(
         Effect.tryPromise({
-          try: () =>
-            listen(host, port, async (request, response) => {
-              await handleRequest(
-                request,
-                response,
-                options.environment,
-                launchTask,
-                activeTaskCapacity,
-                onEvent,
-                eventHub,
-              );
-            }),
+          try: () => listen(host, port, api.handler),
           catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
         }),
         (value) =>
           Effect.tryPromise({
-            try: () => close(value),
+            try: async () => {
+              await close(value);
+              await api.dispose();
+            },
             catch: (cause) => new Error(`server failed to close: ${String(cause)}`),
           }).pipe(Effect.ignore),
       );
@@ -444,28 +462,27 @@ interface BoundServer {
   close(callback: (error?: Error) => void): void;
 }
 
-function listen(
-  host: string,
-  port: number,
-  handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>,
-): Promise<BoundServer> {
+interface WebHandler {
+  (request: globalThis.Request, context: Context.Context<never>): Promise<globalThis.Response>;
+}
+
+function listen(host: string, port: number, handler: WebHandler): Promise<BoundServer> {
   return new Promise((resolve, reject) => {
     const server = createServer((request, response) => {
-      void handler(request, response).catch((error) => {
-        if (!response.headersSent) {
-          response.statusCode =
-            error instanceof TaskCapacityError
-              ? 429
-              : error instanceof ServerValidationError
-                ? 400
-                : error instanceof ServerNotFoundError
-                  ? 404
-                  : 500;
-          writeJson(response, errorProjection(error));
-        } else {
-          response.destroy(error instanceof Error ? error : undefined);
-        }
-      });
+      const controller = new AbortController();
+      request.once("aborted", () => controller.abort());
+      response.once("close", () => controller.abort());
+      void handler(webRequestFromNode(request, controller.signal), Context.empty())
+        .then((webResponse) => writeNodeResponse(response, webResponse))
+        .catch((error) => {
+          if (response.headersSent || response.destroyed) {
+            response.destroy(error instanceof Error ? error : undefined);
+            return;
+          }
+          response.statusCode = 500;
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ code: "server_error", message: "server request failed" }));
+        });
     });
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -479,44 +496,51 @@ function listen(
   });
 }
 
-function close(server: BoundServer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
+function webRequestFromNode(request: IncomingMessage, signal: AbortSignal): globalThis.Request {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  const hasBody = request.method !== "GET" && request.method !== "HEAD";
+  return new Request(`http://${request.headers.host ?? "127.0.0.1"}${request.url ?? "/"}`, {
+    method: request.method,
+    headers,
+    body: hasBody ? (request as unknown as BodyInit) : undefined,
+    signal,
+    duplex: hasBody ? "half" : undefined,
+  } as RequestInit);
 }
 
-async function streamServerEvents(
+async function writeNodeResponse(
   response: ServerResponse,
-  stateDirectory: string,
-  eventHub: TransientEventHub,
-  scope: EventScope,
+  webResponse: globalThis.Response,
 ): Promise<void> {
-  await validateEventScope(stateDirectory, scope);
-  response.statusCode = 200;
-  response.setHeader("content-type", "text/event-stream");
-  response.setHeader("cache-control", "no-cache");
-  response.setHeader("connection", "keep-alive");
-  const subscription = eventHub.subscribe(scope, () => response.destroy());
-  response.once("close", () => {
-    subscription.close();
-  });
-  response.flushHeaders();
-  response.write(": connected\n\n");
+  response.statusCode = webResponse.status;
+  webResponse.headers.forEach((value, name) => response.setHeader(name, value));
+  if (!webResponse.body) {
+    response.end();
+    return;
+  }
+  const reader = webResponse.body.getReader();
+  const cancelReader = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  response.once("close", cancelReader);
   try {
-    while (!response.destroyed) {
-      const envelope = await subscription.take();
-      if (!(await writeServerEvent(response, envelope))) return;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done || response.destroyed) break;
+      if (!response.write(chunk.value) && !response.destroyed && !(await waitForDrain(response)))
+        break;
     }
-  } catch {
-    // Closing the transient subscription interrupts its pending take.
   } finally {
-    subscription.close();
+    response.removeListener("close", cancelReader);
+    reader.releaseLock();
+    if (!response.writableEnded && !response.destroyed) response.end();
   }
 }
 
-function writeServerEvent(response: ServerResponse, envelope: TaskEventEnvelope): Promise<boolean> {
-  if (response.destroyed) return Promise.resolve(false);
-  if (response.write(`data: ${JSON.stringify(envelope)}\n\n`)) return Promise.resolve(true);
+function waitForDrain(response: ServerResponse): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -539,14 +563,229 @@ function writeServerEvent(response: ServerResponse, envelope: TaskEventEnvelope)
   });
 }
 
-function parseEventScope(url: URL): EventScope {
-  const taskId = url.searchParams.get("taskId")?.trim() || undefined;
-  const repositoryId = url.searchParams.get("repositoryId")?.trim() || undefined;
+function close(server: BoundServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function createApiWebHandler(options: {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly launch: (task: AdmittedTask) => void;
+  readonly activeTaskCapacity: number;
+  readonly onEvent: (event: TaskEvent) => void;
+  readonly eventHub: TransientEventHub;
+}): { readonly handler: WebHandler; readonly dispose: () => Promise<void> } {
+  const stateDirectory = stateDirectoryFromEnvironment(options.environment);
+  const serverHandlers = HttpApiBuilder.group(UsineApi, "server", (handlers) =>
+    handlers.handleAll({
+      health: () => apiEffect(() => lookupServerHealth(stateDirectory)),
+      healthAlias: () => apiEffect(() => lookupServerHealth(stateDirectory)),
+      snapshot: ({ query }) =>
+        apiEffect(() => lookupServerSnapshot(stateDirectory, validLimit(query.limit, 100))),
+      snapshotAlias: ({ query }) =>
+        apiEffect(() => lookupServerSnapshot(stateDirectory, validLimit(query.limit, 100))),
+    }),
+  );
+  const repositoryHandlers = HttpApiBuilder.group(UsineApi, "repositories", (handlers) =>
+    handlers.handleAll({
+      list: ({ query }) =>
+        apiEffect(async () => ({
+          repositories: await lookupRepositories(stateDirectory, validLimit(query.limit, 100)),
+        })),
+      get: ({ params }) =>
+        apiEffect(async () => {
+          const repository = await inspectRepositoryResource(stateDirectory, params.repositoryId);
+          if (!repository) throw new ServerNotFoundError("repository not found");
+          return repository;
+        }),
+      register: ({ payload }) =>
+        apiEffect(async () => {
+          const parsed = repositoryRegistrationSchema.safeParse(payload);
+          if (!parsed.success)
+            throw new ServerValidationError(JSON.stringify(contractIssues(parsed.error)));
+          const registration: RepositorySnapshot = {
+            ...parsed.data,
+            path: await realpath(parsed.data.path),
+          };
+          return registerRepositoryResource(stateDirectory, registration);
+        }),
+    }),
+  );
+  const taskHandlers = HttpApiBuilder.group(UsineApi, "tasks", (handlers) =>
+    handlers.handleAll({
+      list: ({ query }) =>
+        apiEffect(async () => ({
+          tasks: await lookupTasks(stateDirectory, validLimit(query.limit, 100)),
+        })),
+      get: ({ params }) =>
+        apiEffect(async () => {
+          const result = await lookupTaskStatus(stateDirectory, params.taskId);
+          if (!result) throw new ServerNotFoundError("task not found");
+          return taskResourceForApi(result);
+        }),
+      history: ({ params, query }) =>
+        apiEffect(async () => {
+          const page = await lookupTaskEvents(
+            stateDirectory,
+            params.taskId,
+            validCursor(query.after, 0),
+            validLimit(query.limit, 200),
+          );
+          if (!page) throw new ServerNotFoundError("task not found");
+          return page;
+        }),
+      submit: ({ payload }) =>
+        apiEffect(async () => {
+          const submission: TaskSubmission = payload;
+          const rawContract = await readFile(submission.contractPath, "utf8");
+          const contract = parseContract(rawContract);
+          if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
+            throw new ServerValidationError(
+              "submitted repository ID does not match the task contract",
+            );
+          const repository = await inspectRepository(stateDirectory, contract.repositoryId);
+          if (!repository)
+            throw new ServerNotFoundError(`repository is not registered: ${contract.repositoryId}`);
+          const policy = runtimePolicyFromEnvironment(options.environment, repository);
+          const result = await admitTask(
+            submission.contractPath,
+            rawContract,
+            contract,
+            policy,
+            options.activeTaskCapacity,
+            options.onEvent,
+          );
+          if (!isTerminalState(result.state))
+            options.launch({ input: { ...submission, rawContract }, contract, result });
+          return taskResourceForApi(result);
+        }),
+    }),
+  );
+  const eventHandlers = HttpApiBuilder.group(UsineApi, "events", (handlers) =>
+    handlers.handleAll({
+      wait: ({ query }) => waitApiEventResponse(stateDirectory, options.eventHub, query),
+      subscribe: ({ query }) => subscribeApiEvents(stateDirectory, options.eventHub, query),
+      subscribeAlias: ({ query }) => subscribeApiEvents(stateDirectory, options.eventHub, query),
+    }),
+  );
+  const apiLayer = HttpApiBuilder.layer(UsineApi).pipe(
+    Layer.provide(Layer.mergeAll(serverHandlers, repositoryHandlers, taskHandlers, eventHandlers)),
+  );
+  return HttpRouter.toWebHandler(apiLayer.pipe(Layer.provide(HttpServer.layerServices)), {
+    disableLogger: true,
+  });
+}
+
+function apiEffect<A>(thunk: () => Promise<A>): Effect.Effect<A, ApiError> {
+  return Effect.tryPromise({ try: thunk, catch: apiError });
+}
+
+function apiError(error: unknown): ApiError {
+  if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
+  if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof TaskCapacityError)
+    return { code: "active_task_capacity", message: error.message, retryable: true };
+  if (isTaskStateQuarantinedError(error)) {
+    if (error.taskId !== undefined)
+      return { taskId: error.taskId, error: "task_state_quarantined" };
+    return { code: "server_error", message: "server request failed" };
+  }
+  if (error instanceof ForgeProfileResolutionError)
+    return { code: error.code, message: error.message };
+  return { code: "server_error", message: "server request failed" };
+}
+
+function validLimit(value: number | undefined, fallback: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+    throw new ServerValidationError("limit is out of range");
+  return limit;
+}
+
+function validCursor(value: number | undefined, fallback: number): number {
+  const cursor = value ?? fallback;
+  if (!Number.isSafeInteger(cursor) || cursor < 0)
+    throw new ServerValidationError("cursor is out of range");
+  return cursor;
+}
+
+function eventScopeFromQuery(query: ApiEventScope): EventScope {
+  const taskId = query.taskId?.trim() || undefined;
+  const repositoryId = query.repositoryId?.trim() || undefined;
   if (taskId && repositoryId)
     throw new ServerValidationError("event scope must select a Task, Repository, or whole server");
-  if (url.searchParams.has("after") || url.searchParams.has("limit"))
-    throw new ServerValidationError("event listeners do not support replay cursors");
   return { taskId, repositoryId };
+}
+
+function waitApiEventResponse(
+  stateDirectory: string,
+  eventHub: TransientEventHub,
+  query: ApiEventQuery & { readonly timeoutMs?: number },
+): Effect.Effect<HttpServerResponse.HttpServerResponse, ApiError> {
+  return apiEffect(async () => {
+    rejectEventReplayQuery(query);
+    const scope = eventScopeFromQuery(query);
+    await validateEventScope(stateDirectory, scope);
+    const timeoutMs = query.timeoutMs ?? DEFAULT_EVENT_WAIT_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_EVENT_WAIT_TIMEOUT_MS)
+      throw new ServerValidationError("timeoutMs is out of range");
+    const listener = eventHub.subscribe(scope);
+    const eventBytes: Effect.Effect<Uint8Array, never> = Effect.tryPromise({
+      try: listener.takeWithTimeout.bind(listener, timeoutMs),
+      catch: () => new Error("event listener closed"),
+    }).pipe(
+      Effect.map((event) =>
+        new TextEncoder().encode(encodeApiWaitResponse(Option.isNone(event) ? null : event.value)),
+      ),
+      Effect.catchCause(() => Effect.succeed(new TextEncoder().encode("null"))),
+    );
+    const body: Stream.Stream<Uint8Array, never> = Stream.concat(
+      Stream.succeed(new TextEncoder().encode(" ")),
+      Stream.fromEffect(eventBytes),
+    ).pipe(Stream.ensuring(Effect.sync(listener.close)));
+    return HttpServerResponse.stream(body, { contentType: "application/json" });
+  });
+}
+
+function subscribeApiEvents(
+  stateDirectory: string,
+  eventHub: TransientEventHub,
+  query: ApiEventQuery,
+): Effect.Effect<Stream.Stream<ApiEventStreamValue>, ApiError> {
+  return apiEffect(async () => {
+    rejectEventReplayQuery(query);
+    const scope = eventScopeFromQuery(query);
+    await validateEventScope(stateDirectory, scope);
+    const listener = eventHub.subscribe(scope);
+    return Stream.concat(
+      Stream.succeed({ kind: "ready" as const }),
+      Stream.fromEffectRepeat(
+        Effect.tryPromise({
+          try: listener.take,
+          catch: () => new Error("event listener closed"),
+        }),
+      ),
+    ).pipe(
+      Stream.catchCause(() => Stream.empty),
+      Stream.ensuring(Effect.sync(listener.close)),
+    );
+  });
+}
+
+function rejectEventReplayQuery(query: ApiEventQuery): void {
+  if (query.after !== undefined || query.limit !== undefined)
+    throw new ServerValidationError("event wait and subscribe do not support replay cursors");
+}
+
+function taskResourceForApi(result: TaskResult): ApiTaskResource {
+  const resource = taskResourceFromResult(result);
+  return {
+    ...resource,
+    delivery: resource.delivery
+      ? { ...resource.delivery, merge: resource.delivery.merge ?? null }
+      : null,
+  };
 }
 
 async function validateEventScope(stateDirectory: string, scope: EventScope): Promise<void> {
@@ -561,264 +800,6 @@ async function validateEventScope(stateDirectory: string, scope: EventScope): Pr
   }
 }
 
-function parseWaitTimeout(value: string | null): number {
-  if (value == null) return DEFAULT_EVENT_WAIT_TIMEOUT_MS;
-  if (!/^\d+$/.test(value))
-    throw new ServerValidationError("timeoutMs must be a non-negative integer");
-  const timeoutMs = Number(value);
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs > MAX_EVENT_WAIT_TIMEOUT_MS)
-    throw new ServerValidationError("timeoutMs is out of range");
-  return timeoutMs;
-}
-
-async function waitForServerEvent(
-  response: ServerResponse,
-  stateDirectory: string,
-  eventHub: TransientEventHub,
-  scope: EventScope,
-  timeoutMs: number,
-): Promise<void> {
-  await validateEventScope(stateDirectory, scope);
-  const subscription = eventHub.subscribe(scope);
-  response.statusCode = 200;
-  response.setHeader("content-type", "application/json");
-  response.once("close", () => subscription.close());
-  response.flushHeaders();
-  response.write(" ");
-  try {
-    const event = await subscription.takeWithTimeout(timeoutMs);
-    if (Option.isNone(event)) {
-      response.end("null");
-      return;
-    }
-    response.end(JSON.stringify(event.value));
-  } catch {
-    if (!response.destroyed) response.end("null");
-  } finally {
-    subscription.close();
-  }
-}
-
-async function handleRequest(
-  request: IncomingMessage,
-  response: ServerResponse,
-  environment: NodeJS.ProcessEnv,
-  launch: (task: AdmittedTask) => void,
-  activeTaskCapacity: number,
-  onEvent: (event: TaskEvent) => void,
-  eventHub: TransientEventHub,
-): Promise<void> {
-  const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
-  const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
-  const stateDirectory = stateDirectoryFromEnvironment(environment);
-  if (request.method === "GET" && ["/v1/events", "/v1/events/subscribe"].includes(url.pathname)) {
-    await streamServerEvents(response, stateDirectory, eventHub, parseEventScope(url));
-    return;
-  }
-  if (request.method === "GET" && url.pathname === "/v1/events/wait") {
-    await waitForServerEvent(
-      response,
-      stateDirectory,
-      eventHub,
-      parseEventScope(url),
-      parseWaitTimeout(url.searchParams.get("timeoutMs")),
-    );
-    return;
-  }
-  if (request.method === "GET" && ["/v1/health", "/v1/server/health"].includes(url.pathname)) {
-    try {
-      writeJson(response, await lookupServerHealth(stateDirectory));
-    } catch (error) {
-      if (isTaskStateQuarantinedError(error)) {
-        response.statusCode = 503;
-        writeJson(response, { taskId: error.taskId, error: error.code });
-        return;
-      }
-      throw error;
-    }
-    return;
-  }
-  if (request.method === "GET" && ["/v1/snapshot", "/v1/server/snapshot"].includes(url.pathname)) {
-    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
-    try {
-      const snapshot: ServerSnapshot = await lookupServerSnapshot(stateDirectory, limit);
-      writeJson(response, snapshot);
-    } catch (error) {
-      if (isTaskStateQuarantinedError(error)) {
-        response.statusCode = 503;
-        writeJson(response, { taskId: error.taskId, error: error.code });
-        return;
-      }
-      throw error;
-    }
-    return;
-  }
-  if (request.method === "GET" && url.pathname === "/v1/tasks") {
-    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
-    let page: TaskListPage;
-    try {
-      page = { tasks: await lookupTasks(stateDirectory, limit) };
-    } catch (error) {
-      if (isTaskStateQuarantinedError(error)) {
-        response.statusCode = 503;
-        writeJson(response, { taskId: error.taskId, error: error.code });
-        return;
-      }
-      throw error;
-    }
-    writeJson(response, page);
-    return;
-  }
-  if (request.method === "GET" && taskEventsPath) {
-    const requestedTaskId = decodeURIComponent(taskEventsPath);
-    const afterSequence = parseCursor(url.searchParams.get("after"), "after");
-    const limit = parseCursor(url.searchParams.get("limit"), "limit", 200);
-    let page: TaskEventPage | null;
-    try {
-      page = await lookupTaskEvents(stateDirectory, requestedTaskId, afterSequence, limit);
-    } catch (error) {
-      if (isTaskStateQuarantinedError(error)) {
-        response.statusCode = 503;
-        writeJson(response, { taskId: error.taskId, error: error.code });
-        return;
-      }
-      throw error;
-    }
-    if (!page) {
-      response.statusCode = 404;
-      writeJson(response, { message: "task not found" });
-      return;
-    }
-    writeJson(response, page);
-    return;
-  }
-  if (request.method === "GET" && taskId) {
-    const requestedTaskId = decodeURIComponent(taskId);
-    let result: TaskResult | null;
-    try {
-      result = await lookupTaskStatus(stateDirectory, requestedTaskId);
-    } catch (error) {
-      if (isTaskStateQuarantinedError(error)) {
-        response.statusCode = 503;
-        writeJson(response, { taskId: requestedTaskId, error: error.code });
-        return;
-      }
-      throw error;
-    }
-    if (!result) {
-      response.statusCode = 404;
-      writeJson(response, { message: "task not found" });
-      return;
-    }
-    writeJson(response, taskResourceFromResult(result));
-    return;
-  }
-
-  if (request.method === "GET" && url.pathname === "/v1/repositories") {
-    const limit = parseCursor(url.searchParams.get("limit"), "limit", 100);
-    writeJson(response, { repositories: await lookupRepositories(stateDirectory, limit) });
-    return;
-  }
-
-  const repositoryId = url.pathname.match(/^\/v1\/repositories\/([^/]+)$/)?.[1];
-  if (request.method === "GET" && repositoryId) {
-    const repository = await inspectRepositoryResource(
-      stateDirectory,
-      decodeURIComponent(repositoryId),
-    );
-    if (!repository) {
-      response.statusCode = 404;
-      writeJson(response, { message: "repository not found" });
-      return;
-    }
-    writeJson(response, repository);
-    return;
-  }
-
-  if (request.method === "POST" && url.pathname === "/v1/repositories") {
-    const parsed = repositoryRegistrationSchema.safeParse(JSON.parse(await readBody(request)));
-    if (!parsed.success) {
-      response.statusCode = 400;
-      writeJson(response, { message: JSON.stringify(contractIssues(parsed.error)) });
-      return;
-    }
-    const registration: RepositorySnapshot = {
-      ...parsed.data,
-      path: await realpath(parsed.data.path),
-    };
-    writeJson(response, await registerRepositoryResource(stateDirectory, registration));
-    return;
-  }
-
-  if (request.method === "POST" && url.pathname === "/v1/tasks") {
-    const submission = parseSubmission(await readBody(request));
-    const rawContract = await readFile(submission.contractPath, "utf8");
-    const contract = parseContract(rawContract);
-    if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
-      throw new Error("submitted repository ID does not match the task contract");
-    const repository = await inspectRepository(stateDirectory, contract.repositoryId);
-    if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
-    const policy = runtimePolicyFromEnvironment(environment, repository);
-    const result = await admitTask(
-      submission.contractPath,
-      rawContract,
-      contract,
-      policy,
-      activeTaskCapacity,
-      onEvent,
-    );
-    if (!isTerminalState(result.state)) {
-      launch({
-        input: { ...submission, rawContract },
-        contract,
-        result,
-      });
-    }
-    writeJson(response, taskResourceFromResult(result));
-    return;
-  }
-
-  response.statusCode = 404;
-  writeJson(response, { message: "route not found" });
-}
-
-function parseCursor(value: string | null, name: string, fallback = 0): number {
-  if (value == null) return fallback;
-  if (!/^\d+$/.test(value))
-    throw new ServerValidationError(`${name} must be a non-negative integer`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new ServerValidationError(`${name} is out of range`);
-  if (name === "limit" && (parsed < 1 || parsed > 200))
-    throw new ServerValidationError(`${name} is out of range`);
-  return parsed;
-}
-
-function parseSubmission(body: string): TaskSubmission {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    throw new Error("request body must be JSON");
-  }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("contractPath" in parsed) ||
-    typeof parsed.contractPath !== "string" ||
-    ("repositoryId" in parsed && typeof parsed.repositoryId !== "string")
-  ) {
-    throw new Error("task submission shape is invalid");
-  }
-  return {
-    contractPath: parsed.contractPath,
-    repositoryId:
-      "repositoryId" in parsed && typeof parsed.repositoryId === "string"
-        ? parsed.repositoryId
-        : undefined,
-  };
-}
-
 function parseContract(rawContract: string): TaskContract {
   let input: unknown;
   try {
@@ -831,31 +812,4 @@ function parseContract(rawContract: string): TaskContract {
     throw new Error(`invalid task contract: ${JSON.stringify(contractIssues(parsed.error))}`);
   }
   return parsed.data;
-}
-
-function readBody(request: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk: string) => {
-      body += chunk;
-      if (body.length > 1_000_000) request.destroy(new Error("request body is too large"));
-    });
-    request.on("end", () => resolve(body));
-    request.on("error", reject);
-  });
-}
-
-function writeJson(response: ServerResponse, value: unknown): void {
-  response.setHeader("content-type", "application/json");
-  response.end(JSON.stringify(value));
-}
-
-function errorProjection(error: unknown): { message: string; code?: string; retryable?: boolean } {
-  if (error instanceof ServerValidationError) return { code: error.code, message: error.message };
-  if (error instanceof TaskCapacityError)
-    return { code: error.code, message: error.message, retryable: error.retryable };
-  if (error instanceof ForgeProfileResolutionError)
-    return { code: error.code, message: error.message };
-  return { code: "server_error", message: "server request failed" };
 }

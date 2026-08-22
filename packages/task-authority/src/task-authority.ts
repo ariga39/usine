@@ -334,7 +334,7 @@ export class TaskAuthority {
       .from(taskQuarantines)
       .where(eq(taskQuarantines.taskId, taskId))
       .limit(1);
-    if (quarantined[0]) throw new TaskStateQuarantinedError();
+    if (quarantined[0]) throw new TaskStateQuarantinedError(taskId);
     return null;
   }
 
