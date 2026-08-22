@@ -232,13 +232,20 @@ describe("Delivery Run durable phase recovery", () => {
           quarantine: async () => undefined,
         },
         session: {
-          run: async () => ({
-            status: "completed" as const,
-            output: { status: "proposed" as const, summary: "candidate" },
-            summary: "completed",
-            failure: null,
-            usage: { inputTokens: 12, outputTokens: 7 },
-          }),
+          run: async (request) => {
+            await request.onObservation?.({
+              type: "mcp_unavailable",
+              server: "github_read_implementer",
+              reason: "unavailable",
+            });
+            return {
+              status: "completed" as const,
+              output: { status: "proposed" as const, summary: "candidate" },
+              summary: "completed",
+              failure: null,
+              usage: { inputTokens: 12, outputTokens: 7 },
+            };
+          },
         },
         quality: {
           check: async (_contract, candidateSha) => ({
@@ -249,15 +256,23 @@ describe("Delivery Run durable phase recovery", () => {
             stdout: "",
             stderr: "",
           }),
-          reviewWithObservation: async (_contract, candidateSha) => ({
-            review: {
-              sha: candidateSha,
-              verdict: "approved" as const,
-              summary: "approved",
-              findings: [],
-            },
-            usage: { inputTokens: 5, outputTokens: 3 },
-          }),
+          reviewWithObservation: async (_contract, candidateSha, _check, _cycle, onObservation) => {
+            await onObservation?.({
+              type: "mcp_tool_completed",
+              server: "github_read_reviewer",
+              tool: "github_pull_request_reviews",
+              outcome: "succeeded",
+            });
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "approved" as const,
+                summary: "approved",
+                findings: [],
+              },
+              usage: { inputTokens: 5, outputTokens: 3 },
+            };
+          },
         },
         forge: {
           deliver: async (_contract, candidateSha) => ({
@@ -274,15 +289,24 @@ describe("Delivery Run durable phase recovery", () => {
     expect(result.state).toBe("reviewed_pr");
     expect(fake.getObservations().map(({ data }) => data.type)).toEqual([
       "coding_session_started",
+      "coding_mcp_unavailable",
       "coding_session_completed",
       "coding_session_started",
+      "coding_mcp_tool_completed",
       "coding_session_completed",
     ]);
     expect(
       fake
         .getObservations()
         .map(({ data }) => (data.type === "coding_session_started" ? data.sessionId : null)),
-    ).toEqual(["coding-session:1:implementer", null, "review-session:1:reviewer", null]);
+    ).toEqual([
+      "coding-session:1:implementer",
+      null,
+      null,
+      "review-session:1:reviewer",
+      null,
+      null,
+    ]);
     expect(JSON.stringify(fake.getObservations())).not.toMatch(
       /prompt|stdout|stderr|profile|token/i,
     );

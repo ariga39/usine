@@ -85,6 +85,13 @@
       "when": 1787356800003,
       "tag": "0011_repository_resource_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787356800004,
+      "tag": "0012_repository_github_read_profile",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,7 @@ import {
   Codex,
   type RunResult,
   type ThreadEvent,
+  type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
@@ -42,6 +43,7 @@ function testClient(
   run: (prompt: string, options?: TurnOptions) => Promise<RunResult>,
   id: string | null = null,
   onStart?: (options: ThreadOptions) => void,
+  completedItems: readonly ThreadItem[] = [],
 ): Codex {
   const client = new Codex();
   const thread = client.startThread();
@@ -53,6 +55,7 @@ function testClient(
       const result = await run(prompt, options);
       yield { type: "thread.started", thread_id: id ?? "thread-test" };
       yield { type: "turn.started" };
+      for (const item of completedItems) yield { type: "item.completed", item };
       yield {
         type: "item.completed",
         item: { type: "agent_message", id: "message", text: result.finalResponse },
@@ -499,6 +502,67 @@ describe("Coding Session", () => {
     } finally {
       await host.close();
     }
+  });
+
+  test("sanitizes MCP lifecycle observations and preserves unavailable fallback", async () => {
+    const observations: unknown[] = [];
+    const mcpItem = {
+      type: "mcp_tool_call",
+      id: "mcp-call",
+      server: "github_read?token=host-secret",
+      tool: "github_issue_get",
+      status: "completed",
+      arguments: { token: "host-secret" },
+      result: {
+        content: [{ type: "text", text: "private response" }],
+        structured_content: { body: "private response" },
+      },
+    } satisfies ThreadItem;
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "ok" })),
+          null,
+          undefined,
+          [mcpItem],
+        ),
+      {
+        environment: {},
+        mcpServerFactory: async () => ({
+          serverName: "github_read?token=host-secret",
+          status: "unavailable",
+          reason: "startup_timeout",
+        }),
+      },
+    );
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      onObservation: (event) => {
+        observations.push(event);
+      },
+    });
+    expect(observation.status).toBe("completed");
+    expect(observations).toContainEqual({
+      type: "mcp_unavailable",
+      server: "unknown",
+      reason: "startup_timeout",
+    });
+    expect(observations).toContainEqual({
+      type: "mcp_tool_completed",
+      server: "unknown",
+      tool: "github_issue_get",
+      outcome: "succeeded",
+    });
+    expect(JSON.stringify(observations)).not.toContain("host-secret");
+    expect(JSON.stringify(observations)).not.toContain("private response");
   });
 
   test("rejects an unusable profile before creating a Codex client", async () => {

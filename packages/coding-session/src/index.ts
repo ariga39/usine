@@ -6,6 +6,8 @@ export {
   type CodingSessionOptions,
   type CodingSessionRuntimeAdapter,
   type CodingSessionMcpServer,
+  type CodingSessionMcpServerFactory,
+  type CodingSessionMcpServerResolution,
   explicitWorkerEnvironment,
   validateCodexProfile,
   type CodingSessionClientFactory,

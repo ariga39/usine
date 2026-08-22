@@ -3,6 +3,7 @@ import { describe, expect, test } from "vite-plus/test";
 import {
   ForgeProfileResolutionError,
   forgePolicyFromEnvironment,
+  githubReadPolicyFromEnvironment,
   runtimePolicyFromEnvironment,
 } from "@usine/runtime";
 
@@ -196,6 +197,61 @@ describe("runtime composition", () => {
         },
       ),
     ).not.toThrow();
+  });
+
+  test("keeps separately credentialed GitHub reads scoped by worker role", () => {
+    const environment = {
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_APP_SLUG: "read-app",
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_TEST_TOKEN: "read-secret",
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_API_URL: "http://127.0.0.1:8787",
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_REPOSITORY: "owner/repo",
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_IMPLEMENTER_TOOLS:
+        "github_issue_get,github_issue_comments",
+      USINE_GITHUB_READ_PROFILE_READ_ONLY_REVIEWER_TOOLS:
+        "github_pull_request_get,github_pull_request_reviews,github_pull_request_checks",
+      USINE_GITHUB_READ_PROFILE_OTHER_READ_APP_SLUG: "other-read-app",
+      USINE_GITHUB_READ_PROFILE_OTHER_READ_TEST_TOKEN: "other-read-secret",
+      USINE_GITHUB_READ_PROFILE_OTHER_READ_API_URL: "http://127.0.0.1:8787",
+      USINE_GITHUB_READ_PROFILE_OTHER_READ_REPOSITORY: "other/repo",
+    };
+    const policy = githubReadPolicyFromEnvironment(environment, {
+      owner: "owner",
+      name: "repo",
+      githubReadProfile: "read-only",
+    });
+    expect(policy).toEqual({
+      policy: {
+        mode: "test",
+        appSlug: "read-app",
+        token: "read-secret",
+        apiUrl: "http://127.0.0.1:8787",
+      },
+      implementerTools: ["github_issue_get", "github_issue_comments"],
+      reviewerTools: [
+        "github_pull_request_get",
+        "github_pull_request_reviews",
+        "github_pull_request_checks",
+      ],
+    });
+    const runtime = runtimePolicyFromEnvironment(
+      { ...forgeEnvironment, ...environment },
+      { ...repository, githubReadProfile: "read-only" },
+    );
+    expect(runtime.githubRead).toEqual(policy);
+    expect(runtime.workerEnvironment).not.toHaveProperty(
+      "USINE_GITHUB_READ_PROFILE_READ_ONLY_TEST_TOKEN",
+    );
+    expect(
+      githubReadPolicyFromEnvironment(environment, {
+        owner: "other",
+        name: "repo",
+        githubReadProfile: "other-read",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        policy: expect.objectContaining({ token: "other-read-secret" }),
+      }),
+    );
   });
 
   test("rejects test forge credentials outside loopback", () => {
