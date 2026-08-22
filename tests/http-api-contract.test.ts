@@ -89,3 +89,25 @@ test("the typed SSE contract emits readiness before a domain envelope", async ()
   );
   expect(Array.from(values)).toEqual([{ kind: "ready" }, envelope]);
 });
+
+test("the shared error contract encodes quarantined Tasks as HTTP 503", async () => {
+  const handlers = HttpApiBuilder.group(UsineApi, "tasks", (group) =>
+    group.handleAll({
+      list: () => Effect.die("unused"),
+      get: () =>
+        Effect.fail({ taskId: "task-quarantined", error: "task_state_quarantined" as const }),
+      history: () => Effect.die("unused"),
+      submit: () => Effect.die("unused"),
+    }),
+  );
+  const request = Effect.scoped(
+    Effect.gen(function* () {
+      const client = yield* HttpApiTest.groups(UsineApi, ["tasks"]);
+      return yield* client.tasks.get({ params: { taskId: "task-quarantined" } });
+    }).pipe(Effect.provide(Layer.mergeAll(handlers, HttpServer.layerServices))),
+  );
+  await expect(Effect.runPromise(request)).rejects.toEqual({
+    taskId: "task-quarantined",
+    error: "task_state_quarantined",
+  });
+});
