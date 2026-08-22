@@ -84,6 +84,16 @@ export class ServerClientError extends Error {
   }
 }
 
+export class TaskCapacityError extends ServerClientError {
+  readonly code = "active_task_capacity";
+  readonly retryable = true;
+
+  constructor(message: string, status: number, diagnostic = "active_task_capacity") {
+    super(message, status, "server", diagnostic);
+    this.name = "TaskCapacityError";
+  }
+}
+
 export type ServerFailureKind = "validation" | "not_found" | "timeout" | "connection" | "server";
 
 export async function submitTask(
@@ -298,6 +308,8 @@ async function requestTask(
 async function readTaskResponse(response: Response): Promise<TaskResource> {
   const parsed = await readJson(response);
   if (!response.ok) {
+    if (isTaskCapacityResponse(parsed))
+      throw new TaskCapacityError(parsed.message, response.status);
     const message =
       typeof parsed === "object" && parsed !== null && "message" in parsed
         ? String(parsed.message)
@@ -338,9 +350,25 @@ function responseMessage(body: unknown, fallback: string): string {
 }
 
 function responseDiagnostic(body: unknown): string | undefined {
-  return typeof body === "object" && body !== null && "error" in body
-    ? String(body.error)
-    : undefined;
+  if (typeof body !== "object" || body === null) return undefined;
+  if ("error" in body) return String(body.error);
+  if ("code" in body) return String(body.code);
+  return undefined;
+}
+
+function isTaskCapacityResponse(
+  body: unknown,
+): body is { code: "active_task_capacity"; message: string; retryable: true } {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    "code" in body &&
+    body.code === "active_task_capacity" &&
+    "retryable" in body &&
+    body.retryable === true &&
+    "message" in body &&
+    typeof body.message === "string"
+  );
 }
 
 async function fetchServer(input: URL, init?: RequestInit): Promise<Response> {

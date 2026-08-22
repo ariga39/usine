@@ -75,6 +75,19 @@ type AuthorityDatabase = RuntimeDatabase;
 const MAX_EVENT_LIMIT = 200;
 const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
 
+export class TaskCapacityError extends Error {
+  readonly code = "active_task_capacity";
+  readonly retryable = true;
+
+  constructor(
+    readonly capacity: number,
+    readonly active: number,
+  ) {
+    super("active Task capacity is full");
+    this.name = "TaskCapacityError";
+  }
+}
+
 function saturatingAdd(left: number, right: number): number {
   return left >= MAX_DURABLE_REVISION - right ? MAX_DURABLE_REVISION : left + right;
 }
@@ -368,7 +381,10 @@ export class TaskAuthority {
     return rows.map(decodeTaskEvent);
   }
 
-  async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
+  async listRestartable(): Promise<{
+    restartable: Array<{ result: TaskResult; input: TaskExecutionInput }>;
+    activeTaskCount: number;
+  }> {
     const rows = await this.database
       .select({
         rawResult: sql<string>`${taskRuns.result}`,
@@ -377,6 +393,7 @@ export class TaskAuthority {
       })
       .from(taskRuns);
     const restartable: Array<{ result: TaskResult; input: TaskExecutionInput }> = [];
+    let activeTaskCount = 0;
     for (const row of rows) {
       let result: TaskResult;
       try {
@@ -385,6 +402,7 @@ export class TaskAuthority {
         continue;
       }
       if (isTerminalState(result.state)) continue;
+      activeTaskCount += 1;
       if (!row.contractPath || !row.rawContract || !result.repository) continue;
       restartable.push({
         result,
@@ -394,7 +412,7 @@ export class TaskAuthority {
         },
       });
     }
-    return restartable;
+    return { restartable, activeTaskCount };
   }
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
@@ -422,7 +440,11 @@ export class TaskAuthority {
     return result;
   }
 
-  async admit(input: AuthorityInput, executionInput?: TaskExecutionInput): Promise<TaskResult> {
+  async admit(
+    input: AuthorityInput,
+    executionInput?: TaskExecutionInput,
+    activeTaskCapacity?: number,
+  ): Promise<TaskResult> {
     const admit = async (database: AuthorityDatabase): Promise<TaskResult> => {
       // The task row is immutable.  Lock it when it already exists so a
       // concurrent admission cannot observe a half-updated lifecycle.
@@ -435,6 +457,21 @@ export class TaskAuthority {
             .where(eq(taskRuns.taskId, input.contract.id));
         }
         return TaskAuthority.existingAdmission(existing, input);
+      }
+
+      if (activeTaskCapacity !== undefined) {
+        const rows = await database
+          .select({ rawResult: sql<string>`${taskRuns.result}` })
+          .from(taskRuns);
+        let active = 0;
+        for (const row of rows) {
+          try {
+            if (!isTerminalState(decodeRawPersistedTaskResult(row.rawResult).state)) active += 1;
+          } catch (error) {
+            if (!isTaskStateQuarantinedError(error)) throw error;
+          }
+        }
+        if (active >= activeTaskCapacity) throw new TaskCapacityError(activeTaskCapacity, active);
       }
 
       const inserted = await database

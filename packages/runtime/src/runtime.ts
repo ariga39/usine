@@ -240,14 +240,16 @@ export async function lookupTaskEvents(
   }
 }
 
-export async function lookupRestartableTasks(
-  stateDirectory: string,
-): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
+export async function lookupRestartableTasks(stateDirectory: string): Promise<{
+  restartable: Array<{ result: TaskResult; input: TaskExecutionInput }>;
+  activeTaskCount: number;
+}> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   try {
     await access(databasePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { restartable: [], activeTaskCount: 0 };
     throw error;
   }
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
@@ -281,6 +283,7 @@ export async function admitTask(
   rawContract: string,
   contract: TaskContract,
   suppliedPolicy: RuntimePolicy,
+  activeTaskCapacity?: number,
 ): Promise<TaskResult> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
@@ -336,6 +339,7 @@ export async function admitTask(
         deadlineEpochMs,
       },
       { contractPath, rawContract },
+      activeTaskCapacity,
     );
     if (deadlineExpired(admitted.deadlineEpochMs)) {
       const blocked = await authority.block(
@@ -539,6 +543,7 @@ function githubReadServerConfig(
 
 export {
   startUsineServer,
+  TaskCapacityStartupError,
   type RunningUsineServer,
   type ServerExecutionContext,
   type TaskSubmission,
