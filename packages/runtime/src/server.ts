@@ -247,7 +247,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         ? Effect.tryPromise({
             try: () => options.codingSession!.cleanupOwned(stateDirectory),
             catch: (cause) => new Error(`server execution cleanup failed: ${String(cause)}`),
-          }).pipe(Effect.ignore)
+          }).pipe(Effect.orDie)
         : Effect.void,
     );
 
