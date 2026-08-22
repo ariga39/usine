@@ -9,6 +9,17 @@ const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
 const outcome = Schema.Literals(["succeeded", "failed", "cancelled", "blocked"]);
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
+const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
+const codingSessionFailureClass = Schema.Literals([
+  "transport",
+  "network",
+  "rate_limit",
+  "timeout",
+  "cancellation",
+  "configuration",
+  "authority",
+  "unknown",
+]);
 
 const eventData = Schema.Union([
   Schema.Struct({ type: Schema.Literal("task_admitted"), contractHash: exactHash }),
@@ -78,6 +89,14 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     outcome,
     sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_session_interrupted"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+    phase: codingSessionPhase,
+    failureClass: codingSessionFailureClass,
   }),
   Schema.Struct({ type: Schema.Literal("candidate_frozen"), sha: exactSha, fence: Schema.Natural }),
   Schema.Struct({
@@ -214,6 +233,14 @@ const observationData = Schema.Union([
     sessionId: safeObservationId,
   }),
   Schema.Struct({
+    type: Schema.Literal("coding_session_interrupted"),
+    role,
+    activation: Schema.Natural,
+    sessionId: safeObservationId,
+    phase: codingSessionPhase,
+    failureClass: codingSessionFailureClass,
+  }),
+  Schema.Struct({
     type: Schema.Literal("recovery_observed"),
     kind: Schema.Literals(["server_restart", "execution_owner_changed"]),
   }),
@@ -302,6 +329,7 @@ const dataFields: Record<string, readonly string[]> = {
     "outcomeId",
   ],
   coding_session_completed: ["type", "role", "activation", "outcome", "sessionId"],
+  coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
   candidate_frozen: ["type", "sha", "fence"],
   project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
   review_completed: ["type", "sha", "cycle", "verdict"],

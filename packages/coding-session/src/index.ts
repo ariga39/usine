@@ -20,6 +20,10 @@ export {
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
+export type {
+  CodingSessionFailureClass,
+  CodingSessionPhase,
+} from "./coding-session-interruption.js";
 export {
   CodexProfileSelectionError,
   validateCodexProfile,

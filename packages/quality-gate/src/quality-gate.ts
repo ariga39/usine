@@ -1,6 +1,11 @@
 import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
-import { reviewerOutputSchema, type RolePolicy } from "@usine/coding-session";
+import {
+  reviewerOutputSchema,
+  type CodingSessionFailureClass,
+  type CodingSessionPhase,
+  type RolePolicy,
+} from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
 
@@ -28,6 +33,7 @@ export interface QualityGateOptions {
 export interface ReviewAttemptObservation {
   review: ReviewVerdict;
   usage: SessionUsage | null;
+  interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
 }
 
 interface QualityGateWorkspace {
@@ -38,6 +44,8 @@ interface QualityGateSession {
   run(request: SessionRequest<ReviewerOutput>): Promise<
     Pick<SessionObservation<ReviewerOutput>, "status" | "output"> &
       Pick<SessionObservation<ReviewerOutput>, "summary" | "failure"> & {
+        phase?: SessionObservation<ReviewerOutput>["phase"];
+        failureClass?: SessionObservation<ReviewerOutput>["failureClass"];
         usage?: SessionUsage | null;
       }
   >;
@@ -160,6 +168,14 @@ export class QualityGate {
               findings: [],
             },
             usage: observation.usage ?? null,
+            ...(observation.phase && observation.failureClass
+              ? {
+                  interruption: {
+                    phase: observation.phase,
+                    failureClass: observation.failureClass,
+                  },
+                }
+              : {}),
           };
         if (observation.output.sha !== sha)
           return {
