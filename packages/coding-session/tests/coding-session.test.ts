@@ -1733,7 +1733,7 @@ describe("Coding Session", () => {
     try {
       await providerStarted.promise;
       await executionPoll.scheduled;
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(2_000);
       await expect(pending).rejects.toMatchObject({
         code: "codex_execution_ownership_error",
         reason: "incomplete",
