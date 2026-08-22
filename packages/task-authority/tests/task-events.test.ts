@@ -174,6 +174,36 @@ describe("Task event stream", () => {
     expect(JSON.stringify(events)).not.toMatch(/arguments|result|credential|secret|token/i);
   });
 
+  test("replays bounded coding interruption phase and class with exact validation", async () => {
+    const taskId = `events-interruption-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    const interruption: TaskObservationEventInput = {
+      eventId: "coding-interruption-1",
+      occurredAtEpochMs: 204,
+      data: {
+        type: "coding_session_interrupted",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+        phase: "turn",
+        failureClass: "network",
+      },
+    };
+    await authority.appendObservation(taskId, interruption);
+    await expect(authority.listEvents(taskId, 1, 1)).resolves.toMatchObject([
+      { sequence: 2, eventId: interruption.eventId, data: interruption.data },
+    ]);
+    await expect(
+      authority.appendObservation(taskId, {
+        ...interruption,
+        eventId: "coding-interruption-unsafe",
+        data: { ...interruption.data, rawMessage: "provider-secret" },
+      } as unknown as TaskObservationEventInput),
+    ).rejects.toThrow();
+    const events = await authority.listEvents(taskId);
+    expect(JSON.stringify(events)).not.toContain("provider-secret");
+  });
+
   test("keeps a complete coding activation observation sequence beside its authoritative result", async () => {
     const taskId = `activation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);

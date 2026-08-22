@@ -2,6 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
 import { createCodexLauncher } from "./codex-execution.js";
+import {
+  classifyAdapterFailure,
+  CodingSessionInterruption,
+  type CodingSessionFailureClass,
+  type CodingSessionPhase,
+} from "./coding-session-interruption.js";
 import { codexAdapterConfig, normalizeCodexProfileSelection } from "./codex-profile.js";
 import type { SessionRequest } from "./coding-session.js";
 import { z } from "zod";
@@ -92,6 +98,8 @@ type AppServerFailureClass =
   | "authentication"
   | "configuration"
   | "network"
+  | "rate_limit"
+  | "timeout"
   | "permission"
   | "unsupported"
   | "transport";
@@ -115,6 +123,8 @@ class BoundedStderrClassifier {
       "configuration",
       "authentication",
       "permission",
+      "rate_limit",
+      "timeout",
       "network",
       "unsupported",
       "transport",
@@ -130,6 +140,8 @@ function classifyStderr(text: string): AppServerFailureClass | undefined {
     return "configuration";
   if (/(auth|credential|login|api key|unauthorized|forbidden)/.test(text)) return "authentication";
   if (/(permission|denied|sandbox|workspace)/.test(text)) return "permission";
+  if (/(rate limit|too many requests|429)/.test(text)) return "rate_limit";
+  if (/(timed out|timeout|deadline)/.test(text)) return "timeout";
   if (/(network|connect|dns|socket|timed out|timeout|rate limit)/.test(text)) return "network";
   if (/(unsupported|not implemented|capability)/.test(text)) return "unsupported";
   return undefined;
@@ -276,24 +288,31 @@ export async function runCodexAppServer({
   executionStateDirectory,
   profileSelection,
 }: AppServerRunOptions): Promise<AppServerRunResult> {
-  const launcher = await createCodexLauncher(
-    executionStateDirectory,
-    request.workspace,
-    request.execution,
-  );
-  const child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
-    cwd: request.workspace,
-    env: {
-      ...environment,
-      USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
-      USINE_CODEX_WORKSPACE: request.workspace,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  let launcher: Awaited<ReturnType<typeof createCodexLauncher>>;
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    launcher = await createCodexLauncher(
+      executionStateDirectory,
+      request.workspace,
+      request.execution,
+    );
+    child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
+      cwd: request.workspace,
+      env: {
+        ...environment,
+        USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
+        USINE_CODEX_WORKSPACE: request.workspace,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
+  }
   const stderr = new BoundedStderrClassifier();
   child.stderr.on("data", (chunk) => stderr.observe(chunk));
   child.stderr.resume();
   const client = new AppServerClient(child, () => stderr.classification());
+  let phase: CodingSessionPhase = "startup";
   let threadId: string | undefined;
   let turnId: string | undefined;
   let finalResponse = "";
@@ -422,6 +441,7 @@ export async function runCodexAppServer({
     });
     throwIfAborted(request.signal);
     client.notify("initialized", {});
+    phase = "thread";
     const thread = threadStartResponseSchema.parse(
       await client.request("thread/start", {
         cwd: request.workspace,
@@ -436,6 +456,7 @@ export async function runCodexAppServer({
     );
     threadId = thread.thread.id;
     throwIfAborted(request.signal);
+    phase = "turn";
     const turn = turnStartResponseSchema.parse(
       await client.request("turn/start", {
         threadId,
@@ -448,13 +469,53 @@ export async function runCodexAppServer({
     throwIfAborted(request.signal);
     return await turnCompletion;
   } catch (error) {
+    if (error instanceof CodingSessionInterruption) throw error;
     if (error instanceof AppServerCancelled || request.signal?.aborted)
-      throw new AppServerCancelled("coding session cancelled");
-    throw error instanceof Error ? error : new Error("app-server request failed");
+      throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
+    const classification = stderr.classification();
+    const failureClass = appServerFailureClass(classification ?? classifyAdapterFailure(error));
+    throw new CodingSessionInterruption(
+      phase,
+      failureClass,
+      safeAppServerFailure(error, classification, failureClass),
+    );
   } finally {
     request.signal?.removeEventListener("abort", abort);
     client.closeTransport();
   }
+}
+
+function appServerFailureClass(
+  classification: AppServerFailureClass | CodingSessionFailureClass,
+): CodingSessionFailureClass {
+  switch (classification) {
+    case "authentication":
+    case "permission":
+      return "authority";
+    case "configuration":
+    case "unsupported":
+      return "configuration";
+    case "network":
+      return "network";
+    case "rate_limit":
+      return "rate_limit";
+    case "timeout":
+      return "timeout";
+    case "transport":
+      return "transport";
+    default:
+      return classification;
+  }
+}
+
+function safeAppServerFailure(
+  error: unknown,
+  classification: AppServerFailureClass | undefined,
+  failureClass: CodingSessionFailureClass,
+): string {
+  const message = error instanceof Error ? error.message : "";
+  if (/^app-server [a-z ]+( \([a-z_]+\))?$/.test(message)) return message;
+  return `app-server provider interruption (${classification ?? failureClass})`;
 }
 
 function parseJson(line: string): unknown {

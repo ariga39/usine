@@ -1,4 +1,8 @@
-import type { CodingSessionObservation } from "@usine/coding-session";
+import type {
+  CodingSessionFailureClass,
+  CodingSessionObservation,
+  CodingSessionPhase,
+} from "@usine/coding-session";
 import type {
   TaskObservationEventData,
   TaskObservationEventInput,
@@ -78,6 +82,30 @@ export function emitCodingObservation(
     eventId: `${eventPrefix}:${counter.value++}:${data.type}`,
     occurredAtEpochMs: Date.now(),
     data,
+  }).then(() => undefined);
+}
+
+export function emitCodingInterruption(
+  services: DeliveryRunServices,
+  taskId: string,
+  role: "implementer" | "reviewer",
+  activation: number,
+  sessionId: string,
+  eventPrefix: string,
+  counter: { value: number },
+  interruption: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass },
+): Promise<void> {
+  return emitObservation(services, taskId, {
+    eventId: `${eventPrefix}:${counter.value++}:coding_session_interrupted`,
+    occurredAtEpochMs: Date.now(),
+    data: {
+      type: "coding_session_interrupted",
+      role,
+      activation,
+      sessionId,
+      phase: interruption.phase,
+      failureClass: interruption.failureClass,
+    },
   }).then(() => undefined);
 }
 

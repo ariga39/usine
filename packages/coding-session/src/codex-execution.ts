@@ -4,7 +4,7 @@ import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const STARTING_OWNERSHIP_WAIT_MS = 500;
+const STARTING_OWNERSHIP_WAIT_MS = 2_000;
 const EXECUTION_POLL_INTERVAL_MS = 10;
 
 export interface ExecutionReference {

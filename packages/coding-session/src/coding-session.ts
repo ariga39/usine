@@ -22,6 +22,12 @@ import {
 import { isAppServerCancellation, runCodexAppServer } from "./codex-app-server.js";
 import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
 import {
+  classifyAdapterFailure,
+  CodingSessionInterruption,
+  type CodingSessionFailureClass,
+  type CodingSessionPhase,
+} from "./coding-session-interruption.js";
+import {
   codexAdapterConfig,
   CodexProfileSelectionError,
   normalizeCodexProfileSelection,
@@ -189,6 +195,8 @@ export interface SessionObservation<T = unknown> {
   usage: { inputTokens?: number; outputTokens?: number } | null;
   summary: string;
   failure: string | null;
+  phase: CodingSessionPhase | null;
+  failureClass: CodingSessionFailureClass | null;
   failureCode?:
     | "codex_profile_unusable"
     | "role_output_transform_unconfigured"
@@ -392,6 +400,7 @@ export class CodexCodingSession {
   private async runProvider<T = unknown>(
     request: SessionRequest<T>,
   ): Promise<SessionObservation<T>> {
+    let phase: CodingSessionPhase = "startup";
     let remaining: number;
     try {
       remaining = remainingUntil(request.deadlineEpochMs);
@@ -403,6 +412,8 @@ export class CodexCodingSession {
         usage: null,
         summary: "elapsed budget exhausted",
         failure: "elapsed budget exhausted",
+        phase,
+        failureClass: "timeout",
       };
     }
     const deadlineSignal = AbortSignal.timeout(remaining);
@@ -410,6 +421,7 @@ export class CodexCodingSession {
       ? AbortSignal.any([request.signal, deadlineSignal])
       : deadlineSignal;
     if (abortSignal.aborted) {
+      const failureClass = deadlineSignal.aborted ? "timeout" : "cancellation";
       return {
         status: "cancelled",
         sessionId: null,
@@ -417,6 +429,8 @@ export class CodexCodingSession {
         usage: null,
         summary: "coding session cancelled",
         failure: "coding session cancelled",
+        phase,
+        failureClass,
       };
     }
     try {
@@ -470,7 +484,12 @@ export class CodexCodingSession {
           profileSelection,
         });
       } else {
-        const client = await this.createClient(effectiveRequest, profileSelection);
+        let client: Codex;
+        try {
+          client = await this.createClient(effectiveRequest, profileSelection);
+        } catch (error) {
+          throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
+        }
         const threadOptions: ThreadOptions = {
           sandboxMode: effectiveRequest.sandbox,
           workingDirectory: effectiveRequest.workspace,
@@ -478,7 +497,13 @@ export class CodexCodingSession {
           modelReasoningEffort: profileSelection.modelReasoningEffort,
           approvalPolicy: "never",
         };
-        const thread: Thread = client.startThread(threadOptions);
+        let thread: Thread;
+        try {
+          thread = client.startThread(threadOptions);
+        } catch (error) {
+          throw new CodingSessionInterruption("thread", classifyAdapterFailure(error));
+        }
+        phase = "turn";
         const turnOptions: TurnOptions = {
           signal: abortSignal,
           outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
@@ -491,6 +516,7 @@ export class CodexCodingSession {
         );
         result = { ...sdkResult, sessionId: thread.id };
       }
+      phase = "output";
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
@@ -501,6 +527,8 @@ export class CodexCodingSession {
             usage: usageFrom(result.usage),
             summary: "coding session output normalization unavailable",
             failure: "coding session output normalization unavailable",
+            phase,
+            failureClass: "configuration",
             failureCode: "role_output_transform_unconfigured",
           };
         }
@@ -520,6 +548,8 @@ export class CodexCodingSession {
               usage: null,
               summary: "coding session cancelled",
               failure: "coding session cancelled",
+              phase,
+              failureClass: deadlineSignal.aborted ? "timeout" : "cancellation",
             };
           return {
             status: "failed",
@@ -528,6 +558,8 @@ export class CodexCodingSession {
             usage: usageFrom(result.usage),
             summary: "coding session output normalization failed",
             failure: "coding session output normalization failed",
+            phase,
+            failureClass: classifyAdapterFailure(error),
             failureCode: "role_output_transform_failed",
           };
         }
@@ -540,6 +572,8 @@ export class CodexCodingSession {
             usage: usageFrom(result.usage),
             summary: "coding session normalized output did not match role schema",
             failure: "coding session normalized output did not match role schema",
+            phase,
+            failureClass: "configuration",
             failureCode: "role_output_schema_invalid",
           };
         }
@@ -551,17 +585,31 @@ export class CodexCodingSession {
         usage: usageFrom(result.usage),
         summary: "coding session completed",
         failure: null,
+        phase: null,
+        failureClass: null,
       };
     } catch (error) {
-      const cancelled = abortSignal.aborted || isAppServerCancellation(error);
-      const failure = error instanceof Error ? error.message : String(error);
+      const deadlineExpired = deadlineSignal.aborted;
+      const cancelled = request.signal?.aborted || isAppServerCancellation(error);
+      const typedInterruption = error instanceof CodingSessionInterruption ? error : undefined;
+      const interruption = deadlineExpired
+        ? new CodingSessionInterruption(typedInterruption?.phase ?? phase, "timeout")
+        : cancelled
+          ? new CodingSessionInterruption(typedInterruption?.phase ?? phase, "cancellation")
+          : error instanceof CodingSessionInterruption
+            ? error
+            : error instanceof CodexProfileSelectionError
+              ? new CodingSessionInterruption(phase, "configuration", error.message)
+              : new CodingSessionInterruption(phase, classifyAdapterFailure(error));
       return {
-        status: cancelled ? "cancelled" : "failed",
+        status: deadlineExpired || cancelled ? "cancelled" : "failed",
         sessionId: null,
         output: null,
         usage: null,
-        summary: failure,
-        failure,
+        summary: safeFailureMessage(interruption),
+        failure: safeFailureMessage(interruption),
+        phase: interruption.phase,
+        failureClass: interruption.failureClass,
         failureCode: error instanceof CodexProfileSelectionError ? error.code : null,
       };
     }
@@ -603,42 +651,47 @@ async function runStreamedTurn(
   options: TurnOptions,
   onObservation?: SessionRequest["onObservation"],
 ): Promise<RunResult> {
-  const streamed = await thread.runStreamed(prompt, options);
-  const items: ThreadItem[] = [];
-  let finalResponse = "";
-  let usage: RunResult["usage"] = null;
-  let turn = 0;
-  for await (const event of streamed.events) {
-    switch (event.type) {
-      case "thread.started":
-        await onObservation?.({ type: "thread_started" });
-        break;
-      case "turn.started":
-        turn += 1;
-        await onObservation?.({ type: "turn_started", turn });
-        break;
-      case "item.completed":
-        items.push(event.item);
-        if (event.item.type === "agent_message") finalResponse = event.item.text;
-        await emitCompletedItem(event.item, onObservation);
-        break;
-      case "item.updated":
-        if (event.item.type === "agent_message") finalResponse = event.item.text;
-        break;
-      case "turn.completed":
-        usage = event.usage;
-        await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
-        break;
-      case "turn.failed":
-        await onObservation?.({ type: "turn_completed", turn, outcome: "failed" });
-        throw new Error("coding turn failed");
-      case "error":
-        throw new Error("coding session stream failed");
-      case "item.started":
-        break;
+  try {
+    const streamed = await thread.runStreamed(prompt, options);
+    const items: ThreadItem[] = [];
+    let finalResponse = "";
+    let usage: RunResult["usage"] = null;
+    let turn = 0;
+    for await (const event of streamed.events) {
+      switch (event.type) {
+        case "thread.started":
+          await onObservation?.({ type: "thread_started" });
+          break;
+        case "turn.started":
+          turn += 1;
+          await onObservation?.({ type: "turn_started", turn });
+          break;
+        case "item.completed":
+          items.push(event.item);
+          if (event.item.type === "agent_message") finalResponse = event.item.text;
+          await emitCompletedItem(event.item, onObservation);
+          break;
+        case "item.updated":
+          if (event.item.type === "agent_message") finalResponse = event.item.text;
+          break;
+        case "turn.completed":
+          usage = event.usage;
+          await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
+          break;
+        case "turn.failed":
+          await onObservation?.({ type: "turn_completed", turn, outcome: "failed" });
+          throw new Error("coding turn failed");
+        case "error":
+          throw new Error("coding session stream failed");
+        case "item.started":
+          break;
+      }
     }
+    return { items, finalResponse, usage };
+  } catch (error) {
+    if (error instanceof CodingSessionInterruption) throw error;
+    throw new CodingSessionInterruption("turn", classifyAdapterFailure(error));
   }
-  return { items, finalResponse, usage };
 }
 
 async function emitCompletedItem(
@@ -688,3 +741,10 @@ function usageFrom(
 }
 
 export { codexMcpConfig };
+
+function safeFailureMessage(error: CodingSessionInterruption): string {
+  const message = error.message;
+  if (/^app-server [a-z ]+( \([a-z_]+\))?$/.test(message)) return message;
+  if (/^Codex profile is unusable: named profile "[A-Za-z0-9._:-]+" /.test(message)) return message;
+  return `coding session provider interruption (${error.failureClass})`;
+}

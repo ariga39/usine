@@ -12,7 +12,13 @@ import {
   registerRepository,
   type ServerExecutionContext,
 } from "@usine/runtime";
-import { submitTask, taskStatus, type TaskSubmission } from "../apps/cli/src/server-client.js";
+import { executeDeliveryRun } from "@usine/delivery-run";
+import {
+  submitTask,
+  taskEvents,
+  taskStatus,
+  type TaskSubmission,
+} from "../apps/cli/src/server-client.js";
 import {
   applyMigrations,
   hashTaskContract,
@@ -22,6 +28,7 @@ import {
   type TaskResource,
   type TaskResult,
   type RepositorySnapshot,
+  type ResolvedTaskContract,
 } from "@usine/task-authority";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -146,6 +153,97 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 }
 
 describe("server-owned execution", () => {
+  test("persists bounded provider interruption evidence through Delivery Run and the server", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, signal }) => {
+        const resolved: ResolvedTaskContract = {
+          ...contract,
+          repository: { path: ".", owner: "example", name: repositoryName },
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          budget: { ...contract.budget, maxImplementerActivations: 1 },
+          delivery: { ...contract.delivery, baseBranch: "main" },
+        };
+        return executeDeliveryRun(
+          {
+            contract: resolved,
+            contractHash: result.contractHash,
+            repositoryIdentity: result.writer.repositoryIdentity,
+            deadlineEpochMs: result.deadlineEpochMs,
+            implementer: {
+              role: "implementer",
+              profile: "writer-profile",
+              sandbox: "workspace-write",
+            },
+            signal,
+          },
+          {
+            authority,
+            workspace: {
+              quarantinePriorWriters: async () => undefined,
+              prepareWriter: async () => ({
+                taskId: result.taskId,
+                activation: 1,
+                path: ".",
+                baseSha: resolved.baseSha,
+              }),
+              freeze: async () => {
+                throw new Error("freeze must not run after interruption");
+              },
+              quarantine: async () => undefined,
+            },
+            session: {
+              run: async () => ({
+                status: "failed" as const,
+                output: null,
+                summary: "temporary provider outage with raw-secret-marker",
+                failure: "temporary provider outage with raw-secret-marker",
+                phase: "turn" as const,
+                failureClass: "network" as const,
+              }),
+            },
+            quality: {
+              check: async () => {
+                throw new Error("check must not run after interruption");
+              },
+              reviewWithObservation: async () => {
+                throw new Error("review must not run after interruption");
+              },
+            },
+            forge: {
+              deliver: async () => {
+                throw new Error("delivery must not run after interruption");
+              },
+            },
+          },
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const admitted = await submitTask(server.url, submission);
+      const blocked = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (result) => result.state === "blocked",
+      );
+      expect(blocked.state).toBe("blocked");
+      const events = (await taskEvents(server.url, admitted.taskId, 0, 100)).events;
+      expect(events.map((event) => event.data)).toContainEqual({
+        type: "coding_session_interrupted",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+        phase: "turn",
+        failureClass: "network",
+      });
+      expect(JSON.stringify(events)).not.toContain("raw-secret-marker");
+    } finally {
+      await server.close();
+    }
+  });
+
   test("persists sanitized restart observations in the durable event stream", async () => {
     const { contractPath, stateDirectory } = await fixture();
     const rawContract = await readFile(contractPath, "utf8");

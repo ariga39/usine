@@ -22,7 +22,12 @@ import {
   type TaskObservationEventInput,
 } from "@usine/task-authority";
 import { activateImplementer } from "./coding-activation.js";
-import { blockTask, emitCodingObservation, emitObservation } from "./delivery-progress.js";
+import {
+  blockTask,
+  emitCodingInterruption,
+  emitCodingObservation,
+  emitObservation,
+} from "./delivery-progress.js";
 
 export interface DeliveryRunInput {
   contract: ResolvedTaskContract;
@@ -64,6 +69,8 @@ interface DeliveryRunSession {
   run(request: SessionRequest<ImplementerOutput>): Promise<
     Pick<SessionObservation<ImplementerOutput>, "status" | "output"> &
       Pick<SessionObservation<ImplementerOutput>, "summary" | "failure"> & {
+        phase?: SessionObservation<ImplementerOutput>["phase"];
+        failureClass?: SessionObservation<ImplementerOutput>["failureClass"];
         usage?: { inputTokens?: number; outputTokens?: number } | null;
       }
   >;
@@ -199,6 +206,17 @@ export async function executeDeliveryRun(
               sessionObservation,
             ),
         );
+        if (observation.interruption)
+          await emitCodingInterruption(
+            services,
+            result.taskId,
+            input.reviewer?.role ?? "reviewer",
+            result.candidateFence,
+            reviewSessionId,
+            `review:${cycle}`,
+            reviewObservationCounter,
+            observation.interruption,
+          );
         review = observation.review;
         throwIfAborted(input.signal);
       } catch (error) {

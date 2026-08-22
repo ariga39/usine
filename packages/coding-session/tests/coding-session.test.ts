@@ -133,6 +133,7 @@ async function fakeAppServerEnvironment(
     | "malformed"
     | "transport"
     | "capability"
+    | "thread-failure"
     | "schema-invalid"
     | "stderr"
     | "wait" = "success",
@@ -188,8 +189,15 @@ const emitTurn = () => {
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
 };
 const handle = (message) => {
-  if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
+  if (message.method === "initialize") {
+    if (mode === "wait") return;
+    send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
+  }
   else if (message.method === "thread/start") {
+    if (mode === "thread-failure") {
+      process.stderr.write("network connection refused secret=should-not-escape\\n");
+      process.exit(1);
+    }
     if (message.params?.config?.model !== expectedModel ||
         message.params?.config?.model_reasoning_effort !== expectedReasoning ||
         message.params?.config?.developer_instructions !== expectedDeveloperInstructions ||
@@ -935,7 +943,7 @@ describe("Coding Session", () => {
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
-  test("cancels a stalled app-server turn at its shared deadline", async () => {
+  test("cancels an app-server startup at its shared deadline", async () => {
     const fixture = await fakeAppServerEnvironment("wait");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
@@ -953,7 +961,12 @@ describe("Coding Session", () => {
       outputSchema: reviewerOutputSchema,
       execution: reviewerExecution,
     });
-    expect(observation).toMatchObject({ status: "cancelled", output: null });
+    expect(observation).toMatchObject({
+      status: "cancelled",
+      output: null,
+      phase: "startup",
+      failureClass: "timeout",
+    });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
@@ -1005,8 +1018,36 @@ describe("Coding Session", () => {
     expect(observation).toMatchObject({
       status: "failed",
       failure: "app-server transport closed (configuration)",
+      phase: "startup",
+      failureClass: "configuration",
     });
     expect(observation.failure).not.toContain("should-not-escape");
+  });
+
+  test("keeps an App Server thread-start failure out of the turn phase", async () => {
+    const fixture = await fakeAppServerEnvironment("thread-failure");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      phase: "thread",
+      failureClass: "network",
+    });
+    expect(JSON.stringify(observation)).not.toContain("should-not-escape");
   });
 
   test("fails closed on an app-server identity mismatch and does not retry", async () => {
@@ -1548,7 +1589,12 @@ describe("Coding Session", () => {
     controller.abort();
     const observation = await pending;
     expect(sdkSignal?.aborted).toBe(true);
-    expect(observation).toMatchObject({ status: "cancelled", output: null });
+    expect(observation).toMatchObject({
+      status: "cancelled",
+      output: null,
+      phase: "turn",
+      failureClass: "cancellation",
+    });
   });
 
   test("reaps the exact process when cancellation crosses launcher ownership recording", async () => {
@@ -1690,7 +1736,7 @@ describe("Coding Session", () => {
     try {
       await providerStarted.promise;
       await executionPoll.scheduled;
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(2_000);
       await expect(pending).rejects.toMatchObject({
         code: "codex_execution_ownership_error",
         reason: "incomplete",
@@ -1745,7 +1791,12 @@ describe("Coding Session", () => {
     controller.abort();
     const observation = await pending;
     expect(transformSignal?.aborted).toBe(true);
-    expect(observation).toMatchObject({ status: "cancelled", output: null });
+    expect(observation).toMatchObject({
+      status: "cancelled",
+      output: null,
+      phase: "output",
+      failureClass: "cancellation",
+    });
   });
 
   test("bounds the output transform by the remaining deadline", async () => {
@@ -1783,7 +1834,12 @@ describe("Coding Session", () => {
     await started.promise;
     const observation = await pending;
     expect(transformSignal?.aborted).toBe(true);
-    expect(observation).toMatchObject({ status: "cancelled", output: null });
+    expect(observation).toMatchObject({
+      status: "cancelled",
+      output: null,
+      phase: "output",
+      failureClass: "timeout",
+    });
   });
 
   test("preserves the deadline reserve before starting a provider", async () => {
@@ -1808,7 +1864,44 @@ describe("Coding Session", () => {
     expect(observation).toMatchObject({
       status: "failed",
       failure: "elapsed budget exhausted",
+      phase: "startup",
+      failureClass: "timeout",
     });
+  });
+
+  test.each([
+    ["network connection refused with secret", "network"],
+    ["rate limit 429 from provider", "rate_limit"],
+    ["request timed out", "timeout"],
+    ["invalid profile configuration", "configuration"],
+    ["permission denied by provider", "authority"],
+    ["transport closed unexpectedly", "transport"],
+    ["unclassified provider failure", "unknown"],
+  ] as const)("projects provider failure %s as %s", async (message, failureClass) => {
+    const session = new CodexCodingSession(
+      async () => {
+        throw new Error(`${message} raw-secret-marker`);
+      },
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
+    );
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      environment: { CI: "true" },
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      phase: "startup",
+      failureClass,
+    });
+    expect(JSON.stringify(observation)).not.toContain("raw-secret-marker");
   });
 
   test.each([
@@ -1961,6 +2054,41 @@ describe("Coding Session", () => {
       status: "failed",
       output: null,
       failure: "coding session output normalization failed",
+      failureCode: "role_output_transform_failed",
+    });
+    expect(JSON.stringify(observation)).not.toContain(secretDetail);
+  });
+
+  test("classifies a provider failure from the role-output transform", async () => {
+    const secretDetail = "rate limit 429 raw-secret-marker";
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          throw new Error(secretDetail);
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      phase: "output",
+      failureClass: "rate_limit",
       failureCode: "role_output_transform_failed",
     });
     expect(JSON.stringify(observation)).not.toContain(secretDetail);

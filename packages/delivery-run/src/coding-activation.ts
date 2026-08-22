@@ -2,7 +2,7 @@ import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { implementerOutputSchema } from "@usine/coding-session";
 import type { CheckResult, TaskObservationEventData, TaskResult } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
-import { blockTask, emitCodingObservation } from "./delivery-progress.js";
+import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
 
 function implementerPrompt(
   input: DeliveryRunInput,
@@ -95,6 +95,19 @@ async function runCodingAttempt(
   });
   if (input.signal?.aborted) {
     await services.workspace.quarantine(workspace);
+    await emitCodingInterruption(
+      services,
+      reservation.result.taskId,
+      input.implementer.role,
+      reservation.activation,
+      sessionId,
+      `coding:${reservation.activation}`,
+      observationCounter,
+      {
+        phase: observation.phase ?? "turn",
+        failureClass: "cancellation",
+      },
+    );
     await emit({
       type: "coding_session_completed",
       role: input.implementer.role,
@@ -106,6 +119,17 @@ async function runCodingAttempt(
   }
   if (observation.status !== "completed" || !observation.output) {
     await services.workspace.quarantine(workspace);
+    if (observation.phase && observation.failureClass)
+      await emitCodingInterruption(
+        services,
+        reservation.result.taskId,
+        input.implementer.role,
+        reservation.activation,
+        sessionId,
+        `coding:${reservation.activation}`,
+        observationCounter,
+        { phase: observation.phase, failureClass: observation.failureClass },
+      );
     await emit({
       type: "coding_session_completed",
       role: input.implementer.role,
