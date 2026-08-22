@@ -84,7 +84,7 @@ describe("server client follow", () => {
     let sequenceNumber = 0;
     globalThis.fetch = async (input) => {
       const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
-      if (url.includes("/events")) {
+      if (new URL(url).pathname.endsWith("/events")) {
         requestedAfter.push(Number(new URL(url).searchParams.get("after")));
         if (state === "blocked")
           return new Response(
@@ -145,7 +145,7 @@ describe("server client follow", () => {
     const requestedAfter: number[] = [];
     globalThis.fetch = async (input) => {
       const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
-      if (url.includes("/events")) {
+      if (new URL(url).pathname.endsWith("/events")) {
         const after = Number(new URL(url).searchParams.get("after"));
         requestedAfter.push(after);
         const events = allEvents.slice(after, after + 200);

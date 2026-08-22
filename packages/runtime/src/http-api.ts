@@ -230,7 +230,10 @@ export function decodeApiEventStreamValue(input: unknown): ApiEventEnvelope | un
 }
 
 export const makeUsineApiClient = (baseUrl: string) =>
-  HttpApiClient.make(UsineApi, { baseUrl }).pipe(Effect.provide(FetchHttpClient.layer));
+  HttpApiClient.make(UsineApi, { baseUrl }).pipe(
+    Effect.provide(FetchHttpClient.layer),
+    Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
+  );
 
 export {
   eventEnvelopeSchema,

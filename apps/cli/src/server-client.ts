@@ -1,4 +1,4 @@
-import { Effect, Result, Stream } from "effect";
+import { Effect, Result, Schema, Stream } from "effect";
 import { HttpClientError } from "effect/unstable/http";
 import {
   decodeApiEventStreamValue,
@@ -272,9 +272,11 @@ function clientError(error: unknown): ServerClientError {
     return new ServerClientError(message, status, failureKindForStatus(status), code);
   }
   if (HttpClientError.isHttpClientError(error)) {
-    const response = error.reason._tag === "StatusCodeError" ? error.reason.response : undefined;
-    const status = response?.status ?? 0;
+    const status = error.response?.status ?? 0;
     return new ServerClientError(error.message, status, failureKindForStatus(status));
+  }
+  if (Schema.isSchemaError(error)) {
+    return new ServerClientError(error.message, 200, failureKindForStatus(200));
   }
   return new ServerClientError(
     error instanceof Error ? error.message : "server request failed",
