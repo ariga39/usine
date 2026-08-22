@@ -189,7 +189,10 @@ const emitTurn = () => {
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
 };
 const handle = (message) => {
-  if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
+  if (message.method === "initialize") {
+    if (mode === "wait") return;
+    send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
+  }
   else if (message.method === "thread/start") {
     if (mode === "thread-failure") {
       process.stderr.write("network connection refused secret=should-not-escape\\n");
