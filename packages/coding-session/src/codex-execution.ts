@@ -96,6 +96,7 @@ export async function createCodexLauncher(
   workspace: string,
   profile: string,
   reference: ExecutionReference,
+  options: { appServer?: boolean } = {},
 ): Promise<{ launcherPath: string; identityPath: string }> {
   const handle = await executionLifecycle.start(reference, stateDirectory, workspace);
   const identityPath = codexExecutionIdentityPath(stateDirectory, handle.reference);
@@ -106,7 +107,7 @@ export async function createCodexLauncher(
 import { spawn, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
-const child = spawn("codex", ["--profile", ${JSON.stringify(profile)}, ...process.argv.slice(2)], { detached: true, env: process.env, stdio: "inherit" });
+const child = spawn("codex", ${options.appServer ? "[...process.argv.slice(2)]" : `["--profile", ${JSON.stringify(profile)}, ...process.argv.slice(2)]`}, { detached: true, env: process.env, stdio: "inherit" });
 const forwardSignal = (signal) => { try { process.kill(-child.pid, signal); } catch {} };
 process.once("SIGINT", () => forwardSignal("SIGINT"));
 process.once("SIGTERM", () => forwardSignal("SIGTERM"));

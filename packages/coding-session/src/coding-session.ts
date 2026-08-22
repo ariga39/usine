@@ -9,9 +9,10 @@ import {
 } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Toml } from "effect/unstable/encoding";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import {
@@ -88,6 +89,41 @@ async function ensureCodexProfileUsable(
     );
   }
   return normalized;
+}
+
+const APP_SERVER_PROFILE_KEYS = new Set([
+  "approval_policy",
+  "features",
+  "model",
+  "model_catalog_json",
+  "model_provider",
+  "model_providers",
+  "model_reasoning_effort",
+  "model_reasoning_summary",
+  "model_verbosity",
+  "personality",
+  "sandbox_mode",
+  "service_tier",
+  "tools",
+]);
+
+async function readCodexAppServerProfileConfig(
+  profile: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<Record<string, unknown>> {
+  const normalized = await ensureCodexProfileUsable(profile, environment);
+  const codexHome = environment.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  try {
+    const parsed = Toml.parse(await readFile(join(codexHome, `${normalized}.config.toml`), "utf8"));
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([key]) => APP_SERVER_PROFILE_KEYS.has(key)),
+    );
+  } catch {
+    throw new CodexProfileSelectionError(
+      profile,
+      `named profile "${normalized}" has an unreadable Codex configuration`,
+    );
+  }
 }
 
 export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
@@ -502,10 +538,12 @@ export class CodexCodingSession {
       if (this.appServerProfiles.has(profile)) {
         if (!this.options.executionStateDirectory)
           throw new Error("app-server execution state directory is unavailable");
+        const environment = effectiveRequest.environment ?? this.options.environment;
         result = await runCodexAppServer({
           request: { ...effectiveRequest, profile, signal: abortSignal },
-          environment: effectiveRequest.environment ?? this.options.environment,
+          environment: explicitWorkerEnvironment(environment),
           executionStateDirectory: this.options.executionStateDirectory,
+          profileConfig: await readCodexAppServerProfileConfig(profile, environment),
         });
       } else {
         const client = await this.createClient(effectiveRequest);

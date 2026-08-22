@@ -101,18 +101,35 @@ async function fakeAppServerEnvironment(
     | "transport"
     | "capability"
     | "schema-invalid"
+    | "stderr"
     | "wait" = "success",
 ): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
   const bin = join(root, "bin");
+  const codexHome = join(root, "codex-home");
   const stateDirectory = join(root, "state");
   await mkdir(join(stateDirectory, "reviewer"), { recursive: true });
   await mkdir(bin, { recursive: true });
+  await mkdir(codexHome, { recursive: true });
+  await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
+  await writeFile(
+    join(codexHome, "reviewer-profile.config.toml"),
+    'model = "fixture-model"\nmodel_reasoning_effort = "minimal"\n',
+  );
   const executable = join(bin, "codex");
   await writeFile(
     executable,
     `#!/usr/bin/env node
-const mode = process.env.FIXTURE_APP_SERVER_MODE;
+const { readFileSync } = require("node:fs");
+const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
+if (process.argv[2] !== "app-server") {
+  process.stderr.write("unknown option --profile secret=should-not-escape\\n");
+  process.exit(2);
+}
+if (mode === "stderr") {
+  process.stderr.write("profile configuration failed secret=should-not-escape\\n");
+  process.exit(1);
+}
 let buffer = "";
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const emitTurn = () => {
@@ -131,6 +148,10 @@ const emitTurn = () => {
 const handle = (message) => {
   if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
   else if (message.method === "thread/start") {
+    if (message.params?.config?.model !== "fixture-model") {
+      process.stderr.write("profile configuration was not forwarded\\n");
+      process.exit(3);
+    }
     send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-fixture" } } });
     setImmediate(() => send({ method: "thread/started", params: { thread: { id: "thread-fixture" } } }));
   } else if (message.method === "turn/start") {
@@ -159,8 +180,8 @@ setInterval(() => undefined, 1_000);
   return {
     environment: {
       PATH: `${bin}:${process.env.PATH ?? ""}`,
+      CODEX_HOME: codexHome,
       CI: "true",
-      FIXTURE_APP_SERVER_MODE: mode,
     },
     stateDirectory,
     close: async () => undefined,
@@ -697,6 +718,31 @@ describe("Coding Session", () => {
       );
     },
   );
+
+  test("classifies bounded app-server stderr without exposing its contents", async () => {
+    const fixture = await fakeAppServerEnvironment("stderr");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      failure: "app-server transport closed (configuration)",
+    });
+    expect(observation.failure).not.toContain("should-not-escape");
+  });
 
   test("fails closed on an app-server identity mismatch and does not retry", async () => {
     const fixture = await fakeAppServerEnvironment("mismatch");

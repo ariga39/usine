@@ -14,6 +14,7 @@ interface AppServerRunOptions {
   request: SessionRequest;
   environment: NodeJS.ProcessEnv;
   executionStateDirectory: string;
+  profileConfig: Record<string, unknown>;
 }
 
 class AppServerCancelled extends Error {}
@@ -85,6 +86,60 @@ const tokenUsageSchema = z.object({
 
 type JsonRpcId = string | number;
 
+type AppServerFailureClass =
+  | "authentication"
+  | "configuration"
+  | "network"
+  | "permission"
+  | "unsupported"
+  | "transport";
+
+class BoundedStderrClassifier {
+  private readonly classifications = new Set<AppServerFailureClass>();
+  private bytesObserved = 0;
+
+  observe(chunk: Buffer | string): void {
+    if (this.bytesObserved >= 4096) return;
+    const text = String(chunk)
+      .slice(0, 4096 - this.bytesObserved)
+      .toLowerCase();
+    this.bytesObserved += text.length;
+    const classification = classifyStderr(text);
+    if (classification) this.classifications.add(classification);
+  }
+
+  classification(): AppServerFailureClass | undefined {
+    for (const classification of [
+      "configuration",
+      "authentication",
+      "permission",
+      "network",
+      "unsupported",
+      "transport",
+    ] as const) {
+      if (this.classifications.has(classification)) return classification;
+    }
+    return undefined;
+  }
+}
+
+function classifyStderr(text: string): AppServerFailureClass | undefined {
+  if (/(config|profile|invalid option|unknown option|unrecognized option)/.test(text))
+    return "configuration";
+  if (/(auth|credential|login|api key|unauthorized|forbidden)/.test(text)) return "authentication";
+  if (/(permission|denied|sandbox|workspace)/.test(text)) return "permission";
+  if (/(network|connect|dns|socket|timed out|timeout|rate limit)/.test(text)) return "network";
+  if (/(unsupported|not implemented|capability)/.test(text)) return "unsupported";
+  return undefined;
+}
+
+function classifiedFailure(
+  prefix: string,
+  classification: AppServerFailureClass | undefined,
+): Error {
+  return new Error(`${prefix}${classification ? ` (${classification})` : ""}`);
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -99,13 +154,18 @@ class AppServerClient {
   private onFailure: ((error: Error) => void) | undefined;
   private onNotification: ((method: string, params: unknown) => void) | undefined;
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly stderrClassification: () => AppServerFailureClass | undefined,
+  ) {
     this.lines = createInterface({ input: child.stdout });
     this.lines.on("line", (line) => this.receive(line));
-    child.once("error", (error) =>
-      this.fail(new Error(`app-server process failed: ${error.message}`)),
+    child.once("error", () =>
+      this.fail(classifiedFailure("app-server process failed", this.stderrClassification())),
     );
-    child.once("close", () => this.fail(new Error("app-server transport closed")));
+    child.once("close", () =>
+      this.fail(classifiedFailure("app-server transport closed", this.stderrClassification())),
+    );
   }
 
   setFailureHandler(handler: (error: Error) => void): void {
@@ -212,12 +272,14 @@ export async function runCodexAppServer({
   request,
   environment,
   executionStateDirectory,
+  profileConfig,
 }: AppServerRunOptions): Promise<AppServerRunResult> {
   const launcher = await createCodexLauncher(
     executionStateDirectory,
     request.workspace,
     request.profile,
     request.execution,
+    { appServer: true },
   );
   const child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
     cwd: request.workspace,
@@ -228,8 +290,10 @@ export async function runCodexAppServer({
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const stderr = new BoundedStderrClassifier();
+  child.stderr.on("data", (chunk) => stderr.observe(chunk));
   child.stderr.resume();
-  const client = new AppServerClient(child);
+  const client = new AppServerClient(child, () => stderr.classification());
   let threadId: string | undefined;
   let turnId: string | undefined;
   let finalResponse = "";
@@ -363,7 +427,10 @@ export async function runCodexAppServer({
         cwd: request.workspace,
         approvalPolicy: "never",
         sandbox: request.sandbox,
-        config: request.mcpServer ? codexMcpConfig(request.mcpServer) : undefined,
+        config: {
+          ...profileConfig,
+          ...(request.mcpServer ? codexMcpConfig(request.mcpServer) : {}),
+        },
         ephemeral: true,
       }),
     );
