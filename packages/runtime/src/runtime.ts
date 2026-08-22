@@ -253,7 +253,7 @@ export async function lookupRestartableTasks(stateDirectory: string): Promise<{
       return { restartable: [], activeTaskCount: 0 };
     throw error;
   }
-  const handle = openSqliteDatabase(databasePath);
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).listRestartable();
   } finally {

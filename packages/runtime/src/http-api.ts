@@ -58,7 +58,13 @@ const scopeQuery = {
   repositoryId: Schema.optional(Schema.String),
 };
 const scopeSchema = Schema.Struct(scopeQuery);
-const waitQuery = { ...scopeQuery, timeoutMs: Schema.optional(Schema.NumberFromString) };
+const eventQuery = {
+  ...scopeQuery,
+  after: Schema.optional(Schema.NumberFromString),
+  limit: Schema.optional(Schema.NumberFromString),
+};
+const eventQuerySchema = Schema.Struct(eventQuery);
+const waitQuery = { ...eventQuery, timeoutMs: Schema.optional(Schema.NumberFromString) };
 const eventPageQuery = {
   after: Schema.optional(Schema.NumberFromString),
   limit: Schema.optional(Schema.NumberFromString),
@@ -182,12 +188,12 @@ const EventApi = HttpApiGroup.make("events").add(
     error: allErrors,
   }),
   HttpApiEndpoint.get("subscribe", "/v1/events/subscribe", {
-    query: scopeQuery,
+    query: eventQuery,
     success: eventStreamSchema,
     error: allErrors,
   }),
   HttpApiEndpoint.get("subscribeAlias", "/v1/events", {
-    query: scopeQuery,
+    query: eventQuery,
     success: eventStreamSchema,
     error: allErrors,
   }),
@@ -201,6 +207,7 @@ export const UsineApi = HttpApi.make("usine-loopback-api")
 
 export type UsineApiClient = HttpApiClient.ForApi<typeof UsineApi>;
 export type ApiEventScope = Schema.Schema.Type<typeof scopeSchema>;
+export type ApiEventQuery = Schema.Schema.Type<typeof eventQuerySchema>;
 export type ApiEventEnvelope = Schema.Schema.Type<typeof eventEnvelopeSchema>;
 export type ApiTaskSubmission = Schema.Schema.Type<typeof taskSubmissionSchema>;
 export type ApiTaskResource = Schema.Schema.Type<typeof taskResourceSchema>;

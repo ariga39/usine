@@ -219,6 +219,8 @@ test("server returns typed validation for invalid cursor and limit inputs", asyn
       "/v1/tasks?limit=0",
       "/v1/repositories?limit=201",
       "/v1/tasks/example/events?after=not-a-number",
+      "/v1/events/wait?after=0",
+      "/v1/events/subscribe?limit=1",
     ]) {
       const response = await fetch(new URL(path, server.url));
       expect(response.status).toBe(400);

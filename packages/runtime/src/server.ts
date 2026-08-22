@@ -58,6 +58,7 @@ import {
   UsineApi,
   type ApiError,
   type ApiEventEnvelope,
+  type ApiEventQuery,
   type ApiEventScope,
   type ApiEventStreamValue,
   type ApiTaskSubmission,
@@ -230,12 +231,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       parseContract(task.input.rawContract);
       restartable.push(task);
     } catch (error) {
-      await quarantinePersistedTask(
-        stateDirectory,
-        task.result.taskId,
-        JSON.stringify(task.result),
-        error,
-      );
+      await blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
       activeTaskCount -= 1;
     }
   }
@@ -454,24 +450,6 @@ async function blockPersistedTask(
     if (isTerminalState(current.state)) return current;
     return await authority.block(
       { taskId: current.taskId, revision: current.revision },
-      error instanceof Error ? error.message : String(error),
-    );
-  } finally {
-    handle.close();
-  }
-}
-
-async function quarantinePersistedTask(
-  stateDirectory: string,
-  taskId: string,
-  rawResult: string,
-  error: unknown,
-): Promise<void> {
-  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
-  try {
-    await new TaskAuthority(handle.database).quarantinePersistedTask(
-      taskId,
-      rawResult,
       error instanceof Error ? error.message : String(error),
     );
   } finally {
@@ -743,9 +721,10 @@ function eventScopeFromQuery(query: ApiEventScope): EventScope {
 function waitApiEventResponse(
   stateDirectory: string,
   eventHub: TransientEventHub,
-  query: ApiEventScope & { readonly timeoutMs?: number },
+  query: ApiEventQuery & { readonly timeoutMs?: number },
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, ApiError> {
   return apiEffect(async () => {
+    rejectEventReplayQuery(query);
     const scope = eventScopeFromQuery(query);
     await validateEventScope(stateDirectory, scope);
     const timeoutMs = query.timeoutMs ?? DEFAULT_EVENT_WAIT_TIMEOUT_MS;
@@ -772,9 +751,10 @@ function waitApiEventResponse(
 function subscribeApiEvents(
   stateDirectory: string,
   eventHub: TransientEventHub,
-  query: ApiEventScope,
+  query: ApiEventQuery,
 ): Effect.Effect<Stream.Stream<ApiEventStreamValue>, ApiError> {
   return apiEffect(async () => {
+    rejectEventReplayQuery(query);
     const scope = eventScopeFromQuery(query);
     await validateEventScope(stateDirectory, scope);
     const listener = eventHub.subscribe(scope);
@@ -791,6 +771,11 @@ function subscribeApiEvents(
       Stream.ensuring(Effect.sync(listener.close)),
     );
   });
+}
+
+function rejectEventReplayQuery(query: ApiEventQuery): void {
+  if (query.after !== undefined || query.limit !== undefined)
+    throw new ServerValidationError("event wait and subscribe do not support replay cursors");
 }
 
 function taskResourceForApi(result: TaskResult): ApiTaskResource {
