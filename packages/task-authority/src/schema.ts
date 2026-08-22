@@ -62,7 +62,6 @@ export const taskEvents = sqliteTable(
   {
     taskId: text("task_id").notNull(),
     sequence: integer("sequence").notNull(),
-    serverCursor: integer("server_cursor").notNull().default(0),
     eventId: text("event_id").notNull(),
     occurredAtEpochMs: integer("occurred_at_epoch_ms").notNull(),
     data: text("data", { mode: "json" }).notNull(),
@@ -73,6 +72,5 @@ export const taskEvents = sqliteTable(
       table.taskId,
       table.eventId,
     ),
-    taskEventsServerCursor: uniqueIndex("task_events_server_cursor_index").on(table.serverCursor),
   }),
 );

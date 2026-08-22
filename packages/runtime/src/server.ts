@@ -2,7 +2,7 @@ import { readFile, mkdir, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { Effect, Fiber, FiberMap } from "effect";
+import { Duration, Effect, Exit, Fiber, FiberMap, Option, PubSub, Scope } from "effect";
 import {
   applyMigrations,
   contractIssues,
@@ -16,7 +16,6 @@ import {
   type TaskContract,
   type TaskExecutionInput,
   type TaskEvent,
-  type ServerEventEnvelope,
   type TaskResult,
   type TaskEventPage,
   type TaskListPage,
@@ -35,7 +34,6 @@ import {
   lookupRestartableTasks,
   lookupTaskStatus,
   lookupTaskEvents,
-  lookupServerEvents,
   lookupTasks,
   lookupServerHealth,
   lookupServerSnapshot,
@@ -45,6 +43,7 @@ import {
   ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
+import type { TaskEventEnvelope } from "./server-events.js";
 
 export interface TaskSubmission {
   contractPath: string;
@@ -98,60 +97,92 @@ class ServerValidationError extends Error {
   }
 }
 
+class ServerNotFoundError extends Error {
+  readonly code = "not_found";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ServerNotFoundError";
+  }
+}
+
 interface AdmittedTask {
   input: TaskExecutionInput;
   contract: TaskContract;
   result: TaskResult;
 }
 
-class EventWakeupHub {
-  private revision = 0;
-  private readonly waiters = new Set<() => void>();
+type EventScope = { readonly taskId?: string; readonly repositoryId?: string };
 
-  notify(): void {
-    this.revision += 1;
-    const waiters = [...this.waiters];
-    this.waiters.clear();
-    for (const resolve of waiters) resolve();
+interface TransientEventListener {
+  readonly scope: EventScope;
+  readonly take: () => Promise<TaskEventEnvelope>;
+  readonly takeWithTimeout: (timeoutMs: number) => Promise<Option.Option<TaskEventEnvelope>>;
+  readonly publish: (envelope: TaskEventEnvelope) => boolean;
+  readonly close: () => void;
+}
+
+class TransientEventHub {
+  private readonly listeners = new Set<TransientEventListener>();
+  private closed = false;
+
+  subscribe(scope: EventScope, onClosed: () => void = () => undefined): TransientEventListener {
+    if (this.closed) throw new Error("event hub is closed");
+    const pubsub = Effect.runSync(PubSub.dropping<TaskEventEnvelope>(64));
+    const listenerScope = Scope.makeUnsafe();
+    const subscription = Effect.runSync(
+      PubSub.subscribe(pubsub).pipe(Effect.provideService(Scope.Scope, listenerScope)),
+    );
+    let closed = false;
+    const listener: TransientEventListener = {
+      scope,
+      take: () => Effect.runPromise(PubSub.take(subscription)),
+      takeWithTimeout: (timeoutMs) =>
+        Effect.runPromise(
+          PubSub.take(subscription).pipe(Effect.timeoutOption(Duration.millis(timeoutMs))),
+        ),
+      publish: (envelope) => Effect.runSync(PubSub.publish(pubsub, envelope)),
+      close: () => {
+        if (closed) return;
+        closed = true;
+        this.listeners.delete(listener);
+        void Effect.runPromise(Scope.close(listenerScope, Exit.void)).catch(() => undefined);
+        onClosed();
+      },
+    };
+    this.listeners.add(listener);
+    return listener;
   }
 
-  subscribe(): {
-    revision: () => number;
-    wait: (observedRevision: number) => Promise<void>;
-    close: () => void;
-  } {
-    let closed = false;
-    const waiters = new Set<() => void>();
-    const close = (): void => {
-      if (closed) return;
-      closed = true;
-      for (const resolve of waiters) {
-        this.waiters.delete(resolve);
-        resolve();
+  publish(envelope: TaskEventEnvelope): void {
+    if (this.closed) return;
+    for (const listener of this.listeners) {
+      if (
+        (listener.scope.taskId !== undefined && listener.scope.taskId !== envelope.taskId) ||
+        (listener.scope.repositoryId !== undefined &&
+          listener.scope.repositoryId !== envelope.repositoryId)
+      )
+        continue;
+      let accepted = false;
+      try {
+        accepted = listener.publish(envelope);
+      } catch {
+        accepted = false;
       }
-      waiters.clear();
-    };
-    return {
-      revision: () => this.revision,
-      wait: (observedRevision) => {
-        if (closed || this.revision !== observedRevision) return Promise.resolve();
-        return new Promise<void>((resolve) => {
-          const wake = (): void => {
-            this.waiters.delete(wake);
-            waiters.delete(wake);
-            resolve();
-          };
-          waiters.add(wake);
-          this.waiters.add(wake);
-          if (closed || this.revision !== observedRevision) wake();
-        });
-      },
-      close,
-    };
+      if (!accepted) listener.close();
+    }
+  }
+
+  shutdown(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const listener of this.listeners) listener.close();
   }
 }
 
 const SERVER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
+const DEFAULT_EVENT_WAIT_TIMEOUT_MS = 30_000;
+const MAX_EVENT_WAIT_TIMEOUT_MS = 60_000;
 
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
@@ -160,7 +191,17 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
-  const eventWakeups = new EventWakeupHub();
+  const eventHub = new TransientEventHub();
+  let eventDispatch = Promise.resolve();
+  const onEvent = (event: TaskEvent): void => {
+    eventDispatch = eventDispatch
+      .then(async () => {
+        const result = await lookupTaskStatus(stateDirectory, event.taskId);
+        const repositoryId = result?.repository?.id;
+        if (repositoryId) eventHub.publish({ taskId: event.taskId, repositoryId, event });
+      })
+      .catch(() => undefined);
+  };
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
   const restartState = await lookupRestartableTasks(stateDirectory);
@@ -171,9 +212,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       parseContract(task.input.rawContract);
       restartable.push(task);
     } catch (error) {
-      await blockPersistedTask(stateDirectory, task.result.taskId, error, () =>
-        eventWakeups.notify(),
-      );
+      await blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
       activeTaskCount -= 1;
     }
   }
@@ -201,8 +240,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
                 options.environment,
                 launchTask,
                 activeTaskCapacity,
-                () => eventWakeups.notify(),
-                eventWakeups,
+                onEvent,
+                eventHub,
               );
             }),
           catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
@@ -225,7 +264,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
                 stateDirectory,
                 options.execute,
                 signal,
-                () => eventWakeups.notify(),
+                onEvent,
               ),
             catch: (cause) => cause,
           }).pipe(Effect.asVoid),
@@ -248,13 +287,13 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
               stateDirectory,
               task.result.taskId,
               "server_restart",
-              () => eventWakeups.notify(),
+              onEvent,
             );
             await recordRecoveryObservation(
               stateDirectory,
               task.result.taskId,
               "execution_owner_changed",
-              () => eventWakeups.notify(),
+              onEvent,
             );
             const contract = parseContract(task.input.rawContract);
             launchTask({ input: task.input, contract, result: task.result });
@@ -263,10 +302,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         }).pipe(
           Effect.catch((error) =>
             Effect.tryPromise({
-              try: () =>
-                blockPersistedTask(stateDirectory, task.result.taskId, error, () =>
-                  eventWakeups.notify(),
-                ),
+              try: () => blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent),
               catch: (cause) => cause,
             }).pipe(
               Effect.asVoid,
@@ -290,6 +326,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   return {
     ...running,
     close: async () => {
+      eventHub.shutdown();
       const initial = await Promise.allSettled([
         options.codingSession
           ? options.codingSession.cleanupOwned(stateDirectory)
@@ -421,7 +458,9 @@ function listen(
               ? 429
               : error instanceof ServerValidationError
                 ? 400
-                : 500;
+                : error instanceof ServerNotFoundError
+                  ? 404
+                  : 500;
           writeJson(response, errorProjection(error));
         } else {
           response.destroy(error instanceof Error ? error : undefined);
@@ -449,43 +488,33 @@ function close(server: BoundServer): Promise<void> {
 async function streamServerEvents(
   response: ServerResponse,
   stateDirectory: string,
-  afterCursor: number,
-  limit: number,
-  eventWakeups: EventWakeupHub,
+  eventHub: TransientEventHub,
+  scope: EventScope,
 ): Promise<void> {
+  await validateEventScope(stateDirectory, scope);
   response.statusCode = 200;
   response.setHeader("content-type", "text/event-stream");
   response.setHeader("cache-control", "no-cache");
   response.setHeader("connection", "keep-alive");
-  const subscription = eventWakeups.subscribe();
-  let closed = false;
+  const subscription = eventHub.subscribe(scope, () => response.destroy());
   response.once("close", () => {
-    closed = true;
     subscription.close();
   });
+  response.flushHeaders();
   response.write(": connected\n\n");
-  let cursor = afterCursor;
   try {
-    while (!closed && !response.destroyed) {
-      const events = await lookupServerEvents(stateDirectory, cursor, limit);
-      if (events.length > 0) {
-        for (const envelope of events) {
-          if (!(await writeServerEvent(response, envelope))) return;
-          cursor = envelope.cursor;
-        }
-        continue;
-      }
-      await subscription.wait(subscription.revision());
+    while (!response.destroyed) {
+      const envelope = await subscription.take();
+      if (!(await writeServerEvent(response, envelope))) return;
     }
+  } catch {
+    // Closing the transient subscription interrupts its pending take.
   } finally {
     subscription.close();
   }
 }
 
-function writeServerEvent(
-  response: ServerResponse,
-  envelope: ServerEventEnvelope,
-): Promise<boolean> {
+function writeServerEvent(response: ServerResponse, envelope: TaskEventEnvelope): Promise<boolean> {
   if (response.destroyed) return Promise.resolve(false);
   if (response.write(`data: ${JSON.stringify(envelope)}\n\n`)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -510,6 +539,66 @@ function writeServerEvent(
   });
 }
 
+function parseEventScope(url: URL): EventScope {
+  const taskId = url.searchParams.get("taskId")?.trim() || undefined;
+  const repositoryId = url.searchParams.get("repositoryId")?.trim() || undefined;
+  if (taskId && repositoryId)
+    throw new ServerValidationError("event scope must select a Task, Repository, or whole server");
+  if (url.searchParams.has("after") || url.searchParams.has("limit"))
+    throw new ServerValidationError("event listeners do not support replay cursors");
+  return { taskId, repositoryId };
+}
+
+async function validateEventScope(stateDirectory: string, scope: EventScope): Promise<void> {
+  if (scope.taskId !== undefined) {
+    if (!(await lookupTaskStatus(stateDirectory, scope.taskId)))
+      throw new ServerNotFoundError("task not found");
+    return;
+  }
+  if (scope.repositoryId !== undefined) {
+    if (!(await inspectRepository(stateDirectory, scope.repositoryId)))
+      throw new ServerNotFoundError("repository not found");
+  }
+}
+
+function parseWaitTimeout(value: string | null): number {
+  if (value == null) return DEFAULT_EVENT_WAIT_TIMEOUT_MS;
+  if (!/^\d+$/.test(value))
+    throw new ServerValidationError("timeoutMs must be a non-negative integer");
+  const timeoutMs = Number(value);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs > MAX_EVENT_WAIT_TIMEOUT_MS)
+    throw new ServerValidationError("timeoutMs is out of range");
+  return timeoutMs;
+}
+
+async function waitForServerEvent(
+  response: ServerResponse,
+  stateDirectory: string,
+  eventHub: TransientEventHub,
+  scope: EventScope,
+  timeoutMs: number,
+): Promise<void> {
+  await validateEventScope(stateDirectory, scope);
+  const subscription = eventHub.subscribe(scope);
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/json");
+  response.once("close", () => subscription.close());
+  response.flushHeaders();
+  response.write(" ");
+  try {
+    const event = await subscription.takeWithTimeout(timeoutMs);
+    if (Option.isNone(event)) {
+      response.end("null");
+      return;
+    }
+    response.end(JSON.stringify(event.value));
+  } catch {
+    if (!response.destroyed) response.end("null");
+  } finally {
+    subscription.close();
+  }
+}
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -517,16 +606,24 @@ async function handleRequest(
   launch: (task: AdmittedTask) => void,
   activeTaskCapacity: number,
   onEvent: (event: TaskEvent) => void,
-  eventWakeups: EventWakeupHub,
+  eventHub: TransientEventHub,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const taskEventsPath = url.pathname.match(/^\/v1\/tasks\/([^/]+)\/events$/)?.[1];
   const taskId = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/)?.[1];
   const stateDirectory = stateDirectoryFromEnvironment(environment);
-  if (request.method === "GET" && url.pathname === "/v1/events") {
-    const afterCursor = parseCursor(url.searchParams.get("after"), "after");
-    const limit = parseCursor(url.searchParams.get("limit"), "limit", 200);
-    await streamServerEvents(response, stateDirectory, afterCursor, limit, eventWakeups);
+  if (request.method === "GET" && ["/v1/events", "/v1/events/subscribe"].includes(url.pathname)) {
+    await streamServerEvents(response, stateDirectory, eventHub, parseEventScope(url));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/events/wait") {
+    await waitForServerEvent(
+      response,
+      stateDirectory,
+      eventHub,
+      parseEventScope(url),
+      parseWaitTimeout(url.searchParams.get("timeoutMs")),
+    );
     return;
   }
   if (request.method === "GET" && ["/v1/health", "/v1/server/health"].includes(url.pathname)) {

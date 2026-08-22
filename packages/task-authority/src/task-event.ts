@@ -269,16 +269,9 @@ const taskEventPage = Schema.Struct({
   nextSequence: Schema.Natural,
 });
 
-const serverEventEnvelope = Schema.Struct({
-  cursor: Schema.Natural,
-  taskId: safeEventId,
-  event: taskEvent,
-});
-
 export type TaskObservationEventInput = Schema.Schema.Type<typeof taskObservationEventInput>;
 export type TaskEvent = Schema.Schema.Type<typeof taskEvent>;
 export type TaskEventPage = Schema.Schema.Type<typeof taskEventPage>;
-export type ServerEventEnvelope = Schema.Schema.Type<typeof serverEventEnvelope>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
   assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
@@ -298,16 +291,6 @@ export function decodeTaskEventPage(input: unknown): TaskEventPage {
     for (const event of input.events) decodeTaskEvent(event);
   }
   return Schema.decodeUnknownSync(taskEventPage)(input);
-}
-
-export function decodeServerEventEnvelope(input: unknown): ServerEventEnvelope {
-  assertExactKeys(input, ["cursor", "taskId", "event"]);
-  if (Predicate.isObject(input) && Predicate.isObject(input.event)) {
-    const event = decodeTaskEvent(input.event);
-    if (event.taskId !== input.taskId)
-      throw new Error("server event envelope Task ID is inconsistent");
-  }
-  return Schema.decodeUnknownSync(serverEventEnvelope)(input);
 }
 
 const dataFields: Record<string, readonly string[]> = {

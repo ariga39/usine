@@ -1,13 +1,12 @@
 import { Clock, Duration, Effect } from "effect";
+import { decodeTaskEventEnvelope, type TaskEventEnvelope } from "@usine/runtime";
 import {
   decodeTaskResource,
   decodeTaskEventPage,
-  decodeServerEventEnvelope,
   decodeTaskListPage,
   decodeServerHealth,
   decodeServerSnapshot,
   type TaskEvent,
-  type ServerEventEnvelope,
   type TaskEventPage,
   type TaskListPage,
   type TaskResource,
@@ -254,13 +253,16 @@ export async function taskEvents(
   }
 }
 
-export interface ServerEventListener extends AsyncIterable<ServerEventEnvelope> {
+export interface EventScope {
+  taskId?: string;
+  repositoryId?: string;
+}
+
+export interface ServerEventListener extends AsyncIterable<TaskEventEnvelope> {
   close(): void;
 }
 
-export interface ServerEventListenerOptions {
-  afterCursor?: number;
-  limit?: number;
+export interface ServerEventListenerOptions extends EventScope {
   signal?: AbortSignal;
 }
 
@@ -268,18 +270,14 @@ export async function openServerEventListener(
   serverUrl: string,
   options: ServerEventListenerOptions = {},
 ): Promise<ServerEventListener> {
-  const afterCursor = options.afterCursor ?? 0;
-  const limit = options.limit ?? 200;
-  validateCursor(afterCursor, "after");
-  validateLimit(limit);
+  const scope = eventScopeQuery(options);
   const controller = new AbortController();
   const signal = options.signal
     ? AbortSignal.any([controller.signal, options.signal])
     : controller.signal;
-  const response = await fetchServer(
-    new URL(`/v1/events?after=${afterCursor}&limit=${limit}`, serverUrl),
-    { signal },
-  );
+  const response = await fetchServer(new URL(`/v1/events/subscribe${scope}`, serverUrl), {
+    signal,
+  });
   if (!response.ok) {
     const body = await readJson(response);
     throw new ServerClientError(
@@ -303,7 +301,7 @@ export async function openServerEventListener(
       // Closing an already-ended transport is intentionally best effort.
     }
   };
-  const listener: ServerEventListener & AsyncIterator<ServerEventEnvelope> = {
+  const listener: ServerEventListener & AsyncIterator<TaskEventEnvelope> = {
     next: () => (closed ? Promise.resolve({ done: true, value: undefined }) : iterator.next()),
     return: async () => {
       stop();
@@ -317,9 +315,57 @@ export async function openServerEventListener(
   return listener;
 }
 
+export async function waitForServerEvent(
+  serverUrl: string,
+  scope: EventScope = {},
+  timeoutMs = 30_000,
+): Promise<TaskEventEnvelope | null> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000)
+    throw new ServerClientError("timeoutMs is out of range", 400, "validation", "validation");
+  const scopeQuery = eventScopeQuery(scope);
+  const response = await fetchServer(
+    new URL(
+      `/v1/events/wait${scopeQuery}${scopeQuery ? "&" : "?"}timeoutMs=${timeoutMs}`,
+      serverUrl,
+    ),
+  );
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "server event wait failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  try {
+    if (body === null) return null;
+    return decodeTaskEventEnvelope(body);
+  } catch {
+    throw new ServerClientError("server returned invalid TaskEventEnvelope", response.status);
+  }
+}
+
+export const waitForEvent = waitForServerEvent;
+export const subscribeToServerEvents = openServerEventListener;
+
+function eventScopeQuery(scope: EventScope): string {
+  if (scope.taskId !== undefined && scope.repositoryId !== undefined)
+    throw new ServerClientError(
+      "event scope must select a Task, Repository, or whole server",
+      400,
+      "validation",
+      "validation",
+    );
+  const params = new URLSearchParams();
+  if (scope.taskId !== undefined) params.set("taskId", scope.taskId);
+  if (scope.repositoryId !== undefined) params.set("repositoryId", scope.repositoryId);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 async function* parseServerEventStream(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<ServerEventEnvelope> {
+): AsyncGenerator<TaskEventEnvelope> {
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of body) {
@@ -342,9 +388,9 @@ async function* parseServerEventStream(
         throw new ServerClientError("server returned invalid event JSON", 500);
       }
       try {
-        yield decodeServerEventEnvelope(parsed);
+        yield decodeTaskEventEnvelope(parsed);
       } catch {
-        throw new ServerClientError("server returned invalid ServerEventEnvelope", 500);
+        throw new ServerClientError("server returned invalid TaskEventEnvelope", 500);
       }
     }
   }

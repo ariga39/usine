@@ -13,7 +13,6 @@ import {
   type RepositorySnapshot,
   type RepositoryResource,
   type ResolvedTaskContract,
-  type ServerEventEnvelope,
   type TaskEvent,
   type TaskListItem,
   type TaskResult,
@@ -236,26 +235,6 @@ export async function lookupTaskEvents(
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
     };
-  } finally {
-    handle.close();
-  }
-}
-
-export async function lookupServerEvents(
-  stateDirectory: string,
-  afterCursor = 0,
-  limit = 200,
-): Promise<ServerEventEnvelope[]> {
-  const databasePath = resolve(stateDirectory, "usine.sqlite");
-  try {
-    await access(databasePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  const handle = openSqliteDatabase(databasePath, { readOnly: true });
-  try {
-    return await new TaskAuthority(handle.database).listServerEvents(afterCursor, limit);
   } finally {
     handle.close();
   }
@@ -574,3 +553,4 @@ export {
   type ServerExecution,
   type UsineServerOptions,
 } from "./server.js";
+export { decodeTaskEventEnvelope, type TaskEventEnvelope } from "./server-events.js";
