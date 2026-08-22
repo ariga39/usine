@@ -262,14 +262,9 @@ export interface SessionObservation<T = unknown> {
     | null;
 }
 
-export interface CodingSessionRuntimeAdapter {
-  start<T>(request: SessionRequest<T>): Promise<unknown>;
-  observe<T>(handle: unknown): Promise<SessionObservation<T>>;
-  interrupt(handle: unknown): Promise<void>;
-  reap(handle: unknown): Promise<void>;
-  discoverOwned(stateDirectory: string, taskId: string): Promise<readonly unknown[]>;
-  reapOwned(stateDirectory: string, taskId: string): Promise<void>;
-  listOwnedTaskIds(stateDirectory: string): Promise<readonly string[]>;
+export interface CodingSessionCleanup {
+  cleanupTask(stateDirectory: string, taskId: string): Promise<void>;
+  cleanupOwned(stateDirectory: string): Promise<void>;
 }
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
@@ -304,7 +299,7 @@ interface CodexOwnedHandle {
   execution: ExecutionHandle;
 }
 
-class CodexRuntimeAdapter implements CodingSessionRuntimeAdapter {
+class CodexRuntimeAdapter implements CodingSessionCleanup {
   constructor(
     private readonly runProvider: <T>(request: SessionRequest<T>) => Promise<SessionObservation<T>>,
     private readonly executionStateDirectory?: string,
@@ -363,17 +358,27 @@ class CodexRuntimeAdapter implements CodingSessionRuntimeAdapter {
     );
   }
 
-  async reapOwned(stateDirectory: string, taskId: string): Promise<void> {
+  async cleanupTask(stateDirectory: string, taskId: string): Promise<void> {
     const handles = await this.discoverOwned(stateDirectory, taskId);
-    const results = await Promise.allSettled(handles.map((handle) => this.reap(handle)));
-    const failure = results.find(
+    const cleanup = await Promise.allSettled(
+      handles.flatMap((handle) => [this.interrupt(handle), this.reap(handle)]),
+    );
+    const failure = cleanup.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failure) throw failure.reason;
   }
 
-  listOwnedTaskIds(stateDirectory: string): Promise<readonly string[]> {
-    return listExecutionTaskIds(stateDirectory);
+  async cleanupOwned(stateDirectory: string): Promise<void> {
+    const results = await Promise.allSettled(
+      (await listExecutionTaskIds(stateDirectory)).map((taskId) =>
+        this.cleanupTask(stateDirectory, taskId),
+      ),
+    );
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure) throw failure.reason;
   }
 }
 
@@ -416,7 +421,7 @@ async function runRoleOutputTransform(
 }
 
 export class CodexCodingSession {
-  private readonly adapter: CodingSessionRuntimeAdapter;
+  private readonly adapter: CodexRuntimeAdapter;
   private readonly appServerProfiles: ReadonlySet<string>;
 
   constructor(
@@ -430,10 +435,6 @@ export class CodexCodingSession {
     );
   }
 
-  get runtimeAdapter(): CodingSessionRuntimeAdapter {
-    return this.adapter;
-  }
-
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
     const handle = await this.adapter.start(request);
     try {
@@ -441,6 +442,14 @@ export class CodexCodingSession {
     } finally {
       await this.adapter.reap(handle);
     }
+  }
+
+  cleanupTask(stateDirectory: string, taskId: string): Promise<void> {
+    return this.adapter.cleanupTask(stateDirectory, taskId);
+  }
+
+  cleanupOwned(stateDirectory: string): Promise<void> {
+    return this.adapter.cleanupOwned(stateDirectory);
   }
 
   private async runProvider<T = unknown>(

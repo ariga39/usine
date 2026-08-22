@@ -472,6 +472,61 @@ describe("Coding Session", () => {
     }
   });
 
+  test("owns task cleanup behind the Coding Session boundary", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-session-cleanup-"));
+    const workspace = join(stateDirectory, "reviewer");
+    const reference = {
+      taskId: "session-cleanup",
+      role: "reviewer" as const,
+      attempt: `1-${sha}`,
+    };
+    const launcher = await createCodexLauncher(
+      stateDirectory,
+      workspace,
+      "reviewer-profile",
+      reference,
+    );
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    if (!child.pid) throw new Error("reviewer child has no PID");
+    try {
+      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
+        encoding: "utf8",
+      }).trim();
+      await writeFile(
+        launcher.identityPath,
+        JSON.stringify({
+          version: 2,
+          state: "running",
+          reference,
+          pid: child.pid,
+          startedAt,
+          workspace,
+        }) + "\n",
+      );
+
+      const session = new CodexCodingSession(undefined, {
+        environment: {},
+        executionStateDirectory: stateDirectory,
+      });
+      await session.cleanupTask(stateDirectory, reference.taskId);
+
+      await expect(discoverOwnedExecutions(stateDirectory, reference.taskId)).resolves.toEqual([]);
+      await expect(access(launcher.identityPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(launcher.launcherPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The Coding Session cleanup may already have removed the group.
+      }
+      if (child.exitCode === null && child.signalCode === null)
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+  });
+
   test("routes each selected profile through the Codex launcher and keeps role sandboxes local", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
     const implementer = await createCodexLauncher(
