@@ -255,7 +255,7 @@ const taskObservationEventInput = Schema.Struct({
   data: observationData,
 });
 
-const taskEvent = Schema.Struct({
+export const taskEventSchema = Schema.Struct({
   taskId: safeEventId,
   sequence: Schema.Natural,
   eventId: safeEventId,
@@ -263,15 +263,15 @@ const taskEvent = Schema.Struct({
   data: eventData,
 });
 
-const taskEventPage = Schema.Struct({
+export const taskEventPageSchema = Schema.Struct({
   taskId: safeEventId,
-  events: Schema.Array(taskEvent),
+  events: Schema.Array(taskEventSchema),
   nextSequence: Schema.Natural,
 });
 
 export type TaskObservationEventInput = Schema.Schema.Type<typeof taskObservationEventInput>;
-export type TaskEvent = Schema.Schema.Type<typeof taskEvent>;
-export type TaskEventPage = Schema.Schema.Type<typeof taskEventPage>;
+export type TaskEvent = Schema.Schema.Type<typeof taskEventSchema>;
+export type TaskEventPage = Schema.Schema.Type<typeof taskEventPageSchema>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
   assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
@@ -282,7 +282,7 @@ export function decodeTaskObservationEventInput(input: unknown): TaskObservation
 export function decodeTaskEvent(input: unknown): TaskEvent {
   assertExactKeys(input, ["taskId", "sequence", "eventId", "occurredAtEpochMs", "data"]);
   if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
-  return Schema.decodeUnknownSync(taskEvent)(input);
+  return Schema.decodeUnknownSync(taskEventSchema)(input);
 }
 
 export function decodeTaskEventPage(input: unknown): TaskEventPage {
@@ -290,7 +290,7 @@ export function decodeTaskEventPage(input: unknown): TaskEventPage {
   if (Predicate.isObject(input) && Array.isArray(input.events)) {
     for (const event of input.events) decodeTaskEvent(event);
   }
-  return Schema.decodeUnknownSync(taskEventPage)(input);
+  return Schema.decodeUnknownSync(taskEventPageSchema)(input);
 }
 
 const dataFields: Record<string, readonly string[]> = {

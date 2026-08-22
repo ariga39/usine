@@ -52,6 +52,7 @@ export {
   type GithubReadPolicy,
 } from "./runtime-policy.js";
 export type { TaskExecutionInput } from "@usine/task-authority";
+export * from "./http-api.js";
 
 export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): CodingSessionCleanup {
   return new CodexCodingSession(undefined, {
@@ -252,7 +253,7 @@ export async function lookupRestartableTasks(stateDirectory: string): Promise<{
       return { restartable: [], activeTaskCount: 0 };
     throw error;
   }
-  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  const handle = openSqliteDatabase(databasePath);
   try {
     return await new TaskAuthority(handle.database).listRestartable();
   } finally {

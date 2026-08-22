@@ -12,6 +12,7 @@ export {
   TaskStateQuarantinedError,
   isTaskStateQuarantinedError,
 } from "./task-state-schema.js";
+export { taskResourceSchema, taskListPageSchema } from "./task-state-schema.js";
 export type { TaskListItem, TaskListPage } from "./task-state-schema.js";
 export { applyMigrations } from "./apply-migrations.js";
 export { openSqliteDatabase } from "./sqlite-database.js";

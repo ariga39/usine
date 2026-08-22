@@ -155,7 +155,7 @@ const publicTaskRepository = Schema.Struct({
   name: Schema.String,
   baseBranch: Schema.String,
 });
-const publicTaskResource = Schema.Struct({
+export const taskResourceSchema = Schema.Struct({
   schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -182,7 +182,7 @@ const publicTaskResource = Schema.Struct({
 
 export type TaskListItem = Schema.Schema.Type<typeof taskListItemSchema>;
 export type TaskListPage = Schema.Schema.Type<typeof taskListPageSchema>;
-export type DecodedTaskResource = Schema.Schema.Type<typeof publicTaskResource>;
+export type DecodedTaskResource = Schema.Schema.Type<typeof taskResourceSchema>;
 
 const legacyTaskResultFields = {
   taskId: Schema.String,
@@ -300,7 +300,7 @@ export function decodeCurrentTaskResult(input: unknown): TaskResult {
 }
 
 export function decodeTaskResource(input: unknown): TaskResource {
-  const decoded = Schema.decodeUnknownSync(publicTaskResource)(input);
+  const decoded = Schema.decodeUnknownSync(taskResourceSchema)(input);
   return {
     schemaVersion: decoded.schemaVersion,
     taskId: decoded.taskId,

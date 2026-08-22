@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { taskListItemSchema } from "./task-state-schema.js";
 
-const repositoryResource = Schema.Struct({
+export const repositoryResourceEffectSchema = Schema.Struct({
   id: Schema.String,
   revision: Schema.Natural,
   owner: Schema.String,
@@ -16,29 +16,29 @@ const codingSessionResource = Schema.Struct({
   revision: Schema.Natural,
 });
 
-const serverHealth = Schema.Struct({
+export const serverHealthSchema = Schema.Struct({
   status: Schema.Literal("ok"),
   revision: Schema.Natural,
 });
 
-const serverSnapshot = Schema.Struct({
+export const serverSnapshotSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   revision: Schema.Natural,
-  server: serverHealth,
-  repositories: Schema.Array(repositoryResource),
+  server: serverHealthSchema,
+  repositories: Schema.Array(repositoryResourceEffectSchema),
   tasks: Schema.Array(taskListItemSchema),
   codingSessions: Schema.Array(codingSessionResource),
 });
 
-export type RepositoryResourceShape = Schema.Schema.Type<typeof repositoryResource>;
+export type RepositoryResourceShape = Schema.Schema.Type<typeof repositoryResourceEffectSchema>;
 export type CodingSessionResource = Schema.Schema.Type<typeof codingSessionResource>;
-export type ServerHealth = Schema.Schema.Type<typeof serverHealth>;
-export type ServerSnapshot = Schema.Schema.Type<typeof serverSnapshot>;
+export type ServerHealth = Schema.Schema.Type<typeof serverHealthSchema>;
+export type ServerSnapshot = Schema.Schema.Type<typeof serverSnapshotSchema>;
 
 export function decodeServerHealth(input: unknown): ServerHealth {
-  return Schema.decodeUnknownSync(serverHealth)(input);
+  return Schema.decodeUnknownSync(serverHealthSchema)(input);
 }
 
 export function decodeServerSnapshot(input: unknown): ServerSnapshot {
-  return Schema.decodeUnknownSync(serverSnapshot)(input);
+  return Schema.decodeUnknownSync(serverSnapshotSchema)(input);
 }

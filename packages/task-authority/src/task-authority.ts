@@ -400,6 +400,7 @@ export class TaskAuthority {
   }> {
     const rows = await this.database
       .select({
+        taskId: taskRuns.taskId,
         rawResult: sql<string>`${taskRuns.result}`,
         contractPath: taskRuns.contractPath,
         rawContract: taskRuns.rawContract,
@@ -412,6 +413,7 @@ export class TaskAuthority {
       try {
         result = decodeRawPersistedTaskResult(row.rawResult);
       } catch {
+        await this.quarantinePersistedTask(row.taskId, row.rawResult);
         continue;
       }
       if (isTerminalState(result.state)) continue;
@@ -426,6 +428,31 @@ export class TaskAuthority {
       });
     }
     return { restartable, activeTaskCount };
+  }
+
+  async quarantinePersistedTask(
+    taskId: string,
+    rawResult: string,
+    reason = "durable task state quarantined",
+  ): Promise<void> {
+    let repositoryPath: string | null = null;
+    try {
+      const parsed = JSON.parse(rawResult) as { repository?: { path?: unknown } };
+      if (typeof parsed.repository?.path === "string") repositoryPath = parsed.repository.path;
+    } catch {
+      // Preserve the unreadable durable bytes in the quarantine record.
+    }
+    await this.database
+      .insert(taskQuarantines)
+      .values({
+        taskId,
+        reason,
+        result: rawResult,
+        repositoryPath,
+      })
+      .onConflictDoNothing();
+    await this.database.delete(taskRuns).where(eq(taskRuns.taskId, taskId));
+    await this.database.delete(repositoryLeases).where(eq(repositoryLeases.taskId, taskId));
   }
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
