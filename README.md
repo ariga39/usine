@@ -4,7 +4,7 @@ Usine 是一个面向自主软件交付的确定性协调器。它的目标不�
 
 当前 V0 由六个 provider-independent 行为模块组成：Task Authority、Delivery Run、Coding Session、Candidate Workspace、Quality Gate 和 Forge Delivery。PR #82/#83 是真实 Codex executable delivery 与 restart evidence；Issue #153 是使用 stubbed Codex adapter 的 server-hosted lifecycle fixture，不能证明 production Codex turn。Issue #199 增加了显式 merge authority 下的 exact-head `merged` terminal；没有该 authority 的任务仍在 `reviewed_pr` 停止。产品路径仍是单 Task、每个 repository 一个 writer lease 和一个 GitHub forge；Herdr、transcript 和 agent prose 不拥有完成 authority。
 
-当前方向是 `correct_before_expansion`：#192/#193 已合并；#199 保留授权 exact-head merge 的 hermetic/server evidence，但不证明 production merge；#176 已关闭为 falsified——真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance，其目标 PR 已交付并手工合并；#195 已授权但 app-server runtime 尚未证明。其它 eligible work 以 canonical design 的当前状态 ledger 为准。
+当前方向是 `correct_before_expansion`：#192/#193 已合并；#199 保留授权 exact-head merge 的 hermetic/server evidence，但不证明 production merge；#176 已关闭为 falsified——真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance，其目标 PR 已交付并手工合并；#195 已证明 bounded local app-server runtime outcome 与静态 opaque profile composition；app-server 不能取得 Task authority。其它 eligible work 以 canonical design 的当前状态 ledger 为准。
 
 运行需要 Node 24、pnpm、Git、Codex 和 GitHub App 配置。状态默认写入目标仓库外的用户状态目录，也可用 `USINE_STATE_DIR` 覆盖。先启动 server：
 
