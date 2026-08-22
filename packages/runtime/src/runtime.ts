@@ -24,6 +24,7 @@ import {
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import {
   CodexCodingSession,
+  codexAppServerProfilesFromEnvironment,
   type CodingSessionMcpServerResolution,
   type CodingSessionRuntimeAdapter,
 } from "@usine/coding-session";
@@ -55,7 +56,10 @@ export type { TaskExecutionInput } from "@usine/task-authority";
 export function createRuntimeExecutionAdapter(
   environment: NodeJS.ProcessEnv,
 ): CodingSessionRuntimeAdapter {
-  return new CodexCodingSession(undefined, { environment }).runtimeAdapter;
+  return new CodexCodingSession(undefined, {
+    environment,
+    appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
+  }).runtimeAdapter;
 }
 
 export async function registerRepository(
@@ -442,6 +446,7 @@ async function executeWithServices(options: {
   const session = new CodexCodingSession(undefined, {
     environment: policy.workerEnvironment,
     executionStateDirectory: policy.stateDirectory,
+    appServerProfiles: policy.appServerProfiles,
     roleOutputTransform: policy.roleOutputTransform,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {
       const readPolicy = policy.githubRead;

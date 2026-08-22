@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
   createOpenAICompatibleRoleOutputTransform,
+  codexAppServerProfilesFromEnvironment,
   explicitWorkerEnvironment,
   validateCodexProfile,
   type RolePolicy,
@@ -37,6 +38,7 @@ export interface RuntimePolicy {
   githubRead?: GithubReadPolicy;
   roleOutputTransform?: RoleOutputTransform;
   workerEnvironment: NodeJS.ProcessEnv;
+  appServerProfiles: readonly string[];
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
 }
 
@@ -108,6 +110,7 @@ export function runtimePolicyFromEnvironment(
     githubRead,
     roleOutputTransform,
     workerEnvironment,
+    appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
   };
 }
