@@ -74,6 +74,18 @@ export interface RunningUsineServer {
   close(): Promise<void>;
 }
 
+export class TaskCapacityStartupError extends Error {
+  readonly code = "active_task_capacity_startup";
+
+  constructor(
+    readonly capacity: number,
+    readonly active: number,
+  ) {
+    super("durable nonterminal Tasks exceed active Task capacity");
+    this.name = "TaskCapacityStartupError";
+  }
+}
+
 class ServerValidationError extends Error {
   readonly code = "validation";
 
@@ -98,6 +110,20 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
   await mkdir(stateDirectory, { recursive: true });
   await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
+  const restartState = await lookupRestartableTasks(stateDirectory);
+  const restartable: typeof restartState.restartable = [];
+  let activeTaskCount = restartState.activeTaskCount;
+  for (const task of restartState.restartable) {
+    try {
+      parseContract(task.input.rawContract);
+      restartable.push(task);
+    } catch (error) {
+      await blockPersistedTask(stateDirectory, task.result.taskId, error);
+      activeTaskCount -= 1;
+    }
+  }
+  if (activeTaskCount > activeTaskCapacity)
+    throw new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount);
 
   let resolveReady: (server: RunningUsineServer) => void = () => undefined;
   let rejectReady: (error: unknown) => void = () => undefined;
@@ -149,10 +175,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         url: `http://${urlHost}:${server.addressPort}`,
         close: async () => undefined,
       };
-      const restartable = yield* Effect.tryPromise({
-        try: () => lookupRestartableTasks(stateDirectory),
-        catch: (cause) => cause,
-      });
       for (const task of restartable) {
         yield* Effect.tryPromise({
           try: async () => {

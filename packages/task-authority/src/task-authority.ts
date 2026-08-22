@@ -381,7 +381,10 @@ export class TaskAuthority {
     return rows.map(decodeTaskEvent);
   }
 
-  async listRestartable(): Promise<Array<{ result: TaskResult; input: TaskExecutionInput }>> {
+  async listRestartable(): Promise<{
+    restartable: Array<{ result: TaskResult; input: TaskExecutionInput }>;
+    activeTaskCount: number;
+  }> {
     const rows = await this.database
       .select({
         rawResult: sql<string>`${taskRuns.result}`,
@@ -390,6 +393,7 @@ export class TaskAuthority {
       })
       .from(taskRuns);
     const restartable: Array<{ result: TaskResult; input: TaskExecutionInput }> = [];
+    let activeTaskCount = 0;
     for (const row of rows) {
       let result: TaskResult;
       try {
@@ -398,6 +402,7 @@ export class TaskAuthority {
         continue;
       }
       if (isTerminalState(result.state)) continue;
+      activeTaskCount += 1;
       if (!row.contractPath || !row.rawContract || !result.repository) continue;
       restartable.push({
         result,
@@ -407,7 +412,7 @@ export class TaskAuthority {
         },
       });
     }
-    return restartable;
+    return { restartable, activeTaskCount };
   }
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
@@ -460,7 +465,11 @@ export class TaskAuthority {
           .from(taskRuns);
         let active = 0;
         for (const row of rows) {
-          if (!isTerminalState(decodeRawPersistedTaskResult(row.rawResult).state)) active += 1;
+          try {
+            if (!isTerminalState(decodeRawPersistedTaskResult(row.rawResult).state)) active += 1;
+          } catch (error) {
+            if (!isTaskStateQuarantinedError(error)) throw error;
+          }
         }
         if (active >= activeTaskCapacity) throw new TaskCapacityError(activeTaskCapacity, active);
       }

@@ -164,6 +164,54 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
+  test("isolates corrupt rows during capacity admission without acquiring a rejected lease", async () => {
+    const path = await makeDatabase();
+    const corruptTaskId = `authority-capacity-corrupt-${Date.now()}`;
+    const database = new DatabaseSync(path);
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(corruptTaskId, "{ invalid");
+    database.close();
+
+    const authority = authorityAt(path);
+    const admittedTaskId = `${corruptTaskId}-admitted`;
+    const admittedRepository = `authority/capacity-${admittedTaskId}`;
+    const admitted = await authority.admit(
+      {
+        contract: makeContract(admittedTaskId),
+        contractHash: `${admittedTaskId}-hash`,
+        repositoryIdentity: admittedRepository,
+        deadlineEpochMs: Date.now() + 30_000,
+      },
+      undefined,
+      1,
+    );
+    expect(admitted.taskId).toBe(admittedTaskId);
+
+    const rejectedTaskId = `${corruptTaskId}-rejected`;
+    const rejectedRepository = `authority/capacity-${rejectedTaskId}`;
+    await expect(
+      authority.admit(
+        {
+          contract: makeContract(rejectedTaskId),
+          contractHash: `${rejectedTaskId}-hash`,
+          repositoryIdentity: rejectedRepository,
+          deadlineEpochMs: Date.now() + 30_000,
+        },
+        undefined,
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "active_task_capacity", active: 1 });
+    await expect(authority.lookup(rejectedTaskId)).resolves.toBeNull();
+
+    const inspection = new DatabaseSync(path);
+    const lease = inspection
+      .prepare("SELECT task_id FROM repository_leases WHERE repository_identity = ?")
+      .get(rejectedRepository);
+    inspection.close();
+    expect(lease).toBeUndefined();
+  });
+
   test("upgrades task history into ordered decodable events and removes the legacy table", async () => {
     const path = await makePreTaskEventsDatabase();
     const authority = authorityAt(path);
