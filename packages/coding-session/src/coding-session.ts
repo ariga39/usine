@@ -9,10 +9,6 @@ import {
 } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
-import { readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { Toml } from "effect/unstable/encoding";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import {
@@ -25,6 +21,16 @@ import {
 } from "./codex-execution.js";
 import { isAppServerCancellation, runCodexAppServer } from "./codex-app-server.js";
 import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
+import {
+  codexAdapterConfig,
+  CodexProfileSelectionError,
+  normalizeCodexProfileSelection,
+  resolveCodexProfile,
+  validateCodexProfile,
+  type CodexProfileResolver,
+} from "./codex-profile.js";
+
+type ResolvedCodexProfile = ReturnType<typeof normalizeCodexProfileSelection>;
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -46,25 +52,6 @@ export interface RolePolicy {
   sandbox: "workspace-write" | "read-only";
 }
 
-export class CodexProfileSelectionError extends Error {
-  readonly code = "codex_profile_unusable" as const;
-
-  constructor(
-    readonly profile: string,
-    reason = "must be a non-blank safe profile name",
-  ) {
-    super(`Codex profile is unusable: ${reason}`);
-    this.name = "CodexProfileSelectionError";
-  }
-}
-
-export function validateCodexProfile(profile: string): string {
-  const normalized = profile.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(normalized))
-    throw new CodexProfileSelectionError(profile);
-  return normalized;
-}
-
 export function codexAppServerProfilesFromEnvironment(
   environment: NodeJS.ProcessEnv,
 ): readonly string[] {
@@ -72,59 +59,6 @@ export function codexAppServerProfilesFromEnvironment(
   if (!configured) return [];
   const profiles = configured.split(",").map(validateCodexProfile);
   return [...new Set(profiles)];
-}
-
-async function ensureCodexProfileUsable(
-  profile: string,
-  environment: NodeJS.ProcessEnv,
-): Promise<string> {
-  const normalized = validateCodexProfile(profile);
-  const codexHome = environment.CODEX_HOME?.trim() || join(homedir(), ".codex");
-  try {
-    const profileFile = await stat(join(codexHome, `${normalized}.config.toml`));
-    if (!profileFile.isFile()) throw new Error("profile configuration is not a regular file");
-  } catch {
-    throw new CodexProfileSelectionError(
-      profile,
-      `named profile "${normalized}" does not have a usable Codex configuration`,
-    );
-  }
-  return normalized;
-}
-
-const APP_SERVER_PROFILE_KEYS = new Set([
-  "approval_policy",
-  "features",
-  "model",
-  "model_catalog_json",
-  "model_provider",
-  "model_providers",
-  "model_reasoning_effort",
-  "model_reasoning_summary",
-  "model_verbosity",
-  "personality",
-  "sandbox_mode",
-  "service_tier",
-  "tools",
-]);
-
-async function readCodexAppServerProfileConfig(
-  profile: string,
-  environment: NodeJS.ProcessEnv,
-): Promise<Record<string, unknown>> {
-  const normalized = await ensureCodexProfileUsable(profile, environment);
-  const codexHome = environment.CODEX_HOME?.trim() || join(homedir(), ".codex");
-  try {
-    const parsed = Toml.parse(await readFile(join(codexHome, `${normalized}.config.toml`), "utf8"));
-    return Object.fromEntries(
-      Object.entries(parsed).filter(([key]) => APP_SERVER_PROFILE_KEYS.has(key)),
-    );
-  } catch {
-    throw new CodexProfileSelectionError(
-      profile,
-      `named profile "${normalized}" has an unreadable Codex configuration`,
-    );
-  }
 }
 
 export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
@@ -243,6 +177,7 @@ export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
   executionStateDirectory?: string;
   appServerProfiles?: readonly string[];
+  profileResolver?: CodexProfileResolver;
   roleOutputTransform?: RoleOutputTransform;
   mcpServerFactory?: CodingSessionMcpServerFactory;
 }
@@ -423,12 +358,14 @@ async function runRoleOutputTransform(
 export class CodexCodingSession {
   private readonly adapter: CodexRuntimeAdapter;
   private readonly appServerProfiles: ReadonlySet<string>;
+  private readonly profileResolver: CodexProfileResolver;
 
   constructor(
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
   ) {
     this.appServerProfiles = new Set(options.appServerProfiles ?? []);
+    this.profileResolver = options.profileResolver ?? resolveCodexProfile;
     this.adapter = new CodexRuntimeAdapter(
       (request) => this.runProvider(request),
       options.executionStateDirectory,
@@ -483,6 +420,20 @@ export class CodexCodingSession {
       };
     }
     try {
+      const profileName = validateCodexProfile(request.profile);
+      let profileSelection: ResolvedCodexProfile;
+      try {
+        profileSelection = normalizeCodexProfileSelection(
+          profileName,
+          await this.profileResolver(profileName, request.environment ?? this.options.environment),
+        );
+      } catch (error) {
+        if (error instanceof CodexProfileSelectionError) throw error;
+        throw new CodexProfileSelectionError(
+          profileName,
+          `named profile "${profileName}" has an unreadable Codex configuration`,
+        );
+      }
       let effectiveRequest = request;
       if (!request.mcpServer && this.options.mcpServerFactory) {
         let resolution: CodingSessionMcpServerResolution;
@@ -507,23 +458,25 @@ export class CodexCodingSession {
           });
         }
       }
-      const profile = validateCodexProfile(effectiveRequest.profile);
       let result: ProviderTurnResult;
-      if (this.appServerProfiles.has(profile)) {
+      if (this.appServerProfiles.has(profileName)) {
         if (!this.options.executionStateDirectory)
           throw new Error("app-server execution state directory is unavailable");
         const environment = effectiveRequest.environment ?? this.options.environment;
         result = await runCodexAppServer({
-          request: { ...effectiveRequest, profile, signal: abortSignal },
+          request: { ...effectiveRequest, profile: profileName, signal: abortSignal },
           environment: explicitWorkerEnvironment(environment),
           executionStateDirectory: this.options.executionStateDirectory,
-          profileConfig: await readCodexAppServerProfileConfig(profile, environment),
+          profileSelection,
         });
       } else {
-        const client = await this.createClient(effectiveRequest);
+        const client = await this.createClient(effectiveRequest, profileSelection);
         const threadOptions: ThreadOptions = {
           sandboxMode: effectiveRequest.sandbox,
           workingDirectory: effectiveRequest.workspace,
+          model: profileSelection.model,
+          modelReasoningEffort: profileSelection.modelReasoningEffort,
+          approvalPolicy: "never",
         };
         const thread: Thread = client.startThread(threadOptions);
         const turnOptions: TurnOptions = {
@@ -614,21 +567,22 @@ export class CodexCodingSession {
     }
   }
 
-  private async createClient(request: SessionRequest): Promise<Codex> {
+  private async createClient(
+    request: SessionRequest,
+    profileSelection: ResolvedCodexProfile,
+  ): Promise<Codex> {
     if (this.clientFactory) return this.clientFactory(request);
-    const profile = await ensureCodexProfileUsable(
-      request.profile,
-      request.environment ?? this.options.environment,
-    );
     const options: CodexOptions = {
       env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
-      config: request.mcpServer ? codexMcpConfig(request.mcpServer) : undefined,
+      config: codexAdapterConfig(
+        profileSelection,
+        request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
+      ),
     };
     if (!this.options.executionStateDirectory) return new Codex(options);
     const launcher = await createCodexLauncher(
       this.options.executionStateDirectory,
       request.workspace,
-      profile,
       request.execution,
     );
     return new Codex({

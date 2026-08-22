@@ -7,6 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   Codex,
+  type CodexOptions,
   type RunResult,
   type ThreadEvent,
   type ThreadItem,
@@ -29,6 +30,7 @@ import {
   codexExecutionIdentityPath,
   removeCodexExecutionIdentity,
   reviewerOutputSchema,
+  type CodexProfileResolver,
 } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
 import { z } from "zod";
@@ -37,6 +39,21 @@ const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
 const implementerExecution = { taskId: contract.id, role: "implementer" as const, attempt: "1" };
 const reviewerExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-a" };
+const syntheticProfileResolver: CodexProfileResolver = async (profile) => {
+  const selection = {
+    model: profile === "reviewer-profile" ? "reviewer-model" : "implementer-model",
+    modelReasoningEffort: profile === "reviewer-profile" ? ("high" as const) : ("low" as const),
+    developerInstructions:
+      profile === "reviewer-profile"
+        ? "Reviewer role instruction: inspect the candidate independently."
+        : "Implementer role instruction: implement the frozen task contract.",
+  };
+  return profile === "implementer-profile"
+    ? Object.assign(selection, {
+        config: { developer_instructions: "hidden conflicting instruction" },
+      })
+    : selection;
+};
 
 function sdkTurn(finalResponse: string, usage: RunResult["usage"] = null): RunResult {
   return { items: [], finalResponse, usage };
@@ -120,6 +137,9 @@ async function fakeAppServerEnvironment(
     | "stderr"
     | "wait" = "success",
   expectedMcpConfig: unknown = null,
+  expectedModel = "fixture-model",
+  expectedReasoning = "minimal",
+  expectedDeveloperInstructions = "Fixture reviewer instructions",
 ): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
   const bin = join(root, "bin");
@@ -131,7 +151,7 @@ async function fakeAppServerEnvironment(
   await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
   await writeFile(
     join(codexHome, "reviewer-profile.config.toml"),
-    'model = "fixture-model"\nmodel_reasoning_effort = "minimal"\n',
+    'model = "fixture-model"\nmodel_reasoning_effort = "minimal"\ndeveloper_instructions = "Fixture reviewer instructions"\n',
   );
   const executable = join(bin, "codex");
   await writeFile(
@@ -140,8 +160,11 @@ async function fakeAppServerEnvironment(
 const { readFileSync } = require("node:fs");
 const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
 const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
+const expectedModel = ${JSON.stringify(expectedModel)};
+const expectedReasoning = ${JSON.stringify(expectedReasoning)};
+const expectedDeveloperInstructions = ${JSON.stringify(expectedDeveloperInstructions)};
 if (process.argv[2] !== "app-server") {
-  process.stderr.write("unknown option --profile secret=should-not-escape\\n");
+  process.stderr.write("unexpected Codex transport arguments\\n");
   process.exit(2);
 }
 if (mode === "stderr") {
@@ -167,7 +190,11 @@ const emitTurn = () => {
 const handle = (message) => {
   if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
   else if (message.method === "thread/start") {
-    if (message.params?.config?.model !== "fixture-model") {
+    if (message.params?.config?.model !== expectedModel ||
+        message.params?.config?.model_reasoning_effort !== expectedReasoning ||
+        message.params?.config?.developer_instructions !== expectedDeveloperInstructions ||
+        message.params?.approvalPolicy !== "never" ||
+        message.params?.sandbox !== "read-only") {
       process.stderr.write("profile configuration was not forwarded\\n");
       process.exit(3);
     }
@@ -368,7 +395,6 @@ describe("Coding Session", () => {
     const implementer = await createCodexLauncher(
       stateDirectory,
       join(stateDirectory, "writer"),
-      "writer-profile",
       implementerExecution,
     );
     const reviewerReference = {
@@ -379,7 +405,6 @@ describe("Coding Session", () => {
     const reviewer = await createCodexLauncher(
       stateDirectory,
       join(stateDirectory, "reviewer"),
-      "reviewer-profile",
       reviewerReference,
     );
 
@@ -402,7 +427,6 @@ describe("Coding Session", () => {
     const launcher = await createCodexLauncher(
       stateDirectory,
       join(stateDirectory, "workspace"),
-      "profile",
       implementerExecution,
     );
     await unlink(launcher.identityPath);
@@ -419,12 +443,7 @@ describe("Coding Session", () => {
       role: "reviewer" as const,
       attempt: `1-${sha}`,
     };
-    const launcher = await createCodexLauncher(
-      stateDirectory,
-      workspace,
-      "reviewer-profile",
-      reference,
-    );
+    const launcher = await createCodexLauncher(stateDirectory, workspace, reference);
     const child = spawn(
       process.execPath,
       ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
@@ -486,12 +505,7 @@ describe("Coding Session", () => {
       role: "reviewer" as const,
       attempt: `1-${sha}`,
     };
-    const launcher = await createCodexLauncher(
-      stateDirectory,
-      workspace,
-      "reviewer-profile",
-      reference,
-    );
+    const launcher = await createCodexLauncher(stateDirectory, workspace, reference);
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,
       stdio: "ignore",
@@ -533,38 +547,37 @@ describe("Coding Session", () => {
     }
   });
 
-  test("routes each selected profile through the Codex launcher and keeps role sandboxes local", async () => {
+  test("keeps role sandboxes local while the launcher forwards transport argv", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
     const implementer = await createCodexLauncher(
       stateDirectory,
-      "/writer",
-      "writer-profile",
+      "fixtures/writer",
       implementerExecution,
     );
     const reviewer = await createCodexLauncher(
       stateDirectory,
-      "/reviewer",
-      "reviewer-profile",
+      "fixtures/reviewer",
       reviewerExecution,
     );
-    expect(await readFile(implementer.launcherPath, "utf8")).toContain(
-      '["--profile", "writer-profile", ...process.argv.slice(2)]',
-    );
-    expect(await readFile(reviewer.launcherPath, "utf8")).toContain(
-      '["--profile", "reviewer-profile", ...process.argv.slice(2)]',
-    );
+    for (const launcher of [implementer, reviewer]) {
+      const source = await readFile(launcher.launcherPath, "utf8");
+      expect(source).toContain('spawn("codex", [...process.argv.slice(2)]');
+      expect(source).not.toContain("--profile");
+    }
 
     const sandboxes: string[] = [];
-    const session = new CodexCodingSession(async (request) =>
-      testClient(
-        async () => sdkTurn(JSON.stringify({ status: "proposed", summary: request.profile })),
-        request.profile,
-        (options) => sandboxes.push(String(options.sandboxMode)),
-      ),
+    const session = new CodexCodingSession(
+      async (request) =>
+        testClient(
+          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: request.profile })),
+          request.profile,
+          (options) => sandboxes.push(String(options.sandboxMode)),
+        ),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
     );
     await session.run({
       role: "implementer",
-      workspace: "/writer",
+      workspace: "fixtures/writer",
       contract,
       prompt: "work",
       profile: "writer-profile",
@@ -575,7 +588,7 @@ describe("Coding Session", () => {
     });
     await session.run({
       role: "reviewer",
-      workspace: "/reviewer",
+      workspace: "fixtures/reviewer",
       contract,
       prompt: "review",
       profile: "reviewer-profile",
@@ -588,7 +601,13 @@ describe("Coding Session", () => {
   });
 
   test("selects the app-server by profile while preserving the SDK path for other roles", async () => {
-    const fixture = await fakeAppServerEnvironment();
+    const fixture = await fakeAppServerEnvironment(
+      "success",
+      undefined,
+      "reviewer-model",
+      "high",
+      "Reviewer role instruction: inspect the candidate independently.",
+    );
     const session = new CodexCodingSession(
       async (request) =>
         testClient(
@@ -606,6 +625,7 @@ describe("Coding Session", () => {
         environment: fixture.environment,
         executionStateDirectory: fixture.stateDirectory,
         appServerProfiles: ["reviewer-profile"],
+        profileResolver: syntheticProfileResolver,
       },
     );
 
@@ -643,6 +663,154 @@ describe("Coding Session", () => {
       sessionId: "thread-fixture",
       output: { verdict: "approved", summary: "app-server" },
     });
+  });
+
+  test("applies synthetic role model selection at both adapter boundaries", async () => {
+    const fixture = await fakeAppServerEnvironment(
+      "success",
+      null,
+      "reviewer-model",
+      "high",
+      "Reviewer role instruction: inspect the candidate independently.",
+    );
+    let sdkThreadOptions: ThreadOptions | undefined;
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "sdk" })),
+          "sdk-thread",
+          (options) => {
+            sdkThreadOptions = options;
+          },
+        ),
+      {
+        environment: fixture.environment,
+        executionStateDirectory: fixture.stateDirectory,
+        appServerProfiles: ["reviewer-profile"],
+        profileResolver: syntheticProfileResolver,
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "implementer",
+        workspace: join(fixture.stateDirectory, "writer"),
+        contract,
+        prompt: "work",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        execution: implementerExecution,
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk" } });
+    expect(sdkThreadOptions).toMatchObject({
+      model: "implementer-model",
+      modelReasoningEffort: "low",
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+    });
+
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: join(fixture.stateDirectory, "reviewer"),
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: { summary: "app-server" } });
+  });
+
+  test("forwards distinct role developer instructions through the official SDK config", async () => {
+    const capturedConfigs: CodexOptions[] = [];
+    const capturedThreads: ThreadOptions[] = [];
+    const prompts: string[] = [];
+    const turnOptions: TurnOptions[] = [];
+    const fakeClient = testClient(async (prompt, options) => {
+      prompts.push(prompt);
+      if (options) turnOptions.push(options);
+      return sdkTurn(
+        prompt === "review"
+          ? JSON.stringify({ sha, verdict: "approved", summary: "sdk-review", findings: [] })
+          : JSON.stringify({ status: "proposed", summary: "sdk-implementer" }),
+      );
+    }, "sdk-thread");
+    const fakeThread = fakeClient.startThread();
+    const startThread = vi.spyOn(Codex.prototype, "startThread").mockImplementation(function (
+      this: Codex,
+      options: ThreadOptions = {},
+    ) {
+      capturedConfigs.push((this as unknown as { options: CodexOptions }).options);
+      capturedThreads.push(options);
+      return fakeThread;
+    });
+    try {
+      const session = new CodexCodingSession(undefined, {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+      });
+      await expect(
+        session.run({
+          role: "implementer",
+          workspace: "fixtures/writer",
+          contract,
+          prompt: "work",
+          profile: "implementer-profile",
+          sandbox: "workspace-write",
+          deadlineEpochMs: Date.now() + 10_000,
+          outputSchema: implementerOutputSchema,
+          execution: implementerExecution,
+        }),
+      ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk-implementer" } });
+      await expect(
+        session.run({
+          role: "reviewer",
+          workspace: "fixtures/reviewer",
+          contract,
+          prompt: "review",
+          profile: "reviewer-profile",
+          sandbox: "read-only",
+          deadlineEpochMs: Date.now() + 10_000,
+          outputSchema: reviewerOutputSchema,
+          execution: reviewerExecution,
+        }),
+      ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk-review" } });
+    } finally {
+      startThread.mockRestore();
+    }
+
+    expect(capturedConfigs.map((options) => options.config?.model)).toEqual([
+      "implementer-model",
+      "reviewer-model",
+    ]);
+    expect(capturedConfigs.map((options) => options.config?.developer_instructions)).toEqual([
+      "Implementer role instruction: implement the frozen task contract.",
+      "Reviewer role instruction: inspect the candidate independently.",
+    ]);
+    expect(
+      capturedConfigs.every((options) => options.env?.developer_instructions === undefined),
+    ).toBe(true);
+    expect(capturedThreads).toEqual([
+      expect.objectContaining({
+        model: "implementer-model",
+        modelReasoningEffort: "low",
+        sandboxMode: "workspace-write",
+        approvalPolicy: "never",
+      }),
+      expect.objectContaining({
+        model: "reviewer-model",
+        modelReasoningEffort: "high",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+      }),
+    ]);
+    expect(prompts).toEqual(["work", "review"]);
+    expect(turnOptions.every((options) => options.outputSchema !== undefined)).toBe(true);
   });
 
   test("normalizes the static app-server profile selection from host environment", () => {
@@ -969,7 +1137,10 @@ describe("Coding Session", () => {
           }
         });
       },
-      { environment: { GITHUB_TOKEN: "worker-github-secret" } },
+      {
+        environment: { GITHUB_TOKEN: "worker-github-secret" },
+        profileResolver: syntheticProfileResolver,
+      },
     );
     try {
       const observation = await session.run({
@@ -1035,6 +1206,7 @@ describe("Coding Session", () => {
         ),
       {
         environment: {},
+        profileResolver: syntheticProfileResolver,
         mcpServerFactory: async () => ({
           serverName: "github_read?token=host-secret",
           status: "unavailable",
@@ -1117,6 +1289,36 @@ describe("Coding Session", () => {
     expect(observation.failure).toContain("missing-profile");
   });
 
+  test.each([
+    ["missing model", 'model_reasoning_effort = "low"\n'],
+    ["unsupported reasoning effort", 'model = "fixture-model"\nmodel_reasoning_effort = "ultra"\n'],
+    ["disallowed features", 'model = "fixture-model"\nfeatures = { shell = true }\n'],
+    ["blank developer instructions", 'model = "fixture-model"\ndeveloper_instructions = "   "\n'],
+    ["non-string developer instructions", 'model = "fixture-model"\ndeveloper_instructions = 42\n'],
+    ["malformed TOML", "model =\n"],
+  ])("rejects %s profile configuration before provider work", async (_name, contents) => {
+    const codexHome = await mkdtemp(join(tmpdir(), "usine-codex-profile-config-"));
+    await writeFile(join(codexHome, "reviewer-profile.config.toml"), contents);
+    const session = new CodexCodingSession(undefined, { environment: { CODEX_HOME: codexHome } });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failureCode: "codex_profile_unusable",
+    });
+    expect(observation.failure).not.toContain("ultra");
+  });
+
   test("passes only the portable worker environment", () => {
     const env = explicitWorkerEnvironment({
       OPENAI_API_KEY: "secret",
@@ -1158,6 +1360,7 @@ describe("Coding Session", () => {
         }, "opaque-thread"),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async () => {
           transformCalls += 1;
           return { status: "blocked", summary: "unexpected normalization" };
@@ -1218,6 +1421,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn(finalResponse)),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async ({ finalResponse: response, outputSchema, signal }) => {
           transformCalls += 1;
           expect(response).toBe(finalResponse);
@@ -1309,16 +1513,22 @@ describe("Coding Session", () => {
     const controller = new AbortController();
     const started = deferred<void>();
     let sdkSignal: AbortSignal | undefined;
-    const session = new CodexCodingSession(async () =>
-      testClient(async (_prompt, options) => {
-        sdkSignal = options?.signal;
-        started.resolve();
-        return new Promise<RunResult>((_resolve, reject) => {
-          options?.signal?.addEventListener("abort", () => reject(new Error("SDK turn aborted")), {
-            once: true,
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(async (_prompt, options) => {
+          sdkSignal = options?.signal;
+          started.resolve();
+          return new Promise<RunResult>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("SDK turn aborted")),
+              {
+                once: true,
+              },
+            );
           });
-        });
-      }),
+        }),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
     );
     const pending = session.run({
       role: "implementer",
@@ -1347,7 +1557,6 @@ describe("Coding Session", () => {
     const launcher = await createCodexLauncher(
       stateDirectory,
       join(stateDirectory, "writer"),
-      "writer-profile",
       implementerExecution,
     );
     const controller = new AbortController();
@@ -1373,6 +1582,7 @@ describe("Coding Session", () => {
       {
         environment: { CI: "true" },
         executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
       },
     );
 
@@ -1436,7 +1646,6 @@ describe("Coding Session", () => {
     const launcher = await createCodexLauncher(
       stateDirectory,
       join(stateDirectory, "writer"),
-      "writer-profile",
       implementerExecution,
     );
     const controller = new AbortController();
@@ -1456,7 +1665,11 @@ describe("Coding Session", () => {
           });
         });
       },
-      { environment: { CI: "true" }, executionStateDirectory: stateDirectory },
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
+      },
     );
 
     const executionPoll = observeExecutionPollSchedule();
@@ -1502,6 +1715,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn("The review is wrapped.")),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async ({ signal }) => {
           transformSignal = signal;
           started.resolve();
@@ -1541,6 +1755,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn("The review is wrapped.")),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async ({ signal }) => {
           transformSignal = signal;
           started.resolve();
@@ -1601,8 +1816,9 @@ describe("Coding Session", () => {
     ["wrong status", JSON.stringify({ status: "finished", summary: "done" })],
     ["missing summary", JSON.stringify({ status: "proposed" })],
   ])("fails closed on implementer output: %s", async (_name, finalResponse) => {
-    const session = new CodexCodingSession(async () =>
-      testClient(async () => sdkTurn(finalResponse)),
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
     );
     const observation = await session.run({
       role: "implementer",
@@ -1633,8 +1849,9 @@ describe("Coding Session", () => {
       JSON.stringify({ sha, verdict: "approved", summary: "ok", findings: [7] }),
     ],
   ])("fails closed on reviewer output: %s", async (_name, finalResponse) => {
-    const session = new CodexCodingSession(async () =>
-      testClient(async () => sdkTurn(finalResponse)),
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
     );
     const observation = await session.run({
       role: "reviewer",
@@ -1657,8 +1874,9 @@ describe("Coding Session", () => {
   });
 
   test("fails explicitly when normalization is needed but unconfigured", async () => {
-    const session = new CodexCodingSession(async () =>
-      testClient(async () => sdkTurn("The review could not be represented directly.")),
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review could not be represented directly.")),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
     );
 
     const observation = await session.run({
@@ -1687,6 +1905,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn("The review is wrapped.")),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async () => ({ verdict: "approved" }),
       },
     );
@@ -1718,6 +1937,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn("The review is wrapped.")),
       {
         environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
         roleOutputTransform: async () => {
           throw new Error(secretDetail);
         },
