@@ -14,10 +14,12 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@usine/task-authority": "workspace:*",
     "effect": "4.0.0-rc.110",
     "execa": "latest",
-    "octokit": "latest"
+    "octokit": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",

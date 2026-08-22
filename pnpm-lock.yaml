@@ -178,6 +178,9 @@ importers:
 
   packages/forge-delivery:
     dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)'
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
@@ -190,6 +193,9 @@ importers:
       octokit:
         specifier: latest
         version: 5.0.5
+      zod:
+        specifier: latest
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: latest
