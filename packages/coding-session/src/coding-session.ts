@@ -23,6 +23,7 @@ import {
   type ExecutionHandle,
   type ExecutionReference,
 } from "./codex-execution.js";
+import { isAppServerCancellation, runCodexAppServer } from "./codex-app-server.js";
 
 const PORTABLE_ENVIRONMENT_KEYS = [
   "PATH",
@@ -61,6 +62,15 @@ export function validateCodexProfile(profile: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(normalized))
     throw new CodexProfileSelectionError(profile);
   return normalized;
+}
+
+export function codexAppServerProfilesFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): readonly string[] {
+  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
+  if (!configured) return [];
+  const profiles = configured.split(",").map(validateCodexProfile);
+  return [...new Set(profiles)];
 }
 
 async function ensureCodexProfileUsable(
@@ -232,6 +242,7 @@ export function createOpenAICompatibleRoleOutputTransform(
 export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
   executionStateDirectory?: string;
+  appServerProfiles?: readonly string[];
   roleOutputTransform?: RoleOutputTransform;
   mcpServerFactory?: CodingSessionMcpServerFactory;
 }
@@ -263,7 +274,13 @@ export interface CodingSessionRuntimeAdapter {
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
 
-function outputFrom(result: RunResult): unknown {
+interface ProviderTurnResult {
+  finalResponse: string;
+  usage: { input_tokens?: number; output_tokens?: number } | null;
+  sessionId: string | null;
+}
+
+function outputFrom(result: ProviderTurnResult): unknown {
   try {
     return JSON.parse(result.finalResponse) as unknown;
   } catch {
@@ -400,11 +417,13 @@ async function runRoleOutputTransform(
 
 export class CodexCodingSession {
   private readonly adapter: CodingSessionRuntimeAdapter;
+  private readonly appServerProfiles: ReadonlySet<string>;
 
   constructor(
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
   ) {
+    this.appServerProfiles = new Set(options.appServerProfiles ?? []);
     this.adapter = new CodexRuntimeAdapter(
       (request) => this.runProvider(request),
       options.executionStateDirectory,
@@ -479,29 +498,41 @@ export class CodexCodingSession {
           });
         }
       }
-      validateCodexProfile(effectiveRequest.profile);
-      const client = await this.createClient(effectiveRequest);
-      const threadOptions: ThreadOptions = {
-        sandboxMode: effectiveRequest.sandbox,
-        workingDirectory: effectiveRequest.workspace,
-      };
-      const thread: Thread = client.startThread(threadOptions);
-      const turnOptions: TurnOptions = {
-        signal: abortSignal,
-        outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
-      };
-      const result = await runStreamedTurn(
-        thread,
-        effectiveRequest.prompt,
-        turnOptions,
-        effectiveRequest.onObservation,
-      );
+      const profile = validateCodexProfile(effectiveRequest.profile);
+      let result: ProviderTurnResult;
+      if (this.appServerProfiles.has(profile)) {
+        if (!this.options.executionStateDirectory)
+          throw new Error("app-server execution state directory is unavailable");
+        result = await runCodexAppServer({
+          request: { ...effectiveRequest, profile, signal: abortSignal },
+          environment: effectiveRequest.environment ?? this.options.environment,
+          executionStateDirectory: this.options.executionStateDirectory,
+        });
+      } else {
+        const client = await this.createClient(effectiveRequest);
+        const threadOptions: ThreadOptions = {
+          sandboxMode: effectiveRequest.sandbox,
+          workingDirectory: effectiveRequest.workspace,
+        };
+        const thread: Thread = client.startThread(threadOptions);
+        const turnOptions: TurnOptions = {
+          signal: abortSignal,
+          outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
+        };
+        const sdkResult = await runStreamedTurn(
+          thread,
+          effectiveRequest.prompt,
+          turnOptions,
+          effectiveRequest.onObservation,
+        );
+        result = { ...sdkResult, sessionId: thread.id };
+      }
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
           return {
             status: "failed",
-            sessionId: thread.id,
+            sessionId: result.sessionId,
             output: null,
             usage: usageFrom(result.usage),
             summary: "coding session output normalization unavailable",
@@ -528,7 +559,7 @@ export class CodexCodingSession {
             };
           return {
             status: "failed",
-            sessionId: thread.id,
+            sessionId: result.sessionId,
             output: null,
             usage: usageFrom(result.usage),
             summary: "coding session output normalization failed",
@@ -540,7 +571,7 @@ export class CodexCodingSession {
         if (!parsed.success) {
           return {
             status: "failed",
-            sessionId: thread.id,
+            sessionId: result.sessionId,
             output: null,
             usage: usageFrom(result.usage),
             summary: "coding session normalized output did not match role schema",
@@ -551,14 +582,14 @@ export class CodexCodingSession {
       }
       return {
         status: "completed",
-        sessionId: thread.id,
+        sessionId: result.sessionId,
         output: parsed.data,
         usage: usageFrom(result.usage),
         summary: "coding session completed",
         failure: null,
       };
     } catch (error) {
-      const cancelled = abortSignal.aborted;
+      const cancelled = abortSignal.aborted || isAppServerCancellation(error);
       const failure = error instanceof Error ? error.message : String(error);
       return {
         status: cancelled ? "cancelled" : "failed",
@@ -684,7 +715,9 @@ function safeObservationLabel(value: string): string {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value) ? value : "unknown";
 }
 
-function usageFrom(usage: Usage | null | undefined): SessionObservation["usage"] {
+function usageFrom(
+  usage: { input_tokens?: number; output_tokens?: number } | null | undefined,
+): SessionObservation["usage"] {
   return usage == null
     ? null
     : {

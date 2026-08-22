@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,8 @@ import {
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
+  type CodingSessionObservation,
+  codexAppServerProfilesFromEnvironment,
   codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
@@ -88,6 +90,64 @@ function deferred<T>(): {
     resolve = resolveValue;
   });
   return { promise, resolve };
+}
+
+async function fakeAppServerEnvironment(
+  mode: "success" | "interrupt" | "mismatch" = "success",
+): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
+  const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
+  const bin = join(root, "bin");
+  const stateDirectory = join(root, "state");
+  await mkdir(join(stateDirectory, "reviewer"), { recursive: true });
+  await mkdir(bin, { recursive: true });
+  const executable = join(bin, "codex");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+const mode = process.env.FIXTURE_APP_SERVER_MODE;
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+const emitTurn = () => {
+  send({ method: "turn/started", params: { threadId: "thread-fixture", turn: { id: "turn-fixture" } } });
+  if (mode === "interrupt") return;
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] }) } } });
+  send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
+  send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
+};
+const handle = (message) => {
+  if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
+  else if (message.method === "thread/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-fixture" } } });
+    setImmediate(() => send({ method: "thread/started", params: { thread: { id: "thread-fixture" } } }));
+  } else if (message.method === "turn/start") {
+    send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-fixture" } } });
+    setImmediate(emitTurn);
+  } else if (message.method === "turn/interrupt") {
+    send({ jsonrpc: "2.0", id: message.id, result: {} });
+    send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "interrupted", error: null } } });
+  }
+};
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  for (const line of buffer.split("\\n").slice(0, -1)) handle(JSON.parse(line));
+  buffer = buffer.slice(buffer.lastIndexOf("\\n") + 1);
+});
+process.stdin.resume();
+setInterval(() => undefined, 1_000);
+`,
+  );
+  await chmod(executable, 0o755);
+  return {
+    environment: {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      CI: "true",
+      FIXTURE_APP_SERVER_MODE: mode,
+    },
+    stateDirectory,
+    close: async () => undefined,
+  };
 }
 
 async function startFakeGithubHost(): Promise<{
@@ -405,6 +465,166 @@ describe("Coding Session", () => {
       execution: reviewerExecution,
     });
     expect(sandboxes).toEqual(["workspace-write", "read-only"]);
+  });
+
+  test("selects the app-server by profile while preserving the SDK path for other roles", async () => {
+    const fixture = await fakeAppServerEnvironment();
+    const session = new CodexCodingSession(
+      async (request) =>
+        testClient(
+          async () =>
+            sdkTurn(JSON.stringify({ status: "proposed", summary: request.profile }), {
+              input_tokens: 2,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 3,
+              reasoning_output_tokens: 0,
+            }),
+          "sdk-thread",
+        ),
+      {
+        environment: fixture.environment,
+        executionStateDirectory: fixture.stateDirectory,
+        appServerProfiles: ["reviewer-profile"],
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "implementer",
+        workspace: join(fixture.stateDirectory, "writer"),
+        contract,
+        prompt: "work",
+        profile: "writer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        execution: implementerExecution,
+      }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      sessionId: "sdk-thread",
+      output: { status: "proposed", summary: "writer-profile" },
+    });
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: join(fixture.stateDirectory, "reviewer"),
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+      }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      sessionId: "thread-fixture",
+      output: { verdict: "approved", summary: "app-server" },
+    });
+  });
+
+  test("normalizes the static app-server profile selection from host environment", () => {
+    expect(
+      codexAppServerProfilesFromEnvironment({
+        USINE_CODEX_APP_SERVER_PROFILES: " reviewer-profile,writer-profile,reviewer-profile ",
+      }),
+    ).toEqual(["reviewer-profile", "writer-profile"]);
+    expect(() =>
+      codexAppServerProfilesFromEnvironment({
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer profile",
+      }),
+    ).toThrow("Codex profile is unusable");
+  });
+
+  test("executes an app-server reviewer through the shared typed lifecycle and reaps its process", async () => {
+    const fixture = await fakeAppServerEnvironment();
+    const observations: CodingSessionObservation[] = [];
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      onObservation: (event) => {
+        observations.push(event);
+      },
+    });
+    expect(observation).toMatchObject({
+      status: "completed",
+      sessionId: "thread-fixture",
+      output: { verdict: "approved", summary: "app-server" },
+      usage: { inputTokens: 7, outputTokens: 9 },
+    });
+    expect(observations).toEqual([
+      { type: "thread_started" },
+      { type: "turn_started", turn: 1 },
+      { type: "tool_completed", tool: "shell", outcome: "succeeded" },
+      { type: "turn_completed", turn: 1, outcome: "succeeded" },
+    ]);
+    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+  });
+
+  test("interrupts an app-server turn and truthfully reaps the exact owned process", async () => {
+    const fixture = await fakeAppServerEnvironment("interrupt");
+    const controller = new AbortController();
+    const started = deferred<void>();
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const pending = session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      signal: controller.signal,
+      onObservation: (event) => {
+        if (event.type === "turn_started") started.resolve();
+      },
+    });
+    await started.promise;
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
+    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+  });
+
+  test("fails closed on an app-server identity mismatch and does not retry", async () => {
+    const fixture = await fakeAppServerEnvironment("mismatch");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      executionStateDirectory: fixture.stateDirectory,
+      appServerProfiles: ["reviewer-profile"],
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+    expect(observation).toMatchObject({ status: "failed", output: null });
+    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
   test("pre-approves exactly the enabled MCP tools", () => {

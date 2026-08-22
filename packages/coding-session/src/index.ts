@@ -1,6 +1,7 @@
 export {
   CodexCodingSession,
   CodexProfileSelectionError,
+  codexAppServerProfilesFromEnvironment,
   codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
