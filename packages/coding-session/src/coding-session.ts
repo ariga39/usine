@@ -559,7 +559,7 @@ export class CodexCodingSession {
             summary: "coding session output normalization failed",
             failure: "coding session output normalization failed",
             phase,
-            failureClass: "configuration",
+            failureClass: classifyAdapterFailure(error),
             failureCode: "role_output_transform_failed",
           };
         }

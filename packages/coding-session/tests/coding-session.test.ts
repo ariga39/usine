@@ -2055,4 +2055,39 @@ describe("Coding Session", () => {
     });
     expect(JSON.stringify(observation)).not.toContain(secretDetail);
   });
+
+  test("classifies a provider failure from the role-output transform", async () => {
+    const secretDetail = "rate limit 429 raw-secret-marker";
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("The review is wrapped.")),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          throw new Error(secretDetail);
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      phase: "output",
+      failureClass: "rate_limit",
+      failureCode: "role_output_transform_failed",
+    });
+    expect(JSON.stringify(observation)).not.toContain(secretDetail);
+  });
 });
