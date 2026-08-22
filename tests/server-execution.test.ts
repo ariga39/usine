@@ -13,7 +13,12 @@ import {
   type ServerExecutionContext,
 } from "@usine/runtime";
 import { executeDeliveryRun } from "@usine/delivery-run";
-import { submitTask, taskStatus, type TaskSubmission } from "../apps/cli/src/server-client.js";
+import {
+  submitTask,
+  taskEvents,
+  taskStatus,
+  type TaskSubmission,
+} from "../apps/cli/src/server-client.js";
 import {
   applyMigrations,
   hashTaskContract,
@@ -224,7 +229,7 @@ describe("server-owned execution", () => {
         (result) => result.state === "blocked",
       );
       expect(blocked.state).toBe("blocked");
-      const events = (await lookupTaskEvents(stateDirectory, admitted.taskId, 0, 100))!.events;
+      const events = (await taskEvents(server.url, admitted.taskId, 0, 100)).events;
       expect(events.map((event) => event.data)).toContainEqual({
         type: "coding_session_interrupted",
         role: "implementer",
