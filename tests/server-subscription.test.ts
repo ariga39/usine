@@ -292,13 +292,20 @@ describe("public transient server event listeners", () => {
       await register(server.url, repo);
       slow = await openPausedListener(server.url, repo.id);
       fast = await openServerEventListener(server.url, { repositoryId: repo.id });
+      const slowClosed = slow.closed;
       const fastEvents = collect(fast, 99);
       await submitTask(server.url, { contractPath, repositoryId: repo.id });
-      slow.close();
       const events = await fastEvents;
       expect(events).toHaveLength(99);
+      expect(events.map((entry) => entry.event.sequence)).toEqual(
+        Array.from({ length: 99 }, (_, index) => index + 1),
+      );
+      expect(events[0]?.event.data.type).toBe("task_admitted");
+      expect(events.at(-2)?.event.data.type).toBe("task_blocked");
       expect(events.at(-1)?.event.data.type).toBe("task_terminal");
       expect(JSON.stringify(events)).not.toContain("secret-b");
+      slow.close();
+      await expect(slowClosed).resolves.toBeUndefined();
       fast.close();
       const shutdownListener = await openServerEventListener(server.url, { repositoryId: repo.id });
       const shutdownNext = shutdownListener[Symbol.asyncIterator]()
