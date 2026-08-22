@@ -25,8 +25,8 @@ import { CandidateWorkspace } from "@usine/candidate-workspace";
 import {
   CodexCodingSession,
   codexAppServerProfilesFromEnvironment,
+  type CodingSessionCleanup,
   type CodingSessionMcpServerResolution,
-  type CodingSessionRuntimeAdapter,
 } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
 import {
@@ -53,13 +53,11 @@ export {
 } from "./runtime-policy.js";
 export type { TaskExecutionInput } from "@usine/task-authority";
 
-export function createRuntimeExecutionAdapter(
-  environment: NodeJS.ProcessEnv,
-): CodingSessionRuntimeAdapter {
+export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): CodingSessionCleanup {
   return new CodexCodingSession(undefined, {
     environment,
     appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
-  }).runtimeAdapter;
+  });
 }
 
 export async function registerRepository(

@@ -133,18 +133,6 @@ export async function discoverOwnedExecutions(
   return executionLifecycle.discover(stateDirectory, taskId);
 }
 
-export async function reapExecutionsForTask(stateDirectory: string, taskId: string): Promise<void> {
-  for (const handle of await executionLifecycle.discover(stateDirectory, taskId)) {
-    await executionLifecycle.reap(stateDirectory, handle);
-  }
-}
-
-export async function stopExecutionsForTask(stateDirectory: string, taskId: string): Promise<void> {
-  for (const handle of await executionLifecycle.discover(stateDirectory, taskId)) {
-    await executionLifecycle.interrupt(stateDirectory, handle);
-  }
-}
-
 export async function listExecutionTaskIds(stateDirectory: string): Promise<string[]> {
   return [
     ...new Set(

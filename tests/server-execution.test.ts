@@ -248,8 +248,18 @@ describe("server-owned execution", () => {
     const firstStarted = deferred<void>();
     const firstAborted = deferred<void>();
     const firstSeen: string[] = [];
+    const cleanupCalls = { taskIds: [] as string[], owned: 0 };
+    const codingSession = {
+      cleanupTask: async (_stateDirectory: string, taskId: string) => {
+        cleanupCalls.taskIds.push(taskId);
+      },
+      cleanupOwned: async (_stateDirectory: string) => {
+        cleanupCalls.owned += 1;
+      },
+    };
     const first = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
+      codingSession,
       execute: async ({ authority, contract, result, signal }) => {
         firstSeen.push(result.taskId);
         await authority.reserveActivation(result.taskId, contract.budget.maxImplementerActivations);
@@ -277,6 +287,7 @@ describe("server-owned execution", () => {
     const restartedSeen: string[] = [];
     const second = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
+      codingSession,
       execute: blockedExecutor(restartedSeen),
       host: "127.0.0.1",
       port: 0,
@@ -290,9 +301,11 @@ describe("server-owned execution", () => {
       expect(firstSeen).toEqual([admitted.taskId]);
       expect(restartedSeen).toEqual([admitted.taskId]);
       expect(completed.evidence.restartRecoveries).toBe(1);
+      expect(cleanupCalls.taskIds).toEqual([admitted.taskId]);
     } finally {
       await second.close();
     }
+    expect(cleanupCalls.owned).toBeGreaterThan(0);
   });
 
   test("isolates corrupt restart rows and completes recovery before readiness", async () => {

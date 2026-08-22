@@ -21,7 +21,7 @@ import {
   taskResourceFromResult,
   isTerminalState,
 } from "@usine/task-authority";
-import type { CodingSessionRuntimeAdapter } from "@usine/coding-session";
+import type { CodingSessionCleanup } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
@@ -61,7 +61,7 @@ export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskR
 export interface UsineServerOptions {
   environment: NodeJS.ProcessEnv;
   execute?: ServerExecution;
-  executionAdapter?: CodingSessionRuntimeAdapter;
+  codingSession?: CodingSessionCleanup;
   host?: string;
   port?: number;
 }
@@ -148,8 +148,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       for (const task of restartable) {
         yield* Effect.tryPromise({
           try: async () => {
-            if (options.executionAdapter)
-              await options.executionAdapter.reapOwned(stateDirectory, task.result.taskId);
+            if (options.codingSession)
+              await options.codingSession.cleanupTask(stateDirectory, task.result.taskId);
             await recordRecoveryObservation(stateDirectory, task.result.taskId, "server_restart");
             await recordRecoveryObservation(
               stateDirectory,
@@ -188,8 +188,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     ...running,
     close: async () => {
       const initial = await Promise.allSettled([
-        options.executionAdapter
-          ? cleanupOwnedExecutions(options.executionAdapter, stateDirectory)
+        options.codingSession
+          ? options.codingSession.cleanupOwned(stateDirectory)
           : Promise.resolve(),
         Effect.runPromise(Fiber.interrupt(fiber)),
       ]);
@@ -197,9 +197,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         (result): result is PromiseRejectedResult => result.status === "rejected",
       );
       let finalFailure: unknown;
-      if (options.executionAdapter) {
+      if (options.codingSession) {
         try {
-          await cleanupOwnedExecutions(options.executionAdapter, stateDirectory);
+          await options.codingSession.cleanupOwned(stateDirectory);
         } catch (error) {
           finalFailure = error;
         }
@@ -208,29 +208,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       if (finalFailure) throw finalFailure;
     },
   };
-}
-
-async function cleanupOwnedExecutions(
-  adapter: CodingSessionRuntimeAdapter,
-  stateDirectory: string,
-): Promise<void> {
-  const taskIds = await adapter.listOwnedTaskIds(stateDirectory);
-  const results = await Promise.allSettled(
-    taskIds.map(async (taskId) => {
-      const handles = await adapter.discoverOwned(stateDirectory, taskId);
-      const cleanup = await Promise.allSettled(
-        handles.flatMap((handle) => [adapter.interrupt(handle), adapter.reap(handle)]),
-      );
-      const failure = cleanup.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected",
-      );
-      if (failure) throw failure.reason;
-    }),
-  );
-  const failure = results.find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
-  );
-  if (failure) throw failure.reason;
 }
 
 function isLoopbackHost(host: string): boolean {
