@@ -1,4 +1,5 @@
 import { Clock, Duration, Effect } from "effect";
+import { decodeTaskEventEnvelope, type TaskEventEnvelope } from "@usine/runtime";
 import {
   decodeTaskResource,
   decodeTaskEventPage,
@@ -249,6 +250,149 @@ export async function taskEvents(
       "server returned invalid TaskEventPage (" + response.status + ")",
       response.status,
     );
+  }
+}
+
+export interface EventScope {
+  taskId?: string;
+  repositoryId?: string;
+}
+
+export interface ServerEventListener extends AsyncIterable<TaskEventEnvelope> {
+  close(): void;
+}
+
+export interface ServerEventListenerOptions extends EventScope {
+  signal?: AbortSignal;
+}
+
+export async function openServerEventListener(
+  serverUrl: string,
+  options: ServerEventListenerOptions = {},
+): Promise<ServerEventListener> {
+  const scope = eventScopeQuery(options);
+  const controller = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+  const response = await fetchServer(new URL(`/v1/events/subscribe${scope}`, serverUrl), {
+    signal,
+  });
+  if (!response.ok) {
+    const body = await readJson(response);
+    throw new ServerClientError(
+      responseMessage(body, "server event listener failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  }
+  if (!response.body)
+    throw new ServerClientError("server event listener has no response body", 500);
+  const iterator = parseServerEventStream(response.body);
+  let closed = false;
+  const stop = (): void => {
+    if (closed) return;
+    closed = true;
+    controller.abort();
+    try {
+      void iterator.return?.(undefined)?.catch(() => undefined);
+    } catch {
+      // Closing an already-ended transport is intentionally best effort.
+    }
+  };
+  const listener: ServerEventListener & AsyncIterator<TaskEventEnvelope> = {
+    next: () => (closed ? Promise.resolve({ done: true, value: undefined }) : iterator.next()),
+    return: async () => {
+      stop();
+      return { done: true, value: undefined };
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    close: stop,
+  };
+  return listener;
+}
+
+export async function waitForServerEvent(
+  serverUrl: string,
+  scope: EventScope = {},
+  timeoutMs = 30_000,
+): Promise<TaskEventEnvelope | null> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000)
+    throw new ServerClientError("timeoutMs is out of range", 400, "validation", "validation");
+  const scopeQuery = eventScopeQuery(scope);
+  const response = await fetchServer(
+    new URL(
+      `/v1/events/wait${scopeQuery}${scopeQuery ? "&" : "?"}timeoutMs=${timeoutMs}`,
+      serverUrl,
+    ),
+  );
+  const body = await readJson(response);
+  if (!response.ok)
+    throw new ServerClientError(
+      responseMessage(body, "server event wait failed"),
+      response.status,
+      failureKindForStatus(response.status),
+      responseDiagnostic(body),
+    );
+  try {
+    if (body === null) return null;
+    return decodeTaskEventEnvelope(body);
+  } catch {
+    throw new ServerClientError("server returned invalid TaskEventEnvelope", response.status);
+  }
+}
+
+export const waitForEvent = waitForServerEvent;
+export const subscribeToServerEvents = openServerEventListener;
+
+function eventScopeQuery(scope: EventScope): string {
+  if (scope.taskId !== undefined && scope.repositoryId !== undefined)
+    throw new ServerClientError(
+      "event scope must select a Task, Repository, or whole server",
+      400,
+      "validation",
+      "validation",
+    );
+  const params = new URLSearchParams();
+  if (scope.taskId !== undefined) params.set("taskId", scope.taskId);
+  if (scope.repositoryId !== undefined) params.set("repositoryId", scope.repositoryId);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+async function* parseServerEventStream(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<TaskEventEnvelope> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    while (true) {
+      const separator = buffer.indexOf("\n\n");
+      if (separator < 0) break;
+      const frame = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      const data = frame
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart())
+        .join("\n");
+      if (!data) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        throw new ServerClientError("server returned invalid event JSON", 500);
+      }
+      try {
+        yield decodeTaskEventEnvelope(parsed);
+      } catch {
+        throw new ServerClientError("server returned invalid TaskEventEnvelope", 500);
+      }
+    }
   }
 }
 

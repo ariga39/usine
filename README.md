@@ -41,6 +41,12 @@ node apps/cli/dist/cli.mjs task watch --after <sequence> <task-id>
 
 Operator reads use `server health|snapshot`, `repository list|get`, and `task list|get|history|watch`. Human-readable output is the default; append `--json` for stable machine-readable resources. Watch and history accept recognized options before or after the Task ID. The existing `register` and `submit` commands remain the mutation entry points. `inspect` is a compatibility alias for `repository get`, while `status` and `follow` are compatibility aliases for `task get` and `task watch`; their output is the same safe resource projection and never includes repository paths or private policy facts.
 
+## Public server event observation
+
+The server exposes transient live observation through `GET /v1/events/subscribe` (SSE) and `GET /v1/events/wait` (one JSON result). Select exactly one scope with `taskId`, `repositoryId`, or neither for the whole server. A wait returns the first matching new event and accepts a bounded optional `timeoutMs`; a timed-out wait returns JSON `null`. A subscription sends every matching event while the connection remains usable. Each non-null `{ taskId, repositoryId, event }` envelope contains the existing sanitized `TaskEvent` projection.
+
+These listeners have no cursor, acknowledgement, replay, resume, or restart-recovery contract. Disconnect, cancellation, server shutdown, and a listener that cannot keep up release the transient resource; a later request starts fresh. A client that needs current state reads the existing snapshot, Task resource, or Task-local history before opening a listener. Task-local persisted history and sequence replay remain unchanged and separate. Public envelopes contain no configured secrets, repository paths, transcripts, or private blocker text.
+
 CLI exit codes are stable: usage `2`, not-found `3`, timeout `4`, connection `5`, server `6`, and validation `7`. Invalid task contracts and server-side validation now use `7`; callers that previously treated those failures as usage must migrate their checks.
 
 完整交付需要为每个已注册 Repository 配置其 `forgeProfile` 对应的 `USINE_FORGE_PROFILE_<PROFILE>_*` GitHub App 变量。配置只在 host runtime 使用；Repository durable facts 保存 profile 名称，不保存凭据。上面的数值、身份、路径和任务文件名都是占位符。
