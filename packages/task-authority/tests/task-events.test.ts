@@ -137,6 +137,43 @@ describe("Task event stream", () => {
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
   });
 
+  test("records only sanitized MCP outcomes and unavailable fallback", async () => {
+    const taskId = `events-mcp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    await authority.appendObservation(taskId, {
+      eventId: "coding-mcp-completed",
+      occurredAtEpochMs: 202,
+      data: {
+        type: "coding_mcp_tool_completed",
+        role: "reviewer",
+        activation: 1,
+        sessionId: "coding-session:1:reviewer",
+        outcomeId: "coding:1:mcp:outcome",
+        server: "github_read_reviewer",
+        tool: "github_issue_get",
+        outcome: "succeeded",
+      },
+    });
+    await authority.appendObservation(taskId, {
+      eventId: "coding-mcp-unavailable",
+      occurredAtEpochMs: 203,
+      data: {
+        type: "coding_mcp_unavailable",
+        role: "reviewer",
+        activation: 1,
+        sessionId: "coding-session:1:reviewer",
+        server: "github_read_reviewer",
+        reason: "startup_timeout",
+      },
+    });
+    const events = await authority.listEvents(taskId);
+    expect(events.slice(-2).map((event) => event.data.type)).toEqual([
+      "coding_mcp_tool_completed",
+      "coding_mcp_unavailable",
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/arguments|result|credential|secret|token/i);
+  });
+
   test("keeps a complete coding activation observation sequence beside its authoritative result", async () => {
     const taskId = `activation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);

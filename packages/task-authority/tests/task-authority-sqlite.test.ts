@@ -221,7 +221,58 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_history'")
         .get(),
     ).toBeUndefined();
+    expect(
+      inspection
+        .prepare("PRAGMA table_info(repositories)")
+        .all()
+        .find((row) => row.name === "github_read_profile"),
+    ).toMatchObject({ name: "github_read_profile", notnull: 0 });
     inspection.close();
+  });
+
+  test("persists per-Repository read ownership while hiding it from projections", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const first = {
+      id: "read-repository-one",
+      path: "/repositories/one",
+      owner: "example",
+      name: "one",
+      baseBranch: "main",
+      implementerProfile: "writer-one",
+      reviewerProfile: "reviewer-one",
+      forgeProfile: "forge-one",
+      githubReadProfile: "read-one",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    };
+    const second = { ...first, id: "read-repository-two", name: "two", githubReadProfile: null };
+    const savedFirst = await authority.registerRepository(first);
+    await authority.registerRepository(second);
+
+    expect(savedFirst.githubReadProfile).toBe("read-one");
+    expect(await authority.lookupRepository(first.id)).toMatchObject({
+      id: first.id,
+      githubReadProfile: "read-one",
+    });
+    expect(await authority.lookupRepository(second.id)).toMatchObject({
+      id: second.id,
+      githubReadProfile: null,
+    });
+    const publicResource = await authority.lookupRepositoryResource(first.id);
+    expect(publicResource).toMatchObject({ id: first.id, owner: "example", name: "one" });
+    expect(JSON.stringify(publicResource)).not.toContain("read-one");
+
+    const admitted = await authority.admit({
+      contract: { ...makeContract("read-snapshot-task"), repositoryId: first.id },
+      contractHash: "read-snapshot-hash",
+      repositoryIdentity: "example/one",
+      repository: savedFirst,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    expect(admitted.repository).toBeDefined();
+    expect(JSON.stringify(admitted.repository)).not.toContain("read-one");
+    expect(admitted.repository).not.toHaveProperty("githubReadProfile");
   });
 
   test("quarantines unsupported durable state at the lookup boundary", async () => {

@@ -22,21 +22,33 @@ import {
   isTerminalState,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
-import { CodexCodingSession, type CodingSessionRuntimeAdapter } from "@usine/coding-session";
+import {
+  CodexCodingSession,
+  type CodingSessionMcpServerResolution,
+  type CodingSessionRuntimeAdapter,
+} from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
-import { ForgeDelivery, type ForgePolicy } from "@usine/forge-delivery";
+import {
+  ForgeDelivery,
+  startGithubReadMcpHttp,
+  type ForgePolicy,
+  type GithubReadMcpHttpHandle,
+  type GithubReadRole,
+} from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import type { RuntimePolicy } from "./runtime-policy.js";
-import { deadlineExpired } from "@usine/task-authority";
+import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 
 export {
   runtimePolicyFromEnvironment,
   forgePolicyFromEnvironment,
+  githubReadPolicyFromEnvironment,
   ForgeProfileResolutionError,
   type ForgeProfileErrorCode,
   stateDirectoryFromEnvironment,
   type RuntimePolicy,
+  type GithubReadPolicy,
 } from "./runtime-policy.js";
 export type { TaskExecutionInput } from "@usine/task-authority";
 
@@ -431,7 +443,43 @@ async function executeWithServices(options: {
     environment: policy.workerEnvironment,
     executionStateDirectory: policy.stateDirectory,
     roleOutputTransform: policy.roleOutputTransform,
+    mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {
+      const readPolicy = policy.githubRead;
+      const role: GithubReadRole = request.role;
+      const serverName = `github_read_${role}`;
+      if (!readPolicy) return { serverName, status: "unavailable", reason: "unavailable" };
+
+      const tools = role === "implementer" ? readPolicy.implementerTools : readPolicy.reviewerTools;
+      const existing = githubReadHandles.get(role);
+      if (existing)
+        return {
+          serverName,
+          status: "available",
+          server: githubReadServerConfig(serverName, existing.url, tools, deadlineEpochMs),
+        };
+      try {
+        const handle = await startGithubReadMcpHttp({
+          repository: { owner: contract.repository.owner, name: contract.repository.name },
+          issueNumber: contract.delivery.issue,
+          role,
+          tools,
+          policy: readPolicy.policy,
+          deadlineEpochMs,
+          signal: options.signal,
+          requestTimeoutMs: Math.min(10_000, remainingUntil(deadlineEpochMs)),
+        });
+        githubReadHandles.set(role, handle);
+        return {
+          serverName,
+          status: "available",
+          server: githubReadServerConfig(serverName, handle.url, tools, deadlineEpochMs),
+        };
+      } catch {
+        return { serverName, status: "unavailable", reason: "unavailable" };
+      }
+    },
   });
+  const githubReadHandles = new Map<GithubReadRole, GithubReadMcpHttpHandle>();
   const quality = new QualityGate({
     workspace,
     session,
@@ -456,13 +504,34 @@ async function executeWithServices(options: {
     reviewer: policy.roles.reviewer,
     signal: options.signal,
   };
-  return executeDeliveryRun(workflowInput, {
-    authority,
-    workspace,
-    session,
-    quality,
-    forge,
-  });
+  try {
+    return await executeDeliveryRun(workflowInput, {
+      authority,
+      workspace,
+      session,
+      quality,
+      forge,
+    });
+  } finally {
+    await Promise.allSettled([...githubReadHandles.values()].map((handle) => handle.close()));
+  }
+}
+
+function githubReadServerConfig(
+  name: string,
+  url: string,
+  enabledTools: readonly string[],
+  deadlineEpochMs: number,
+) {
+  const remaining = remainingUntil(deadlineEpochMs);
+  return {
+    name,
+    url,
+    enabledTools,
+    startupTimeoutMs: Math.min(5_000, remaining),
+    toolTimeoutMs: Math.min(10_000, remaining),
+    required: false,
+  };
 }
 
 export {

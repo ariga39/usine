@@ -15,13 +15,12 @@ const PORTABLE_ENVIRONMENT_KEYS = [
   "PATHEXT",
 ] as const;
 
-export type ForgePolicy =
+export type GithubApiPolicy =
   | {
       mode: "test";
       appSlug: string;
       token: string;
       apiUrl: string;
-      gitUrl: string;
     }
   | {
       mode: "app";
@@ -29,8 +28,15 @@ export type ForgePolicy =
       appId: string;
       installationId: number;
       privateKeyPath: string;
-      gitUrl: string;
     };
+
+export type ForgePolicy =
+  | (Extract<GithubApiPolicy, { mode: "test" }> & {
+      gitUrl: string;
+    })
+  | (Extract<GithubApiPolicy, { mode: "app" }> & {
+      gitUrl: string;
+    });
 
 export function forgeGitEnvironment(
   environment: NodeJS.ProcessEnv,
@@ -81,28 +87,38 @@ function providerStatusOf(error: unknown): number | undefined {
   return typeof status === "number" && Number.isFinite(status) ? status : undefined;
 }
 
-export async function createForgeClient(options: ForgeDeliveryOptions): Promise<ForgeClient> {
-  const forge = options.forge;
-  if (forge.mode === "test") {
+export async function createGithubApiClient(
+  policy: GithubApiPolicy,
+  fetchImplementation?: typeof fetch,
+): Promise<ForgeClient> {
+  if (policy.mode === "test") {
     return {
-      octokit: new Octokit({ auth: forge.token, baseUrl: forge.apiUrl }),
-      token: forge.token,
-      appSlug: forge.appSlug,
+      octokit: new Octokit({
+        auth: policy.token,
+        baseUrl: policy.apiUrl,
+        request: fetchImplementation ? { fetch: fetchImplementation } : undefined,
+      }),
+      token: policy.token,
+      appSlug: policy.appSlug,
     };
   }
   try {
     const app = new App({
-      appId: forge.appId,
-      privateKey: await readFile(forge.privateKeyPath, "utf8"),
+      appId: policy.appId,
+      privateKey: await readFile(policy.privateKeyPath, "utf8"),
     });
-    const octokit = await app.getInstallationOctokit(forge.installationId);
+    const octokit = await app.getInstallationOctokit(policy.installationId);
     const auth = (await octokit.auth({ type: "installation" })) as { token?: unknown };
     if (typeof auth.token !== "string") throw new ForgeAuthenticationError();
-    return { octokit, token: auth.token, appSlug: forge.appSlug };
+    return { octokit, token: auth.token, appSlug: policy.appSlug };
   } catch (error) {
     if (error instanceof ForgeAuthenticationError) throw error;
     throw new ForgeAuthenticationError(providerStatusOf(error));
   }
+}
+
+export async function createForgeClient(options: ForgeDeliveryOptions): Promise<ForgeClient> {
+  return createGithubApiClient(options.forge);
 }
 
 export function approvalAttestationBody(

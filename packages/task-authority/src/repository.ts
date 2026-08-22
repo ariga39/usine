@@ -28,6 +28,7 @@ export const repositoryRegistrationSchema = z
     implementerProfile: nonBlank,
     reviewerProfile: nonBlank,
     forgeProfile: forgeProfileSchema,
+    githubReadProfile: forgeProfileSchema.nullable().optional(),
     projectCheck: z.object({
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),
@@ -54,7 +55,7 @@ export type RepositoryResource = z.infer<typeof repositoryResourceSchema>;
 export type RepositorySnapshot = RepositoryRegistration;
 export type TaskRepositorySnapshot = Omit<
   RepositorySnapshot,
-  "implementerProfile" | "reviewerProfile" | "forgeProfile"
+  "implementerProfile" | "reviewerProfile" | "forgeProfile" | "githubReadProfile"
 >;
 
 export function taskSnapshotFromRegistration(
@@ -78,6 +79,7 @@ export function repositoryIdentity(owner: string, name: string): string {
 export function snapshotFromRegistration(registration: RepositoryRegistration): RepositorySnapshot {
   return {
     ...registration,
+    githubReadProfile: registration.githubReadProfile ?? null,
     projectCheck: { ...registration.projectCheck },
     gitAuthor: { ...registration.gitAuthor },
   };

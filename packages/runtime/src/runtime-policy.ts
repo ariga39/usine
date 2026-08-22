@@ -8,7 +8,12 @@ import {
   type RolePolicy,
   type RoleOutputTransform,
 } from "@usine/coding-session";
-import type { ForgePolicy } from "@usine/forge-delivery";
+import {
+  githubReadToolNames,
+  type ForgePolicy,
+  type GithubApiPolicy,
+  type GithubReadToolName,
+} from "@usine/forge-delivery";
 import { forgeProfileSchema } from "@usine/task-authority";
 
 const defaultRolePolicies = {
@@ -29,9 +34,16 @@ export interface RuntimePolicy {
     reviewer: RolePolicy;
   };
   forge: ForgePolicy;
+  githubRead?: GithubReadPolicy;
   roleOutputTransform?: RoleOutputTransform;
   workerEnvironment: NodeJS.ProcessEnv;
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
+}
+
+export interface GithubReadPolicy {
+  policy: GithubApiPolicy;
+  implementerTools: readonly GithubReadToolName[];
+  reviewerTools: readonly GithubReadToolName[];
 }
 
 export type ForgeProfileErrorCode = "malformed" | "unauthorized" | "repository_mismatch";
@@ -69,6 +81,7 @@ export function runtimePolicyFromEnvironment(
     implementerProfile: string;
     reviewerProfile: string;
     forgeProfile: string;
+    githubReadProfile?: string | null;
   },
   homeDirectory = homedir(),
 ): RuntimePolicy {
@@ -85,15 +98,43 @@ export function runtimePolicyFromEnvironment(
   };
 
   const forge = forgePolicyFromEnvironment(environment, repository);
+  const githubRead = githubReadPolicyFromEnvironment(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
   const roleOutputTransform = roleOutputTransformFromEnvironment(environment);
   return {
     stateDirectory,
     roles,
     forge,
+    githubRead,
     roleOutputTransform,
     workerEnvironment,
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
+  };
+}
+
+export function githubReadPolicyFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  repository: { owner: string; name: string; githubReadProfile?: string | null },
+): GithubReadPolicy | undefined {
+  const profile = repository.githubReadProfile?.trim();
+  if (!profile) return undefined;
+  if (!forgeProfileSchema.safeParse(profile).success)
+    throw new Error("GitHub read profile is malformed");
+  const prefix = `USINE_GITHUB_READ_PROFILE_${profile.toUpperCase().replaceAll("-", "_")}_`;
+  const configuredRepository = requiredProfileValue(
+    environment[`${prefix}REPOSITORY`],
+    "unauthorized",
+    profile,
+    repository,
+  );
+  if (configuredRepository.toLowerCase() !== `${repository.owner}/${repository.name}`.toLowerCase())
+    throw new Error(`GitHub read profile '${profile}' is not authorized for this repository`);
+
+  const policy = githubApiPolicyFromEnvironment(environment, prefix, profile, repository);
+  return {
+    policy,
+    implementerTools: githubReadToolsFromEnvironment(environment[`${prefix}IMPLEMENTER_TOOLS`]),
+    reviewerTools: githubReadToolsFromEnvironment(environment[`${prefix}REVIEWER_TOOLS`]),
   };
 }
 
@@ -167,6 +208,60 @@ export function forgePolicyFromEnvironment(
   if (!Number.isSafeInteger(installationId) || installationId <= 0)
     throw new ForgeProfileResolutionError("malformed", profile, repositoryIdentity(repository));
   return { mode: "app", appSlug, appId, installationId, privateKeyPath, gitUrl };
+}
+
+function githubApiPolicyFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  prefix: string,
+  profile: string,
+  repository: { owner: string; name: string },
+): GithubApiPolicy {
+  const appSlug = requiredProfileValue(
+    environment[`${prefix}APP_SLUG`],
+    "unauthorized",
+    profile,
+    repository,
+  );
+  const testToken = environment[`${prefix}TEST_TOKEN`]?.trim();
+  const apiUrl = environment[`${prefix}API_URL`]?.trim();
+  if (testToken) {
+    if (!apiUrl || !isLoopbackHttpUrl(apiUrl))
+      throw new Error("test GitHub read token is restricted to loopback API URL");
+    return { mode: "test", appSlug, token: testToken, apiUrl };
+  }
+  const appId = requiredProfileValue(
+    environment[`${prefix}APP_ID`],
+    "malformed",
+    profile,
+    repository,
+  );
+  const privateKeyPath = requiredProfileValue(
+    environment[`${prefix}PRIVATE_KEY_PATH`],
+    "malformed",
+    profile,
+    repository,
+  );
+  const installationId = Number(environment[`${prefix}INSTALLATION_ID`]);
+  if (!Number.isSafeInteger(installationId) || installationId <= 0)
+    throw new Error("GitHub read installation ID is malformed");
+  return { mode: "app", appSlug, appId, installationId, privateKeyPath };
+}
+
+function githubReadToolsFromEnvironment(value: string | undefined): GithubReadToolName[] {
+  const raw = value?.trim();
+  if (!raw) return [...githubReadToolNames];
+  const names = raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (names.length === 0) throw new Error("GitHub read tool scope is empty");
+  const tools: GithubReadToolName[] = [];
+  for (const name of names) {
+    const tool = githubReadToolNames.find((candidate) => candidate === name);
+    if (!tool) throw new Error("GitHub read tool scope is invalid");
+    tools.push(tool);
+  }
+  return [...new Set(tools)];
 }
 
 function requiredProfileValue(

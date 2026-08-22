@@ -24,6 +24,7 @@ export const repositories = sqliteTable("repositories", {
   implementerProfile: text("implementer_profile").notNull(),
   reviewerProfile: text("reviewer_profile").notNull(),
   forgeProfile: text("forge_profile").notNull(),
+  githubReadProfile: text("github_read_profile"),
   projectCheckCommand: text("project_check_command").notNull(),
   projectCheckTimeoutMs: integer("project_check_timeout_ms").notNull(),
   gitAuthorName: text("git_author_name").notNull(),

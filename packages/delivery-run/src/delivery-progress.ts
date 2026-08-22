@@ -40,6 +40,26 @@ export function emitCodingObservation(
           tool: observation.tool,
           outcome: observation.outcome,
         };
+      case "mcp_tool_completed":
+        return {
+          type: "coding_mcp_tool_completed",
+          role,
+          activation,
+          sessionId,
+          outcomeId: `${eventPrefix}:${counter.value}:outcome`,
+          server: observation.server,
+          tool: observation.tool,
+          outcome: observation.outcome,
+        };
+      case "mcp_unavailable":
+        return {
+          type: "coding_mcp_unavailable",
+          role,
+          activation,
+          sessionId,
+          server: observation.server,
+          reason: observation.reason,
+        };
       case "turn_completed":
         return {
           type: "coding_turn_completed",
