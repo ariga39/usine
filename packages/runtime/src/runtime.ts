@@ -554,4 +554,3 @@ export {
   type ServerExecution,
   type UsineServerOptions,
 } from "./server.js";
-export { decodeTaskEventEnvelope, type TaskEventEnvelope } from "./server-events.js";

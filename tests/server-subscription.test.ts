@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { decodeTaskEventEnvelope, startUsineServer, type TaskEventEnvelope } from "@usine/runtime";
+import { decodeApiEventEnvelope, startUsineServer, type ApiEventEnvelope } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
 import {
   openServerEventListener,
@@ -28,8 +28,8 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 async function collect(
   listener: Awaited<ReturnType<typeof openServerEventListener>>,
   count: number,
-): Promise<TaskEventEnvelope[]> {
-  const events: TaskEventEnvelope[] = [];
+): Promise<ApiEventEnvelope[]> {
+  const events: ApiEventEnvelope[] = [];
   while (events.length < count) {
     const next = await listener[Symbol.asyncIterator]().next();
     if (next.done) throw new Error("public event listener closed before expected events");
@@ -40,9 +40,9 @@ async function collect(
 
 async function collectUntil(
   listener: Awaited<ReturnType<typeof openServerEventListener>>,
-  predicate: (event: TaskEventEnvelope) => boolean,
-): Promise<TaskEventEnvelope[]> {
-  const events: TaskEventEnvelope[] = [];
+  predicate: (event: ApiEventEnvelope) => boolean,
+): Promise<ApiEventEnvelope[]> {
+  const events: ApiEventEnvelope[] = [];
   while (true) {
     const next = await listener[Symbol.asyncIterator]().next();
     if (next.done) throw new Error("public event listener closed before the expected event");
@@ -76,10 +76,10 @@ async function openPausedListener(
 async function openWait(
   serverUrl: string,
   scope: { taskId?: string; repositoryId?: string },
-): Promise<{ event: Promise<TaskEventEnvelope> }> {
+): Promise<{ event: Promise<ApiEventEnvelope> }> {
   const query = new URLSearchParams({ ...scope, timeoutMs: "5000" });
   const response = await fetch(`${serverUrl}/v1/events/wait?${query}`);
-  return { event: response.json().then(decodeTaskEventEnvelope) };
+  return { event: response.json().then(decodeApiEventEnvelope) };
 }
 
 async function repository(

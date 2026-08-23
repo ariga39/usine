@@ -191,9 +191,6 @@ export async function waitForServerEvent(
   return runRequest(client.events.wait({ query: { ...apiScope(scope), timeoutMs } }));
 }
 
-export const waitForEvent = waitForServerEvent;
-export const subscribeToServerEvents = openServerEventListener;
-
 export interface FollowOptions {
   intervalMs?: number;
   afterSequence?: number;
