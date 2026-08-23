@@ -137,6 +137,16 @@ const eventData = Schema.Union([
     ]),
   }),
   Schema.Struct({
+    type: Schema.Literal("task_waiting"),
+    reason: Schema.Literal("network_interruption"),
+    activation: Schema.Natural,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("task_retry_accepted"),
+    reason: Schema.Literal("network_interruption"),
+    activation: Schema.Natural,
+  }),
+  Schema.Struct({
     type: Schema.Literal("task_terminal"),
     state: Schema.Literals(["reviewed_pr", "merged", "blocked"]),
   }),
@@ -329,6 +339,8 @@ const dataFields: Record<string, readonly string[]> = {
   delivery_completed: ["type", "sha", "prNumber", "merged"],
   recovery_observed: ["type", "kind"],
   task_blocked: ["type", "reason"],
+  task_waiting: ["type", "reason", "activation"],
+  task_retry_accepted: ["type", "reason", "activation"],
   task_terminal: ["type", "state"],
   legacy_observation: ["type", "kind", "outcome", "complete"],
   legacy_import_incomplete: ["type", "importedCount", "complete"],

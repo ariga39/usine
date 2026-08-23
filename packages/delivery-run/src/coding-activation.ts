@@ -1,6 +1,12 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { implementerOutputSchema } from "@usine/coding-session";
-import type { CheckResult, TaskObservationEventData, TaskResult } from "@usine/task-authority";
+import {
+  deadlineExpired,
+  type CheckResult,
+  type TaskObservationEventData,
+  type TaskResult,
+  type TaskWaitingResumeState,
+} from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
 import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
 
@@ -30,7 +36,7 @@ type CodingAttempt =
       result: TaskResult;
       candidate: { sha: string; baseSha: string; workspace: WriterWorkspace };
     }
-  | { status: "failed"; result: TaskResult; reason: string };
+  | { status: "failed"; result: TaskResult; reason: string; retryable: boolean };
 
 async function runCodingAttempt(
   input: DeliveryRunInput,
@@ -141,6 +147,10 @@ async function runCodingAttempt(
       status: "failed",
       result: reservation.result,
       reason: "implementer coding session failed",
+      retryable:
+        input.implementer.role === "implementer" &&
+        observation.phase === "turn" &&
+        observation.failureClass === "network",
     };
   }
   const output = observation.output;
@@ -157,6 +167,7 @@ async function runCodingAttempt(
       status: "failed",
       result: reservation.result,
       reason: "implementer coding session blocked",
+      retryable: false,
     };
   }
   await emit({
@@ -183,6 +194,7 @@ async function runCodingAttempt(
       status: "failed",
       result: reservation.result,
       reason: error instanceof Error ? error.message : String(error),
+      retryable: false,
     };
   }
 }
@@ -204,11 +216,29 @@ export async function activateImplementer(
   }
   if (attempt.status === "failed") {
     if (
-      attempt.result.evidence.implementerActivations >=
-      input.contract.budget.maxImplementerActivations
-    )
-      return blockTask(services, attempt.result, attempt.reason);
-    return attempt.result;
+      attempt.retryable &&
+      attempt.result.evidence.implementerActivations <
+        input.contract.budget.maxImplementerActivations &&
+      !deadlineExpired(attempt.result.deadlineEpochMs)
+    ) {
+      const resumeState: TaskWaitingResumeState | null =
+        attempt.result.state === "admitted" ||
+        attempt.result.state === "checked" ||
+        attempt.result.state === "reviewed"
+          ? attempt.result.state
+          : null;
+      if (resumeState === null)
+        return blockTask(services, attempt.result, "invalid task phase for retry");
+      return services.authority.recordWaiting(
+        { taskId: attempt.result.taskId, revision: attempt.result.revision },
+        {
+          reason: "network_interruption",
+          resumeState,
+          activation: attempt.result.evidence.implementerActivations,
+        },
+      );
+    }
+    return blockTask(services, attempt.result, attempt.reason);
   }
   await services.workspace.quarantine(attempt.candidate.workspace);
   return attempt.result;

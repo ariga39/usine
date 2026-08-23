@@ -98,6 +98,7 @@ test("the shared error contract encodes quarantined Tasks as HTTP 503", async ()
         Effect.fail({ taskId: "task-quarantined", error: "task_state_quarantined" as const }),
       history: () => Effect.die("unused"),
       submit: () => Effect.die("unused"),
+      retry: () => Effect.die("unused"),
     }),
   );
   const request = Effect.scoped(

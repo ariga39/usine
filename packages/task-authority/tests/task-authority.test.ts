@@ -8,13 +8,14 @@ const contract = { id: "authority-module-test" } as TaskContract;
 describe("Task Authority module contract", () => {
   test("accepts only legal lifecycle transitions", () => {
     expect(canTransition("admitted", "candidate")).toBe(true);
+    expect(canTransition("admitted", "waiting")).toBe(true);
     expect(canTransition("reviewed_pr", "candidate")).toBe(false);
     expect(canTransition("reviewed", "merged")).toBe(true);
   });
 
-  test("applies legal facts and rejects stale fences without persistence", () => {
-    const admitted: TaskResult = {
-      schemaVersion: 2,
+  test("makes a turn network interruption waiting until an explicit retry fact", () => {
+    const active: TaskResult = {
+      schemaVersion: 3,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
@@ -27,6 +28,46 @@ describe("Task Authority module contract", () => {
       review: null,
       delivery: null,
       blocker: null,
+      waiting: null,
+      activeActivation: 1,
+      writer: { repositoryIdentity: "owner/repo" },
+      evidence: {
+        implementerActivations: 1,
+        reviewCycles: 0,
+        changesRequestedBatches: 0,
+        restartRecoveries: 0,
+      },
+    };
+    const waiting = applyTaskFact(active, {
+      type: "waiting",
+      waiting: { reason: "network_interruption", resumeState: "admitted", activation: 1 },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption", resumeState: "admitted", activation: 1 },
+      activeActivation: null,
+      evidence: { implementerActivations: 1 },
+    });
+    const resumed = applyTaskFact(waiting, { type: "retry" });
+    expect(resumed).toMatchObject({ state: "admitted", waiting: null, activeActivation: null });
+  });
+
+  test("applies legal facts and rejects stale fences without persistence", () => {
+    const admitted: TaskResult = {
+      schemaVersion: 3,
+      taskId: contract.id,
+      contractHash: "hash",
+      revision: 4,
+      deadlineEpochMs: 10_000,
+      state: "admitted",
+      mergeAuthorized: false,
+      candidateSha: null,
+      candidateFence: null,
+      check: null,
+      review: null,
+      delivery: null,
+      blocker: null,
+      waiting: null,
       activeActivation: 1,
       writer: { repositoryIdentity: "owner/repo" },
       evidence: {
@@ -55,7 +96,7 @@ describe("Task Authority module contract", () => {
 
   test("requires an authorized merge effect for the merged terminal state", () => {
     const reviewed: TaskResult = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
@@ -68,6 +109,7 @@ describe("Task Authority module contract", () => {
       review: { sha, verdict: "approved", summary: "approved", findings: [] },
       delivery: null,
       blocker: null,
+      waiting: null,
       activeActivation: null,
       writer: { repositoryIdentity: "owner/repo" },
       evidence: {

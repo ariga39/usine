@@ -7,6 +7,7 @@ import {
   followTask,
   getTask,
   listTasks,
+  retryTask,
   submitTask,
   taskEvents,
   taskStatus,
@@ -86,7 +87,13 @@ export function taskCommand(serverUrl: string) {
     (options) => Effect.promise(() => runTaskHistoryCommand(options, serverUrl)),
   );
 
-  return Command.make("task").pipe(Command.withSubcommands([list, get, watch, history]));
+  const retry = Command.make(
+    "retry",
+    { taskId: Argument.string("task-id"), json: jsonFlag() },
+    (options) => Effect.promise(() => runTaskRetryCommand(options, serverUrl)),
+  );
+
+  return Command.make("task").pipe(Command.withSubcommands([list, get, watch, history, retry]));
 }
 
 export function compatibilityTaskCommands(serverUrl: string) {
@@ -146,6 +153,16 @@ export async function runTaskHistoryCommand(
   return runCommand("task_history_failed", async () => {
     const page = await taskEvents(serverUrl, options.taskId, options.after, options.limit);
     process.stdout.write(renderTaskEvents(page, options.after, options.json));
+  });
+}
+
+export async function runTaskRetryCommand(
+  options: { readonly taskId: string; readonly json: boolean },
+  serverUrl: string,
+): Promise<void> {
+  return runCommand("task_retry_failed", async () => {
+    const task = await retryTask(serverUrl, options.taskId);
+    process.stdout.write(renderTask(task, options.json));
   });
 }
 

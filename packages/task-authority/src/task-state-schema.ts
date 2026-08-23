@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import type { TaskResult } from "./task-state.js";
 
-export const TASK_RESULT_SCHEMA_VERSION = 2 as const;
+export const TASK_RESULT_SCHEMA_VERSION = 3 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
 
 export class TaskStateQuarantinedError extends Error {
@@ -25,6 +25,7 @@ export function isTaskStateQuarantinedError(error: unknown): error is TaskStateQ
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const taskState = Schema.Literals([
   "admitted",
+  "waiting",
   "candidate",
   "checked",
   "reviewed",
@@ -76,6 +77,11 @@ const repositorySnapshot = Schema.Struct({
   projectCheck: Schema.Struct({ command: Schema.String, timeoutMs: Schema.Int }),
   gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
 });
+const taskWaiting = Schema.Struct({
+  reason: Schema.Literal("network_interruption"),
+  resumeState: Schema.Literals(["admitted", "checked", "reviewed"]),
+  activation: Schema.Natural,
+});
 const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -89,6 +95,7 @@ const taskResultFields = {
   review: Schema.NullOr(reviewVerdict),
   delivery: Schema.NullOr(deliveryEffect),
   blocker: Schema.NullOr(Schema.String),
+  waiting: Schema.NullOr(taskWaiting),
   activeActivation: Schema.NullOr(Schema.Natural),
   writer: Schema.Struct({ repositoryIdentity: Schema.String }),
   evidence: Schema.Struct({
@@ -105,6 +112,39 @@ const currentTaskResult = Schema.Struct({
   ...taskResultFields,
 });
 
+const previousTaskResult = Schema.Struct({
+  schemaVersion: Schema.Literal(2),
+  taskId: Schema.String,
+  contractHash: Schema.String,
+  revision: Schema.Natural,
+  deadlineEpochMs: Schema.Int,
+  state: Schema.Literals([
+    "admitted",
+    "candidate",
+    "checked",
+    "reviewed",
+    "reviewed_pr",
+    "merged",
+    "blocked",
+  ]),
+  mergeAuthorized: Schema.Boolean,
+  candidateSha: Schema.NullOr(exactSha),
+  candidateFence: Schema.NullOr(Schema.Natural),
+  check: Schema.NullOr(checkResult),
+  review: Schema.NullOr(reviewVerdict),
+  delivery: Schema.NullOr(deliveryEffect),
+  blocker: Schema.NullOr(Schema.String),
+  activeActivation: Schema.NullOr(Schema.Natural),
+  writer: Schema.Struct({ repositoryIdentity: Schema.String }),
+  evidence: Schema.Struct({
+    implementerActivations: Schema.Natural,
+    reviewCycles: Schema.Natural,
+    changesRequestedBatches: Schema.Natural,
+    restartRecoveries: Schema.Natural,
+  }),
+  repository: Schema.optional(repositorySnapshot),
+});
+
 export const taskListItemSchema = Schema.Struct({
   taskId: Schema.String,
   revision: Schema.Natural,
@@ -112,6 +152,7 @@ export const taskListItemSchema = Schema.Struct({
   state: taskState,
   candidateSha: Schema.NullOr(exactSha),
   activeActivation: Schema.NullOr(Schema.Natural),
+  retryable: Schema.Boolean,
   writer: Schema.Struct({ repositoryIdentity: Schema.String }),
   evidence: Schema.Struct({
     implementerActivations: Schema.Natural,
@@ -148,6 +189,9 @@ const publicBlockerDiagnostic = Schema.Struct({
     "unknown",
   ]),
 });
+const publicTaskWaiting = Schema.Struct({
+  reason: Schema.Literal("network_interruption"),
+});
 const publicTaskRepository = Schema.Struct({
   id: Schema.String,
   owner: Schema.String,
@@ -155,7 +199,7 @@ const publicTaskRepository = Schema.Struct({
   baseBranch: Schema.String,
 });
 export const taskResourceSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(TASK_RESULT_SCHEMA_VERSION),
+  schemaVersion: Schema.Literals([2, TASK_RESULT_SCHEMA_VERSION]),
   taskId: Schema.String,
   contractHash: Schema.String,
   revision: Schema.Natural,
@@ -168,6 +212,8 @@ export const taskResourceSchema = Schema.Struct({
   review: Schema.NullOr(publicReviewVerdict),
   delivery: Schema.NullOr(deliveryEffect),
   blocker: Schema.NullOr(publicBlockerDiagnostic),
+  waiting: Schema.optional(Schema.NullOr(publicTaskWaiting)),
+  retryable: Schema.optional(Schema.Boolean),
   activeActivation: Schema.NullOr(Schema.Natural),
   writer: Schema.Struct({ repositoryIdentity: Schema.String }),
   repository: Schema.optional(publicTaskRepository),
@@ -220,7 +266,12 @@ const priorTaskResult = Schema.Struct({
   ...legacyTaskResultFields,
 });
 
-const persistedTaskResult = Schema.Union([currentTaskResult, legacyTaskResult, priorTaskResult]);
+const persistedTaskResult = Schema.Union([
+  currentTaskResult,
+  previousTaskResult,
+  legacyTaskResult,
+  priorTaskResult,
+]);
 type DecodedPersistedTaskResult = Schema.Schema.Type<typeof persistedTaskResult>;
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
@@ -254,6 +305,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
         }
       : null,
     blocker: decoded.blocker,
+    waiting: "waiting" in decoded ? decoded.waiting : null,
     activeActivation: decoded.activeActivation,
     writer: { repositoryIdentity: decoded.writer.repositoryIdentity },
     repository: decoded.repository
@@ -300,6 +352,7 @@ export function taskListItemFromResult(result: TaskResult): TaskListItem {
     state: result.state,
     candidateSha: result.candidateSha,
     activeActivation: result.activeActivation,
+    retryable: result.waiting != null,
     writer: { repositoryIdentity: result.writer.repositoryIdentity },
     evidence: { ...result.evidence },
   };

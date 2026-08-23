@@ -37,6 +37,12 @@ const capacityError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(true),
 }).pipe(HttpApiSchema.status(429));
+const retryConflictError = Schema.Struct({
+  code: Schema.Literal("task_retry_conflict"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
+  state: Schema.String,
+}).pipe(HttpApiSchema.status(409));
 const quarantineError = Schema.Struct({
   taskId: Schema.String,
   error: Schema.Literal("task_state_quarantined"),
@@ -116,6 +122,7 @@ const allErrors = [
   validationError,
   notFoundError,
   capacityError,
+  retryConflictError,
   quarantineError,
   forgeError,
   serverError,
@@ -176,6 +183,11 @@ const TaskApi = HttpApiGroup.make("tasks").add(
   }),
   HttpApiEndpoint.post("submit", "/v1/tasks", {
     payload: taskSubmissionSchema,
+    success: taskResourceSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.post("retry", "/v1/tasks/:taskId/retry", {
+    params: taskParams,
     success: taskResourceSchema,
     error: allErrors,
   }),
@@ -248,6 +260,7 @@ export {
   validationError,
   notFoundError,
   capacityError,
+  retryConflictError,
   quarantineError,
   forgeError,
   serverError,

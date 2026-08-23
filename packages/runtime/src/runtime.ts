@@ -20,6 +20,7 @@ import {
   type ServerSnapshot,
   type TaskObservationEventInput,
   isTerminalState,
+  isWaitingState,
 } from "@usine/task-authority";
 import { CandidateWorkspace } from "@usine/candidate-workspace";
 import {
@@ -261,6 +262,40 @@ export async function lookupRestartableTasks(stateDirectory: string): Promise<{
   }
 }
 
+export async function lookupTaskExecution(
+  stateDirectory: string,
+  taskId: string,
+): Promise<{ result: TaskResult; input: TaskExecutionInput } | null> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).lookupExecution(taskId);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function retryTask(
+  stateDirectory: string,
+  taskId: string,
+  budget: number,
+  onEvent?: (event: TaskEvent) => void,
+): Promise<TaskResult> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath);
+  try {
+    return await new TaskAuthority(handle.database, { onEvent }).retryTask(taskId, budget);
+  } finally {
+    handle.close();
+  }
+}
+
 export async function recordRecoveryObservation(
   stateDirectory: string,
   taskId: string,
@@ -376,7 +411,7 @@ export async function executeAdmittedTask(
   try {
     const existing = await authority.lookup(contract.id);
     if (!existing) throw new Error("task is not admitted");
-    if (isTerminalState(existing.state)) return existing;
+    if (isTerminalState(existing.state) || isWaitingState(existing.state)) return existing;
     if (hashTaskContract(input.rawContract) !== existing.contractHash)
       throw new Error("persisted task contract bytes do not match admission");
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
