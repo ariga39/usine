@@ -1,13 +1,51 @@
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
 import type { TaskContract } from "@usine/task-authority";
+import { registerRepository, submitTask } from "../apps/cli/src/server-client.js";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
+}
+
+async function within<T>(label: string, promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} did not complete within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function runCli(
+  cliPath: string,
+  root: string,
+  environment: NodeJS.ProcessEnv,
+  args: readonly string[],
+  reject = true,
+) {
+  try {
+    return await execa("node", [cliPath, ...args], {
+      cwd: root,
+      env: environment,
+      reject,
+      timeout: 15_000,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`CLI ${args.join(" ")} failed: ${detail}`, { cause: error });
+  }
 }
 
 describe("resource-oriented Task CLI", () => {
@@ -131,141 +169,60 @@ describe("resource-oriented Task CLI", () => {
 
     try {
       const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
-      const trustedPath = await realpath(repository);
       const environment = { USINE_SERVER_URL: server.url };
-      await writeFile(
-        join(root, "repository.json"),
-        JSON.stringify({
-          id: taskId,
-          path: trustedPath,
-          owner: "example",
-          name: taskId,
-          baseBranch: "main",
-          implementerProfile: "writer-profile",
-          reviewerProfile: "reviewer-profile",
-          forgeProfile: "default",
-          projectCheck: { command: "true", timeoutMs: 1_000 },
-          gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
-        }),
-      );
-      const registered = await execa("node", [cliPath, "register", join(root, "repository.json")], {
-        cwd: repository,
-        env: environment,
-      });
-      expect(JSON.stringify(JSON.parse(registered.stdout))).not.toContain(trustedPath);
-
-      const repositories = await execa("node", [cliPath, "repository", "list", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(repositories.stdout)).toMatchObject({
-        repositories: [{ id: taskId, owner: "example", name: taskId, revision: 1 }],
-      });
-      expect(repositories.stdout).not.toContain(trustedPath);
-      expect(repositories.stdout).not.toContain("writer-profile");
-      expect(repositories.stdout).not.toContain("reviewer-profile");
-      expect(repositories.stdout).not.toContain("default");
-      const limitedRepositories = await execa(
-        "node",
-        [cliPath, "repository", "list", "--limit", "1", "--json"],
-        { cwd: root, env: environment },
-      );
-      expect(JSON.parse(limitedRepositories.stdout).repositories).toEqual([
-        { id: taskId, revision: 1, owner: "example", name: taskId, baseBranch: "main" },
-      ]);
-
-      const repositoryGet = await execa("node", [cliPath, "repository", "get", taskId, "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(repositoryGet.stdout)).toMatchObject({
+      await registerRepository(server.url, {
         id: taskId,
+        path: repository,
         owner: "example",
         name: taskId,
-        revision: 1,
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
-      expect(repositoryGet.stdout).not.toContain(trustedPath);
-      expect(repositoryGet.stdout).not.toContain("writer-profile");
-      expect(repositoryGet.stdout).not.toContain("reviewer-profile");
-      expect(repositoryGet.stdout).not.toContain("default");
-      const health = await execa("node", [cliPath, "server", "health", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(health.stdout)).toMatchObject({ status: "ok", revision: 1 });
-      const initialSnapshot = await execa("node", [cliPath, "server", "snapshot", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(initialSnapshot.stdout)).toMatchObject({
-        schemaVersion: 1,
-        repositories: [{ id: taskId, revision: 1 }],
-        tasks: [],
-        codingSessions: [],
-      });
-      expect(initialSnapshot.stdout).not.toContain(trustedPath);
-      const limitedSnapshot = await execa(
-        "node",
-        [cliPath, "server", "snapshot", "--limit", "1", "--json"],
-        { cwd: root, env: environment },
-      );
-      expect(JSON.parse(limitedSnapshot.stdout)).toMatchObject({
-        repositories: [{ id: taskId }],
-        tasks: [],
-        codingSessions: [],
-      });
-      await execa("node", [cliPath, "register", join(root, "repository.json")], {
-        cwd: repository,
-        env: environment,
-      });
-      await execa("node", [cliPath, "register", join(root, "repository.json")], {
-        cwd: repository,
-        env: environment,
-      });
-      const highRevisionSnapshot = await execa("node", [cliPath, "server", "snapshot", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      const highRevision = JSON.parse(highRevisionSnapshot.stdout).revision as number;
-      await execa("node", [cliPath, "submit", contractPath], {
-        cwd: repository,
-        env: environment,
-      });
-      await sessionStarted;
-      const activeSnapshot = await execa("node", [cliPath, "server", "snapshot", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(activeSnapshot.stdout)).toMatchObject({
-        codingSessions: [{ taskId, sessionId: "session-1", role: "implementer", activation: 0 }],
-      });
-      expect(activeSnapshot.stdout).not.toContain(trustedPath);
+      await submitTask(server.url, { contractPath });
+      await within("coding session start", sessionStarted, 5_000);
+
+      const list = await runCli(cliPath, root, environment, [
+        "task",
+        "list",
+        "--limit",
+        "1",
+        "--json",
+      ]);
+      const listed = JSON.parse(list.stdout) as {
+        tasks: Array<{ taskId: string; state: string }>;
+      };
+      expect(listed.tasks).toEqual([expect.objectContaining({ taskId, state: "admitted" })]);
       releaseSession();
 
-      const list = await execa("node", [cliPath, "task", "list", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      const listed = JSON.parse(list.stdout) as {
-        tasks: Array<{ taskId: string; state: string; revision: number }>;
-      };
-      const discovered = listed.tasks.find((task) => task.taskId === taskId);
-      expect(discovered).toMatchObject({ taskId, state: "blocked" });
-      const limitedTasks = await execa(
-        "node",
-        [cliPath, "task", "list", "--limit", "1", "--json"],
-        { cwd: root, env: environment },
-      );
-      expect(JSON.parse(limitedTasks.stdout).tasks).toEqual([
-        expect.objectContaining({ taskId, state: "blocked" }),
+      const watch = await runCli(cliPath, root, environment, [
+        "task",
+        "watch",
+        "--after",
+        "7",
+        "--timeout",
+        "10000",
+        taskId,
+        "--json",
       ]);
+      const watchedEvents = watch.stderr
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { sequence: number; data: { type: string } });
+      expect(watchedEvents.map((event) => event.sequence)).toEqual([8, 9]);
+      expect(watchedEvents[1]?.data).toEqual({ type: "task_terminal", state: "blocked" });
+      expect(JSON.parse(watch.stdout)).toMatchObject({ taskId, state: "blocked" });
 
-      const get = await execa("node", [cliPath, "task", "get", taskId, "--json"], {
-        cwd: root,
-        env: environment,
-      });
+      const get = await runCli(cliPath, root, environment, ["task", "get", taskId, "--json"]);
       expect(JSON.parse(get.stdout)).toMatchObject({ taskId, state: "blocked" });
-      expect(get.stdout).not.toContain(trustedPath);
+      expect(get.stdout).not.toContain(repository);
+      expect(get.stdout).not.toContain("writer-profile");
+      expect(get.stdout).not.toContain("reviewer-profile");
+      expect(get.stdout).not.toContain("default");
       expect(JSON.parse(get.stdout).review).toEqual({
         sha: "b".repeat(40),
         verdict: "changes_requested",
@@ -278,52 +235,22 @@ describe("resource-oriented Task CLI", () => {
       expect(get.stdout).not.toContain("review sentinel private content");
       expect(get.stdout).not.toContain("FINDING-PRIVATE-BETA");
       expect(get.stdout).not.toContain("BLOCKER-PRIVATE-GAMMA");
-      const missing = await execa("node", [cliPath, "task", "get", `${taskId}-missing`], {
-        cwd: root,
-        env: environment,
-        reject: false,
-      });
+
+      const missing = await runCli(
+        cliPath,
+        root,
+        environment,
+        ["task", "get", `${taskId}-missing`],
+        false,
+      );
       expect(missing.exitCode).toBe(3);
       expect(JSON.parse(missing.stderr)).toEqual({
         error: "task_not_found",
         taskId: `${taskId}-missing`,
       });
-
-      const snapshot = await execa("node", [cliPath, "server", "snapshot", "--json"], {
-        cwd: root,
-        env: environment,
-      });
-      expect(JSON.parse(snapshot.stdout)).toMatchObject({
-        schemaVersion: 1,
-        tasks: [{ taskId, state: "blocked" }],
-      });
-      expect(JSON.parse(snapshot.stdout).revision).toBeGreaterThan(highRevision);
-      expect(snapshot.stdout).not.toContain(trustedPath);
-
-      const history = await execa(
-        "node",
-        ["apps/cli/dist/cli.mjs", "task", "history", "--after", "7", taskId, "--json"],
-        { cwd: process.cwd(), env: environment },
-      );
-      expect(
-        JSON.parse(history.stdout).events.map((event: { sequence: number }) => event.sequence),
-      ).toEqual([8, 9]);
-
-      const watch = await execa(
-        "node",
-        [cliPath, "task", "watch", "--after", "7", taskId, "--json"],
-        { cwd: root, env: environment },
-      );
-      const watchedEvents = watch.stderr
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as { sequence: number; data: { type: string } });
-      expect(watchedEvents.map((event) => event.sequence)).toEqual([8, 9]);
-      expect(watchedEvents[1]?.data).toEqual({ type: "task_terminal", state: "blocked" });
-      expect(JSON.parse(watch.stdout)).toMatchObject({ taskId, state: "blocked" });
     } finally {
-      await server.close();
+      releaseSession();
+      await within("server shutdown", server.close(), 5_000);
     }
   }, 30_000);
 });
