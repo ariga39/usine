@@ -37,34 +37,8 @@ import {
   type RepositorySnapshot,
 } from "./repository.js";
 
-export type {
-  AuthorityInput,
-  CandidateFact,
-  CheckResult,
-  DeliveryEffect,
-  ReviewVerdict,
-  TaskFact,
-  TaskExecutionInput,
-  TaskObservation,
-  TaskResult,
-  TaskResource,
-} from "./task-state.js";
 import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
 import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
-export { decodeTaskEvent, decodeTaskObservationEventInput } from "./task-event.js";
-export type {
-  TaskEvent,
-  TaskEventPage,
-  TaskEventData,
-  TaskObservationEventData,
-  TaskObservationEventInput,
-} from "./task-event.js";
-export type {
-  RepositoryRegistration,
-  RepositoryResource,
-  RepositorySnapshot,
-  TaskRepositorySnapshot,
-} from "./repository.js";
 
 type AuthorityDatabase = RuntimeDatabase;
 
