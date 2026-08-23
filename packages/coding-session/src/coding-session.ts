@@ -235,22 +235,11 @@ async function runRoleOutputTransform(
   request: RoleOutputTransformRequest,
 ): Promise<unknown> {
   return Effect.runPromise(
-    Effect.raceFirst(
-      Effect.tryPromise({
-        try: (signal) =>
-          transform({ ...request, signal: AbortSignal.any([request.signal, signal]) }),
-        catch: identityError,
-      }),
-      Effect.callback<never>((resume) => {
-        const onAbort = (): void => resume(Effect.interrupt);
-        if (request.signal.aborted) {
-          onAbort();
-          return Effect.void;
-        }
-        request.signal.addEventListener("abort", onAbort, { once: true });
-        return Effect.sync(() => request.signal.removeEventListener("abort", onAbort));
-      }),
-    ),
+    Effect.tryPromise({
+      try: (signal) => transform({ ...request, signal }),
+      catch: identityError,
+    }),
+    { signal: request.signal },
   );
 }
 
