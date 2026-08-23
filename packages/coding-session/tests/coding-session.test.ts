@@ -141,7 +141,12 @@ async function fakeAppServerEnvironment(
   expectedModel = "fixture-model",
   expectedReasoning = "minimal",
   expectedDeveloperInstructions = "Fixture reviewer instructions",
-): Promise<{ environment: NodeJS.ProcessEnv; stateDirectory: string; close: () => Promise<void> }> {
+): Promise<{
+  environment: NodeJS.ProcessEnv;
+  stateDirectory: string;
+  protocolLogPath: string;
+  close: () => Promise<void>;
+}> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
   const bin = join(root, "bin");
   const codexHome = join(root, "codex-home");
@@ -149,7 +154,9 @@ async function fakeAppServerEnvironment(
   await mkdir(join(stateDirectory, "reviewer"), { recursive: true });
   await mkdir(bin, { recursive: true });
   await mkdir(codexHome, { recursive: true });
+  const protocolLogPath = join(codexHome, "protocol.log");
   await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
+  await writeFile(protocolLogPath, "");
   await writeFile(
     join(codexHome, "reviewer-profile.config.toml"),
     'model = "fixture-model"\nmodel_reasoning_effort = "minimal"\ndeveloper_instructions = "Fixture reviewer instructions"\n',
@@ -158,7 +165,7 @@ async function fakeAppServerEnvironment(
   await writeFile(
     executable,
     `#!/usr/bin/env node
-const { readFileSync } = require("node:fs");
+const { appendFileSync, readFileSync } = require("node:fs");
 const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
 const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
 const expectedModel = ${JSON.stringify(expectedModel)};
@@ -173,6 +180,7 @@ if (mode === "stderr") {
   process.exit(1);
 }
 let buffer = "";
+const record = (event) => appendFileSync(process.env.CODEX_HOME + "/protocol.log", event + "\\n");
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const emitTurn = () => {
   send({ method: "turn/started", params: { threadId: "thread-fixture", turn: { id: "turn-fixture" } } });
@@ -189,6 +197,7 @@ const emitTurn = () => {
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
 };
 const handle = (message) => {
+  record(message.method ?? "response");
   if (message.method === "initialize") {
     if (mode === "wait") return;
     send({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fixture", codexHome: ".", platformFamily: "unix", platformOs: "test" } });
@@ -224,7 +233,6 @@ const handle = (message) => {
     send({ jsonrpc: "2.0", id: message.id, result: { turn: { id: "turn-fixture" } } });
     setImmediate(emitTurn);
   } else if (message.method === "turn/interrupt") {
-    send({ jsonrpc: "2.0", id: message.id, result: {} });
     send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "interrupted", error: null } } });
   }
 };
@@ -234,6 +242,7 @@ process.stdin.on("data", (chunk) => {
   for (const line of buffer.split("\\n").slice(0, -1)) handle(JSON.parse(line));
   buffer = buffer.slice(buffer.lastIndexOf("\\n") + 1);
 });
+process.stdin.on("end", () => record("transport-release"));
 process.stdin.resume();
 setInterval(() => undefined, 1_000);
 `,
@@ -246,6 +255,7 @@ setInterval(() => undefined, 1_000);
       CI: "true",
     },
     stateDirectory,
+    protocolLogPath,
     close: async () => undefined,
   };
 }
@@ -925,6 +935,15 @@ describe("Coding Session", () => {
     await started.promise;
     controller.abort();
     await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
+    const protocol = (await readFile(fixture.protocolLogPath, "utf8")).trim().split("\n");
+    expect(protocol).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start",
+      "turn/interrupt",
+      "transport-release",
+    ]);
     const observationCount = observations.length;
     await Promise.resolve();
     expect(observations).toHaveLength(observationCount);
@@ -982,6 +1001,9 @@ describe("Coding Session", () => {
       phase: "startup",
       failureClass: "timeout",
     });
+    const protocolLog = (await readFile(fixture.protocolLogPath, "utf8")).trim();
+    const protocol = protocolLog === "" ? [] : protocolLog.split("\n");
+    expect(protocol).not.toContain("turn/interrupt");
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
