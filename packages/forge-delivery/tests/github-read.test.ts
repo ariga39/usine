@@ -365,7 +365,12 @@ describe("host-owned GitHub read MCP", () => {
   });
 
   test("fails closed when the fake host exceeds the read deadline", async () => {
-    let underlyingRequestSignal: AbortSignal | undefined;
+    let resolveFetchStarted!: (signal: AbortSignal) => void;
+    let rejectFetchStarted!: (error: Error) => void;
+    const fetchStarted = new Promise<AbortSignal>((resolve, reject) => {
+      resolveFetchStarted = resolve;
+      rejectFetchStarted = reject;
+    });
     const server = createGithubReadMcpServer({
       repository: { owner: "example", name: "authorized" },
       issueNumber: 189,
@@ -378,12 +383,18 @@ describe("host-owned GitHub read MCP", () => {
         apiUrl: "https://fake-github.invalid",
       },
       deadlineEpochMs: Date.now() + 5_000,
-      requestTimeoutMs: 25,
+      requestTimeoutMs: 1_000,
       fetch: async (_input, init) =>
         new Promise<Response>((_resolve, reject) => {
           const signal = init?.signal;
-          underlyingRequestSignal = signal ?? undefined;
-          const timeout = setTimeout(() => reject(new Error("fake host did not respond")), 1_000);
+          if (!signal) {
+            const error = new Error("GitHub request signal is missing");
+            rejectFetchStarted(error);
+            reject(error);
+            return;
+          }
+          resolveFetchStarted(signal);
+          const timeout = setTimeout(() => reject(new Error("fake host did not respond")), 2_000);
           if (signal?.aborted) {
             clearTimeout(timeout);
             reject(new Error("fake host request timed out"));
@@ -404,10 +415,12 @@ describe("host-owned GitHub read MCP", () => {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
-      const result = await client.callTool({
+      const resultPromise = client.callTool({
         name: "github_issue_get",
         arguments: { owner: "example", repository: "authorized", issue: 189 },
       });
+      const underlyingRequestSignal = await fetchStarted;
+      const result = await resultPromise;
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).toContain("GitHub read unavailable");
       expect(JSON.stringify(result)).not.toContain("host-read-credential");
