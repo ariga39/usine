@@ -75,13 +75,6 @@ export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Recor
   return result;
 }
 
-export {
-  implementerOutputSchema,
-  reviewerOutputSchema,
-  type ImplementerOutput,
-  type ReviewerOutput,
-} from "./role-output.js";
-
 export type SessionRole = "implementer" | "reviewer";
 export type SandboxMode = "workspace-write" | "read-only";
 
@@ -643,8 +636,6 @@ function usageFrom(
         outputTokens: usage.output_tokens,
       };
 }
-
-export { codexMcpConfig };
 
 function safeFailureMessage(error: CodingSessionInterruption): string {
   const message = error.message;

@@ -1,7 +1,6 @@
 export {
   CodexCodingSession,
   codexAppServerProfilesFromEnvironment,
-  codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
   type CodingSessionCleanup,
@@ -20,6 +19,7 @@ export {
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
+export { codexMcpConfig } from "./coding-session-policy.js";
 export type {
   CodingSessionFailureClass,
   CodingSessionPhase,
