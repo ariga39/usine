@@ -185,11 +185,17 @@ describe("resource-oriented Task CLI", () => {
       await submitTask(server.url, { contractPath });
       await within("coding session start", sessionStarted, 5_000);
 
-      const list = await runCli(cliPath, root, environment, ["task", "list", "--json"]);
+      const list = await runCli(cliPath, root, environment, [
+        "task",
+        "list",
+        "--limit",
+        "1",
+        "--json",
+      ]);
       const listed = JSON.parse(list.stdout) as {
         tasks: Array<{ taskId: string; state: string }>;
       };
-      expect(listed.tasks).toContainEqual(expect.objectContaining({ taskId, state: "admitted" }));
+      expect(listed.tasks).toEqual([expect.objectContaining({ taskId, state: "admitted" })]);
       releaseSession();
 
       const watch = await runCli(cliPath, root, environment, [
@@ -214,6 +220,9 @@ describe("resource-oriented Task CLI", () => {
       const get = await runCli(cliPath, root, environment, ["task", "get", taskId, "--json"]);
       expect(JSON.parse(get.stdout)).toMatchObject({ taskId, state: "blocked" });
       expect(get.stdout).not.toContain(repository);
+      expect(get.stdout).not.toContain("writer-profile");
+      expect(get.stdout).not.toContain("reviewer-profile");
+      expect(get.stdout).not.toContain("default");
       expect(JSON.parse(get.stdout).review).toEqual({
         sha: "b".repeat(40),
         verdict: "changes_requested",
