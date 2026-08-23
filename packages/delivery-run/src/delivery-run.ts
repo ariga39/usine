@@ -11,6 +11,7 @@ import { DeliveryQuarantineError, ForgeAuthenticationError } from "@usine/forge-
 import {
   deadlineExpired,
   isTerminalState,
+  isWaitingState,
   type AuthorityInput,
   type CandidateFact,
   type CheckResult,
@@ -20,6 +21,7 @@ import {
   type TaskObservation,
   type TaskResult,
   type TaskObservationEventInput,
+  type TaskWaiting,
 } from "@usine/task-authority";
 import { activateImplementer } from "./coding-activation.js";
 import {
@@ -49,6 +51,7 @@ interface DeliveryRunAuthority {
   recordCheck(observation: TaskObservation, check: CheckResult): Promise<TaskResult>;
   recordReview(observation: TaskObservation, review: ReviewVerdict): Promise<TaskResult>;
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
+  recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
   block(observation: TaskObservation, blocker: string): Promise<TaskResult>;
   appendObservation(taskId: string, input: TaskObservationEventInput): Promise<unknown>;
@@ -126,6 +129,8 @@ export async function executeDeliveryRun(
     if (isTerminalState(result.state)) return result;
     if (deadlineExpired(result.deadlineEpochMs))
       return blockTask(services, result, "elapsed budget exhausted");
+
+    if (isWaitingState(result.state)) return result;
 
     if (result.state === "admitted") {
       result = await activateImplementer(input, services, result, input.contract.baseSha, null, []);

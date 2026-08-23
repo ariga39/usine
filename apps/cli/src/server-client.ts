@@ -17,6 +17,7 @@ import {
   type ServerHealth,
   type ServerSnapshot,
   isTerminalState,
+  isWaitingState,
 } from "@usine/task-authority";
 
 export type TaskSubmission = ApiTaskSubmission;
@@ -52,6 +53,20 @@ export class TaskCapacityError extends ServerClientError {
   }
 }
 
+export class TaskRetryConflictError extends ServerClientError {
+  readonly code = "task_retry_conflict";
+  readonly retryable = false;
+
+  constructor(
+    message: string,
+    status: number,
+    readonly state: string,
+  ) {
+    super(message, status, "server", "task_retry_conflict");
+    this.name = "TaskRetryConflictError";
+  }
+}
+
 export type ServerFailureKind = "validation" | "not_found" | "timeout" | "connection" | "server";
 
 async function clientFor(serverUrl: string) {
@@ -83,6 +98,11 @@ export async function submitTask(
 ): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
   return runRequest(client.tasks.submit({ payload: submission }));
+}
+
+export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.tasks.retry({ params: { taskId } }));
 }
 
 export async function registerRepository(
@@ -217,7 +237,7 @@ export async function followTask(
       }
       if (page.events.length < 200) break;
     }
-    if (isTerminalState(result.state)) return result;
+    if (isTerminalState(result.state) || isWaitingState(result.state)) return result;
     const now = Date.now();
     const durableRemainingMs = result.deadlineEpochMs - now;
     const timeoutRemainingMs =
@@ -252,6 +272,12 @@ function clientError(error: unknown): ServerClientError {
     const code = error.code ?? error.error;
     const message = error.message ?? "server request failed";
     if (code === "active_task_capacity") return new TaskCapacityError(message, 429, code);
+    if (code === "task_retry_conflict")
+      return new TaskRetryConflictError(
+        message,
+        409,
+        typeof error.state === "string" ? error.state : "blocked",
+      );
     const status = statusForCode(code);
     return new ServerClientError(message, status, failureKindForStatus(status), code);
   }
@@ -268,7 +294,9 @@ function clientError(error: unknown): ServerClientError {
   );
 }
 
-function isApiError(error: unknown): error is { code?: string; error?: string; message?: string } {
+function isApiError(
+  error: unknown,
+): error is { code?: string; error?: string; message?: string; state?: unknown } {
   return (
     typeof error === "object" &&
     error !== null &&
@@ -286,6 +314,8 @@ function statusForCode(code: string | undefined): number {
       return 404;
     case "active_task_capacity":
       return 429;
+    case "task_retry_conflict":
+      return 409;
     case "task_state_quarantined":
       return 503;
     default:

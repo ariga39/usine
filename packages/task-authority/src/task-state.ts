@@ -4,6 +4,7 @@ import type { RepositorySnapshot, TaskRepositorySnapshot } from "./repository.js
 
 export type TaskState =
   | "admitted"
+  | "waiting"
   | "candidate"
   | "checked"
   | "reviewed"
@@ -45,7 +46,7 @@ export interface MergeEffect {
 
 export interface TaskResult {
   /** Version of the durable Task Authority result projection. */
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
   taskId: string;
   contractHash: string;
   /** Durable compare-and-set identity for this observation. */
@@ -61,6 +62,7 @@ export interface TaskResult {
   review: ReviewVerdict | null;
   delivery: DeliveryEffect | null;
   blocker: string | null;
+  waiting?: TaskWaiting | null;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
   /** Resolved repository facts frozen at admission for restart and audit. */
@@ -71,6 +73,14 @@ export interface TaskResult {
     changesRequestedBatches: number;
     restartRecoveries: number;
   };
+}
+
+export type TaskWaitingReason = "network_interruption";
+export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed";
+export interface TaskWaiting {
+  reason: TaskWaitingReason;
+  resumeState: TaskWaitingResumeState;
+  activation: number;
 }
 
 export interface TaskRepositoryResource {
@@ -107,8 +117,12 @@ export interface PublicBlockerDiagnostic {
   classification: TaskBlockerClassification;
 }
 
+export interface PublicTaskWaiting {
+  reason: TaskWaitingReason;
+}
+
 export interface TaskResource {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
   taskId: string;
   contractHash: string;
   revision: number;
@@ -121,6 +135,8 @@ export interface TaskResource {
   review: PublicReviewVerdict | null;
   delivery: DeliveryEffect | null;
   blocker: PublicBlockerDiagnostic | null;
+  waiting?: PublicTaskWaiting | null;
+  retryable?: boolean;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
   repository?: TaskRepositoryResource;
@@ -129,7 +145,7 @@ export interface TaskResource {
 
 export function taskResourceFromResult(result: TaskResult): TaskResource {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: result.taskId,
     contractHash: result.contractHash,
     revision: result.revision,
@@ -160,6 +176,8 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
         }
       : null,
     blocker: result.blocker ? publicBlockerFromText(result.blocker) : null,
+    waiting: result.waiting ? { reason: result.waiting.reason } : null,
+    retryable: result.waiting != null,
     activeActivation: result.activeActivation,
     writer: { ...result.writer },
     repository: result.repository
@@ -201,6 +219,10 @@ export function isTerminalState(state: TaskState): boolean {
   return state === "reviewed_pr" || state === "merged" || state === "blocked";
 }
 
+export function isWaitingState(state: TaskState): boolean {
+  return state === "waiting";
+}
+
 export interface CandidateFact {
   sha: string;
   baseSha: string;
@@ -218,6 +240,8 @@ export type TaskFact =
   | { type: "review"; review: ReviewVerdict }
   | { type: "delivery"; delivery: DeliveryEffect }
   | { type: "repair_batch" }
+  | { type: "waiting"; waiting: TaskWaiting }
+  | { type: "retry" }
   | { type: "blocked"; blocker: string };
 
 export interface AuthorityInput {
@@ -235,10 +259,11 @@ export interface TaskExecutionInput {
 }
 
 const transitions: Record<TaskState, readonly TaskState[]> = {
-  admitted: ["admitted", "candidate", "blocked"],
-  candidate: ["candidate", "checked", "blocked"],
-  checked: ["checked", "candidate", "reviewed", "blocked"],
-  reviewed: ["reviewed", "candidate", "reviewed_pr", "merged", "blocked"],
+  admitted: ["admitted", "candidate", "waiting", "blocked"],
+  waiting: ["waiting", "blocked"],
+  candidate: ["candidate", "checked", "waiting", "blocked"],
+  checked: ["checked", "candidate", "reviewed", "waiting", "blocked"],
+  reviewed: ["reviewed", "candidate", "reviewed_pr", "merged", "waiting", "blocked"],
   merged: ["merged"],
   reviewed_pr: ["reviewed_pr"],
   blocked: ["blocked"],
@@ -348,10 +373,41 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
           changesRequestedBatches: result.evidence.changesRequestedBatches + 1,
         },
       };
+    case "waiting":
+      if (!canTransition(result.state, "waiting"))
+        throw new Error(`illegal task state transition: ${result.state} -> waiting`);
+      if (
+        result.activeActivation !== fact.waiting.activation ||
+        fact.waiting.activation <= 0 ||
+        !Number.isSafeInteger(fact.waiting.activation) ||
+        fact.waiting.resumeState !== result.state
+      )
+        throw new Error("waiting activation is stale");
+      return {
+        ...result,
+        state: "waiting",
+        waiting: { ...fact.waiting },
+        activeActivation: null,
+      };
+    case "retry":
+      if (result.state !== "waiting" || !result.waiting)
+        throw new Error("task is not waiting for an explicit retry");
+      return {
+        ...result,
+        state: result.waiting.resumeState,
+        waiting: null,
+        activeActivation: null,
+      };
     case "blocked":
       if (!canTransition(result.state, "blocked"))
         throw new Error(`illegal task state transition: ${result.state} -> blocked`);
-      return { ...result, state: "blocked", blocker: fact.blocker };
+      return {
+        ...result,
+        state: "blocked",
+        blocker: fact.blocker,
+        waiting: null,
+        activeActivation: null,
+      };
   }
   throw new Error("unknown task fact");
 }

@@ -114,6 +114,10 @@ function fakeAuthority(initial: TaskResult) {
     ) => transition(observation, { type: "review", review: review! }),
     recordRepairBatch: (observation: { taskId: string; revision: number }) =>
       transition(observation, { type: "repair_batch" }),
+    recordWaiting: (
+      observation: { taskId: string; revision: number },
+      waiting: NonNullable<TaskResult["waiting"]>,
+    ) => transition(observation, { type: "waiting", waiting }),
     recordDelivery: (
       observation: { taskId: string; revision: number },
       delivery: TaskResult["delivery"],
@@ -310,6 +314,57 @@ describe("Delivery Run durable phase recovery", () => {
     expect(JSON.stringify(fake.getObservations())).not.toMatch(
       /prompt|stdout|stderr|profile|token/i,
     );
+  });
+
+  test("waits on only an implementer turn network interruption", async () => {
+    const id = `waiting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("admitted", id));
+    let sessions = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not start");
+        },
+        reviewWithObservation: async () => {
+          throw new Error("review must not start");
+        },
+      },
+      {
+        deliver: async () => {
+          throw new Error("delivery must not start");
+        },
+      },
+    );
+    services.session = {
+      run: async () => {
+        sessions += 1;
+        return {
+          status: "failed" as const,
+          output: null,
+          summary: "network interruption",
+          failure: "network interruption",
+          phase: "turn" as const,
+          failureClass: "network" as const,
+        };
+      },
+    };
+    const input = {
+      contract: contract(id),
+      contractHash: "waiting-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption", resumeState: "admitted", activation: 1 },
+      evidence: { implementerActivations: 1 },
+    });
+    const reentered = await executeDeliveryRun(input, services);
+    expect(reentered).toEqual(waiting);
+    expect(sessions).toBe(1);
   });
 
   test("persists an authorized exact-head merge effect as the merged terminal state", async () => {

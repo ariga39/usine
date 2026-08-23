@@ -18,6 +18,7 @@ import {
 import {
   applyTaskFact,
   isTerminalState,
+  isWaitingState,
   type AuthorityInput,
   type CandidateFact,
   type CheckResult,
@@ -27,7 +28,9 @@ import {
   type TaskObservation,
   type TaskExecutionInput,
   type TaskResult,
+  type TaskWaiting,
 } from "./task-state.js";
+import { deadlineExpired } from "./remaining-until.js";
 import {
   snapshotFromRegistration,
   repositoryResourceFromSnapshot,
@@ -59,6 +62,24 @@ export class TaskCapacityError extends Error {
   ) {
     super("active Task capacity is full");
     this.name = "TaskCapacityError";
+  }
+}
+
+export type TaskRetryConflictReason =
+  | "task_not_waiting"
+  | "deadline_exhausted"
+  | "activation_budget_exhausted";
+
+export class TaskRetryConflictError extends Error {
+  readonly code = "task_retry_conflict";
+  readonly retryable = false;
+
+  constructor(
+    readonly reason: TaskRetryConflictReason,
+    readonly state: string,
+  ) {
+    super("task is not retryable");
+    this.name = "TaskRetryConflictError";
   }
 }
 
@@ -386,6 +407,7 @@ export class TaskAuthority {
       }
       if (isTerminalState(result.state)) continue;
       activeTaskCount += 1;
+      if (isWaitingState(result.state)) continue;
       if (!row.contractPath || !row.rawContract || !result.repository) continue;
       restartable.push({
         result,
@@ -396,6 +418,30 @@ export class TaskAuthority {
       });
     }
     return { restartable, activeTaskCount };
+  }
+
+  async lookupExecution(
+    taskId: string,
+  ): Promise<{ result: TaskResult; input: TaskExecutionInput } | null> {
+    const rows = await this.database
+      .select({
+        rawResult: sql<string>`${taskRuns.result}`,
+        contractPath: taskRuns.contractPath,
+        rawContract: taskRuns.rawContract,
+      })
+      .from(taskRuns)
+      .where(eq(taskRuns.taskId, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    if (!row.contractPath || !row.rawContract) return null;
+    return {
+      result: decodeRawPersistedTaskResult(row.rawResult),
+      input: {
+        contractPath: row.contractPath,
+        rawContract: row.rawContract,
+      },
+    };
   }
 
   private static async currentTask(database: AuthorityDatabase, taskId: string) {
@@ -502,6 +548,7 @@ export class TaskAuthority {
         review: null,
         delivery: null,
         blocker: null,
+        waiting: null,
         activeActivation: null,
         writer: {
           repositoryIdentity: input.repositoryIdentity,
@@ -595,6 +642,10 @@ export class TaskAuthority {
     return this.persistFact(observation, { type: "repair_batch" });
   }
 
+  recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult> {
+    return this.persistFact(observation, { type: "waiting", waiting });
+  }
+
   block(observation: TaskObservation, blocker: string): Promise<TaskResult> {
     return this.persistFact(observation, { type: "blocked", blocker });
   }
@@ -659,6 +710,78 @@ export class TaskAuthority {
     });
     if (reserved.event) this.emit([reserved.event]);
     return reserved.result;
+  }
+
+  async retryTask(taskId: string, budget: number): Promise<TaskResult> {
+    const retry = async (
+      database: AuthorityDatabase,
+    ): Promise<{ result: TaskResult; events: TaskEvent[] }> => {
+      const current = await TaskAuthority.currentTask(database, taskId);
+      if (!current) throw new Error("task is not admitted");
+      const prior = decodePersistedTaskResult(current.result);
+      if (!isWaitingState(prior.state) || !prior.waiting)
+        throw new TaskRetryConflictError("task_not_waiting", prior.state);
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
+      });
+      if (!lease || lease.taskId !== prior.taskId)
+        throw new Error("repository writer lease is stale");
+      if (deadlineExpired(prior.deadlineEpochMs)) {
+        const blocked = applyTaskFact(prior, {
+          type: "blocked",
+          blocker: "elapsed budget exhausted",
+        });
+        const saved = {
+          ...blocked,
+          revision: prior.revision + 1,
+          deadlineEpochMs: prior.deadlineEpochMs,
+        };
+        await database
+          .update(taskRuns)
+          .set({ result: saved, updatedAt: new Date() })
+          .where(eq(taskRuns.taskId, taskId));
+        const blockedEvent = await TaskAuthority.appendEvent(database, taskId, {
+          eventId: `blocked:${prior.revision}`,
+          occurredAtEpochMs: Date.now(),
+          data: { type: "task_blocked", reason: "elapsed_budget" },
+        });
+        const terminalEvent = await TaskAuthority.appendEvent(database, taskId, {
+          eventId: `terminal:${saved.state}`,
+          occurredAtEpochMs: Date.now(),
+          data: { type: "task_terminal", state: "blocked" },
+        });
+        await database
+          .delete(repositoryLeases)
+          .where(
+            and(
+              eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
+              eq(repositoryLeases.taskId, prior.taskId),
+            ),
+          );
+        return { result: saved, events: [blockedEvent, terminalEvent] };
+      }
+      if (prior.evidence.implementerActivations >= budget)
+        throw new TaskRetryConflictError("activation_budget_exhausted", prior.state);
+      const resumed = applyTaskFact(prior, { type: "retry" });
+      const saved = {
+        ...resumed,
+        revision: prior.revision + 1,
+        deadlineEpochMs: prior.deadlineEpochMs,
+      };
+      await database
+        .update(taskRuns)
+        .set({ result: saved, updatedAt: new Date() })
+        .where(eq(taskRuns.taskId, taskId));
+      const event = await TaskAuthority.appendEvent(database, taskId, {
+        eventId: `retry:${prior.revision}`,
+        occurredAtEpochMs: Date.now(),
+        data: { type: "task_retry_accepted", reason: prior.waiting.reason },
+      });
+      return { result: saved, events: [event] };
+    };
+    const accepted = await this.inTransaction(retry);
+    this.emit(accepted.events);
+    return accepted.result;
   }
 
   private async inTransaction<T>(
@@ -807,6 +930,14 @@ function factEvent(
           cycle: Math.max(1, prior.evidence.reviewCycles),
         },
       };
+    case "waiting":
+      return {
+        eventId: `waiting:${fact.waiting.activation}`,
+        occurredAtEpochMs,
+        data: { type: "task_waiting", reason: fact.waiting.reason },
+      };
+    case "retry":
+      return null;
     case "blocked":
       return {
         eventId: `blocked:${prior.revision}`,

@@ -144,6 +144,50 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("accepts one explicit retry while retaining the lease and active slot", async () => {
+    const path = await makeDatabase();
+    const first = authorityAt(path);
+    const second = authorityAt(path);
+    const taskId = `authority-retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await first.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-retry-hash",
+      repositoryIdentity: `authority/retry-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const reservation = await first.reserveActivation(taskId, 3);
+    const waiting = await first.recordWaiting(
+      { taskId, revision: reservation.result.revision },
+      {
+        reason: "network_interruption",
+        resumeState: "admitted",
+        activation: reservation.activation,
+      },
+    );
+    expect(waiting.state).toBe("waiting");
+    expect((await first.listRestartable()).activeTaskCount).toBe(1);
+
+    const retries = await Promise.allSettled([
+      first.retryTask(taskId, 3),
+      second.retryTask(taskId, 3),
+    ]);
+    expect(retries.filter((entry) => entry.status === "fulfilled")).toHaveLength(1);
+    expect(retries.filter((entry) => entry.status === "rejected")).toHaveLength(1);
+    const rejected = retries.find((entry) => entry.status === "rejected");
+    expect(rejected).toMatchObject({ reason: { code: "task_retry_conflict", retryable: false } });
+
+    const resumed = await first.lookup(taskId);
+    expect(resumed).toMatchObject({
+      state: "admitted",
+      waiting: null,
+      evidence: { implementerActivations: 1 },
+    });
+    const restart = await first.listRestartable();
+    expect(restart.activeTaskCount).toBe(1);
+    expect(restart.restartable).toHaveLength(0);
+    expect(admitted.writer.repositoryIdentity).toBe(resumed?.writer.repositoryIdentity);
+  });
+
   test("fails closed when Task discovery encounters malformed durable state", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
@@ -407,9 +451,34 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     inspection.close();
 
     await expect(authority.lookup(taskId)).resolves.toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       mergeAuthorized: false,
       state: "admitted",
+    });
+  });
+
+  test("decodes the prior version-two result without a waiting field", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-prior-result-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "authority-prior-result-hash",
+      repositoryIdentity: `authority/prior-result-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const inspection = new DatabaseSync(path);
+    const prior = { ...admitted, schemaVersion: 2 } as Record<string, unknown>;
+    delete prior.waiting;
+    inspection
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(prior), taskId);
+    inspection.close();
+
+    await expect(authority.lookup(taskId)).resolves.toMatchObject({
+      schemaVersion: 3,
+      state: "admitted",
+      waiting: null,
     });
   });
 
@@ -430,7 +499,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const admittedRow = inspection
       .prepare("SELECT result FROM task_runs WHERE task_id = ?")
       .get(taskId) as { result: string };
-    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 2 });
+    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 3 });
     expect(JSON.parse(admittedRow.result).writer).toEqual(admitted.writer);
     expect(admittedRow.result).not.toContain('"repository"');
 

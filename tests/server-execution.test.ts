@@ -15,6 +15,9 @@ import {
 import { executeDeliveryRun } from "@usine/delivery-run";
 import {
   submitTask,
+  retryTask,
+  TaskRetryConflictError,
+  followTask,
   taskEvents,
   taskStatus,
   type TaskSubmission,
@@ -234,7 +237,7 @@ describe("server-owned execution", () => {
     await expect(fetch(server.url)).rejects.toThrow();
   });
 
-  test("persists bounded provider interruption evidence through Delivery Run and the server", async () => {
+  test("persists a retryable provider interruption without implicit retry", async () => {
     const { submission, stateDirectory, repositoryName } = await fixture();
     const server = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
@@ -243,7 +246,7 @@ describe("server-owned execution", () => {
           ...contract,
           repository: { path: ".", owner: "example", name: repositoryName },
           projectCheck: { command: "true", timeoutMs: 1_000 },
-          budget: { ...contract.budget, maxImplementerActivations: 1 },
+          budget: { ...contract.budget, maxImplementerActivations: 2 },
           delivery: { ...contract.delivery, baseBranch: "main" },
         };
         return executeDeliveryRun(
@@ -305,11 +308,17 @@ describe("server-owned execution", () => {
     });
     try {
       const admitted = await submitTask(server.url, submission);
-      const blocked = await waitFor(
+      const waiting = await waitFor(
         () => taskStatus(server.url, admitted.taskId),
-        (result) => result.state === "blocked",
+        (result) => result.state === "waiting",
       );
-      expect(blocked.state).toBe("blocked");
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        retryable: true,
+        waiting: { reason: "network_interruption" },
+        activeActivation: null,
+        evidence: { implementerActivations: 1 },
+      });
       const events = (await taskEvents(server.url, admitted.taskId, 0, 100)).events;
       expect(events.map((event) => event.data)).toContainEqual({
         type: "coding_session_interrupted",
@@ -320,6 +329,156 @@ describe("server-owned execution", () => {
         failureClass: "network",
       });
       expect(JSON.stringify(events)).not.toContain("raw-secret-marker");
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("accepts one explicit retry and resumes the same Delivery Run", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    let sessions = 0;
+    let checks = 0;
+    let reviews = 0;
+    let deliveries = 0;
+    const candidateSha = "c".repeat(40);
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, signal }) => {
+        const resolved: ResolvedTaskContract = {
+          ...contract,
+          repository: { path: ".", owner: "example", name: repositoryName },
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          budget: { ...contract.budget, maxImplementerActivations: 2 },
+          delivery: { ...contract.delivery, baseBranch: "main" },
+        };
+        return executeDeliveryRun(
+          {
+            contract: resolved,
+            contractHash: result.contractHash,
+            repositoryIdentity: result.writer.repositoryIdentity,
+            deadlineEpochMs: result.deadlineEpochMs,
+            implementer: {
+              role: "implementer",
+              profile: "writer-profile",
+              sandbox: "workspace-write",
+            },
+            signal,
+          },
+          {
+            authority,
+            workspace: {
+              quarantinePriorWriters: async () => undefined,
+              prepareWriter: async (_taskId, activation, baseSha) => ({
+                taskId: result.taskId,
+                activation,
+                path: ".",
+                baseSha,
+              }),
+              freeze: async (workspace) => ({
+                sha: candidateSha,
+                baseSha: workspace.baseSha,
+                workspace,
+              }),
+              quarantine: async () => undefined,
+            },
+            session: {
+              run: async () => {
+                sessions += 1;
+                return sessions === 1
+                  ? {
+                      status: "failed" as const,
+                      output: null,
+                      summary: "network interruption",
+                      failure: "network interruption",
+                      phase: "turn" as const,
+                      failureClass: "network" as const,
+                    }
+                  : {
+                      status: "completed" as const,
+                      output: { status: "proposed" as const, summary: "candidate" },
+                      summary: "completed",
+                      failure: null,
+                    };
+              },
+            },
+            quality: {
+              check: async (_contract, sha) => {
+                checks += 1;
+                return {
+                  sha,
+                  status: "passed" as const,
+                  command: "true",
+                  exitCode: 0,
+                  stdout: "",
+                  stderr: "",
+                };
+              },
+              reviewWithObservation: async (_contract, sha, _check, _cycle, _onObservation) => {
+                reviews += 1;
+                return {
+                  review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+                  usage: null,
+                };
+              },
+            },
+            forge: {
+              deliver: async (_contract, sha) => {
+                deliveries += 1;
+                return {
+                  sha,
+                  effect: "github" as const,
+                  prNumber: 151,
+                  url: "https://example.invalid/pr/151",
+                  attestationId: "retry-test",
+                };
+              },
+            },
+          },
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const admitted = await submitTask(server.url, submission);
+      const waiting = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (result) => result.state === "waiting",
+      );
+      expect(waiting).toMatchObject({ state: "waiting", retryable: true });
+      expect(sessions).toBe(1);
+      expect(checks).toBe(0);
+      expect(reviews).toBe(0);
+      expect(deliveries).toBe(0);
+
+      await expect(submitTask(server.url, submission)).resolves.toMatchObject({ state: "waiting" });
+      expect(sessions).toBe(1);
+      await expect(
+        followTask(server.url, admitted.taskId, { timeoutMs: 1_000 }),
+      ).resolves.toMatchObject({
+        state: "waiting",
+        retryable: true,
+      });
+
+      const accepted = await retryTask(server.url, admitted.taskId);
+      expect(accepted).toMatchObject({ state: "admitted", retryable: false });
+      const terminal = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (result) => result.state === "reviewed_pr",
+      );
+      expect(terminal).toMatchObject({
+        state: "reviewed_pr",
+        evidence: { implementerActivations: 2 },
+      });
+      expect({ sessions, checks, reviews, deliveries }).toEqual({
+        sessions: 2,
+        checks: 1,
+        reviews: 1,
+        deliveries: 1,
+      });
+      await expect(retryTask(server.url, admitted.taskId)).rejects.toBeInstanceOf(
+        TaskRetryConflictError,
+      );
     } finally {
       await server.close();
     }
