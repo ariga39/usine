@@ -154,13 +154,9 @@ export interface ServerEventListener extends AsyncIterable<ApiEventEnvelope> {
   close(): void;
 }
 
-export interface ServerEventListenerOptions extends EventScope {
-  signal?: AbortSignal;
-}
-
 export async function openServerEventListener(
   serverUrl: string,
-  options: ServerEventListenerOptions = {},
+  options: EventScope = {},
 ): Promise<ServerEventListener> {
   const scope = apiScope(options);
   const client = await clientFor(serverUrl);
@@ -172,23 +168,14 @@ export async function openServerEventListener(
     (value) => (value === undefined ? Result.fail(undefined) : Result.succeed(value)),
   );
   const iterator = Stream.toAsyncIterable(stream)[Symbol.asyncIterator]();
-  let closed = false;
-  const stop = (): void => {
-    if (closed) return;
-    closed = true;
-    void iterator.return?.(undefined).catch(() => undefined);
+  const close = (): void => {
+    void iterator.return?.().catch(() => undefined);
   };
-  options.signal?.addEventListener("abort", stop, { once: true });
-  const listener: ServerEventListener & AsyncIterator<ApiEventEnvelope> = {
-    next: () => (closed ? Promise.resolve({ done: true, value: undefined }) : iterator.next()),
-    return: async () => {
-      stop();
-      return { done: true, value: undefined };
-    },
+  const listener: ServerEventListener = {
     [Symbol.asyncIterator]() {
-      return listener;
+      return iterator;
     },
-    close: stop,
+    close,
   };
   return listener;
 }
