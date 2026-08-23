@@ -1,20 +1,10 @@
 import { readFile, mkdir, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import {
-  Context,
-  Duration,
-  Effect,
-  Exit,
-  FiberMap,
-  Layer,
-  Option,
-  PubSub,
-  Scope,
-  Stream,
-} from "effect";
-import { HttpRouter, HttpServer, HttpServerResponse } from "effect/unstable/http";
+import { createServer } from "node:http";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import { Duration, Effect, Exit, FiberMap, Layer, Option, PubSub, Scope, Stream } from "effect";
+import { HttpRouter, HttpServerResponse } from "effect/unstable/http";
 import { HttpApiBuilder } from "effect/unstable/httpapi";
 import {
   applyMigrations,
@@ -200,8 +190,6 @@ class TransientEventHub {
 
 const DEFAULT_EVENT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_EVENT_WAIT_TIMEOUT_MS = 60_000;
-const SERVER_EVENT_DRAIN_TIMEOUT_MS = 1_000;
-
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
@@ -239,9 +227,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
 
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {
-    yield* Effect.acquireRelease(Effect.succeed(eventHub), (hub) =>
-      Effect.sync(() => hub.shutdown()),
-    );
     yield* Effect.acquireRelease(Effect.void, () =>
       options.codingSession
         ? Effect.tryPromise({
@@ -253,36 +238,20 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
 
     const runTask = yield* FiberMap.makeRuntime<never, string>();
     let launchTask: (task: AdmittedTask) => void = () => undefined;
-    const api = yield* Effect.acquireRelease(
-      Effect.sync(() =>
-        createApiWebHandler({
-          environment: options.environment,
-          launch: (task) => launchTask(task),
-          activeTaskCapacity,
-          onEvent,
-          eventHub,
-        }),
-      ),
-      (value) =>
-        Effect.tryPromise({
-          try: () => value.dispose(),
-          catch: (cause) => new Error(`server API cleanup failed: ${String(cause)}`),
-        }).pipe(Effect.ignore),
+    const api = yield* HttpRouter.toHttpEffect(
+      createApiLayer({
+        environment: options.environment,
+        launch: (task) => launchTask(task),
+        activeTaskCapacity,
+        onEvent,
+        eventHub,
+      }).pipe(Layer.provide(NodeHttpServer.layerHttpServices)),
     );
-    const server = yield* Effect.acquireRelease(
-      Effect.tryPromise({
-        try: () => listen(host, port, api.handler),
-        catch: (cause) => new Error(`server failed to listen: ${String(cause)}`),
-      }),
-      (value) =>
-        Effect.tryPromise({
-          try: async () => {
-            eventHub.shutdown();
-            await close(value);
-          },
-          catch: (cause) => new Error(`server failed to close: ${String(cause)}`),
-        }).pipe(Effect.ignore),
+    const server = yield* NodeHttpServer.make(createServer, { host, port }).pipe(
+      Effect.mapError((cause) => new Error(`server failed to listen: ${String(cause.cause)}`)),
     );
+    yield* server.serve(api);
+    yield* Effect.acquireRelease(Effect.void, () => Effect.sync(() => eventHub.shutdown()));
 
     launchTask = (task) => {
       runTask(
@@ -337,10 +306,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       );
     }
 
+    const serverPort = server.address._tag === "TcpAddress" ? server.address.port : port;
     return {
       host,
-      port: server.addressPort,
-      url: `http://${urlHost}:${server.addressPort}`,
+      port: serverPort,
+      url: `http://${urlHost}:${serverPort}`,
     };
   });
 
@@ -447,125 +417,13 @@ async function blockPersistedTask(
   }
 }
 
-interface BoundServer {
-  addressPort: number;
-  close(callback: (error?: Error) => void): void;
-}
-
-interface WebHandler {
-  (request: globalThis.Request, context: Context.Context<never>): Promise<globalThis.Response>;
-}
-
-function listen(host: string, port: number, handler: WebHandler): Promise<BoundServer> {
-  return new Promise((resolve, reject) => {
-    const server = createServer((request, response) => {
-      const controller = new AbortController();
-      request.once("aborted", () => controller.abort());
-      response.once("close", () => controller.abort());
-      void handler(webRequestFromNode(request, controller.signal), Context.empty())
-        .then((webResponse) => writeNodeResponse(response, webResponse))
-        .catch((error) => {
-          if (response.headersSent || response.destroyed) {
-            response.destroy(error instanceof Error ? error : undefined);
-            return;
-          }
-          response.statusCode = 500;
-          response.setHeader("content-type", "application/json");
-          response.end(JSON.stringify({ code: "server_error", message: "server request failed" }));
-        });
-    });
-    server.once("error", reject);
-    server.listen(port, host, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("server did not bind to a TCP port"));
-        return;
-      }
-      resolve({ addressPort: address.port, close: (callback) => server.close(callback) });
-    });
-  });
-}
-
-function webRequestFromNode(request: IncomingMessage, signal: AbortSignal): globalThis.Request {
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(request.headers)) {
-    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-  }
-  const hasBody = request.method !== "GET" && request.method !== "HEAD";
-  return new Request(`http://${request.headers.host ?? "127.0.0.1"}${request.url ?? "/"}`, {
-    method: request.method,
-    headers,
-    body: hasBody ? (request as unknown as BodyInit) : undefined,
-    signal,
-    duplex: hasBody ? "half" : undefined,
-  } as RequestInit);
-}
-
-async function writeNodeResponse(
-  response: ServerResponse,
-  webResponse: globalThis.Response,
-): Promise<void> {
-  response.statusCode = webResponse.status;
-  webResponse.headers.forEach((value, name) => response.setHeader(name, value));
-  if (!webResponse.body) {
-    response.end();
-    return;
-  }
-  const reader = webResponse.body.getReader();
-  const cancelReader = (): void => {
-    void reader.cancel().catch(() => undefined);
-  };
-  response.once("close", cancelReader);
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done || response.destroyed) break;
-      if (!response.write(chunk.value) && !response.destroyed && !(await waitForDrain(response)))
-        break;
-    }
-  } finally {
-    response.removeListener("close", cancelReader);
-    reader.releaseLock();
-    if (!response.writableEnded && !response.destroyed) response.end();
-  }
-}
-
-function waitForDrain(response: ServerResponse): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const finish = (accepted: boolean): void => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      response.removeListener("drain", onDrain);
-      response.removeListener("close", onClose);
-      resolve(accepted);
-    };
-    const onDrain = (): void => finish(true);
-    const onClose = (): void => finish(false);
-    response.once("drain", onDrain);
-    response.once("close", onClose);
-    timeout = setTimeout(() => {
-      response.destroy();
-      finish(false);
-    }, SERVER_EVENT_DRAIN_TIMEOUT_MS);
-  });
-}
-
-function close(server: BoundServer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-}
-
-function createApiWebHandler(options: {
+function createApiLayer(options: {
   readonly environment: NodeJS.ProcessEnv;
   readonly launch: (task: AdmittedTask) => void;
   readonly activeTaskCapacity: number;
   readonly onEvent: (event: TaskEvent) => void;
   readonly eventHub: TransientEventHub;
-}): { readonly handler: WebHandler; readonly dispose: () => Promise<void> } {
+}) {
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const serverHandlers = HttpApiBuilder.group(UsineApi, "server", (handlers) =>
     handlers.handleAll({
@@ -662,9 +520,7 @@ function createApiWebHandler(options: {
   const apiLayer = HttpApiBuilder.layer(UsineApi).pipe(
     Layer.provide(Layer.mergeAll(serverHandlers, repositoryHandlers, taskHandlers, eventHandlers)),
   );
-  return HttpRouter.toWebHandler(apiLayer.pipe(Layer.provide(HttpServer.layerServices)), {
-    disableLogger: true,
-  });
+  return apiLayer;
 }
 
 function apiEffect<A>(thunk: () => Promise<A>): Effect.Effect<A, ApiError> {
