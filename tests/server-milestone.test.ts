@@ -714,8 +714,11 @@ describe("server-owned delivery milestone", () => {
       );
       expect(processAlive(descendantPid)).toBe(true);
 
-      await stopServer(first);
+      await stopServer(first, "SIGINT");
       firstStopped = true;
+      const firstResult = await first.child;
+      expect(firstResult.exitCode).toBe(130);
+      expect(firstResult.signal).toBeUndefined();
       const interrupted = await lookupTaskStatus(fixtureValue.stateDirectory, fixtureValue.taskId);
       const interruptedEvents = await lookupTaskEvents(
         fixtureValue.stateDirectory,

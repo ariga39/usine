@@ -24,7 +24,7 @@ export function runServerCommand(environment: NodeJS.ProcessEnv) {
     (server) =>
       Effect.sync(() => {
         process.stdout.write(renderJson({ event: "server_ready", url: server.url }));
-      }).pipe(Effect.andThen(awaitServerStop)),
+      }).pipe(Effect.andThen(Effect.never)),
     (server) => Effect.promise(() => server.close()),
   ).pipe(
     Effect.catch((cause) =>
@@ -34,16 +34,3 @@ export function runServerCommand(environment: NodeJS.ProcessEnv) {
     ),
   );
 }
-
-const awaitServerStop = Effect.promise(
-  () =>
-    new Promise<void>((resolve) => {
-      const stop = () => {
-        process.off("SIGINT", stop);
-        process.off("SIGTERM", stop);
-        resolve();
-      };
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-    }),
-);
