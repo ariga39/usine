@@ -1,14 +1,18 @@
 name: Verify
 
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -18,4 +22,8 @@ jobs:
       - run: corepack pnpm lint
       - run: corepack pnpm typecheck
       - run: corepack pnpm build
+        if: github.event_name == 'pull_request'
+      - run: corepack pnpm exec vp run --filter './packages/*' --filter './apps/*' test
+        if: github.event_name == 'pull_request'
       - run: corepack pnpm test
+        if: github.event_name == 'push'

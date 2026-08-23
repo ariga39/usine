@@ -139,6 +139,7 @@ active falsifier / safety-authority defect
 - Vite+ 内置并锁定 Oxlint、Oxfmt、Vitest 和 tsdown。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter/build orchestrator。
 - 普通 library package 使用 Vite+ `pack` 的默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，CLI 的 unbundle 保持其 executable/import contract。
 - `vp run --filter '@usine/cli...' build` 使用 pnpm workspace 的现有依赖图顺序递归执行六个产品 package、runtime 与 CLI 的 `vp pack`；没有额外 task cache 或第二套 monorepo orchestrator。
+- CI 为每个候选选择一条按比例的路径：`pull_request` checkout PR 的 exact candidate SHA，运行 format、lint、typecheck、transitive build 和所有 workspace package-local `test` scripts；只有 push 到 `main` 才运行完整的 `corepack pnpm test`，包括 root public-seam suite。feature-branch push 不触发 verification，因此不会重复 PR 检查；这条 cadence 不替代 exact-SHA review 或 merge-head protection。
 
 ## 6. 纵切优先与复杂度预算
 
