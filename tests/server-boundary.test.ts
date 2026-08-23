@@ -59,6 +59,35 @@ describe("CLI/server boundary", () => {
     }
   });
 
+  test("projects an occupied port through the built CLI server failure contract", async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const address = blocker.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
+
+    try {
+      const result = await execa("node", [join(process.cwd(), "apps/cli/dist/cli.mjs"), "server"], {
+        env: {
+          USINE_STATE_DIR: join(tmpdir(), "usine-server-cli-startup-failure"),
+          USINE_SERVER_HOST: "127.0.0.1",
+          USINE_SERVER_PORT: String(address.port),
+        },
+        reject: false,
+        stripFinalNewline: false,
+      });
+
+      expect(result.exitCode).toBe(6);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        '{"error":"server_failed","kind":"server","message":"operation failed"}\n',
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        blocker.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   test("submits a task to the local server and reads the same durable Task ID", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-boundary-"));
     const repository = join(root, "repository");

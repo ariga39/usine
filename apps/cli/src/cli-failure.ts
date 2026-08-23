@@ -1,3 +1,5 @@
+import { Runtime } from "effect";
+
 export type CliFailureKind =
   | "usage"
   | "validation"
@@ -7,6 +9,9 @@ export type CliFailureKind =
   | "server";
 
 export class CliFailure extends Error {
+  readonly [Runtime.errorExitCode]: number;
+  readonly [Runtime.errorReported] = false;
+
   constructor(
     readonly error: string,
     readonly kind: CliFailureKind,
@@ -15,6 +20,7 @@ export class CliFailure extends Error {
   ) {
     super(message);
     this.name = "CliFailure";
+    this[Runtime.errorExitCode] = exitCodeForKind(kind);
   }
 }
 
