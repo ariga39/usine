@@ -30,15 +30,6 @@ export const serverSnapshotSchema = Schema.Struct({
   codingSessions: Schema.Array(codingSessionResource),
 });
 
-export type RepositoryResourceShape = Schema.Schema.Type<typeof repositoryResourceEffectSchema>;
 export type CodingSessionResource = Schema.Schema.Type<typeof codingSessionResource>;
 export type ServerHealth = Schema.Schema.Type<typeof serverHealthSchema>;
 export type ServerSnapshot = Schema.Schema.Type<typeof serverSnapshotSchema>;
-
-export function decodeServerHealth(input: unknown): ServerHealth {
-  return Schema.decodeUnknownSync(serverHealthSchema)(input);
-}
-
-export function decodeServerSnapshot(input: unknown): ServerSnapshot {
-  return Schema.decodeUnknownSync(serverSnapshotSchema)(input);
-}
