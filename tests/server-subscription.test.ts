@@ -307,6 +307,8 @@ describe("public transient server event listeners", () => {
       slow.close();
       await expect(slowClosed).resolves.toBeUndefined();
       fast.close();
+      fast.close();
+      await expect(fast[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
       const shutdownListener = await openServerEventListener(server.url, { repositoryId: repo.id });
       const shutdownNext = shutdownListener[Symbol.asyncIterator]()
         .next()
