@@ -10,8 +10,12 @@ import {
   openServerEventListener,
   registerRepository,
   submitTask,
+  taskStatus,
   waitForServerEvent,
 } from "../apps/cli/src/server-client.js";
+
+// Representative public-loopback characterization size, not a throughput contract.
+const REPRESENTATIVE_OBSERVATION_BURST = 2_500;
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
@@ -253,7 +257,7 @@ describe("public transient server event listeners", () => {
     }
   });
 
-  test("isolates a slow listener and starts a fresh process without replay", async () => {
+  test("isolates a paused listener during a 2,500-observation burst and starts a fresh process without replay", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-event-lifecycle-"));
     const stateDirectory = join(root, "state");
     const repo = await repository(root, "repository-a");
@@ -262,7 +266,7 @@ describe("public transient server event listeners", () => {
     const server = await startUsineServer({
       environment: environment(stateDirectory),
       execute: async ({ authority, result }) => {
-        for (let index = 0; index < 96; index += 1) {
+        for (let index = 0; index < REPRESENTATIVE_OBSERVATION_BURST; index += 1) {
           await authority.appendObservation(result.taskId, {
             eventId: `lifecycle:${index}`,
             occurredAtEpochMs: index,
@@ -293,17 +297,33 @@ describe("public transient server event listeners", () => {
       slow = await openPausedListener(server.url, repo.id);
       fast = await openServerEventListener(server.url, { repositoryId: repo.id });
       const slowClosed = slow.closed;
-      const fastEvents = collect(fast, 99);
+      const fastEvents = collect(fast, REPRESENTATIVE_OBSERVATION_BURST + 3);
       await submitTask(server.url, { contractPath, repositoryId: repo.id });
       const events = await fastEvents;
-      expect(events).toHaveLength(99);
+      expect(events).toHaveLength(REPRESENTATIVE_OBSERVATION_BURST + 3);
       expect(events.map((entry) => entry.event.sequence)).toEqual(
-        Array.from({ length: 99 }, (_, index) => index + 1),
+        Array.from({ length: REPRESENTATIVE_OBSERVATION_BURST + 3 }, (_, index) => index + 1),
       );
       expect(events[0]?.event.data.type).toBe("task_admitted");
-      expect(events.at(-2)?.event.data.type).toBe("task_blocked");
-      expect(events.at(-1)?.event.data.type).toBe("task_terminal");
+      expect(events.slice(1, -2).map((entry) => entry.event.data)).toEqual(
+        Array.from({ length: REPRESENTATIVE_OBSERVATION_BURST }, (_, index) => ({
+          type: "coding_tool_completed",
+          role: "implementer",
+          activation: 1,
+          tool: "read",
+          outcome: "succeeded",
+          sessionId: "lifecycle-session",
+          outcomeId: `lifecycle-outcome:${index}`,
+        })),
+      );
+      expect(events.at(-2)?.event.data).toEqual({ type: "task_blocked", reason: "unknown" });
+      expect(events.at(-1)?.event.data).toEqual({ type: "task_terminal", state: "blocked" });
       expect(JSON.stringify(events)).not.toContain("secret-b");
+      await expect(taskStatus(server.url, taskId)).resolves.toMatchObject({
+        taskId,
+        state: "blocked",
+        blocker: { classification: "unknown" },
+      });
       slow.close();
       await expect(slowClosed).resolves.toBeUndefined();
       fast.close();
@@ -341,5 +361,5 @@ describe("public transient server event listeners", () => {
       slow?.close();
       fast?.close();
     }
-  });
+  }, 30_000);
 });
