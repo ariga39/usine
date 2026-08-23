@@ -1,6 +1,5 @@
 import { Schema } from "effect";
 import type { TaskResult } from "./task-state.js";
-import type { TaskResource } from "./task-state.js";
 
 export const TASK_RESULT_SCHEMA_VERSION = 2 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
@@ -293,38 +292,6 @@ export function decodeRawPersistedTaskResult(input: string): TaskResult {
   }
 }
 
-export function decodeCurrentTaskResult(input: unknown): TaskResult {
-  return projectDecodedResult(Schema.decodeUnknownSync(currentTaskResult)(input));
-}
-
-export function decodeTaskResource(input: unknown): TaskResource {
-  const decoded = Schema.decodeUnknownSync(taskResourceSchema)(input);
-  return {
-    schemaVersion: decoded.schemaVersion,
-    taskId: decoded.taskId,
-    contractHash: decoded.contractHash,
-    revision: decoded.revision,
-    deadlineEpochMs: decoded.deadlineEpochMs,
-    state: decoded.state,
-    mergeAuthorized: decoded.mergeAuthorized,
-    candidateSha: decoded.candidateSha,
-    candidateFence: decoded.candidateFence,
-    check: decoded.check ? { ...decoded.check } : null,
-    review: decoded.review ? { ...decoded.review } : null,
-    delivery: decoded.delivery
-      ? {
-          ...decoded.delivery,
-          merge: decoded.delivery.merge ? { ...decoded.delivery.merge } : null,
-        }
-      : null,
-    blocker: decoded.blocker,
-    activeActivation: decoded.activeActivation,
-    writer: { ...decoded.writer },
-    repository: decoded.repository ? { ...decoded.repository } : undefined,
-    evidence: { ...decoded.evidence },
-  };
-}
-
 export function taskListItemFromResult(result: TaskResult): TaskListItem {
   return {
     taskId: result.taskId,
@@ -336,8 +303,4 @@ export function taskListItemFromResult(result: TaskResult): TaskListItem {
     writer: { repositoryIdentity: result.writer.repositoryIdentity },
     evidence: { ...result.evidence },
   };
-}
-
-export function decodeTaskListPage(input: unknown): TaskListPage {
-  return Schema.decodeUnknownSync(taskListPageSchema)(input);
 }
