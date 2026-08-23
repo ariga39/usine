@@ -205,13 +205,11 @@ export const UsineApi = HttpApi.make("usine-loopback-api")
   .add(TaskApi)
   .add(EventApi);
 
-export type UsineApiClient = HttpApiClient.ForApi<typeof UsineApi>;
 export type ApiEventScope = Schema.Schema.Type<typeof scopeSchema>;
 export type ApiEventQuery = Schema.Schema.Type<typeof eventQuerySchema>;
 export type ApiEventEnvelope = Schema.Schema.Type<typeof eventEnvelopeSchema>;
 export type ApiTaskSubmission = Schema.Schema.Type<typeof taskSubmissionSchema>;
 export type ApiTaskResource = Schema.Schema.Type<typeof taskResourceSchema>;
-export type ApiRepositoryRegistration = Schema.Schema.Type<typeof repositoryRegistrationSchema>;
 export type ApiError = Schema.Schema.Type<(typeof allErrors)[number]>;
 export type ApiEventStreamValue = Schema.Schema.Type<typeof eventStreamDataSchema>;
 

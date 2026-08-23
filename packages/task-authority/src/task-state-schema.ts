@@ -182,8 +182,6 @@ export const taskResourceSchema = Schema.Struct({
 
 export type TaskListItem = Schema.Schema.Type<typeof taskListItemSchema>;
 export type TaskListPage = Schema.Schema.Type<typeof taskListPageSchema>;
-export type DecodedTaskResource = Schema.Schema.Type<typeof taskResourceSchema>;
-
 const legacyTaskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
