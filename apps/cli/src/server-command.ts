@@ -1,7 +1,7 @@
 import { createRuntimeCodingSession, startUsineServer } from "@usine/runtime";
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
 import { Command } from "effect/unstable/cli";
-import { reportCommandFailure } from "./cli-failure.js";
+import { CliFailure, reportCommandFailure } from "./cli-failure.js";
 import { renderJson } from "./cli-renderer.js";
 import { serverReadCommands } from "./server-read-command.js";
 
@@ -25,12 +25,23 @@ export function runServerCommand(environment: NodeJS.ProcessEnv) {
       Effect.sync(() => {
         process.stdout.write(renderJson({ event: "server_ready", url: server.url }));
       }).pipe(Effect.andThen(Effect.never)),
-    (server) => Effect.promise(() => server.close()),
+    (server) =>
+      Effect.promise(() => server.close()).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.sync(() => {
+                reportCommandFailure("server_failed", cause);
+              }).pipe(Effect.andThen(Effect.fail(new CliFailure("server_failed", "server")))),
+        ),
+      ),
   ).pipe(
-    Effect.catch((cause) =>
-      Effect.sync(() => {
-        reportCommandFailure("server_failed", cause);
-      }),
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(cause)
+        : Effect.sync(() => {
+            reportCommandFailure("server_failed", cause);
+          }),
     ),
   );
 }
