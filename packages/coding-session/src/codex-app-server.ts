@@ -250,6 +250,7 @@ export async function runCodexAppServer({
   let phase: CodingSessionPhase = "startup";
   let threadId: string | undefined;
   let turnId: string | undefined;
+  let turnActive = false;
   let finalResponse = "";
   let usage: AppServerRunResult["usage"] = null;
   let turnNumber = 0;
@@ -282,7 +283,7 @@ export async function runCodexAppServer({
                 },
               ),
           ),
-          (transport) => Effect.sync(() => transport.closeTransport()),
+          (clientTransport) => Effect.sync(() => clientTransport.closeTransport()),
         );
         client = transport;
 
@@ -395,6 +396,7 @@ export async function runCodexAppServer({
                     const event = turnCompletedSchema.parse(incoming.params);
                     assertIdentity(event.threadId, event.turn.id);
                     if (!threadId) throw identityMismatch();
+                    turnActive = false;
                     yield* observe({
                       type: "turn_completed",
                       turn: turnNumber,
@@ -430,20 +432,17 @@ export async function runCodexAppServer({
           }
         });
         yield* processMessages.pipe(Effect.forkScoped);
-        if (request.signal)
-          yield* Effect.forkScoped(
-            appServerCancellation(
-              request.signal,
-              transport,
-              messages,
-              terminal,
-              () => ({
-                threadId,
-                turnId,
-              }),
-              () => currentResponse?.deferred,
-            ),
-          );
+        yield* Effect.addFinalizer(() => {
+          if (!request.signal?.aborted || !turnActive) return Effect.void;
+          return Effect.sync(() => {
+            if (!threadId || !turnId) return;
+            try {
+              transport.notify("turn/interrupt", { threadId, turnId });
+            } catch {
+              // The transport release finalizer still owns process cleanup.
+            }
+          });
+        });
 
         yield* requestAppServer("initialize", {
           clientInfo: { name: "usine-coding-session", version: "0.1.0" },
@@ -476,10 +475,12 @@ export async function runCodexAppServer({
           }),
         );
         turnId = turn.turn.id;
+        turnActive = true;
         throwIfAborted(request.signal);
         return yield* Deferred.await(terminal);
       }),
     ),
+    { signal: request.signal },
   ).catch((error) => {
     if (error instanceof CodingSessionInterruption) throw error;
     if (error instanceof AppServerCancelled || request.signal?.aborted)
@@ -497,38 +498,6 @@ export async function runCodexAppServer({
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error("app-server request failed");
-}
-
-function appServerCancellation(
-  signal: AbortSignal,
-  client: AppServerClient,
-  messages: Queue.Queue<AppServerMessage>,
-  terminal: Deferred.Deferred<AppServerRunResult, Error>,
-  ids: () => { threadId: string | undefined; turnId: string | undefined },
-  currentResponse: () => Deferred.Deferred<unknown, Error> | undefined,
-): Effect.Effect<void> {
-  return Effect.callback<void>((resume) => {
-    const onAbort = (): void => resume(Effect.void);
-    if (signal.aborted) onAbort();
-    else signal.addEventListener("abort", onAbort, { once: true });
-    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
-  }).pipe(
-    Effect.tap(() =>
-      Effect.gen(function* () {
-        const { threadId, turnId } = ids();
-        if (threadId && turnId)
-          yield* Effect.sync(() => client.notify("turn/interrupt", { threadId, turnId })).pipe(
-            Effect.catch(() => Effect.void),
-          );
-        const cancellation = new AppServerCancelled("coding session cancelled");
-        const response = currentResponse();
-        if (response) yield* Deferred.fail(response, cancellation);
-        yield* Queue.shutdown(messages);
-        yield* Deferred.fail(terminal, cancellation);
-      }),
-    ),
-    Effect.asVoid,
-  );
 }
 
 function appServerFailureClass(
