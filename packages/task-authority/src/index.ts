@@ -5,9 +5,6 @@ export * from "./task-state.js";
 export * from "./task-authority.js";
 export * from "./task-event.js";
 export {
-  decodeCurrentTaskResult,
-  decodeTaskResource,
-  decodeTaskListPage,
   taskListItemFromResult,
   TaskStateQuarantinedError,
   isTaskStateQuarantinedError,

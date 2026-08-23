@@ -51,11 +51,7 @@ export type {
 } from "./task-state.js";
 import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
 import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
-export {
-  decodeTaskEvent,
-  decodeTaskEventPage,
-  decodeTaskObservationEventInput,
-} from "./task-event.js";
+export { decodeTaskEvent, decodeTaskObservationEventInput } from "./task-event.js";
 export type {
   TaskEvent,
   TaskEventPage,

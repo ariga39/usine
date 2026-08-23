@@ -285,14 +285,6 @@ export function decodeTaskEvent(input: unknown): TaskEvent {
   return Schema.decodeUnknownSync(taskEventSchema)(input);
 }
 
-export function decodeTaskEventPage(input: unknown): TaskEventPage {
-  assertExactKeys(input, ["taskId", "events", "nextSequence"]);
-  if (Predicate.isObject(input) && Array.isArray(input.events)) {
-    for (const event of input.events) decodeTaskEvent(event);
-  }
-  return Schema.decodeUnknownSync(taskEventPageSchema)(input);
-}
-
 const dataFields: Record<string, readonly string[]> = {
   task_admitted: ["type", "contractHash"],
   activation_reserved: ["type", "activation", "recovery"],
