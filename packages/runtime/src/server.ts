@@ -245,7 +245,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     const api = yield* HttpRouter.toHttpEffect(
       createApiLayer({
         environment: options.environment,
-        launch: (task) => launchTask(task),
+        launch: (task, mode) => launchTask(task, mode),
         activeTaskCapacity,
         onEvent,
         eventHub,
