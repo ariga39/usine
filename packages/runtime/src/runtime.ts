@@ -285,11 +285,12 @@ export async function retryTask(
   stateDirectory: string,
   taskId: string,
   budget: number,
+  onEvent?: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath);
   try {
-    return await new TaskAuthority(handle.database).retryTask(taskId, budget);
+    return await new TaskAuthority(handle.database, { onEvent }).retryTask(taskId, budget);
   } finally {
     handle.close();
   }

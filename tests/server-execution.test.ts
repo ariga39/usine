@@ -8,6 +8,7 @@ import {
   lookupTaskStatus,
   lookupTaskEvents,
   recordRecoveryObservation,
+  retryTask as retryPersistedTask,
   startUsineServer,
   registerRepository,
   type ServerExecutionContext,
@@ -18,6 +19,7 @@ import {
   retryTask,
   TaskRetryConflictError,
   followTask,
+  openServerEventListener,
   taskEvents,
   taskStatus,
   type TaskSubmission,
@@ -460,7 +462,15 @@ describe("server-owned execution", () => {
         retryable: true,
       });
 
+      const listener = await openServerEventListener(server.url, { taskId: admitted.taskId });
       const accepted = await retryTask(server.url, admitted.taskId);
+      const retryEvent = await listener[Symbol.asyncIterator]().next();
+      listener.close();
+      expect(retryEvent.value?.event.data).toEqual({
+        type: "task_retry_accepted",
+        reason: "network_interruption",
+        activation: 1,
+      });
       expect(accepted).toMatchObject({ state: "admitted", retryable: false });
       const terminal = await waitFor(
         () => taskStatus(server.url, admitted.taskId),
@@ -481,6 +491,188 @@ describe("server-owned execution", () => {
       );
     } finally {
       await server.close();
+    }
+  });
+
+  test("relaunches explicit retry while the prior owner is still finishing", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const waiting = deferred<void>();
+    const relaunched = deferred<void>();
+    let launches = 0;
+    const activations: number[] = [];
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, signal }) => {
+        launches += 1;
+        const reservation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        activations.push(reservation.activation);
+        if (launches === 1) {
+          const waitingResult = await authority.recordWaiting(
+            { taskId: result.taskId, revision: reservation.result.revision },
+            {
+              reason: "network_interruption",
+              resumeState: "admitted",
+              activation: reservation.activation,
+            },
+          );
+          waiting.resolve();
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) {
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return waitingResult;
+        }
+        relaunched.resolve();
+        return authority.block(
+          { taskId: result.taskId, revision: reservation.result.revision },
+          "retry replacement complete",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const admitted = await submitTask(server.url, submission);
+      await waiting.promise;
+      await expect(retryTask(server.url, admitted.taskId)).resolves.toMatchObject({
+        state: "admitted",
+      });
+      await relaunched.promise;
+      await expect(taskStatus(server.url, admitted.taskId)).resolves.toMatchObject({
+        state: "blocked",
+      });
+      expect({ launches, activations }).toEqual({ launches: 2, activations: [1, 2] });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("does not restart or resubmit a waiting Task", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const waiting = deferred<void>();
+    let launches = 0;
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result }) => {
+        launches += 1;
+        const reservation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        const waitingResult = await authority.recordWaiting(
+          { taskId: result.taskId, revision: reservation.result.revision },
+          {
+            reason: "network_interruption",
+            resumeState: "admitted",
+            activation: reservation.activation,
+          },
+        );
+        waiting.resolve();
+        return waitingResult;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const admitted = await submitTask(server.url, submission);
+    await waiting.promise;
+    await server.close();
+
+    const restarted = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async () => {
+        launches += 1;
+        throw new Error("waiting task must not restart");
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await expect(submitTask(restarted.url, submission)).resolves.toMatchObject({
+        taskId: admitted.taskId,
+        state: "waiting",
+      });
+      expect(launches).toBe(1);
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  test("re-enters an accepted retry after its launch is lost", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const waiting = deferred<void>();
+    let launches = 0;
+    const activations: number[] = [];
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, signal }) => {
+        launches += 1;
+        const reservation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        activations.push(reservation.activation);
+        if (launches === 1) {
+          const waitingResult = await authority.recordWaiting(
+            { taskId: result.taskId, revision: reservation.result.revision },
+            {
+              reason: "network_interruption",
+              resumeState: "admitted",
+              activation: reservation.activation,
+            },
+          );
+          waiting.resolve();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return waitingResult;
+        }
+        return authority.block(
+          { taskId: result.taskId, revision: reservation.result.revision },
+          "retry restart complete",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const admitted = await submitTask(server.url, submission);
+    await waiting.promise;
+    await expect(retryPersistedTask(stateDirectory, admitted.taskId, 2)).resolves.toMatchObject({
+      state: "admitted",
+      evidence: { implementerActivations: 1 },
+    });
+    await server.close();
+
+    const restarted = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result }) => {
+        launches += 1;
+        const reservation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        activations.push(reservation.activation);
+        return authority.block(
+          { taskId: result.taskId, revision: reservation.result.revision },
+          "restart recovery complete",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await expect(taskStatus(restarted.url, admitted.taskId)).resolves.toMatchObject({
+        state: "blocked",
+        evidence: { implementerActivations: 2 },
+      });
+      expect({ launches, activations }).toEqual({ launches: 2, activations: [1, 2] });
+    } finally {
+      await restarted.close();
     }
   });
 

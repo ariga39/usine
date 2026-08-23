@@ -46,7 +46,7 @@ export interface MergeEffect {
 
 export interface TaskResult {
   /** Version of the durable Task Authority result projection. */
-  schemaVersion: 2 | 3;
+  schemaVersion: 3;
   taskId: string;
   contractHash: string;
   /** Durable compare-and-set identity for this observation. */
@@ -62,7 +62,7 @@ export interface TaskResult {
   review: ReviewVerdict | null;
   delivery: DeliveryEffect | null;
   blocker: string | null;
-  waiting?: TaskWaiting | null;
+  waiting: TaskWaiting | null;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
   /** Resolved repository facts frozen at admission for restart and audit. */
@@ -122,7 +122,7 @@ export interface PublicTaskWaiting {
 }
 
 export interface TaskResource {
-  schemaVersion: 2 | 3;
+  schemaVersion: 3;
   taskId: string;
   contractHash: string;
   revision: number;
@@ -135,8 +135,8 @@ export interface TaskResource {
   review: PublicReviewVerdict | null;
   delivery: DeliveryEffect | null;
   blocker: PublicBlockerDiagnostic | null;
-  waiting?: PublicTaskWaiting | null;
-  retryable?: boolean;
+  waiting: PublicTaskWaiting | null;
+  retryable: boolean;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
   repository?: TaskRepositoryResource;

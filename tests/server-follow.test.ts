@@ -5,7 +5,7 @@ import type { TaskEvent, TaskResource, TaskState } from "@usine/task-authority";
 
 function result(taskId: string, revision: number, state: TaskState): TaskResource {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId,
     contractHash: "a".repeat(64),
     revision,
@@ -18,6 +18,8 @@ function result(taskId: string, revision: number, state: TaskState): TaskResourc
     review: null,
     delivery: null,
     blocker: state === "blocked" ? { classification: "unknown" } : null,
+    waiting: null,
+    retryable: false,
     activeActivation: state === "admitted" ? 1 : null,
     writer: { repositoryIdentity: "example/repository" },
     evidence: {

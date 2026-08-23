@@ -58,6 +58,7 @@ import {
   encodeApiWaitResponse,
 } from "./http-api.js";
 type TaskEventEnvelope = ApiEventEnvelope;
+type LaunchMode = "deduplicated" | "replace";
 
 export type TaskSubmission = ApiTaskSubmission;
 
@@ -240,7 +241,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     );
 
     const runTask = yield* FiberMap.makeRuntime<never, string>();
-    let launchTask: (task: AdmittedTask) => void = () => undefined;
+    let launchTask: (task: AdmittedTask, mode?: LaunchMode) => void = () => undefined;
     const api = yield* HttpRouter.toHttpEffect(
       createApiLayer({
         environment: options.environment,
@@ -256,7 +257,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     yield* server.serve(api);
     yield* Effect.acquireRelease(Effect.void, () => Effect.sync(() => eventHub.shutdown()));
 
-    launchTask = (task) => {
+    launchTask = (task, mode = "deduplicated") => {
       runTask(
         task.result.taskId,
         Effect.tryPromise({
@@ -271,7 +272,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
             ),
           catch: (cause) => cause,
         }).pipe(Effect.asVoid),
-        { onlyIfMissing: true },
+        mode === "deduplicated" ? { onlyIfMissing: true } : undefined,
       );
     };
 
@@ -388,6 +389,7 @@ async function executeServerTask(
       });
     } catch (error) {
       const latest = await authority.lookup(current.taskId);
+      if (signal.aborted) return latest ?? task.result;
       if (!latest || isTerminalState(latest.state)) throw error;
       return await authority.block(
         { taskId: latest.taskId, revision: latest.revision },
@@ -422,7 +424,7 @@ async function blockPersistedTask(
 
 function createApiLayer(options: {
   readonly environment: NodeJS.ProcessEnv;
-  readonly launch: (task: AdmittedTask) => void;
+  readonly launch: (task: AdmittedTask, mode?: LaunchMode) => void;
   readonly activeTaskCapacity: number;
   readonly onEvent: (event: TaskEvent) => void;
   readonly eventHub: TransientEventHub;
@@ -520,9 +522,10 @@ function createApiLayer(options: {
             stateDirectory,
             params.taskId,
             contract.budget.maxImplementerActivations,
+            options.onEvent,
           );
           if (!isTerminalState(result.state) && result.state !== "waiting")
-            options.launch({ input: execution.input, contract, result });
+            options.launch({ input: execution.input, contract, result }, "replace");
           return taskResourceForApi(result);
         }),
     }),

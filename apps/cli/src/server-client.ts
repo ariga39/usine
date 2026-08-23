@@ -5,6 +5,7 @@ import {
   makeUsineApiClient,
   type ApiEventEnvelope,
   type ApiEventScope,
+  type ApiTaskResource,
   type ApiTaskSubmission,
 } from "@usine/runtime";
 import {
@@ -97,12 +98,12 @@ export async function submitTask(
   submission: TaskSubmission,
 ): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
-  return runRequest(client.tasks.submit({ payload: submission }));
+  return normalizeTaskResource(await runRequest(client.tasks.submit({ payload: submission })));
 }
 
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
-  return runRequest(client.tasks.retry({ params: { taskId } }));
+  return normalizeTaskResource(await runRequest(client.tasks.retry({ params: { taskId } })));
 }
 
 export async function registerRepository(
@@ -139,7 +140,7 @@ export async function listRepositories(
 export async function taskStatus(serverUrl: string, taskId: string): Promise<TaskResource | null> {
   const client = await clientFor(serverUrl);
   try {
-    return await runRequest(client.tasks.get({ params: { taskId } }));
+    return normalizeTaskResource(await runRequest(client.tasks.get({ params: { taskId } })));
   } catch (error) {
     if (error instanceof ServerClientError && error.status === 404) return null;
     throw error;
@@ -292,6 +293,15 @@ function clientError(error: unknown): ServerClientError {
     error instanceof Error ? error.message : "server request failed",
     500,
   );
+}
+
+function normalizeTaskResource(resource: ApiTaskResource): TaskResource {
+  return {
+    ...resource,
+    schemaVersion: 3,
+    waiting: resource.waiting ?? null,
+    retryable: resource.retryable ?? false,
+  };
 }
 
 function isApiError(

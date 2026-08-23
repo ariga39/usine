@@ -775,7 +775,11 @@ export class TaskAuthority {
       const event = await TaskAuthority.appendEvent(database, taskId, {
         eventId: `retry:${prior.revision}`,
         occurredAtEpochMs: Date.now(),
-        data: { type: "task_retry_accepted", reason: prior.waiting.reason },
+        data: {
+          type: "task_retry_accepted",
+          reason: prior.waiting.reason,
+          activation: prior.waiting.activation,
+        },
       });
       return { result: saved, events: [event] };
     };
@@ -934,7 +938,11 @@ function factEvent(
       return {
         eventId: `waiting:${fact.waiting.activation}`,
         occurredAtEpochMs,
-        data: { type: "task_waiting", reason: fact.waiting.reason },
+        data: {
+          type: "task_waiting",
+          reason: fact.waiting.reason,
+          activation: fact.waiting.activation,
+        },
       };
     case "retry":
       return null;

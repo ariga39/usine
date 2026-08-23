@@ -59,7 +59,7 @@ function persistedResult(
   mergeAuthorized = false,
 ): TaskResult {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     taskId: id,
     contractHash: "hash",
     revision: 4,
@@ -76,6 +76,7 @@ function persistedResult(
       state === "reviewed" ? { sha, verdict: "approved", summary: "approved", findings: [] } : null,
     delivery: null,
     blocker: null,
+    waiting: null,
     activeActivation: null,
     writer: { repositoryIdentity: `recovery/${id}` },
     evidence: {
