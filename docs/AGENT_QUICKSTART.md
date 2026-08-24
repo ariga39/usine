@@ -119,7 +119,7 @@ Grant the read App only the repository permissions needed by its enabled tools:
 |---|---|
 | `github_issue_get`, `github_issue_comments` | Issues: read |
 | `github_pull_request_get`, `github_pull_request_reviews` | Pull requests: read |
-| `github_pull_request_checks` | Checks: read |
+| `github_pull_request_checks` | Pull requests: read; Checks: read |
 | `github_file_get`, `github_commit_get` | Contents: read |
 
 The allowed tool names are `github_issue_get`, `github_issue_comments`, `github_pull_request_get`, `github_pull_request_reviews`, `github_pull_request_checks`, `github_file_get`, and `github_commit_get`. If a role-specific tool list is omitted, the current implementation enables the complete list for that role. The read capability is bound to the frozen Repository and Issue. Pull-request reads require an authorized delivered-PR fact; current pre-delivery role sessions have no delivered-PR binding, so the example enables only Issue, file, and commit tools. Read credentials do not become Forge credentials and do not enter worker environment variables or durable public resources.
@@ -291,7 +291,7 @@ Retry it explicitly:
 node apps/cli/dist/cli.mjs task retry "<TASK_ID>" --json
 ```
 
-The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority. It consumes the next implementer activation and can be accepted only while the activation budget and deadline remain available. It is not an automatic retry; with the maximum activation budget of 2, there is at most one retry. Restart, re-submission, reviewer failures, project-check failures, provider configuration failures, and other failure classes do not enter this explicit `waiting`/`task retry` path. A retry against a non-waiting Task returns a retry conflict.
+The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority and can be accepted only while the activation budget and deadline remain available. The subsequent Delivery Run reserves the next implementer activation. It is not an automatic retry; with the maximum activation budget of 2, there is at most one retry. Restart, re-submission, reviewer failures, project-check failures, provider configuration failures, and other failure classes do not enter this explicit `waiting`/`task retry` path. A retry against a non-waiting Task returns a retry conflict.
 
 The server's default active-Task capacity is 1. A full capacity returns a retryable API error; wait for an active Task to become terminal before submitting another Task or adjust `USINE_ACTIVE_TASK_CAPACITY` to a positive finite value appropriate for the host. Capacity is a bounded admission setting, not a queue.
 
@@ -316,7 +316,7 @@ The CLI writes structured diagnostics to stderr. These exit codes are stable:
 - `invalid_repository_registration` or validation exit code `7`: check the strict registration shape, nonblank fields, lowercase kebab-case Forge/read profile names, positive `projectCheck.timeoutMs`, and a resolvable `<AUTHORIZED_REPOSITORY_PATH>`.
 - `invalid_task_contract`: check for extra or missing keys, a lowercase 40-character `baseSha`, an Issue URL whose owner/name and number exactly match `delivery`, non-empty acceptance, valid budgets, and `authorization.delivery: true`. Commit the contract file, leave it unchanged, and ensure `baseSha` is an ancestor of the checkout passed to `submit`.
 - `codex_profile_unusable`: check `CODEX_HOME`, the exact named profile filename, its required `model`, supported optional fields, and whether the profile name was intentionally listed in `USINE_CODEX_APP_SERVER_PROFILES`.
-- A Forge `unauthorized`, `malformed`, or `repository_mismatch` error: derive the environment prefix from the registration's lowercase kebab-case `forgeProfile` by uppercasing it and replacing hyphens with underscores. Check the App slug, positive App and installation IDs, readable private-key path, and exact owner/name binding.
+- A Forge `unauthorized`, `malformed`, or `repository_mismatch` error: derive the environment prefix from the registration's lowercase kebab-case `forgeProfile` by uppercasing it and replacing hyphens with underscores. Check the App slug, nonblank App ID, positive installation ID, readable private-key path, and exact owner/name binding.
 - A configured read profile is unavailable: check its separate App credentials, exact `USINE_GITHUB_READ_PROFILE_<PROFILE>_REPOSITORY` binding, and comma-separated role tool names. Read access is optional; it cannot replace the Task Contract's authority.
 - The normalizer is rejected as incomplete: set `USINE_ROLE_OUTPUT_API_KEY`, `USINE_ROLE_OUTPUT_API_URL`, and `USINE_ROLE_OUTPUT_MODEL` together, or unset all three.
 - `task get` shows `waiting` and `retryable: true`: use the explicit `task retry` command. If it shows `blocked`, or retry returns a conflict, inspect `blocker.classification`, `task history`, project-check output in the host's private diagnostics, and the deadline before changing the Task Contract.
