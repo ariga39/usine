@@ -7,6 +7,7 @@ import {
 import { createHermesBridgeMcpServer, startHermesBridgeMcpHttp } from "../src/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Effect, Stream } from "effect";
 import type { ApiEventEnvelope, ApiTaskResource } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 
@@ -102,7 +103,7 @@ function upstream(resource: ApiTaskResource): HermesBridgeUpstream {
     taskHistory: async () => ({ taskId: resource.taskId, events: [], nextSequence: 0 }),
     submitTask: async () => resource,
     retryTask: async () => resource,
-    subscribe: async function* () {},
+    subscribe: () => Effect.succeed(Stream.empty),
   };
 }
 
@@ -266,6 +267,183 @@ describe("Hermes supervisor bridge attention", () => {
     await bridge.handleEvent(event("coding_tool_completed"));
     expect(taskReads).toBe(1);
     await bridge.close();
+  });
+
+  test("rereads a submitted Task outside the bounded list window after reconnect", async () => {
+    const requests: RecordedRequest[] = [];
+    const resources = [task("admitted")];
+    let reads = 0;
+    const source = listedUpstream(resources);
+    source.listTasks = async () => ({ tasks: [] });
+    source.getTask = async (taskId) => {
+      reads += 1;
+      return resources.find((resource) => resource.taskId === taskId) ?? null;
+    };
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    await bridge.upstream.submitTask({
+      contractPath: "<COMMITTED_CONTRACT_PATH>",
+      repositoryId: "repository-269",
+    });
+    resources[0] = task("waiting", true);
+    await bridge.notifyUnavailable();
+    await bridge.notifyReconnected();
+    await settleWebhookDelivery();
+
+    expect(reads).toBe(1);
+    expect(
+      requests
+        .map((request) => JSON.parse(request.body))
+        .find((payload) => payload.event === "usine_attention"),
+    ).toMatchObject({
+      taskId: "task-269",
+      repositoryId: "repository-269",
+      state: "waiting",
+    });
+    await bridge.close();
+  });
+
+  test("routes a failed event reread through outage reconciliation", async () => {
+    const requests: RecordedRequest[] = [];
+    const current = task("waiting", true);
+    const source = listedUpstream([current]);
+    let failRead = true;
+    let subscriptions = 0;
+    let secondSubscription!: () => void;
+    const recoverySubscription = new Promise<void>((resolve) => {
+      secondSubscription = resolve;
+    });
+    let attentionDelivered!: () => void;
+    const attentionDelivery = new Promise<void>((resolve) => {
+      attentionDelivered = resolve;
+    });
+    source.listTasks = async () => ({ tasks: [] });
+    source.getTask = async () => {
+      if (failRead) {
+        failRead = false;
+        throw new Error("transient current Task read failure");
+      }
+      return current;
+    };
+    source.subscribe = () => {
+      subscriptions += 1;
+      if (subscriptions === 1)
+        return Effect.succeed(Stream.succeed(event("coding_tool_completed")));
+      secondSubscription();
+      return Effect.succeed(
+        Stream.concat(Stream.succeed(event("coding_tool_completed")), Stream.never),
+      );
+    };
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      sleep: async () => undefined,
+      fetch: async (_input, init) => {
+        const request = recordRequest(init);
+        requests.push(request);
+        if (JSON.parse(request.body).event === "usine_attention") attentionDelivered();
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    const started = bridge.start();
+    await recoverySubscription;
+    await attentionDelivery;
+
+    const payloads = requests.map((request) => JSON.parse(request.body));
+    expect(payloads).toContainEqual({
+      event: "usine_instance_unavailable",
+      sourceId: "usine-instance-269",
+    });
+    expect(
+      payloads.some(
+        (payload) =>
+          payload.event === "usine_instance_reconnected" ||
+          payload.event === "usine_instance_reconciled",
+      ),
+    ).toBe(true);
+    expect(payloads).toContainEqual(
+      expect.objectContaining({
+        event: "usine_attention",
+        taskId: "task-269",
+        state: "waiting",
+      }),
+    );
+    await bridge.close();
+    await expect(started).resolves.toBeUndefined();
+  });
+
+  test("projects the event Repository ID when the reread resource omits it", async () => {
+    const requests: RecordedRequest[] = [];
+    const resource = { ...task("blocked"), repository: undefined };
+    const source = upstream(resource);
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    await bridge.handleEvent(event("coding_tool_completed"));
+    await settleWebhookDelivery();
+
+    expect(JSON.parse(requests[0]?.body ?? "")).toMatchObject({
+      event: "usine_attention",
+      taskId: "task-269",
+      repositoryId: "repository-269",
+    });
+    await bridge.close();
+  });
+
+  test("maps the typed not_found Task error to null", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ code: "not_found", message: "task not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      const source = createUsineBridgeUpstream("http://127.0.0.1:4312");
+      await expect(source.getTask("missing-task")).resolves.toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("preserves the typed event stream ready marker for recovery", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const envelope = event("coding_tool_completed");
+      globalThis.fetch = async () =>
+        new Response(`data: {"kind":"ready"}\n\ndata: ${JSON.stringify(envelope)}\n\n`, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      const source = createUsineBridgeUpstream("http://127.0.0.1:4312");
+      const stream = await Effect.runPromise(source.subscribe());
+      const values = await Effect.runPromise(Stream.runCollect(stream));
+      expect(Array.from(values)).toEqual([{ kind: "ready" }, envelope]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("re-reads the TaskResource and ignores a coding-tool invalidation while non-actionable", async () => {
@@ -689,13 +867,8 @@ describe("Hermes supervisor bridge attention", () => {
     const reconnected = new Promise<void>((resolve) => {
       resolveReconnected = resolve;
     });
-    source.subscribe = (signal) =>
-      (async function* () {
-        yield { kind: "ready" as const };
-        await new Promise<void>((resolve) => {
-          signal.addEventListener("abort", () => resolve(), { once: true });
-        });
-      })();
+    source.subscribe = () =>
+      Effect.succeed(Stream.concat(Stream.succeed({ kind: "ready" as const }), Stream.never));
     const bridge = createHermesBridge({
       upstream: source,
       sourceId: "usine-instance-269",

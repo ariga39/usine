@@ -9,9 +9,9 @@ import {
   ManagedRuntime,
   Queue,
   Schedule,
+  Stream,
 } from "effect";
 import {
-  decodeApiEventEnvelope,
   makeUsineApiClient,
   type ApiEventEnvelope,
   type ApiEventStreamValue,
@@ -37,7 +37,7 @@ export interface HermesBridgeUpstream {
   ): Promise<TaskEventPage>;
   submitTask(submission: TaskSubmission, signal?: AbortSignal): Promise<ApiTaskResource>;
   retryTask(taskId: string, signal?: AbortSignal): Promise<ApiTaskResource>;
-  subscribe(signal: AbortSignal): AsyncIterable<ApiEventStreamValue>;
+  subscribe(): Effect.Effect<Stream.Stream<ApiEventStreamValue, unknown>, unknown>;
 }
 
 export interface HermesBridgeOptions {
@@ -92,7 +92,6 @@ function runEffectRequest<A>(effect: Effect.Effect<A, unknown>, signal?: AbortSi
 
 export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
   if (options.sourceId.trim() === "") throw new Error("Hermes source ID is required");
-  const upstream = options.upstream;
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const sleep =
@@ -112,6 +111,47 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     maxAttempts: options.maxWebhookAttempts ?? 3,
     retryDelayMs: options.webhookRetryDelayMs ?? 250,
   });
+  const sourceUpstream = options.upstream;
+  const trackedTaskIds = new Set<string>();
+  const trackedRepositoryIds = new Map<string, string>();
+  const trackTask = (taskId: string, repositoryId?: string): void => {
+    trackedTaskIds.add(taskId);
+    if (repositoryId !== undefined) trackedRepositoryIds.set(taskId, repositoryId);
+  };
+  const upstream: HermesBridgeUpstream = {
+    serverSnapshot: async (limit, signal) => {
+      const snapshot = await sourceUpstream.serverSnapshot(limit, signal);
+      for (const resource of snapshot.tasks) trackTask(resource.taskId);
+      return snapshot;
+    },
+    listTasks: async (limit, signal) => {
+      const page = await sourceUpstream.listTasks(limit, signal);
+      for (const resource of page.tasks) trackTask(resource.taskId);
+      return page;
+    },
+    getTask: async (taskId, signal) => {
+      trackTask(taskId);
+      const resource = await sourceUpstream.getTask(taskId, signal);
+      if (resource) trackTask(resource.taskId, resource.repository?.id);
+      return resource;
+    },
+    taskHistory: async (taskId, after, limit, signal) => {
+      trackTask(taskId);
+      return sourceUpstream.taskHistory(taskId, after, limit, signal);
+    },
+    submitTask: async (submission, signal) => {
+      const resource = await sourceUpstream.submitTask(submission, signal);
+      trackTask(resource.taskId, resource.repository?.id ?? submission.repositoryId);
+      return resource;
+    },
+    retryTask: async (taskId, signal) => {
+      trackTask(taskId);
+      const resource = await sourceUpstream.retryTask(taskId, signal);
+      trackTask(resource.taskId, resource.repository?.id);
+      return resource;
+    },
+    subscribe: () => sourceUpstream.subscribe(),
+  };
   const taskStates = new Map<
     string,
     { classification: HermesAttentionPayload["state"]; revision: number } | undefined
@@ -129,6 +169,7 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     resource: ObservableTask | null,
     mode: "event" | "startup" | "reconnect",
     eventSequence?: number,
+    eventRepositoryId?: string,
   ): Promise<void> => {
     if (!resource) return;
     const previous = taskStates.get(resource.taskId);
@@ -143,7 +184,9 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
         resource.retryable === true &&
         previous?.classification !== "waiting"
       ) {
-        enqueueBestEffort(attentionPayload(resource, options.sourceId));
+        enqueueBestEffort(
+          attentionPayload(resource, options.sourceId, undefined, eventRepositoryId),
+        );
       }
       return;
     }
@@ -153,16 +196,22 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
       (previous?.classification !== current.classification ||
         previous.revision !== current.revision)
     ) {
-      enqueueBestEffort(attentionPayload(resource, options.sourceId, eventSequence));
+      enqueueBestEffort(
+        attentionPayload(resource, options.sourceId, eventSequence, eventRepositoryId),
+      );
     }
   };
 
   const handleEventEffect = (envelope: ApiEventEnvelope): Effect.Effect<void, unknown> =>
     Effect.tryPromise({
-      try: (signal) =>
-        upstream
+      try: (signal) => {
+        trackTask(envelope.taskId, envelope.repositoryId);
+        return upstream
           .getTask(envelope.taskId, signal)
-          .then((resource) => observeTask(resource, "event", envelope.event.sequence)),
+          .then((resource) =>
+            observeTask(resource, "event", envelope.event.sequence, envelope.repositoryId),
+          );
+      },
       catch: (error) => error,
     });
 
@@ -170,7 +219,20 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     Effect.tryPromise({
       try: async (signal) => {
         const tasks = await upstream.listTasks(taskLimit, signal);
-        await Promise.all(tasks.tasks.map((resource) => observeTask(resource, mode)));
+        const listedTaskIds = new Set(tasks.tasks.map((resource) => resource.taskId));
+        await Promise.all(
+          tasks.tasks.map((resource) =>
+            observeTask(resource, mode, undefined, trackedRepositoryIds.get(resource.taskId)),
+          ),
+        );
+        await Promise.all(
+          [...trackedTaskIds]
+            .filter((taskId) => !listedTaskIds.has(taskId))
+            .map(async (taskId) => {
+              const resource = await upstream.getTask(taskId, signal);
+              await observeTask(resource, mode, undefined, trackedRepositoryIds.get(taskId));
+            }),
+        );
         if (mode === "startup" && !initialReconciliationNotified) {
           initialReconciliationNotified = true;
           enqueueBestEffort({
@@ -242,7 +304,6 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
         }
         yield* consumeEvents(
           upstream,
-          runtime,
           handleEventEffect,
           notifyUnavailableEffect,
           notifyReconnectedEffect,
@@ -277,6 +338,7 @@ function attentionPayload(
   resource: ObservableTask,
   sourceId: string,
   eventSequence?: number,
+  eventRepositoryId?: string,
 ): HermesAttentionPayload {
   const state = actionableState(resource);
   if (!state) throw new Error("cannot create attention payload for a non-actionable Task");
@@ -287,15 +349,16 @@ function attentionPayload(
     revision: resource.revision,
     ...(eventSequence === undefined ? {} : { eventSequence }),
     state,
-    ...("repository" in resource && resource.repository
-      ? { repositoryId: resource.repository.id }
-      : {}),
+    ...(eventRepositoryId !== undefined
+      ? { repositoryId: eventRepositoryId }
+      : "repository" in resource && resource.repository
+        ? { repositoryId: resource.repository.id }
+        : {}),
   };
 }
 
 function consumeEvents(
   upstream: HermesBridgeUpstream,
-  runtime: ManagedRuntime.ManagedRuntime<Clock.Clock, never>,
   handleEvent: (envelope: ApiEventEnvelope) => Effect.Effect<void, unknown>,
   notifyUnavailable: Effect.Effect<void, unknown>,
   notifyReconnected: Effect.Effect<void, unknown>,
@@ -303,25 +366,20 @@ function consumeEvents(
   return Effect.gen(function* () {
     while (true) {
       const subscription = yield* Effect.exit(
-        Effect.tryPromise({
-          try: async (signal) => {
-            for await (const observation of upstream.subscribe(signal)) {
-              if ("kind" in observation) {
-                if (observation.kind === "ready")
-                  await runtime.runPromise(notifyReconnected).catch(() => undefined);
-                continue;
-              }
-              await runtime.runPromise(handleEvent(observation)).catch(() => undefined);
+        Effect.gen(function* () {
+          const stream = yield* upstream.subscribe();
+          yield* Stream.runForEach(stream, (observation) => {
+            if ("kind" in observation) {
+              return observation.kind === "ready"
+                ? notifyReconnected.pipe(Effect.catchCause(() => Effect.void))
+                : Effect.void;
             }
-            return !signal.aborted;
-          },
-          catch: (error) => error,
+            return handleEvent(observation);
+          });
         }),
       );
       if (subscription._tag === "Failure") {
         if (Cause.hasInterruptsOnly(subscription.cause)) return;
-      } else if (!subscription.value) {
-        return;
       }
       yield* notifyUnavailable.pipe(Effect.catchCause(() => Effect.void));
       yield* Effect.sleep(250);
@@ -516,48 +574,15 @@ export function createUsineBridgeUpstream(baseUrl: string): HermesBridgeUpstream
       runEffectRequest(client.tasks.submit({ payload: submission }), signal),
     retryTask: (taskId, signal) =>
       runEffectRequest(client.tasks.retry({ params: { taskId } }), signal),
-    subscribe: (signal) => subscribeEvents(baseUrl, signal),
+    subscribe: () => client.events.subscribe({ query: {} }),
   };
 }
 
 function isNotFound(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && error.status === 404;
-}
-
-async function* subscribeEvents(
-  baseUrl: string,
-  signal: AbortSignal,
-): AsyncIterable<ApiEventStreamValue> {
-  const url = new URL("/v1/events/subscribe", baseUrl);
-  const response = await fetch(url, { headers: { accept: "text/event-stream" }, signal });
-  if (!response.ok || !response.body) throw new Error("Usine event stream unavailable");
-  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = "";
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) return;
-      buffer += next.value;
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        boundary = buffer.indexOf("\n\n");
-        const data = frame
-          .split(/\r?\n/)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (!data) continue;
-        const parsed: unknown = JSON.parse(data);
-        if (typeof parsed === "object" && parsed !== null && "kind" in parsed) {
-          if (parsed.kind === "ready") yield { kind: "ready" };
-          continue;
-        }
-        yield decodeApiEventEnvelope(parsed);
-      }
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (("code" in error && error.code === "not_found") ||
+      ("error" in error && error.error === "not_found"))
+  );
 }

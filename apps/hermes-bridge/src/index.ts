@@ -29,7 +29,7 @@ export async function startHermesBridge(
   let mcp: HermesMcpHttpHandle;
   try {
     mcp = await startHermesBridgeMcpHttp({
-      upstream,
+      upstream: bridge.upstream,
       host: options.mcpHost,
       port: options.mcpPort,
     });
