@@ -1,224 +1,174 @@
 ---
 status: current
-updated: 2026-08-18
-issue: https://github.com/ariga39/usine/issues/1
+updated: 2026-08-24
+issue: https://github.com/ariga39/usine/issues/267
 ---
 
-# 开发 Usine 的工作协议
+# Developing Usine
 
-本文约束的是我们如何开发 Usine，而不是 Usine 将来如何编排用户项目。它直接针对上一轮实施暴露的问题：compact 后原则丢失、未使用 Git、局部底层细节吞噬主路线、任务无法真正并排、review 无界扩张，以及大量文档彼此争夺权威。
+This document governs development of the Usine repository. It does not define how the Usine product coordinates a user's repository. Product behavior belongs in [DESIGN](DESIGN.md), durable technical choices belong in [DECISIONS](DECISIONS.md), and product operation belongs in the [agent quickstart](AGENT_QUICKSTART.md).
 
-## 1. 权威文档与恢复顺序
+## 1. Authority and context recovery
 
-只有 `AGENTS.md`、`docs/DESIGN.md`、本文和 `docs/DECISIONS.md` 可以定义当前方向。`AGENTS.md` 是短入口，后三份文档是 canonical design authority；README 和 `.agents/skills/` 只做导航或提供按需方法。Issue/PR 定义一项具体开发工作的授权范围，但不能静默推翻 canonical design。
+`AGENTS.md`, `DESIGN.md`, this document, and `DECISIONS.md` are the canonical repository authorities. README is an entry point. Skills are on-demand methods. An Issue and its PR authorize one concrete outcome, but cannot silently override the canonical design.
 
-任何 agent 在以下时刻必须重新执行 context bootstrap：新 session、compact 后、从其他 agent 接手、用户纠偏后、切换 Issue 或工作树后：
+At the start of a session, after compaction or handoff, after user correction, and after switching an Issue or worktree:
 
 ```text
-read AGENTS + active Issue / PR / unresolved review threads
+read AGENTS + active Issue/PR + unresolved review threads
         ↓
-inspect branch + base SHA + status + diff
+inspect branch + base SHA + status + complete diff
         ↓
-read canonical sections relevant to the behavior
+read the canonical sections relevant to the behavior
         ↓
 identify owner + active falsifier + next observable outcome
 ```
 
-若方向、authority、architecture expansion 或 canonical conflict 无法从相关章节解释，再完整读取对应 canonical 文档；不要把每项普通工作变成全量 corpus 加载。如果 summary、旧 handoff、自然语言记忆和 Git/Issue 不一致，以 Git、Issue 和 canonical docs 为准。先报告冲突，再继续；不依靠猜测补全。
+Read an entire canonical document when its authority, direction, or architecture is in question. Otherwise, keep recovery proportional. Git, GitHub, and canonical files outrank summaries, handoffs, and agent claims.
 
-### Compact 后的机械提醒
+A `PostCompact` hook may remind an agent to repeat this bootstrap. It must not edit files, summarize the design, or become correctness authority. A temporary ignored `.tasks/HANDOFF.md` may record the active Issue/PR, branch/base/head, verified facts, unfinished outcome, active falsifier, blocker, and next action. Durable decisions belong in canonical documents or the Issue.
 
-仓库规则是正确性的第一层；Codex hook 是低成本提醒层：
+Four controls survive every context replacement:
 
-- `PostCompact` 应提醒主 agent 重新读取 `AGENTS.md`、当前 Issue/PR、Git 状态和当前行为所需的 canonical sections，并在委派前重新确认 Herdr environment/launcher constraint；
-- hook 不自动修改文件、不总结设计，也不把旧 session summary 提升为权威；
-- hook 丢失只意味着少一次提醒，不能让流程失去恢复能力；
-- 方向发生重大变化或同一工作经历多次 compact 时，优先生成短 handoff 并开新 session，不无限延长已被旧假设污染的 thread。
+- do not prescribe an unknown seam before evidence establishes it;
+- a vertical slice is not an exemption for a monolith;
+- the active falsifier determines which work is eligible;
+- small PRs, green tests, file counts, and commit counts are evidence, not outcomes.
 
-Handoff 放在临时 `.tasks/HANDOFF.md`，只记录：当前 Issue/PR、branch/base/head、已完成的可验证事实、未完成 outcome、active falsifier、eligible task class、behavior-cluster owner、blocker、下一条命令或动作。重要决定必须先进入 `DECISIONS.md` 或 Issue，不能只留在 handoff。
+Provider names, credentials, endpoints, model identifiers, service tiers, context-window sizes, and machine-specific configuration are local operating facts. Keep them out of repository and GitHub surfaces.
 
-### 两次失败留下的控制约束
+## 2. Issue, branch, worktree, and PR
 
-第一次实现把未知 seam 过早写成详细 package/interface/test contract，得到局部完整但距离交付很远的 admission。第二次实现把最短纵切、小 PR、测试全绿和文件变短提升为控制指标，第一个纵切形成 runtime/test monolith，后续任务只能机械搬移或继续补丁。两次失败的共同原因不是模型、TDD、monorepo 或 Herdr 单独失效，而是没有角色对 behavior cluster 的 module depth、seam 和 change locality 负责，且局部 Issue acceptance 可以覆盖全局证伪证据。
+Except for an empty repository's root commit, do not develop directly on `main`.
 
-因此 compact 后不加载外部历史报告或旧 task tree，但必须从本 corpus 恢复四项约束：未知 seam 不事前过度规定；纵切不能成为 monolith 豁免；active falsifier 控制调度资格；小 PR、绿测试、文件和提交数量都只是 evidence，不是 outcome。
+1. Create one Issue with an observable outcome, scope, non-goals, acceptance evidence, draft checkpoint, merge gate, and stopping condition. Use [write-behavior-task](../.agents/skills/write-behavior-task/SKILL.md).
+2. Branch from current `main` as `agent/<issue>-<slug>`. Parallel work uses separate linked worktrees outside every existing package workspace so parent dependency resolution cannot capture the checkout.
+3. Give the outcome owner every internal layer needed for coherence. Restrict writes only for a real permission, safety, external-authority, or independent-ownership boundary.
+4. Commit and push the first checkable state. Open a focused draft PR immediately, then publish further small checkpoints on the same PR.
+5. Converge implementation, checks, independent review, and fixes in that PR. A scoped green checkpoint is not the merge gate.
+6. When the coherent outcome and every applicable gate pass, the orchestrator merges and continues to the next eligible task without routine user confirmation.
 
-### Context 与模型配置边界
+GitHub is the durable task record. An ignored `.tasks/*.md` file is only an execution projection. It may contain the Issue URL, exact base SHA, outcome, authority limits, active falsifier, owner, evidence, and stopping condition, but must not become a second task system.
 
-Context window 和 model catalog 会随客户端、账户和供应商变化，不属于 canonical architecture。主编排者可以在 task-local profile 中选择当前支持且成本可接受的较大 window；implementer 和 reviewer 使用 role-sized context，不继承主编排 thread。具体 model slug、provider、reasoning、service tier、window 数值、订阅容量和 benchmark 结论只进入本地用户配置或短期运行 evidence，不进入 repository 或 GitHub durable surface，并在客户端/model 升级后重新验证。
+Committed files and GitHub surfaces use repository-relative paths or explicit placeholders. Never publish secrets, private keys, local absolute paths, usernames, home-directory names, hostnames, transcripts, or other private machine details.
 
-更大的 window 只是性能优化，可能同时保留更多过期讨论并增加输入成本。原则恢复始终依赖 canonical files + GitHub/Git bootstrap；policy 保持单一来源，不靠重复 prompt 或固定模型参数维持。
+## 3. Ownership, delegation, and bounded parallelism
 
-## 2. GitHub Issue → branch/worktree → PR
+The primary orchestrator owns direction, task selection, repository-agent policy, integration, review, delivery, and continuation. Repository constitution, orchestration policy, and repo-local tools are maintained directly by that orchestrator rather than delegated as ordinary product implementation.
 
-除空仓库 root commit 外，不在 main 直接开发。
+Every delegated repository session runs through Herdr while `HERDR_ENV=1`:
 
-1. 创建一个有明确 outcome、scope、non-goals、acceptance、draft checkpoint 和 merge gate 的 GitHub Issue。Outcome 通常是最小 coherent module behavior 或 user-observable behavior，可独立使用、验证和回滚。
-2. 从最新 main 创建 `agent/<issue>-<slug>` branch；并排任务使用独立 worktree。Linked worktree 必须位于任何现有 package workspace 之外；嵌套 worktree 会让 pnpm/Vite+ 把父 workspace 的依赖和工具误认作当前 checkout。
-3. 每个 branch 只实现一个 Issue。Outcome owner 可以修改交付 coherent behavior 所需的每个内部 layer；只有真实 permission、security、external authority 或 independent concurrent ownership boundary 才能形成 writable restriction。
-4. 以小 commit 推进；第一个可检查状态立即提交并 push，不把数小时工作只留在本地。第一处 green 只满足 draft checkpoint，不自动满足 merge gate。
-5. 首次 push 后立即创建小而聚焦的 draft PR。PR 必须引用 Issue，并说明变化、原因、用户影响和验证；后续 checkpoint 持续 push，不能等最终 review 才让代码可见。
-6. scoped review/fix 在同一 PR 收敛；coherent outcome、checks、spec/correctness verdict 和适用的 design verdict 全部通过后由 orchestrator 自动 merge，并继续下一项 eligible Issue，不等待用户监督。
+- implementation uses a fresh agent in an isolated writable checkout without delivery credentials;
+- semantic review uses a fresh context over a read-only exact candidate without implementer chat;
+- bounded research uses a fresh read-only context when independent evidence is valuable.
 
-GitHub Issue 是任务事实源。`.tasks/*.md` 只是给 agent 的本地执行投影，必须包含 Issue URL、exact base SHA、observable outcome、authority limits、non-goals、active falsifier、behavior-cluster owner、draft checkpoint、merge gate 与停止条件；它被 gitignore，不积累成第二套任务系统。使用 `.agents/skills/write-behavior-task/` 编写投影，不以预测的文件、函数、layer 或实现步骤替代 outcome ownership。
+Herdr lifecycle state and agent prose are observations, never completion authority. Herdr's absence is a development-environment blocker; do not silently substitute another launcher. These rules govern development of this repository, not the product Coding Session described in `DESIGN.md`.
 
-所有 committed files 与 GitHub durable surfaces 都必须使用 repository-relative paths 或明确占位符；不得写入本地绝对路径、用户名、home-directory name、hostname 或其它 machine-specific identifier。运行所需的本地路径只允许留在未提交的 `.tasks/` 或进程参数中，任何复制到 Issue、PR、review/comment 或 completion evidence 的内容都必须先清理。
+At most two repository implementation PRs may be active when their outcomes and writable surfaces are independent and their shared interfaces already exist on `main`. This is an attention fence, not a product capacity claim. Serialize work when one failure would force the other task to rewrite an unmerged foundation.
 
-## 3. 有界并排开发
+Status reports, routine questions, local commits, and green subsets do not end authorized work. Continue until acceptance is verified or a genuine product/authority decision, irreversible external choice, or required unavailable input prevents progress.
 
-当前 product classification 与 eligible work 以 DESIGN.md 的状态 ledger 为准。Repository development 保留最多两个 ownership 与 writable surface 不重叠的 active implementation PR，作为单一 orchestrator 的 attention fence；这不是产品 capacity claim。增加 runtime、forge、分布式 runner、自动 merge authority 或更高并发，必须有授权 Issue、当前 caller 和对应实证。
+## 4. Eligibility, falsifiers, and design ownership
 
-产品交付 evidence 仍按每个 repository 一个 writer lease 串行；上述两项上限只约束 Usine repository development 的注意力，不表示产品支持多 Task 并行。
-
-只有满足以下条件才并排：
-
-- 两项工作具有独立 user-visible outcome；
-- writable file/package ownership 不重叠；
-- 共享接口已经在 main 或先行 PR 中固定；
-- 两个 agent 使用不同 worktree、branch、task file 和 commit；
-- 任一任务失败不会要求另一个 agent 重写未合并基础。
-
-若只是把一个紧耦合功能机械拆给两个 agent，会把节省的墙钟时间变成 merge、沟通和返工成本，应串行。主编排者不亲自同时深写两个任务；它负责边界、进度、integration 和纠偏。每完成一项才从 Issue 队列补下一项。
-
-### 跨 turn 推进与完成条件
-
-用户不需要发送 Codex `/goal` 或重复“继续”。GitHub Issue、canonical docs、Git state 和 PR gate 定义 durable progress；主编排者负责跨 turn、验证 checkpoint、review/fix、merge 和下一项工作的自主推进。Codex `/goal` 只可作为内部运行机制，不能成为用户监督前置条件，也不得覆盖 Issue scope、自动吸收 backlog 或绕过 Git/PR 流程。
-
-当授权中的 active Issue 尚未达到 stopping condition 时，回答任何 interim status、confirmation 或 clarification interruption 后，必须在同一 turn 恢复下一项安全且仍在 scope 内的动作。
-
-每项工作仍须明确 objective、non-goals、可验证进展、最终停止条件和真正需要暂停的 blocker。状态汇报不是停止；只有 acceptance 已验证，或确实出现新的 product/authority decision、不可逆外部选择或缺失必要输入时才找用户。
-
-### Role session routing
-
-本节只约束我们如何开发 Usine repository，不改变 Usine 产品的 Coding Session：产品 runtime 继续使用 canonical design 选择的 Codex SDK adapter，Herdr 不进入 product correctness path。
-
-所有 delegated repository implementer/reviewer session 必须由 primary orchestrator 在 `HERDR_ENV=1` 的会话中通过 Herdr 启动、prompt、inspect 和 wait；不得以 native/internal subagent API 替代。Herdr state 只是观察证据，不授予 Git、Issue、check、review 或 completion authority。Herdr 不可用时报告 development-environment blocker，不静默切换 launcher。
-
-Repository-agent constitution、orchestration policy 与 repo-local tools 由 primary orchestrator 直接维护，不作为普通 product-code implementation 委派。
-
-- product-code implementation：fresh worker、isolated workspace-write checkout、无 delivery credentials；
-- semantic review：fresh session、只读 exact candidate、不继承 implementer chat；
-- bounded research：需要独立 evidence 时使用 fresh read-only session；
-- optional final role-output normalization 使用 schema-constrained OpenAI-compatible API，不加载 coding-agent runtime；它不能承担一般 classification/extraction/summary、repository work、completion authority 或 semantic review。
-
-## 4. Falsifier、任务优先级与设计责任
-
-任务不是 flat backlog。调度顺序固定为：
+The work queue is ordered by evidence:
 
 ```text
-active falsifier / safety-authority defect
+active falsifier or safety/authority defect
 > accepted-outcome critical path
 > representative real task
 > measured bottleneck
-> cleanup / aesthetics
+> cleanup or aesthetics
 ```
 
-高优先级 failure class 未解除时，低优先级 Issue 不 eligible；不能以局部 acceptance、non-goal、测试全绿或“本 PR 只做移动”绕过。一个 falsifier 只能由其 decision 指定的真实 evidence 解除。方向审计发现 blocker 后，必须同步改变 eligible queue，而不是只生成更多 flat Issues。
+An unresolved higher-priority failure class makes lower-priority work ineligible. An Issue non-goal, local acceptance criterion, or green suite cannot conceal a repository-wide falsifier. Only the evidence named by the controlling decision can clear it.
 
-每个 active behavior cluster 指定一名临时 design owner。Owner 维护一个小的 module map、external interface、internal seams、interface-level tests、待删除旧 code/tests，以及 PR slice 的 coherence；不要求 owner 亲自实现全部 PR，但 ownership 必须明确交接。
+Each active behavior cluster has a temporary design owner responsible for its module map, public interface, internal seams, interface-level tests, replacement/deletion plan, and change locality. Ownership may be handed off explicitly; it may not disappear between PRs.
 
-以下事件触发一次独立 design review，而不是每个 PR 都做架构审批：首次实现 behavior cluster；新增 package/interface；同一大文件连续三个 PR 被修改；同一 policy 在三个位置出现；真实 falsifier 要求改变 transport/lifecycle。Design reviewer 可以跨当前 Issue non-goals，只回答 seam、interface depth、caller knowledge、change locality 和 replacement/deletion plan。Spec/correctness reviewer 仍回答当前功能和回归；两个 verdict 不能互相替代。
+Request an independent design review when a behavior cluster is first implemented, a package or public interface is added, the same large file is changed across three PRs, policy appears in three places, or a real falsifier changes transport or lifecycle. Design review evaluates seam depth, caller knowledge, change locality, and deletion. Exact-SHA correctness review evaluates the authorized behavior and regressions. Neither verdict substitutes for the other.
 
-## 5. Library-first，而不是 abstraction-first
+## 5. Library-first modules
 
-在编写 scheduler、queue、retry、migration、ORM、GitHub auth、process runner、logging、schema validation 或测试容器代码前：
+Before writing a scheduler, queue, retry system, migration layer, ORM, GitHub authentication client, process runner, logger, schema validator, or test container:
 
-1. 查看 canonical dependency decision；
-2. 读取候选库当前官方文档；
-3. 用最薄调用路径确认它覆盖当前行为；
-4. 只为产品特有 policy 写代码。
+1. check the relevant durable decision;
+2. read the maintained library's current official documentation;
+3. prove the thinnest path that covers the present behavior;
+4. write only Usine-specific policy.
 
-如果决定自写，PR 必须列出被拒绝的成熟库、当前缺口和自写代码的删除边界。“可能以后更灵活”不是理由。不要为了包数量制造接口；一个 module 只有在隐藏复杂度、稳定 caller 或允许真正独立开发时才成立。
+If custom infrastructure remains necessary, record the evaluated primitive, its concrete gap, and the deletion boundary of the custom code. Future flexibility alone is not evidence. A module earns its boundary by hiding complexity, stabilizing callers, or enabling genuinely independent work—not by increasing package count.
 
-数据库默认使用 Drizzle schema、ORM 和 Drizzle Kit migration，并直接使用 Node 24 `node:sqlite` transaction 原子地保留 task lease、attempt fence、effect identity 和领域 observation。Delivery Run 每次只根据已持久化事实决定并执行一个 next action；进程重启重走同一 reconcile 路径，不保存第二套 operation replay。生产和 CI 使用 committed migration，不使用 `drizzle-kit push` 代替可审查的 migration。避免 hand-written repository boilerplate、重复 JSON shape checks、触发器状态机和 catalog fingerprint 测试。当前单 Task/单 runner 不引入 queue/workflow engine；多个 runner、durable delayed scheduling 或实测 polling/竞争瓶颈出现时，先评估成熟库，不扩张自制 scheduler。
+The current product package map and dependency direction are defined in [DESIGN](DESIGN.md#5-behavioral-packages-and-composition). Use [codebase-design](../.agents/skills/codebase-design/SKILL.md) before changing those boundaries and [find-simplifications](../.agents/skills/find-simplifications/SKILL.md) when a touched seam exposes removable machinery.
 
-### TypeScript 工具链
+The root Vite+ workspace is the toolchain authority:
 
-- 根 workspace 使用 Vite+ 0.2.9 统一提供 `vp fmt`、`vp lint`、`vp check`、package-local `vp test` 和 `vp run --filter '@usine/cli...' build`；完整根测试命令是 `corepack pnpm test`。它先运行根 public-seam suite，再递归运行每个声明 `test` script 的 workspace package；没有测试的 package 不需要 placeholder。根 `vite.config.ts` 是 format、lint、type-check 和根 test 的配置入口；六个产品 package、runtime 和 CLI 各自的 package-local `vite.config.ts` 提供 `pack` entry，产品 package 另声明自己的 package-local test include。
-- `vp check` 通过 type-aware/type-check 路径独立执行 TypeScript 静态检查，并继续覆盖根 `tsconfig.json` 的 `tests/**/*.ts`；packaging 成功不能替代 type-check。
-- Vite+ 内置并锁定 Oxlint、Oxfmt、Vitest 和 tsdown。没有当前规则或语言缺口的证据，不引入 ESLint、Prettier 或第二套 formatter/linter/build orchestrator。
-- 普通 library package 使用 Vite+ `pack` 的默认 external dependency 行为；只有真实 runtime 约束需要逐模块输出时才开启 `unbundle`，CLI 的 unbundle 保持其 executable/import contract。
-- `vp run --filter '@usine/cli...' build` 使用 pnpm workspace 的现有依赖图顺序递归执行六个产品 package、runtime 与 CLI 的 `vp pack`；没有额外 task cache 或第二套 monorepo orchestrator。
-- CI 为每个候选选择一条按比例的路径：`pull_request` checkout PR 的 exact candidate SHA，运行 format、lint、typecheck、transitive build 和所有 workspace package-local `test` scripts；只有 push 到 `main` 才运行完整的 `corepack pnpm test`，包括 root public-seam suite。feature-branch push 不触发 verification，因此不会重复 PR 检查；这条 cadence 不替代 exact-SHA review 或 merge-head protection。
+```sh
+vp test run <test-file>
+vp fmt --check
+vp lint
+vp check --no-fmt --no-lint
+vp run --filter '@usine/cli...' build
+corepack pnpm test
+corepack pnpm check:links
+```
 
-## 6. 纵切优先与复杂度预算
+Package-local Vite+ configuration owns packaging and focused tests. The root suite owns public seams. Do not add a second formatter, linter, build orchestrator, or task cache without a demonstrated gap.
 
-每个 PR 应尽量完成一个可从公共入口观察到的行为。内部基础工作只有在下一条纵切直接使用它时才单独存在。
+## 6. Vertical slices and complexity budget
 
-默认选择最小 coherent PR，而不是把一条路线的所有后续能力塞进一次“大而全”交付。若一个 diff 已经包含多个可独立验证、可独立回滚的 outcome，应拆成串行小 Issue/PR；不要用 stacked-PR 管理本身制造新的协调负担。小并不等于 mergeable：package/file movement、机械等价和行数下降只有在删除旧 seam、减少 caller knowledge 或显著集中 future change 时才构成 outcome。
+A PR should finish one behavior observable through a public entry point. Internal foundation work stands alone only when the next authorized slice immediately consumes it.
 
-Draft checkpoint 与 merge gate 分离：第一处 scoped green 必须先 commit、push、开 draft PR，使工作可见且可恢复；它不自动授权 merge。只有 Issue 的 coherent module behavior 或 user-observable behavior 完成，且适用的 spec/correctness 与 design gate 都通过，才可 merge。相邻独立 outcome 仍进入下一 Issue；但 active falsifier、module-depth blocker 和使当前 seam 不值得继续承载行为的 finding 不能降级为 later concern。
+Prefer the smallest coherent PR, not the smallest diff. Split independently usable and reversible outcomes into serial Issues. Mechanical movement, shorter files, and additional packages are not outcomes unless they remove an old seam, reduce caller knowledge, or concentrate future change.
 
-出现以下情况时停止扩张，先提交 decision note 或缩小方案：
+Publish the first green draft checkpoint, but merge only after the Issue's coherent behavior and applicable correctness/design gates pass. Stop expansion and narrow or document the choice when:
 
-- 未经 Issue 授权或尚无实证的第二种 runtime、forge、database 或 sandbox adapter；
-- 创建没有当前生产 caller 的通用 interface；
-- 测试数量增长，但 Issue 的端到端状态没有前进；
-- draft checkpoint 已 green，但代码仍只在本地；
-- merge claim 只有文件变短、物理移动、测试数量或机械等价 evidence；
-- active falsifier 存在，而当前任务不 characterize、delete、replace 或 repair 它；
-- reviewer 要求证明部署威胁模型之外的敌对环境；
-- 一个修复引入新的 task tree 才能解释它；
-- agent 连续长时间 reasoning 而没有 tool call、diff、测试结果或其他可验证进展。
+- an unauthorized second runtime, forge, database, sandbox, or distributed runner appears;
+- a generic interface has no production caller;
+- test volume grows while the end-to-end state does not advance;
+- an active falsifier remains untouched;
+- a reviewer expands beyond the deployment threat model without evidence;
+- a fix needs a new task tree merely to explain it;
+- prolonged reasoning produces no tool action, diff, test, or other observable progress.
 
-对容易无限规划的模型，bootstrap 任务必须缩成一个可落地制品；若约十分钟或约 8k reasoning tokens 仍无 action，终止 run，保留诊断并用更小 task 或更果断的模型重启。不要继续为已经失去收敛性的 session 付 token。
+## 7. Testing
 
-## 7. 测试哲学
+Use test-first development for known contracts, domain policy, state invariants, and regressions. For uncertain third-party APIs, first build the thinnest smoke or characterization path, then lock only the behavior Usine depends on.
 
-TDD 是工具，不是宗教：
+Prefer adapter fakes for subprocess, Git, database, and forge behavior, with a small number of real integrations. Test public behavior and authority boundaries rather than private functions, SQL text, migration catalogs, or hypothetical hostile fixtures. Once a deep interface covers the old behavior, delete tests that exist only to preserve its shallow implementation.
 
-- 已知 contract、纯 domain policy、状态不变量和 bug regression：先写失败测试；
-- 第三方 integration 或尚不确定的 API shape：先建立最薄 smoke/characterization，再固定真正依赖的行为；
-- subprocess、Git、database 和 forge：大多数测试通过 adapter fake，保留少量真实 integration；
-- 测试公共行为和 authority boundary，不锁死内部函数、SQL 文本、migration catalog 或每一种想象中的 hostile fixture；
-- 发现真实 failure class 后再增加对应测试，不预付无限 threat matrix。
-- 建立深 module 后，新 behavior tests 穿过其 interface；adapter wire fixtures 单独验证协议；CLI end-to-end 只保留少量主路径与恢复路径。新 interface tests 覆盖旧行为后必须删除锁定旧 shallow implementation 的 tests，不把 fake modes 永久叠加到一个 suite。
+A green test is not proof of the user outcome, and review does not explain machine failures. Aggregate failing checks for the implementer; bind semantic verdicts to an immutable candidate SHA.
 
-一个绿测试不能证明用户 outcome，测试套件也不能代替独立 review。反过来，reviewer 不负责解释 pipeline 失败；机器失败先聚合给 implementer。
+## 8. Review and clean-room direction audits
 
-## 8. Review 与 clean-room 预算
+Give a reviewer the canonical documents, Issue, exact candidate diff, and relevant evidence—not author chat, old task trees, or the historical archive. The primary review checks the outcome, invariants, regression risk, and obvious omissions. After fixes, use one bounded delta review of the findings and changed surfaces. Only correctness, security, or authority blockers expand scope.
 
-Review 要求高于实现，但 review 本身也必须有 scope 和成本预算。
+Run a fresh clean-room direction audit before a new canonical design is marked ready or merged, after the first complete task-to-reviewed-PR vertical slice and before capacity or merge-authority expansion, and whenever repeated non-delivery, competing authorities, or context loss makes the route uncertain.
 
-- Spec/correctness review 与 design review 是不同 verdict。前者检查 Issue outcome、canonical invariants、回归与 exact SHA；后者只在上一节触发条件出现时检查 seam、depth、caller knowledge、locality 与删除计划。
-- 给 reviewer 完整 codebase 访问，但只提供 canonical docs、Issue、candidate diff 和相关 evidence；不要把作者 chat、全部历史 archive 和旧任务文档塞入 context。
-- 第一次 review 检查 Issue outcome、canonical invariants、回归和明显缺口。
-- 修复后只做 delta review：验证原 findings、修改 surfaces 和新回归。只有 correctness/security/authority blocker 可以扩大范围；其它建议进入新 Issue。
-- 默认最多一次 primary review 和一次 delta review。重复同类分歧进入诊断或用户裁决，不继续开无界 reviewer 链。
-- clean-room 方向审查按触发条件运行，而不是按每个 PR 运行：canonical design 大改、连续三个 PR 没有推进用户可见纵切、出现第二套权威文档、或主编排者经历多次 compact 后无法解释当前路线。
-- 多模型审查不是投票。只有不同模型提供了真正独立的 failure lens 时才花费额外 quota；限额本身是系统约束，不以“再找一个 agent”掩盖。
+The audit must actively challenge the route:
 
-### 独立方向审计 checkpoint
+- Would the same design be chosen today from the user outcome?
+- Has infrastructure or review process displaced that outcome?
+- What is the cheapest credible alternative?
+- What complexity can be deleted?
+- What is the strongest argument against the route?
+- What evidence would falsify it, and is that evidence present?
+- What is the next shortest user-visible slice?
 
-以下 checkpoint 必须完成一次 clean-room 方向审计：
+It classifies the result as `continue`, `correct_before_expansion`, or `stop_and_redesign`, and separates direction blockers, current-PR defects, and later concerns. Map every direction blocker to the current PR, a new Issue, or a required user decision. One focused delta audit is enough after corrections. Self-review, tests, and ordinary code review do not replace this checkpoint.
 
-1. 新的 canonical design 在标记 ready/merge 前；
-2. 第一条完整的 task → implementation → checks → independent review → reviewed PR 纵切完成后，在增加通用架构、容量或自动 merge 权限前；
-3. 增加未经当前 Issue 授权且尚无实证的第二种 runtime/forge、分布式 runner、扩大 worker/delivery 权限，或把主编排开发并发提高到两个以上之前；
-4. 提前触发条件出现时：连续三个 PR 没有推进用户可见 outcome、canonical authority 冲突、重复 compact 后路线无法解释，或实现再次被底层基础设施/测试矩阵吞噬。
+Use [review-change](../.agents/skills/review-change/SKILL.md) for exact-SHA acceptance and [pre-push-checks](../.agents/skills/pre-push-checks/SKILL.md) before publication.
 
-Checkpoint 不暂停已经安全、有效的真实任务流；它只阻止继续扩大架构、权限或容量，直到方向 blocker 被处理。
+## 9. Documentation lifecycle
 
-审计程序：
+Keep each fact under one authority:
 
-1. 主编排者在临时 clean-room 目录准备有界 evidence packet：`AGENTS.md`、三份 canonical design 文档、当前 Issue/PR 索引、实际已实现能力、最近纵切证据与 metrics、待审问题。不得包含作者 chat、旧 task tree 或整个历史 archive。
-2. 审计者必须是未参与当前设计/实现的 fresh session。设计方向审计默认只看 packet；若需要验证“代码确实这样工作”的 claim，再提供 exact SHA 的只读 checkout，而不是作者 worktree。
-3. Prompt 固定要求主动挑战所选机制：如果今天只从用户 outcome 出发是否仍会选择同一路线、最便宜的可信替代方案是什么、哪些复杂度可以删除、是否重复实现了 library、开发是否真实可并排、什么证据会证伪当前路线、证据是否支持当前 claim、下一条最短用户可见纵切是什么，以及反对当前路线的最强论据。Evidence packet 必须包含上次失败的 causal chain、已 falsified approach、仍有效的 module/seam evidence、曾误导的 proxy metrics，以及新方案如何避免相同 mechanism。审计可以跨越当前 Issue non-goals，报告 deletion、replacement、`correct_before_expansion` 或 `stop_and_redesign` 建议。
-4. 报告输出 `continue`、`correct_before_expansion` 或 `stop_and_redesign`，并把 finding 区分为 direction blocker、current-PR defect 和 later concern。
-5. 主编排者必须把 direction blocker 映射到当前 PR 修订、一个新 Issue 或用户 decision。完成后最多做一次 focused delta audit；later concern 不得无限延长当前 checkpoint。
+- current product architecture and mechanics: `DESIGN.md`;
+- durable choices, rationale, supersession, and re-entry conditions: `DECISIONS.md`;
+- repository development protocol: this document and the short `AGENTS.md` entry point;
+- product setup and operation by an agent: `AGENT_QUICKSTART.md`;
+- product overview and navigation: `README.md`;
+- one outcome: its Issue and PR;
+- temporary prompts, checkpoints, and handoffs: ignored `.tasks/` files;
+- reusable methods: `.agents/skills/`;
+- raw research and benchmarks: temporary evidence attached only to the decision that needs it.
 
-Self-review、普通 code review、更多测试或一份主编排者总结都不能代替该 checkpoint。默认只用一个匹配能力的独立审计者；只有高风险分歧无法裁决时才增加第二视角，避免审计本身成为 quota 黑洞。
-
-## 9. 文档生命周期
-
-不复制旧任务树和旧实现报告。Canonical bootstrap 是恢复入口；历史 clean-room archive 保存在仓库外，只用于追溯，不参与 agent 默认 context。
-
-- 当前架构变化：修改 `DESIGN.md`；
-- 持久技术选择：修改 `DECISIONS.md`，明确 supersedes/re-entry；
-- 开发流程变化：修改本文和必要的 `AGENTS.md`；
-- 一项具体工作：GitHub Issue/PR；
-- 临时 prompt、checkpoint、handoff：`.tasks/`，不提交；
-- 可复用的 task、design、simplification、checks、prose 与 review 方法：`.agents/skills/`；按需加载，不能成为设计权威或复制 canonical policy；
-- 研究笔记和 benchmark 原始输出：只在当前 decision 需要时作为 PR evidence，不成为新的权威设计。
-
-每次 compact 后先恢复短入口、live Issue/Git 与当前行为需要的 canonical sections，而不是不断增长的历史。文档的价值在于降低恢复成本和防止漂移，不以数量衡量。
+Do not preserve obsolete task trees or implementation diaries as active documentation. Documentation exists to reduce recovery cost and prevent authority drift; its value is not measured by page count.

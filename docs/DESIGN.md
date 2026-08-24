@@ -1,242 +1,242 @@
 ---
 status: current
-design_version: 0.7
-updated: 2026-08-22
-issue: https://github.com/ariga39/usine/issues/217
+design_version: 0.8
+updated: 2026-08-24
+issue: https://github.com/ariga39/usine/issues/267
 ---
 
-# Usine 当前设计
+# Usine product design
 
-## 1. 我们真正要解决的问题
+## 1. Problem, first useful behavior, and boundary
 
-个人开发者可以让 coding agent 完成单个明确任务，但人仍然承担着形成任务、分配任务、催促继续、判断是否完成、安排 review、处理返修和交付的工作。增加 agent 数量后，如果这些协调动作仍由人完成，人会更快成为瓶颈；如果让 agent 通过自由对话互相激活，又容易形成通信风暴、偏离共同目标或无人拥有最终责任。
+Usine coordinates a bounded software-delivery task after a user or an existing project process has supplied an authorized, reviewable Task Contract. Without a coordinator, a person must repeatedly start implementation, inspect the result, run checks, arrange independent review, request repairs, recover interrupted work, and decide whether delivery is authorized. Free-form agent-to-agent coordination makes those decisions difficult to audit and can leave no component responsible for the final outcome.
 
-Usine 要把这段重复协调从人类手中移出。V0 由用户或现有项目流程直接提供一个足够完整且已授权的 Task Contract；admission 后用户可以离线，系统让有界任务持续、有序地流过实现、验证、独立 review、返修和交付，只在需要新增权限、不可逆决定或真实产品分叉时找人。Requirement Proxy 和 Planner 属于手工 contract delivery loop 跑通后的 admission 扩展，不是第一项行为的前置角色。
+The first useful behavior is therefore one complete, server-owned path: admit one committed Task Contract, give one Repository writer an isolated workspace, freeze an exact candidate SHA, run the project check, obtain a fresh independent review, and deliver an exact-SHA approved PR. If and only if the immutable contract grants `authorization.merge: true`, the same path revalidates the live PR and merges that exact approved head, recording `merged`; otherwise it records `reviewed_pr`. A bounded implementer retry and restart recovery are part of this path.
 
-长期 north star 是每天形成 300 个有效、有价值并最终合并的 PR。这个数字是扩展方向，不是第一版的虚假验收指标。系统实际优化：
+The current supported boundary is:
 
-```text
-accepted delivery outcomes
-────────────────────────────────────────────
-human interventions × elapsed time × cost
-```
-
-提交数、agent turn、测试数和 PR 数只有在推动 accepted outcome 时才有价值。
-
-## 2. 第一项有用行为
-
-Usine 的第一个完整产品行为是：接收一项已经授权、边界明确的真实开发任务，在无人再次发送“继续”的情况下，产出一个经过项目检查和独立 reviewer 明确批准、绑定 exact SHA 的 PR；若 Task Contract 明确授予 merge authority，系统还会重新验证 live PR 并合并该 exact approved head，持久化 `merged` 结果；没有该 authority 时则停在 `reviewed_pr`。若实现者提前停止、协调器重启或 reviewer 要求修改，系统能够在预算内恢复并继续。
-
-这是一条持续投入真实工作的路径，不是先做完才允许继续建设的孤立实验。它定义的是产品必须尽早具备的纵向行为，而不是旧式任务分解。
-
-[fund-manager Issue #52](https://github.com/ariga39/fund-manager/issues/52) 经 [PR #53](https://github.com/ariga39/fund-manager/pull/53) 完成了 bounded serial one-contract exact-head production merge。独立 reviewer 返回 approval；配置的 schema-constrained role-output normalizer 将最终响应投影为合法对象，协调器重新校验 schema 与 exact SHA 后才接受 verdict。live PR head、attestation、merge parents、Issue closure 与 durable `merged` result 一致。这项证据不扩大 merge policy、provider、runner 或 capacity claim。
-
-第一项行为不包含：
-
-- 自动从模糊 wish 生成完整任务树；
-- 同一仓库多个并发 writer；
-- 任意 DAG、插件市场或动态 provider router；
-- 分布式调度、跨主机迁移或多 forge 同步；
-- Web dashboard、Mem0、session 向量数据库；
-- 对 Git 对象库、SQLite catalog 或敌对 host 的穷举式证明；
-- 不受 Task Contract 明确 authority 约束的自动 merge。
-
-这些能力并未被永久否决。只有观察到明确需求穿透现有边界时，才按 `DECISIONS.md` 中的 re-entry trigger 重新讨论。
-
-## 3. 端到端模型
-
-```text
-authorized task contract
-        │
-        ▼
-typed local API
-        │
-        ▼
-server-owned Effect scope
-  deterministic coordinator
-  SQLite facts + reconcile loop
-        │
-        ▼
-isolated Codex implementer workspace
-        │ proposes commit
-        ▼
-immutable candidate SHA
-        ├──────────────┐
-        ▼              ▼
-project checks    fresh independent reviewer
-        └──────┬───────┘
-               ▼
-       exact-SHA gate reducer
-        │              │
-        │ approved     │ changes requested
-        ▼              └── one aggregated fix activation
-credential-scoped GitHub delivery
-        ▼
-reviewed PR + explicit approval attestation
-        │
-        ├── no merge authority ──▶ reviewed_pr
-        │
-        └── explicit merge authority
-                    │
-                    ▼
-         live exact-head revalidation
-                    │
-                    ▼
-            GitHub merge endpoint
-                    │
-                    ▼
-                 merged
-```
-
-当前实现保留上述 authority invariants、deterministic reconciliation 和六个行为模块。PR #82/#83 提供真实 Codex executable delivery 与 restart evidence；Issue #153 只用 stubbed Codex adapter 验证 server-hosted lifecycle fixture；Issue #199 是 hermetic authorized exact-head merge precursor。fund-manager PR #53 提供 bounded serial one-contract production merge evidence；它不证明 retry recovery、ruleset refusal coverage、额外容量或更广的 merge policy。
-
-Artifact coupling 很强：Task Contract、base SHA、candidate SHA、check evidence、review verdict 和投影出的 attestation 都可追溯且不可被聊天静默改写。
-
-Activation coupling 仍应很弱：普通消息不会广播唤醒其他角色；只有持久化状态变化让协调器激活一个明确 next owner。Herdr、hook、transcript 和 App Server 都不参与 coordinator authority；app-server 即使作为 adapter，也不能取得 Task authority。
-
-## 4. 权威与状态
-
-### 4.1 确定性控制面
-
-顶层不需要 LLM 界面，也不存在永久 Chief Agent。协调器是普通 TypeScript 程序；本地 SQLite 保存最小领域事实，Drizzle transaction 原子地保留 lease、attempt fence 和 effect identity，Delivery Run 根据这些事实一次决定一个 next action。协调器只做机械且可审计的决定：admit、lease、activate、observe、retry、invalidate stale evidence、reduce gates 和 publish effects。
-
-V0 的 LLM 只承担 Implementer 和 Reviewer 的 coding-agent work。`ai` + `@ai-sdk/openai` 只在配置时作为 optional final role-output normalization adapter；它不承担一般 classification、extraction 或 summary，也不取得 lifecycle authority。协调器仍负责输入投影、schema 校验、exact-SHA 校验和 lifecycle authority。未来的 Requirement Proxy 和 Planner 只能从同一个 admission seam 生成待授权 contract，不能绕过授权或直接修改 task lifecycle。任何 LLM 都不能用自然语言宣布终态。
-
-正常推进和恢复使用同一条 deterministic reconcile 路径：读取持久事实与外部 observation，事务性保留一个带 stable identity 的 next action，执行后再记录 observation。Persistent local server 拥有 Effect scope、HTTP resource、task fibers、durable re-entry、cleanup invocation 和 AbortSignal propagation；provider execution semantics 由 Coding Session adapter 拥有。CLI 通过 loopback typed API 提供 `server health|snapshot`、`repository list|get`、`task list|get|history|watch`；`register` 与 `submit` 保留为 mutation entry points，`inspect`、`status` 和 `follow` 是兼容 aliases，提交进程退出不改变已 admission 的 task。Operator follow/replay 使用 Task-local `task_events` 单一有序流，通过 `GET /v1/tasks/:id/events?after=<sequence>&limit=<bounded>` 按 sequence 重放或继续 live polling；外部观察者通过 `GET /v1/events/wait` 等待一次，或通过 `GET /v1/events/subscribe` 持续接收 `{taskId, repositoryId, event}` typed envelope，并以 `taskId`、`repositoryId` 或 whole-server 选择 scope。wait 在注册后以 JSON body 返回首个匹配事件，超时返回 JSON `null`；subscribe 则在连接可用期间发送每个匹配事件。外部观察只接受当前 server process 中新发布的清洗事件：没有 durable global cursor、acknowledgement、replay、resume 或 restart-recovery promise；断开、取消、server shutdown 和无法 keep up 的 listener 都释放 transient resource，后续请求重新开始。Task-local history 与 sequence replay 保持独立；client 需要 current state 时先读取 snapshot/get/history。所有 public event surface 都只暴露已清洗的 TaskEvent projection，不包含 secret、路径、transcript 或 private blocker text；事件是非权威观察，不能被 reconciliation 读取来决定 lifecycle、retry、authority 或 delivery。Persistent server 的正的有限 `USINE_ACTIVE_TASK_CAPACITY` 由 Task Authority 在 admission transaction 内以 durable nonterminal Task count 强制；同一 Task 的 idempotent resubmission 先返回既有事实。server 启动时先统计 SQLite 中的 nonterminal Task，再决定 readiness；若 durable count 超过 configured capacity，server 拒绝 readiness，不启动超界执行、不阻塞 Task 制造空位，也不引入 queue。正常恢复仍从 SQLite 重新进入 nonterminal Task，不延长 durable deadline，也不维护第二套 operation-index replay 或 scheduler control plane。只有出现多个独立 runner、durable delayed scheduling 或数据库 polling/竞争成为实测瓶颈时，才引入成熟 queue/workflow library。
-
-### 4.2 最小状态事实
-
-- **Task Contract**：任务意义、范围、non-goals、acceptance、授权来源、不可变的 delivery/merge authority、预算和风险；admission 后不可原地修改。
-- **Run**：一次 agent/process 尝试及其 context、workspace、模型、预算和 observation。
-- **Candidate**：从记录的 base 产生、由 host 验证并冻结的 Git commit SHA。
-- **Check Result**：项目原生命令在该 Candidate 上产生的机器事实。
-- **Review Verdict**：fresh non-author reviewer 对该 Candidate 的 `approved`、`changes_requested` 或 `inconclusive`；其中 exact-SHA `approved` 是 Usine 的 semantic approval 事实。
-- **Delivery Effect**：branch、push、PR、review attestation projection，以及在显式 merge authority 下产生的 exact-head merge effect 和 probe 结果。
-
-进程退出、Codex hook、agent 最后一条消息、测试命令 exit 0 和 CI job 正常结束都只是一项 evidence。Task 的终态只能由完整 gate 对同一 SHA 的事实归并得到。
-
-### 4.3 恢复
-
-恢复路径和正常路径相同。server 重启后读取 SQLite 中的冻结 Task Contract、执行输入和领域状态，再观察 workspace、Git 和 GitHub 的当前事实：
-
-- 确认已发生的 effect，记录成功；
-- 可证明未发生的 effect，按相同 identity 重试；
-- 无法确定的 effect，先 probe，仍不确定则 quarantine；
-- merge 前重新读取 live PR 和 exact-head attestation；GitHub merge endpoint 是平台 policy 的最终 gate，refusal 只产生 concrete blocker，不产生 delivery fact；
-- 丢失 merge response 时 probe 已合并的 exact PR，成功观察后只记录一个 merge effect；
-- agent 已停止而 Task 未到 terminal gate，按预算恢复或重新激活；
-- 不因 timeout 自动授予第二个 writer。
-
-Codex Stop hook 可以缩短一次 run 内的继续延迟，但只能发出 signal，不能创建新 writer 或决定完成。系统在 hook 完全缺失时仍必须正确。
-
-## 5. 并发与隔离
-
-当前 evidence 仍限定为一个 process 内的 bounded multi-repository capacity：Issue #178 证明 configured finite capacity、durable admission gate 和每个 repository 一个有效 writer lease，但不证明更高容量的性能或分布式并发。每个 activation 使用独立 writable workspace 和 monotonic fence；review 使用另一个 fresh checkout，不继承 implementer 对话、未提交文件和可写 ref。产品不据此宣称 retry recovery、更宽的 runtime/forge、分布式 runner、动态 capacity、fairness 或更广的 merge policy；这些仍须由授权 Issue 和实证支持。
-
-隔离按能力而不是 agent 名字定义：
-
-| 角色 | 代码写入 | 网络 | GitHub delivery credential |
-|---|---:|---:|---:|
-| Implementer | 自己的 workspace | 按 task profile | 无 |
-| Project checks | disposable exact-SHA checkout | host filesystem/network permissions | Forge credentials 不传入环境 |
-| Reviewer | read-only candidate + scratch | 文档查询可选 | 仅提交内部 verdict 的短期 capability |
-| Delivery executor | 不运行 candidate code | GitHub only | 短期 GitHub App installation token |
-
-Project checks 使用 reduced explicit environment，但仍共享 host filesystem/network permissions；只有 Forge credentials 不传入环境。优先使用 Codex sandbox 和 host 目录/进程权限。容器、轻量 VM 或远端 sandbox 是 adapter 选择，不进入领域模型；只有现有隔离无法满足某个项目的实际风险时才引入。
-
-## 6. Review、checks 与交付
-
-Project checks 和 reviewer 是两个独立事实。Reviewer 可以读取完整 codebase、Task Contract、diff 和 check evidence，但不继承 implementer 的辩护性对话。它必须提交结构化 verdict；review process 正常退出但没有合法 verdict 时结果是 `inconclusive`，不是批准。
-
-所有 gate 绑定 exact Candidate SHA。新 commit 自动使旧 check、review verdict 和 attestation stale。`changes_requested` 先聚合为一个 finding batch，再激活一次 implementer；不会让每条评论分别激活 agent。重复不收敛按预算进入 blocker/diagnosis，不形成无限 review 风暴。
-
-GitHub 是当前 forge、交付与 bounded read surface，不是核心 task domain。每个 registered Repository 保存一个 opaque `forgeProfile` 名称，并可保存一个 opaque `githubReadProfile` 名称；local host 在 execution boundary 分别解析 Forge capability 与 read-only GitHub capability。read capability 通过 official Streamable HTTP MCP 按 implementer/reviewer role allowlist 暴露，并绑定 frozen Repository + Issue；PR reads 只有 caller 提供 authorized delivered-PR fact 时才可绑定。Octokit 使用各自 GitHub App capability 生成短期 installation token；worker 不接触任一凭据，profile secrets 不进入 public Repository resources、Task snapshots、Task Contract、durable facts、event stream、logs、prompt、MCP config 或 worker environment。branch、PR、review thread 和 review attestation projection 都有稳定 identity，crash 后先查询 GitHub 再决定是否重试。
-
-fresh reviewer 提交的 exact-SHA `approved` verdict 是必要的 semantic approval；review process 成功退出或 delivery executor 的文字都不能替代它。Delivery executor 只能把这个已存在的 verdict 投影为 PR 上可追溯的 attestation，不能制造或改写语义批准。若仓库 ruleset 还要求 GitHub 原生 `APPROVE` review，必须由不同于 PR author/delivery identity 的 reviewer capability 提交，并作为额外 platform fact；同一 GitHub App 不得自批。Task Contract 的 `authorization.merge` 必须是 admission 时冻结的显式 authority；delivery authority 不隐含 merge authority。没有它，第一项产品行为在带 exact-SHA approval attestation 的 `reviewed_pr` 终止；有它，Forge Delivery 在 merge 前重新读取 live head、attestation 和诊断性 platform fields，向 GitHub merge endpoint 提交 approved SHA，由平台 policy 最终决定。changed head、attestation/App identity 不匹配或 proved platform refusal 都 quarantine 为 concrete blocker；lost response 先 probe，只有观察到 exact merged PR 才记录 `merged`。
-
-## 7. Context 模型
-
-Agent session 是可丢弃的执行缓存，不是记忆数据库。每次 activation 都从 durable artifacts 构造有界 context pack：当前 Task Contract、canonical design、repo rules、exact Git state、未解决 findings、最近一次有效 checkpoint 和本次 failure delta。
-
-不向新 agent 倾倒整个历史 chat、旧任务树或全部研究 archive。实现者在一个连贯 run 内可以保持 warm；reviewer 默认 fresh；recovery agent 读取最后有效 checkpoint，而不是重放所有对话。长期向量记忆只有在这些 artifact 无法支撑重复恢复、且有实际遗漏数据时才考虑。
-
-Clean-room 不等于失忆。Compact 或新实现不加载历史 archive，但 canonical corpus 必须保留：两次失败的 causal chain、已 falsified route、仍有效的 evidence、曾误导的 proxy metrics，以及当前 eligible work。这样可以删除旧代码而不重复相同的控制机制。
-
-## 8. 深模块与 library-first 边界
-
-模块是行为边界，并由六个真实 pnpm workspace package 物理执行：`@usine/task-authority`、`@usine/delivery-run`、`@usine/coding-session`、`@usine/candidate-workspace`、`@usine/quality-gate` 和 `@usine/forge-delivery`。CLI 与 `@usine/runtime` 只负责组合，不是第七个行为 module：
-
-| 模块 | 隐藏的 policy | 外部 caller 只知道 | 允许的内部 seams 与 change locality |
-|---|---|---|---|
-| **Task Authority** | contract admission/immutability、repository writer lease、合法状态转移、接受或拒绝领域事实、exact-SHA evidence invalidation，以及 Task-local event projection | `admit`、读取当前 Run、事务性保留或提交一个待验证领域事实、按 sequence 读取清洗事件 | 纯 reducer + Drizzle persistence；事件不参与 reconciliation，不 import Git、Codex、GitHub 或 subprocess |
-| **Delivery Run** | deterministic reconcile 顺序、activation/review budget、retry、restart recovery、next action | `run(authorized contract)` 返回 durable task result | 一次只根据 durable facts 执行一个已保留 action；它不解析 provider events、不拼 Git argv、不调用 Octokit endpoint，也不维护第二套 replay log |
-| **Coding Session** | role/profile/sandbox policy、受限 environment、prompt/context projection、structured turn lifecycle、cancel/timeout | 在一个已准备 workspace 中运行 implementer 或 fresh reviewer，并取得 provider-neutral typed observation | supported provider remains Codex；静态 opaque profile composition 可选择官方 Codex SDK adapter 或 bounded local Codex App Server adapter；optional developer instructions 只作为 host-private secondary composition，不能替换 frozen Task Contract 或 coordinator prompt；thread/turn lifecycle、final schema output、usage、cancellation 和 failure 留在 adapter 内，agent result 永不授予 task terminal authority |
-| **Candidate Workspace** | isolated writer worktree、explicit Git environment、host-side commit/finalize、ancestry/cleanliness、disposable exact-SHA checkout | prepare writer、freeze Candidate、以 SHA 提供 disposable checkout | 系统 Git CLI 的窄 argv adapter；不拥有 retry、review 或 delivery policy |
-| **Quality Gate** | 分别产生 project check 与 fresh exact-SHA review facts，并聚合 findings | `check(candidate, contract)` 返回 exact-SHA Check Result；`review(candidate, contract, check)` 返回 fresh exact-SHA Review Verdict | 通过 Candidate Workspace 取得 checkout，通过 Coding Session 启动 reviewer；它不拥有 retry、activation 或 stale-evidence policy。Check failure 作为 fact 交给 Delivery Run，后者决定下一次 implementer activation |
-| **Forge Delivery** | GitHub App auth、branch/PR/attestation identity、exact-head merge authority、probe-before-retry、ambiguous effect reconciliation | `deliver(approved exact-SHA bundle)` 返回 reviewed-PR 或 merged effect | Octokit 与 credential-scoped Git push/merge；不运行 candidate code，也不能制造 semantic approval |
-
-依赖只向产品 policy 内侧流动：runtime 中的 local server 组合 Delivery Run 与 adapter，CLI 只依赖 typed server client；Delivery Run 独占 activation/retry/budget policy 并使用其余五个 package；Quality Gate 可以使用 Coding Session 和 Candidate Workspace。依赖图必须有向无环，生产代码和测试只能使用声明依赖的 package exports，不能穿透其它 package 的 `src` 或 `dist`。跨模块传递 Task Contract、Candidate、Check Result、Review Verdict、Delivery Effect 和 provider-neutral typed observation，不传递 HTTP request、Effect Fiber、Herdr pane、Codex thread/event/argv、Octokit response 或数据库 transaction context。每个 package 必须拥有真实 caller 与有意义的 policy；共享 option/type 归消费它的 module，Delivery Run 不接收无关的 environment 或 credential capability bundle。
-
-### 8.1 Coding Session 的最小 contract
-
-Coordinator 只提供 role、workspace/candidate、冻结的 Task Contract 与未解决 findings、role policy、deadline 和 output schema。Coding Session 只返回 task-oriented `run(request) -> typed observation` 的 terminal status、schema-valid final role output、usage、cancellation 或 failure；其 streamed lifecycle 通过受限 callback 投影为 provider-neutral observation。Task event 中的 session/outcome identifier 只由 activation 或 review cycle 与 durable event identity 派生，不暴露 provider thread/event payload。它必须支持 cancellation/timeout；provider execution lifecycle 由 adapter 拥有，其他模块看不到 provider thread 或 event 类型。
-
-Candidate SHA、workspace cleanliness、project checks、review freshness、delivery eligibility 和 Task terminal state都不由该 contract 决定。Provider turn completion 是一次 semantic worker attempt 的完成证据，不是 Task 完成。
-
-Implementer 的 Task/PR authority 由冻结 Task Contract 提供。可选的 GitHub context 不可用时，Task Contract 仍是足够的 authority；Coding Session 不因此等待用户，也不把 app-server 或其它 adapter 变成 task authority。
-
-对 critical seam 比较两种 external contract：
-
-| Contract shape | Caller knowledge | 决定 |
-|---|---|---|
-| **Task-oriented turn port**：`run(request) -> typed observation` | role、workspace、deadline、schema 和 domain output；不知道 process、pane、event protocol 或 provider command | **选择**。provider lifecycle 留在 adapter；Delivery Run 只根据 durable domain fact retry。 |
-| **Session supervisor handle**：`start / observe / prompt / interrupt / stop` | caller 必须拥有 session state、event ordering、process cleanup 和 provider error mapping | 拒绝。它会把 Gas City/Herdr 的通用 runtime surface重新搬进 coordinator，并诱发自写 supervisor；只有同时出现第二个 runtime 和交互式 session caller 才 re-enter。 |
-
-这个 port 是当前 domain-facing seam，不是兼容性承诺或预建 provider framework。Supported provider remains Codex；static opaque profile composition 在 activation 前选择 exactly one of the official Codex SDK adapter or the bounded local Codex App Server adapter。optional developer instructions 只作为 host-private secondary composition，不能替换 frozen Task Contract 或 coordinator prompt。两个 adapter 都留在这个 provider-neutral Coding Session port 后面；没有 fallback、registry、capability negotiation、automatic routing 或第三个/non-Codex provider，app-server 也不能取得 Task authority。Task Authority、Delivery Run、Candidate、Quality 和 Forge 不随 provider execution semantics 改变。
-
-### 8.2 Reuse strategy decision
-
-| 候选 | 可删除的自写 surface | 决定 |
-|---|---|---|
-| [OpenAI Codex SDK](https://developers.openai.com/codex/sdk/) | CLI argv、JSONL parser、output-schema temp plumbing、provider execution lifecycle glue | **选择为官方 SDK adapter**。它使用 thread start/run、thread ID、final schema output、usage、cancellation 和 failure；Usine 只包 role policy 与 product evidence projection。 |
-| [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/) `SandboxAgent` / tracing | agent loop、sandbox capability binding、session/tracing | 不作为 V0 runtime。它适合更广泛 agent application，但会在当前一个 Codex specialist 内重复 Codex agent loop，并与 Usine task authority 重叠；sandbox capability model 只作为设计 donor。Experimental `codexTool` 不是生产依赖。 |
-| Codex App Server | 独立的 JSON-RPC lifecycle client | **选择为 bounded local adapter，已由 #195 证明**；由 opaque named profile 在 activation 前静态选择。没有 fallback、registry、capability negotiation 或 automatic routing，且 app-server 不能取得 task authority。 |
-| [Gas City runtime/session design](https://github.com/gastownhall/gascity/blob/main/engdocs/architecture/session.md) + Herdr | runtime/session ownership ideas | 作为 donor，不采用通用 provider。Herdr pane、prompt settlement、screen state 和 rendered transcript 不进入 production correctness path；它们不能成为 completion evidence。 |
-| [AgentRouter](https://github.com/perixtar/AgentRouter) / [Cezar](https://github.com/open-mercato/cezar) | persisted run/event、sandbox、multi-provider examples、worktree/event UI patterns | 不采用。前者仍为 alpha 且引入 Daytona/R2/第二套 remote database control plane，后者主要是本地 cockpit；两者都会复制当前 Task Authority/Forge ownership。只借鉴公开的 event mapping、credential separation 和 worktree examples。 |
-
-Supported provider remains Codex。Repository 只向 Coding Session 提供不透明的 named profile；static profile composition 可在 activation 前选择 official Codex SDK adapter 或 bounded local Codex App Server adapter，两个 adapter 都复用同一个 provider-neutral Coding Session port。profile 内的 model、provider、reasoning、service tier、credentials 和 optional developer instructions 不进入 Usine contract；developer instructions 只作为 host-private secondary composition，不能替换 frozen Task Contract 或 coordinator prompt。Usine 仍独立强制 role sandbox、workspace、freshness 和 credential separation。#192 证明 SDK lifecycle，#195 证明 app-server lifecycle；这不引入 fallback、registry、capability negotiation、automatic routing、第三个/non-Codex provider，app-server 也不能取得 task authority。
-
-默认依赖选择：
-
-- Node 24 `node:sqlite` + Drizzle ORM/Drizzle Kit：领域模型、查询、durable transaction、attempt/effect reservation 与 code-first SQL migration；
-- Zod：现有 Task Contract 外部 JSON/schema 边界；Effect 4 RC Schema：Task Authority 的不可信 durable-state decode boundary；Effect Scope、FiberMap 与 cancellation：local server composition root 的 task lifecycle、资源释放与 AbortSignal propagation。六个领域 package 不机械迁移为 Effect Service/Layer；Promise/SDK/subprocess/HTTP adapter 只在 Effect 边界桥接；
-- Octokit：GitHub App authentication 与 REST/GraphQL client；
-- `@openai/codex-sdk`：官方 Codex SDK adapter；Codex App Server：bounded local Codex adapter；两个 adapter 都留在 Coding Session port 后面；Execa 只用于 Git 和项目命令；`ai` + `@ai-sdk/openai`：可选的 final role-output normalization；
-- Vitest：公共行为测试，SQLite public-seam tests 覆盖独立连接与 hard-kill recovery；
-- Vite+：workspace 唯一的 format、lint、type-check、test 与 package command/config surface；其内部使用 tsdown、Oxlint、Oxfmt 与 Vitest；`vp check` 的 type-check 独立于 `vp pack`。
-
-Git 操作调用系统 Git CLI，通过一个窄 adapter 组装 argv 和解析结构化结果；不实现 Git object plumbing。原始 SQL 只允许用于 ORM 无法表达且有实际性能/一致性证据的局部语句，并必须在 PR 中说明原因。不得用手写 trigger/catalog fingerprint 模拟 ORM 或 migration engine，也不得把 deterministic reconciler扩张成通用 scheduler、queue 或 workflow engine。
-
-官方能力依据：Node 24 `node:sqlite` transaction 和 SQLite file locking 提供当前单 Task/单 writer 所需的原子事实保留；Drizzle Kit 提供 schema-derived SQL migration；Octokit 可代管 GitHub App JWT 和 installation token 生命周期。恢复由同一 Delivery Run reconcile 函数重读这些事实完成，不另存 operation-index replay。
-
-## 9. 衡量与扩大
-
-首条纵切只记录能回答核心优化目标的事实：是否形成 accepted outcome、human activation、端到端时间、成本、返修次数和 blocker。观察到具体瓶颈后再增加诊断指标，不预建通用 metrics surface，也不设置 10、30、50、100、300 之间的人工阶段门。
-
-Hard-kill recovery 不复用可能仍在写入的 workspace。每个 activation 取得 monotonic fence token 和独立 workspace；Task Authority 只接受当前 token 冻结的 Candidate。旧进程即使短暂存活也只能写旧 workspace，其 output/Candidate 被拒绝并 quarantine，随后由 host cleanup。Restart 恢复同一 Task/repository lease，但 fresh retry 使用新的 activation token；一个 lease 只允许一个 Task 拥有 repository publish authority，不允许两个进程并发共享目录或 Candidate 权限。
-
-当前状态与 eligible work：
-
-| Evidence / outcome | 当前边界 |
+| Area | Current product boundary |
 |---|---|
-| #82/#83 | 真实 Codex executable delivery 与 restart evidence；不证明 app-server adapter 或多 Task capacity。 |
-| #153 | stubbed Codex adapter 的 persistent-server lifecycle fixture；不证明 production Codex turn。 |
-| #192/#193 | 已合并，证明当前 SDK lifecycle 与 attestation facts。 |
-| #195 | 已证明 bounded local app-server runtime outcome 与静态 opaque profile composition；app-server 不能取得 Task authority。 |
-| #217 | 授权记录 fund-manager Issue #52 / PR #53 的 production run：一个 committed Task Contract、一次 implementer activation、一次 fresh review、完整 project check 与 exact-head merge。reviewer 的 approval 经 schema-constrained normalizer 投影后，由协调器重新校验 schema 与 exact SHA。仅证明 bounded serial one-contract production evidence。 |
-| #199 | hermetic authorized exact-head merge precursor；不单独证明 production merge。 |
-| #176 | historical falsification：真实 pilot 需要四个 Task Contract，未证明 one-contract/same-ID acceptance；目标 PR 已交付并手工合并。它不再是当前 bounded route blocker。 |
-| #178 / #151 | #178 证明一个 process 内 configured finite capacity、same-ID idempotency、slot release 与 lowered-capacity restart refusal；不证明更高容量的性能或分布式 runner。#151 已实现 bounded explicit retry：仅 implementer turn-phase network interruption 可进入 durable `waiting`，显式 retry 以同一 Task Contract、deadline、repository authority 和 monotonic fence 恢复下一次 activation；restart、same-ID submit、events 与其它 failure class 不会隐式 retry。 |
-| #187 / #188 / #189 | 分别拥有独立 outcome；#187 的 Task-local event stream 与 #188 的 resource CLI 已完成，#189 保持独立边界；transient order 不构成永久 architecture。 |
+| Host | One local loopback server with a finite active-Task capacity. |
+| Work ownership | One writer lease per registered Repository; one isolated workspace per activation. |
+| Provider | Codex through one task-oriented Coding Session port, with the official SDK or the bounded local App Server adapter selected statically by named profile. |
+| Forge | GitHub for delivery and a bounded, role-scoped read surface through GitHub MCP. |
+| Authority | A committed, immutable Task Contract authorizes scope, acceptance, budget, delivery, and optional merge. Durable Task facts decide lifecycle and completion. |
+| Observation | Durable Task-local history plus best-effort process-local wait/subscribe observation. |
 
-当前 bounded product path 的 direction classification 为 `continue`。Eligibility 仍按 active falsifier/safety-authority defect > accepted-outcome critical path > representative real task > measured bottleneck > cleanup；capacity evidence 仍限定为一个 process 与每个 repository 一个 writer lease。#151 的 bounded evidence 已实现：network interruption 先形成 durable、auditable、same-Task `waiting`，只有一个显式 retry 才能恢复；Task event 仍只是 observation，durable TaskResult 与 Authority CAS 才决定 lifecycle。该 evidence 不扩大为 reviewer retry、其它 failure class、分布式 runner 或更高容量。#176 只保留历史 falsification，#199 只保留 hermetic precursor。Herdr、transcript、process state 和 adapter prose 不能恢复 product completion authority；probe-before-retry 与 deterministic reconciliation 仍由 durable facts 决定。
+The product does not currently provide a planner for vague requests, a general task DAG, concurrent writers for one Repository, a distributed scheduler or runner, automatic merge without contract authority, provider routing or negotiation, another forge, a web dashboard, or a memory/vector database. It also does not claim exhaustive hostile validation of every Git or SQLite failure mode. These are deferred options, not implicit promises; their re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
+
+## 2. End-to-end lifecycle
+
+The server admits a contract only after the CLI/server boundary and the registered Repository validate it. The contract, Repository snapshot, deadline, writer identity, and merge authority are then frozen in durable state.
+
+```text
+committed Task Contract
+        │  validate, resolve Repository, verify committed bytes/ancestry
+        ▼
+loopback API → persistent local server
+        │
+        │  Effect Scope owns HTTP resources, Task fibers, cleanup, signals
+        ▼
+Task Authority: admit + writer lease + durable TaskResult
+        │
+        ▼
+Delivery Run: read state, reserve one activation/fence
+        │
+        ▼
+Candidate Workspace: isolated writer worktree
+        │  Codex implementer proposes a change
+        ▼
+host freezes clean descendant → exact Candidate SHA
+        │
+        ├────────────── project check in disposable exact-SHA checkout
+        │
+        └────────────── fresh reviewer in a separate exact-SHA checkout
+                              │ explicit approved / changes_requested /
+                              │ inconclusive verdict
+                              ▼
+                 Task Authority exact-SHA gate
+                   │ changes_requested → one aggregated repair activation
+                   │ inconclusive/failure → blocked
+                   ▼
+                 Forge Delivery: branch, PR, exact-SHA attestation
+                   │
+                   ├── no merge authority → reviewed_pr (terminal)
+                   │
+                   └── explicit merge authority
+                              │ re-read live PR head and attestation
+                              │ require approved head == Candidate SHA
+                              ▼
+                       GitHub merge endpoint
+                              │
+                              ├── proved refusal/ambiguity → blocked
+                              └── observed exact merge effect → merged (terminal)
+```
+
+Every crossing in this path carries typed domain evidence, not provider transcripts or transport objects. The principal artifacts are the Task Contract, Candidate, Check Result, Review Verdict, Delivery Effect, and provider-neutral session observation. A new Candidate invalidates prior check, review, and delivery evidence by exact-SHA comparison.
+
+## 3. Authority model and invariants
+
+The coordinator is deterministic TypeScript. It performs admission, lease and activation reservation, fact validation, stale-evidence rejection, retry decisions, gate reduction, effect reconciliation, and terminal-state projection. A model may propose code or a structured role result; it cannot announce a Task terminal state. The optional `ai`/`@ai-sdk/openai` integration only normalizes a final role response into its schema and has no lifecycle authority.
+
+The following invariants are product rules:
+
+- The admitted Task Contract and its first deadline are immutable. A same-ID submission returns the existing facts only when the contract hash, Repository identity, snapshot, and merge authority still match.
+- Task Authority is the sole owner of Task state, writer lease, activation fence, accepted facts, and terminal facts. Its transaction updates the durable result, appends the corresponding event, and releases the lease on a terminal transition.
+- A Candidate, check, review, attestation, and merge effect must identify the same full lowercase 40-character SHA. A stale revision, fence, candidate parent, or live PR head is rejected or quarantined.
+- A fresh reviewer must return an explicit structured verdict. Process exit, provider success, a test exit code, an agent message, a hook, or an attestation cannot substitute for semantic approval.
+- Merge authority is not implied by delivery authority. Only an admitted `authorization.merge: true` contract may produce `merged`.
+- Forge credentials are resolved and used at the host delivery boundary. They are not exposed to implementers, reviewers, project checks, public resources, durable events, prompts, or worker environment variables.
+- One Repository has at most one writer lease. Old activation workspaces and execution identities are quarantined before a new writer is allowed to publish a Candidate.
+- Normal execution and restart recovery use the same durable reconciliation path. An uncertain external effect is probed before retry; an ambiguous merge is not recorded as success.
+- Durable state is authoritative. Process state, provider transcripts, hooks, transient subscriptions, and process-local event order are observations only.
+
+## 4. Domain facts and Task lifecycle
+
+### 4.1 Durable facts
+
+`@usine/task-authority` defines the domain types in [`task-state.ts`](../packages/task-authority/src/task-state.ts), the contract boundary in [`contract.ts`](../packages/task-authority/src/contract.ts), and the persisted decode boundary in [`task-state-schema.ts`](../packages/task-authority/src/task-state-schema.ts). A `TaskResult` contains the contract hash, monotonic revision, original deadline, state, immutable merge-authority projection, Candidate SHA and fence, check, review, delivery, blocker, waiting record, active activation, writer identity, Repository snapshot, and evidence counters.
+
+The main facts are:
+
+| Fact | Meaning and owner |
+|---|---|
+| Task Contract | Caller-owned scope, acceptance, non-goals, budget, Issue authorization, delivery data, and optional merge authority. Admission freezes it. |
+| Run/activation | A durable implementer activation and monotonic fence. It is an attempt identity, not completion evidence. |
+| Candidate | A host-verified clean Git commit descending from the recorded parent and original base. |
+| Check Result | The registered project command's result in a disposable exact-SHA checkout, with bounded output. |
+| Review Verdict | A fresh reviewer result for the checked SHA: `approved`, `changes_requested`, or `inconclusive`. |
+| Delivery Effect | Branch/PR identity, exact-SHA approval attestation, and optional observed merge effect. |
+| Task event | A bounded, sanitized history projection for recovery and observation. It cannot reconcile state. |
+
+The persistent representation is decoded with Effect Schema at the untrusted SQLite boundary. Existing Zod validation remains the external Task Contract boundary; six behavior packages remain Promise-based unless a caller-specific change proves that Effect removes duplicated validation, error mapping, or lifecycle code.
+
+### 4.2 States and transitions
+
+The legal state names are `admitted`, `waiting`, `candidate`, `checked`, `reviewed`, `reviewed_pr`, `merged`, and `blocked`. `reviewed_pr`, `merged`, and `blocked` are terminal. `waiting` is a durable pause, not a terminal result.
+
+| State | Meaning | Normal next facts |
+|---|---|---|
+| `admitted` | Contract admitted, lease held, no accepted Candidate yet. | Candidate, waiting, or blocked. |
+| `waiting` | The implementer suffered the one currently retryable turn-phase network interruption. The record stores the resume state and activation. | Explicit retry resumes the recorded `admitted`, `checked`, or `reviewed` phase; expiry or invalidity blocks. |
+| `candidate` | A clean exact Candidate SHA was accepted under the current activation fence. | Check, a repair Candidate path, waiting, or blocked. |
+| `checked` | A Check Result for the current Candidate exists. | Fresh review, repair activation after a failed check, waiting, or blocked. |
+| `reviewed` | A review verdict for a passing check exists. | One aggregated repair activation, delivery, waiting, or blocked. |
+| `reviewed_pr` | GitHub delivery and exact-SHA attestation succeeded without merge authority. | None. |
+| `merged` | GitHub reported and the server observed an exact approved-head merge effect with a merge commit SHA. | None. |
+| `blocked` | The coordinator recorded a classified product, provider, evidence, budget, delivery, or platform blocker. | None. |
+
+Task Authority's reducer and the Candidate Workspace enforce the following lifecycle properties:
+
+- A new Candidate clears check, review, delivery, and blocker evidence. The reducer requires its fence to equal the reserved activation and, after the first Candidate, requires its parent to be the accepted prior Candidate. Candidate Workspace separately requires the initial Candidate to descend from the contract base.
+- A check must belong to the current Candidate. A review requires a passing check for that same SHA. A delivery requires a passing check and an `approved` review for that same SHA.
+- `changes_requested` findings are recorded as one repair batch before one implementer activation. Individual findings do not each wake an agent.
+- Only an implementer failure in the `turn` phase with `failureClass: "network"` may become `waiting`. Reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission do not implicitly retry.
+- `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline and returns to the stored resume state; the subsequent Delivery Run reserves the next activation. Deadline exhaustion blocks the retry, while an exhausted activation budget is rejected as a retry conflict.
+- `reviewed_pr` is the no-merge terminal. `merged` requires both immutable merge authority and a Delivery Effect whose approved head and PR number match the reviewed delivery; the merge commit SHA must also be exact.
+
+## 5. Behavioral packages and composition
+
+The six behavior packages are real pnpm workspace packages with public exports. The package manifests and export barrels are the boundary evidence: [`packages/task-authority/package.json`](../packages/task-authority/package.json), [`candidate-workspace/package.json`](../packages/candidate-workspace/package.json), [`coding-session/package.json`](../packages/coding-session/package.json), [`delivery-run/package.json`](../packages/delivery-run/package.json), [`quality-gate/package.json`](../packages/quality-gate/package.json), and [`forge-delivery/package.json`](../packages/forge-delivery/package.json). `@usine/runtime` and `@usine/cli` are composition roots, not a seventh behavior package.
+
+| Package | Current caller | Policy hidden behind its port | Typed artifacts crossing the boundary |
+|---|---|---|---|
+| [`@usine/task-authority`](../packages/task-authority/) | Runtime and Delivery Run | Contract admission/immutability, Repository lease, CAS revision, legal state transitions, exact-SHA validation, durable persistence, sanitized Task history, and public projections. | `TaskContract`, `RepositorySnapshot`, `TaskResult`, `TaskFact`, `TaskEvent`, public resources. |
+| [`@usine/candidate-workspace`](../packages/candidate-workspace/) | Runtime and Delivery Run; Quality Gate uses its checkout capability | Detached writer worktrees, clean commit/finalization, ancestry, disposable checkouts, credential-free Git environment, quarantine. | `WriterWorkspace`, `FrozenCandidate`, SHA and checkout callback. |
+| [`@usine/coding-session`](../packages/coding-session/) | Delivery Run and Quality Gate | Role/sandbox policy, profile resolution, worker environment, prompt/output schema projection, provider turn lifecycle, cancellation, timeout, and bounded observations. | `SessionRequest`, schema-valid role output, `SessionObservation`, provider-neutral observation. |
+| [`@usine/quality-gate`](../packages/quality-gate/) | Delivery Run | Project-check execution and fresh exact-SHA review in separate disposable checkouts; review output validation and finding projection. | `CheckResult`, `ReviewAttemptObservation`, `ReviewVerdict`. |
+| [`@usine/forge-delivery`](../packages/forge-delivery/) | Delivery Run and runtime's GitHub-read composition | GitHub App authentication, branch/PR identity, push, approval attestation, live-head validation, merge, and probe-before-retry. | Approved check/review bundle and `DeliveryEffect`; bounded GitHub-read MCP server configuration. |
+| [`@usine/delivery-run`](../packages/delivery-run/) | Runtime server | The deterministic phase reducer, activation/review budgets, repair batching, bounded retry, restart re-entry, and next-action ordering. | `DeliveryRunInput`, `DeliveryRunServices`, and the resulting durable `TaskResult`. |
+
+The production dependency direction is acyclic. The diagram below is the production dependency graph formed from package `dependencies`; it excludes test- and tool-only `devDependencies` such as test fixtures. In the diagram, `A → B` means “package A imports package B”; arrows therefore point toward the domain policy owner:
+
+```text
+@usine/candidate-workspace ───────→ @usine/task-authority
+@usine/coding-session ────────────→ @usine/task-authority
+@usine/forge-delivery ────────────→ @usine/task-authority
+@usine/quality-gate ──────────────→ @usine/candidate-workspace
+                                  ├→ @usine/coding-session
+                                  └→ @usine/task-authority
+@usine/delivery-run ──────────────→ @usine/candidate-workspace
+                                  ├→ @usine/coding-session
+                                  ├→ @usine/forge-delivery
+                                  ├→ @usine/quality-gate
+                                  └→ @usine/task-authority
+@usine/runtime ───────────────────→ all six behavior packages
+@usine/cli ───────────────────────→ @usine/runtime and @usine/task-authority
+```
+
+Domain policy does not import HTTP, Git, subprocess, GitHub, SDK, or database implementation. Cross-package calls use declared package exports; they do not reach into another package's `src` or `dist`. Boundaries carry Task Contract, Candidate, Check Result, Review Verdict, Delivery Effect, and provider-neutral observations. They do not carry HTTP requests, Effect fibers, provider threads/events, panes, argv, raw provider responses, or database transactions.
+
+## 6. Persistent server lifecycle and Coding Session lifecycle
+
+The persistent local server is the coordinator host. [`packages/runtime/src/server.ts`](../packages/runtime/src/server.ts) creates a sequential Effect Scope, applies SQLite migrations, validates loopback binding, checks the durable active-Task count, starts the typed HTTP API, owns a `FiberMap` for Task execution, and installs release cleanup. On shutdown it closes transient listeners and the Effect scope; owned Codex executions are interrupted and reaped. `AbortSignal` is propagated into the Delivery Run and adapters.
+
+At startup the server decodes durable Tasks. Nonterminal Tasks that have valid committed execution input are re-entered through the same run path, after recording sanitized restart/owner-change observations. `waiting` Tasks retain their lease and capacity slot but are not launched automatically. Persisted-state decode failures are rejected at the Task Authority boundary; invalid committed execution input is blocked during startup. A submitting CLI process may exit after admission because execution belongs to the server.
+
+Coding Session is a different lifecycle. [`CodexCodingSession`](../packages/coding-session/src/coding-session.ts) owns one provider run: profile resolution, role policy, bounded environment, optional read-MCP setup, provider thread/turn, structured output parsing or optional final normalization, cancellation/deadline handling, and cleanup of the provider execution identity. It returns a typed `SessionObservation`; the Delivery Run decides what durable Task fact follows. Provider thread IDs, raw events, transcripts, tool arguments, and raw error text do not cross the domain port or become Task authority.
+
+The server therefore owns Task fibers, durable re-entry, resource cleanup, and lifecycle authority; the Coding Session adapter owns Codex execution semantics. Neither a provider process nor an Effect fiber is a durable Task state machine.
+
+## 7. SDK and bounded App Server profile selection
+
+A registered Repository supplies opaque implementer and reviewer profile names. Before activation, the Coding Session validates the safe name and resolves `<profile>.config.toml` from `CODEX_HOME` or the Codex default directory. A profile needs a nonblank model; supported configuration includes the current Codex model, reasoning, provider/catalog, verbosity/personality, service tier, and optional developer instructions. Invalid, unreadable, or unsupported configuration fails closed as `codex_profile_unusable`.
+
+`USINE_CODEX_APP_SERVER_PROFILES` is a comma-separated allowlist of profile names. A listed name selects exactly the bounded local Codex App Server adapter; an unlisted name selects the official `@openai/codex-sdk` adapter. This choice is static per named profile and per activation. There is no fallback, registry, capability negotiation, automatic routing, third provider, or general runtime-compatibility claim. Both adapters implement the same task-oriented `run(request) -> typed observation` port. The App Server is not a second task authority.
+
+The coordinator still supplies the frozen Task Contract, role prompt, sandbox (`workspace-write` for implementer and `read-only` for reviewer), output schema, deadline, and cancellation. Profile model/provider/reasoning/service-tier values, credentials, and developer instructions are host-private composition inputs; they do not alter the Task Contract or durable Task model. `ai` + `@ai-sdk/openai`, when configured, is only a final role-output normalizer and is bounded by the same output schema and deadline.
+
+## 8. Candidate, checks, review, delivery, and GitHub capabilities
+
+The implementer receives a detached worktree at the contract base or the current Candidate parent. The host, not the agent, freezes the Candidate: it checks that the worktree advances, is clean, is descended from both the prior parent and original base, and produces a full exact SHA. Git runs with `GIT_CONFIG_NOSYSTEM=1`, a null global config, and terminal prompting disabled; Forge credentials are absent.
+
+Quality Gate runs the registered project command in a disposable exact-SHA checkout with an explicit reduced environment and bounded stdout/stderr. A passed check is required before review. The reviewer receives a fresh checkout, the Task Contract, the exact Candidate SHA, and check evidence. It does not inherit the implementer's workspace or conversation and must return an explicit schema-valid verdict. A missing/invalid/stale output is `inconclusive`, never approval.
+
+Forge Delivery requires a passing exact-SHA check and exact-SHA semantic approval. It probes for an existing branch/PR before writing, pushes with a credential-scoped GitHub capability, and creates or verifies one approval attestation tied to the Task, Issue, SHA, check, and review. Multiple, mismatched, or wrong-identity attestations quarantine delivery. A lost write response is reconciled by probing the same identity.
+
+For merge-authorized contracts, Forge Delivery re-reads the live PR and attestation immediately before calling the GitHub merge endpoint. A changed head, mismatched attestation, non-mergeable platform state, refusal, or ambiguous response does not create a merge fact. A later probe may record `merged` only when the PR is observed merged with an exact merge commit SHA and the approved head/PR identity still matches. GitHub platform policy is the final merge gate.
+
+GitHub read access is optional and separate from Forge delivery. The registered opaque `githubReadProfile` resolves its own GitHub App capability, must bind to the same owner/name, and exposes only an allowlisted `github_issue_*`, `github_pull_request_*`, `github_file_get`, or `github_commit_get` tool set to the selected role through a local Streamable HTTP MCP server. Pull-request reads additionally require an authorized delivered-PR fact. Read credentials never become Forge credentials and never enter workers, prompts, MCP configuration, public resources, durable events, or logs.
+
+## 9. Durable history and transient observation
+
+Task Authority persists one ordered, Task-local `task_events` stream. Authority transactions create admission, activation, Candidate, check, review, repair, waiting/retry, delivery, recovery, blocker, and terminal facts/events with stable event identities. External Coding Session and recovery observations are accepted only through the sanitized observation schema. Event data is bounded and excludes secrets, paths, prompts, transcripts, argv, raw provider payloads, credentials, and private diagnostics. Duplicate event identities are idempotent; sequence order is assigned durably.
+
+`task history` reads this durable stream after a sequence cursor. `task watch` replays history and then reads the authoritative Task resource, so it can recover an operator view without treating event text as state. The CLI aliases `status` and `follow` remain compatibility surfaces; canonical resource commands are `server health|snapshot`, `repository list|get`, and `task list|get|history|watch|retry`, with `register` and `submit` as mutation entry points.
+
+The server also exposes process-local `wait` and `subscribe` observation through an Effect `PubSub` hub. A listener chooses exactly one scope: Task, Repository, or the whole server. `wait` returns one new sanitized envelope or `null` on bounded timeout; `subscribe` emits a ready marker and future matching envelopes. These are best-effort producer-only notifications with a bounded dropping buffer. They have no durable cursor, acknowledgement, replay, resume, backpressure, or restart-recovery protocol. If a listener disconnects, the server shuts down, or it cannot keep up, the listener closes; callers must read current state/history when correctness matters.
+
+## 10. Recovery, retry, capacity, and isolation
+
+Recovery is deterministic reconciliation, not replay of process operations. On re-entry the server reads the durable Task Contract, phase, revision, activation, Candidate, and effect identities; it probes Git/worktree/GitHub before repeating uncertain effects. Confirmed effects are recorded once, provably absent effects may be retried with the same stable identity, and unresolved ambiguity is quarantined. A new writer receives a new activation fence and workspace; stale work cannot publish a Candidate. The first deadline is never extended by restart.
+
+The default `USINE_ACTIVE_TASK_CAPACITY` is `1`; it must be a positive finite integer. Admission counts durable nonterminal Tasks and, in the same transaction, acquires the Repository lease. Same-ID idempotent resubmission is checked before capacity rejection. A full capacity returns a retryable error but does not create a queue. On startup, a durable count above the configured capacity rejects readiness rather than launching work beyond the bound. Terminal state releases the Repository lease and the capacity slot. This is bounded process-local capacity, not fairness, dynamic resizing, or distributed scheduling.
+
+Isolation is capability-based:
+
+| Actor | Workspace | Network | GitHub delivery credential |
+|---|---|---|---|
+| Implementer | Writable activation worktree | Provider/task environment | None |
+| Project check | Disposable exact-SHA checkout | Host filesystem/network permissions with reduced explicit environment | None |
+| Reviewer | Fresh read-only exact-SHA checkout plus scratch | Provider/task environment and optional bounded read MCP | No Forge credential |
+| Delivery | No candidate execution | GitHub and configured Git remote | Short-lived host-scoped Forge capability |
+
+Codex sandbox and host permissions are the default isolation mechanism. Containers, VMs, remote sandboxes, queues, and distributed runners are not hidden prerequisites or domain concepts.
+
+## 11. Current evidence and limits
+
+The repository currently provides focused behavioral evidence rather than a production-scale benchmark. The most direct evidence is:
+
+| Claim | Repository evidence | Limit of the evidence |
+|---|---|---|
+| Lifecycle reducer, exact-SHA facts, waiting, explicit retry, merge authorization | [`packages/task-authority/tests/task-authority.test.ts`](../packages/task-authority/tests/task-authority.test.ts), [`packages/task-authority/tests/task-authority-sqlite.test.ts`](../packages/task-authority/tests/task-authority-sqlite.test.ts) | Does not prove every hostile database or Git failure mode. |
+| Durable sanitized history and event identity | [`packages/task-authority/tests/task-events.test.ts`](../packages/task-authority/tests/task-events.test.ts) | History is Task-local; process-local subscriptions are separately best effort. |
+| Persistent server, server-owned execution, restart cleanup, exact-head delivery and optional merge | [`tests/server-milestone.test.ts`](../tests/server-milestone.test.ts), [`tests/server-execution.test.ts`](../tests/server-execution.test.ts) | Hermetic fixtures and bounded scenarios do not prove broad GitHub ruleset or provider behavior. |
+| Capacity admission, same-ID idempotency, slot release, and lowered-capacity startup refusal | [`tests/server-capacity.test.ts`](../tests/server-capacity.test.ts) | No performance claim for higher capacity, fairness, multiple runners, or dynamic resizing. |
+| Process-local wait/subscribe and CLI history/watch projection | [`tests/server-subscription.test.ts`](../tests/server-subscription.test.ts), [`tests/server-follow.test.ts`](../tests/server-follow.test.ts), [`apps/cli/tests/server-client.test.ts`](../apps/cli/tests/server-client.test.ts) | No replay, acknowledgement, backpressure, or restart guarantee for transient listeners. |
+| Static profile selection, bounded SDK/App Server adapters, cancellation, and output normalization | [`packages/coding-session/tests/coding-session.test.ts`](../packages/coding-session/tests/coding-session.test.ts), [`packages/coding-session/src/codex-profile.ts`](../packages/coding-session/src/codex-profile.ts) | Supported provider remains Codex; no general provider compatibility or automatic routing is claimed. |
+| Disposable checks, fresh review, stale review rejection, and credential-free Git | [`packages/quality-gate/tests/quality-gate.test.ts`](../packages/quality-gate/tests/quality-gate.test.ts), [`packages/candidate-workspace/tests/candidate-workspace.test.ts`](../packages/candidate-workspace/tests/candidate-workspace.test.ts) | Check output is bounded and environment policy remains host-specific. |
+| Forge probe/retry, attestation identity, read MCP scoping, and merge effects | [`packages/forge-delivery/tests/forge-delivery.test.ts`](../packages/forge-delivery/tests/forge-delivery.test.ts), [`packages/forge-delivery/tests/github-read.test.ts`](../packages/forge-delivery/tests/github-read.test.ts), [`tests/runtime-policy.test.ts`](../tests/runtime-policy.test.ts) | Private live characterization is optional; no claim is made about every GitHub installation or ruleset. |
+| One bounded external exact-head production run | [fund-manager Issue #52](https://github.com/ariga39/fund-manager/issues/52) and [PR #53](https://github.com/ariga39/fund-manager/pull/53) | It is one one-contract run; it does not establish retry recovery, scale, broader merge policy, or provider breadth. |
+
+These limits define the current stopping boundary. A green check, PR, process exit, event stream, or agent statement is evidence for a narrower fact; none independently proves Task completion.

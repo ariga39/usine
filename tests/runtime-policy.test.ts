@@ -8,16 +8,29 @@ import {
 } from "@usine/runtime";
 
 async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
-  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
-  const command = readme.match(/```sh\n([\s\S]*?)\n```/)?.[1];
-  if (!command) throw new Error("README startup command is missing");
+  const guide = await readFile(new URL("../docs/AGENT_QUICKSTART.md", import.meta.url), "utf8");
+  const block = guide.match(/### Forge GitHub App profile[\s\S]*?```sh\n([\s\S]*?)\n```/)?.[1];
+  if (!block) throw new Error("agent quickstart is missing the Forge environment block");
 
+  const replacements = new Map([
+    ["<GITHUB_APP_SLUG>", "example-app"],
+    ["<GITHUB_APP_ID>", "123456"],
+    ["<GITHUB_INSTALLATION_ID>", "123456"],
+    ["<GITHUB_APP_PRIVATE_KEY_PATH>", "./app-private-key.pem"],
+    ["<GITHUB_OWNER>/<GITHUB_REPOSITORY>", "example-owner/example-repository"],
+  ]);
   const environment: NodeJS.ProcessEnv = {};
-  for (const line of command.split("\n")) {
-    const assignment = line.match(/^([A-Z][A-Z0-9_]*)=(?:"([^"]*)"|([^ ]+)) \\$/);
+  for (const line of block.split("\n")) {
+    const assignment = line.match(/^export ([A-Z][A-Z0-9_]*)="([^"]+)"$/);
     const key = assignment?.[1];
-    if (key) environment[key] = assignment[2] ?? assignment[3];
+    const placeholder = assignment?.[2];
+    if (!key || !placeholder) throw new Error(`invalid Forge environment line: ${line}`);
+    const value = replacements.get(placeholder);
+    if (!value) throw new Error(`unexpected Forge environment placeholder: ${placeholder}`);
+    environment[key] = value;
   }
+  if (Object.keys(environment).length !== replacements.size)
+    throw new Error("agent quickstart Forge environment block is incomplete");
   return environment;
 }
 
@@ -44,7 +57,7 @@ const roleOutputEnvironment = {
 };
 
 describe("runtime composition", () => {
-  test("accepts the documented production startup shape before external delivery", async () => {
+  test("accepts the agent quickstart's production Forge shape before delivery", async () => {
     const environment = await documentedProductionEnvironment();
     expect(environment).not.toHaveProperty("USINE_IMPLEMENTER_PROFILE");
 
