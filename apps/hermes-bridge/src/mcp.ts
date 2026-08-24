@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { HermesBridgeUpstream } from "./bridge.js";
+import { assertLoopbackHost } from "./loopback.js";
 
 const maxBodyBytes = 65_536;
 const maxLimit = 100;
@@ -103,7 +103,7 @@ export async function startHermesBridgeMcpHttp(
   options: HermesMcpHttpOptions,
 ): Promise<HermesMcpHttpHandle> {
   const host = options.host ?? "127.0.0.1";
-  if (!isLoopbackHost(host)) throw new Error("Hermes MCP host must be loopback");
+  assertLoopbackHost(host);
   type Session = { transport: StreamableHTTPServerTransport; server: McpServer };
   let session: Session | undefined;
   let initialization: Promise<void> = Promise.resolve();
@@ -192,15 +192,6 @@ export async function startHermesBridgeMcpHttp(
       return closePromise;
     },
   };
-}
-
-function isLoopbackHost(host: string): boolean {
-  const normalized = host
-    .trim()
-    .replace(/^\[|\]$/g, "")
-    .toLowerCase();
-  if (normalized === "localhost" || normalized === "::1") return true;
-  return isIP(normalized) === 4 && normalized.startsWith("127.");
 }
 
 async function callSafely<T>(operation: () => Promise<T>): Promise<CallToolResult> {

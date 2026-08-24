@@ -14,12 +14,14 @@ import {
   decodeApiEventEnvelope,
   makeUsineApiClient,
   type ApiEventEnvelope,
+  type ApiEventStreamValue,
   type ApiTaskResource,
   type ServerSnapshot,
   type TaskEventPage,
   type TaskListPage,
   type TaskSubmission,
 } from "@usine/runtime";
+import { assertLoopbackHttpUrl } from "./loopback.js";
 
 const defaultTaskLimit = 100;
 
@@ -35,7 +37,7 @@ export interface HermesBridgeUpstream {
   ): Promise<TaskEventPage>;
   submitTask(submission: TaskSubmission, signal?: AbortSignal): Promise<ApiTaskResource>;
   retryTask(taskId: string, signal?: AbortSignal): Promise<ApiTaskResource>;
-  subscribe(signal: AbortSignal): AsyncIterable<ApiEventEnvelope>;
+  subscribe(signal: AbortSignal): AsyncIterable<ApiEventStreamValue>;
 }
 
 export interface HermesBridgeOptions {
@@ -55,7 +57,7 @@ export interface HermesAttentionPayload {
   event: "usine_attention";
   sourceId: string;
   taskId: string;
-  repositoryId: string;
+  repositoryId?: string;
   revision: number;
   eventSequence?: number;
   state: "waiting" | "blocked" | "reviewed_pr" | "merged";
@@ -282,12 +284,12 @@ function attentionPayload(
     event: "usine_attention",
     sourceId,
     taskId: resource.taskId,
-    repositoryId:
-      ("repository" in resource ? resource.repository?.id : undefined) ??
-      resource.writer.repositoryIdentity,
     revision: resource.revision,
     ...(eventSequence === undefined ? {} : { eventSequence }),
     state,
+    ...("repository" in resource && resource.repository
+      ? { repositoryId: resource.repository.id }
+      : {}),
   };
 }
 
@@ -303,8 +305,13 @@ function consumeEvents(
       const subscription = yield* Effect.exit(
         Effect.tryPromise({
           try: async (signal) => {
-            for await (const envelope of upstream.subscribe(signal)) {
-              await runtime.runPromise(handleEvent(envelope)).catch(() => undefined);
+            for await (const observation of upstream.subscribe(signal)) {
+              if ("kind" in observation) {
+                if (observation.kind === "ready")
+                  await runtime.runPromise(notifyReconnected).catch(() => undefined);
+                continue;
+              }
+              await runtime.runPromise(handleEvent(observation)).catch(() => undefined);
             }
             return !signal.aborted;
           },
@@ -485,6 +492,7 @@ function isTransientWebhookStatus(status: number): boolean {
 }
 
 export function createUsineBridgeUpstream(baseUrl: string): HermesBridgeUpstream {
+  assertLoopbackHttpUrl(baseUrl);
   const client = Effect.runSync(makeUsineApiClient(baseUrl));
   return {
     serverSnapshot: (limit = defaultTaskLimit, signal) =>
@@ -519,7 +527,7 @@ function isNotFound(error: unknown): boolean {
 async function* subscribeEvents(
   baseUrl: string,
   signal: AbortSignal,
-): AsyncIterable<ApiEventEnvelope> {
+): AsyncIterable<ApiEventStreamValue> {
   const url = new URL("/v1/events/subscribe", baseUrl);
   const response = await fetch(url, { headers: { accept: "text/event-stream" }, signal });
   if (!response.ok || !response.body) throw new Error("Usine event stream unavailable");
@@ -542,7 +550,10 @@ async function* subscribeEvents(
           .join("\n");
         if (!data) continue;
         const parsed: unknown = JSON.parse(data);
-        if (typeof parsed === "object" && parsed !== null && "kind" in parsed) continue;
+        if (typeof parsed === "object" && parsed !== null && "kind" in parsed) {
+          if (parsed.kind === "ready") yield { kind: "ready" };
+          continue;
+        }
         yield decodeApiEventEnvelope(parsed);
       }
     }

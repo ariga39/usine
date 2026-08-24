@@ -1,5 +1,9 @@
 import { createHmac } from "node:crypto";
-import { createHermesBridge, type HermesBridgeUpstream } from "../src/bridge.js";
+import {
+  createHermesBridge,
+  createUsineBridgeUpstream,
+  type HermesBridgeUpstream,
+} from "../src/bridge.js";
 import { createHermesBridgeMcpServer, startHermesBridgeMcpHttp } from "../src/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -228,11 +232,12 @@ describe("Hermes supervisor bridge attention", () => {
       (request) => JSON.parse(request.body).event === "usine_attention",
     );
     expect(attention).toBeDefined();
-    expect(JSON.parse(attention?.body ?? "")).toMatchObject({
+    expect(JSON.parse(attention?.body ?? "")).toEqual({
       event: "usine_attention",
       sourceId: "usine-instance-269",
       taskId: "task-waiting",
       state: "waiting",
+      revision: 4,
     });
     expect(
       requests.filter((request) => JSON.parse(request.body).event === "usine_instance_reconciled"),
@@ -671,6 +676,52 @@ describe("Hermes supervisor bridge attention", () => {
     );
   });
 
+  test("reconnects after startup outage when a ready stream stays open", async () => {
+    const requests: RecordedRequest[] = [];
+    const source = listedUpstream([task("admitted")]);
+    let listCalls = 0;
+    source.listTasks = async (limit) => {
+      listCalls += 1;
+      if (listCalls === 1) throw new Error("Usine is unavailable");
+      return listedUpstream([task("admitted")]).listTasks(limit);
+    };
+    let resolveReconnected!: () => void;
+    const reconnected = new Promise<void>((resolve) => {
+      resolveReconnected = resolve;
+    });
+    source.subscribe = (signal) =>
+      (async function* () {
+        yield { kind: "ready" as const };
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      })();
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        const request = recordRequest(init);
+        requests.push(request);
+        if (JSON.parse(request.body).event === "usine_instance_reconnected") resolveReconnected();
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    const started = bridge.start();
+    await reconnected;
+    await bridge.close();
+    await expect(started).resolves.toBeUndefined();
+
+    expect(requests.map((request) => JSON.parse(request.body).event)).toEqual([
+      "usine_instance_unavailable",
+      "usine_instance_reconnected",
+    ]);
+    expect(listCalls).toBe(2);
+  });
+
   test("starts idempotently inside the runtime and close aborts its reconciliation read", async () => {
     let listStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -823,5 +874,34 @@ describe("Hermes supervisor bridge attention", () => {
     await expect(
       startHermesBridgeMcpHttp({ upstream: upstream(task("admitted")), host: "0.0.0.0" }),
     ).rejects.toThrow("loopback");
+  });
+
+  test("rejects invalid or non-loopback upstream URLs without leaking URL details", () => {
+    for (const value of [
+      "not a URL",
+      "ftp://127.0.0.1:4312",
+      "http://example.com:4312",
+      "http://user:secret@127.0.0.1:4312",
+    ]) {
+      expect(() => createUsineBridgeUpstream(value)).toThrow();
+      try {
+        createUsineBridgeUpstream(value);
+      } catch (error) {
+        if (!(error instanceof Error))
+          throw new Error("expected loopback validation Error", { cause: error });
+        expect(error.message).not.toContain("secret");
+        expect(error.message).not.toContain(value);
+      }
+    }
+    expect(() => createUsineBridgeUpstream("https://localhost:4312")).not.toThrow();
+    expect(() => createUsineBridgeUpstream("http://[::1]:4312")).not.toThrow();
+  });
+
+  test("rejects non-loopback MCP hostnames through the shared boundary", async () => {
+    for (const host of ["example.com", "127.0.0.1.evil", "[::2]"]) {
+      await expect(
+        startHermesBridgeMcpHttp({ upstream: upstream(task("admitted")), host }),
+      ).rejects.toThrow("loopback");
+    }
   });
 });
