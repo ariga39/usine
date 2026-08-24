@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import {
   Clock,
   Cause,
@@ -24,12 +24,17 @@ import {
 const defaultTaskLimit = 100;
 
 export interface HermesBridgeUpstream {
-  serverSnapshot(limit?: number): Promise<ServerSnapshot>;
-  listTasks(limit?: number): Promise<TaskListPage>;
-  getTask(taskId: string): Promise<ApiTaskResource | null>;
-  taskHistory(taskId: string, after?: number, limit?: number): Promise<TaskEventPage>;
-  submitTask(submission: TaskSubmission): Promise<ApiTaskResource>;
-  retryTask(taskId: string): Promise<ApiTaskResource>;
+  serverSnapshot(limit?: number, signal?: AbortSignal): Promise<ServerSnapshot>;
+  listTasks(limit?: number, signal?: AbortSignal): Promise<TaskListPage>;
+  getTask(taskId: string, signal?: AbortSignal): Promise<ApiTaskResource | null>;
+  taskHistory(
+    taskId: string,
+    after?: number,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<TaskEventPage>;
+  submitTask(submission: TaskSubmission, signal?: AbortSignal): Promise<ApiTaskResource>;
+  retryTask(taskId: string, signal?: AbortSignal): Promise<ApiTaskResource>;
   subscribe(signal: AbortSignal): AsyncIterable<ApiEventEnvelope>;
 }
 
@@ -75,12 +80,12 @@ export function signHermesWebhook(secret: string, timestamp: number, body: strin
   return createHmac("sha256", secret).update(`${timestamp}.${body}`, "utf8").digest("hex");
 }
 
-export function stableWebhookRequestId(key: string): string {
-  return `usine-${createHash("sha256").update(key, "utf8").digest("hex").slice(0, 32)}`;
+function newWebhookRequestId(): string {
+  return `usine-${randomUUID().replaceAll("-", "")}`;
 }
 
-function runEffectRequest<A>(effect: Effect.Effect<A, unknown>): Promise<A> {
-  return Effect.runPromise(effect);
+function runEffectRequest<A>(effect: Effect.Effect<A, unknown>, signal?: AbortSignal): Promise<A> {
+  return Effect.runPromise(effect, signal === undefined ? undefined : { signal });
 }
 
 export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
@@ -112,13 +117,14 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
   let unavailable = false;
   let initialReconciliationNotified = false;
   let running: Promise<void> | undefined;
+  let closed = false;
 
   const enqueueBestEffort = (payload: HermesAttentionPayload | HermesInstancePayload): void => {
     void dispatcher.enqueue(payload).catch(() => undefined);
   };
 
   const observeTask = async (
-    resource: ApiTaskResource | null,
+    resource: ObservableTask | null,
     mode: "event" | "startup" | "reconnect",
     eventSequence?: number,
   ): Promise<void> => {
@@ -149,77 +155,112 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     }
   };
 
-  const bridge: HermesBridge = {
-    upstream,
-    async handleEvent(envelope) {
-      await observeTask(await upstream.getTask(envelope.taskId), "event", envelope.event.sequence);
-    },
-    async reconcile(mode = "startup") {
-      const tasks = await upstream.listTasks(taskLimit);
-      await Promise.all(
-        tasks.tasks.map(async (item) => observeTask(await upstream.getTask(item.taskId), mode)),
-      );
-      if (mode === "startup" && !initialReconciliationNotified) {
-        initialReconciliationNotified = true;
-        enqueueBestEffort({
-          event: "usine_instance_reconciled",
-          sourceId: options.sourceId,
-        });
-      }
-    },
-    notifyUnavailable: () => {
-      if (unavailable) return Promise.resolve();
-      unavailable = true;
-      return dispatcher.enqueue(
+  const handleEventEffect = (envelope: ApiEventEnvelope): Effect.Effect<void, unknown> =>
+    Effect.tryPromise({
+      try: (signal) =>
+        upstream
+          .getTask(envelope.taskId, signal)
+          .then((resource) => observeTask(resource, "event", envelope.event.sequence)),
+      catch: (error) => error,
+    });
+
+  const reconcileEffect = (mode: "startup" | "reconnect"): Effect.Effect<void, unknown> =>
+    Effect.tryPromise({
+      try: async (signal) => {
+        const tasks = await upstream.listTasks(taskLimit, signal);
+        await Promise.all(tasks.tasks.map((resource) => observeTask(resource, mode)));
+        if (mode === "startup" && !initialReconciliationNotified) {
+          initialReconciliationNotified = true;
+          enqueueBestEffort({
+            event: "usine_instance_reconciled",
+            sourceId: options.sourceId,
+          });
+        }
+      },
+      catch: (error) => error,
+    });
+
+  const notifyUnavailableEffect = Effect.suspend(() => {
+    if (unavailable) return Effect.void;
+    unavailable = true;
+    return Effect.tryPromise(() =>
+      dispatcher.enqueue(
         {
           event: "usine_instance_unavailable",
           sourceId: options.sourceId,
         },
         true,
-      );
-    },
-    async notifyReconnected() {
-      if (!unavailable) return Promise.resolve();
-      try {
-        await bridge.reconcile("reconnect");
-      } catch {
-        return;
-      }
-      unavailable = false;
-      return dispatcher.enqueue(
+      ),
+    );
+  });
+
+  const notifyReconnectedEffect = Effect.gen(function* () {
+    if (!unavailable) return;
+    const reconciliation = yield* Effect.exit(reconcileEffect("reconnect"));
+    if (reconciliation._tag === "Failure") return;
+    unavailable = false;
+    yield* Effect.tryPromise(() =>
+      dispatcher.enqueue(
         {
           event: "usine_instance_reconnected",
           sourceId: options.sourceId,
         },
         true,
-      );
+      ),
+    );
+  });
+
+  const bridge: HermesBridge = {
+    upstream,
+    async handleEvent(envelope) {
+      await runtime.runPromise(handleEventEffect(envelope));
     },
+    async reconcile(mode = "startup") {
+      await runtime.runPromise(reconcileEffect(mode));
+    },
+    notifyUnavailable: () => runtime.runPromise(notifyUnavailableEffect),
+    notifyReconnected: () => runtime.runPromise(notifyReconnectedEffect),
     start(signal?: AbortSignal) {
-      return startBridge(bridge, signal);
+      return startBridge(signal);
     },
     close() {
+      closed = true;
       return dispatcher.close();
     },
   };
 
-  async function startBridge(bridgeInstance: HermesBridge, signal?: AbortSignal): Promise<void> {
-    try {
-      await bridgeInstance.reconcile("startup");
-    } catch {
-      await bridgeInstance.notifyUnavailable().catch(() => undefined);
-    }
+  function startBridge(signal?: AbortSignal): Promise<void> {
     if (running) return running;
-    running = runtime.runPromise(
-      consumeEvents(bridgeInstance, runtime),
+    const started = runtime.runPromise(
+      Effect.gen(function* () {
+        const reconciliation = yield* Effect.exit(reconcileEffect("startup"));
+        if (reconciliation._tag === "Failure") {
+          if (Cause.hasInterruptsOnly(reconciliation.cause)) return;
+          yield* notifyUnavailableEffect.pipe(Effect.catchCause(() => Effect.void));
+        }
+        yield* consumeEvents(
+          upstream,
+          runtime,
+          handleEventEffect,
+          notifyUnavailableEffect,
+          notifyReconnectedEffect,
+        );
+      }).pipe(Effect.catchCause(() => Effect.void)),
       signal === undefined ? undefined : { signal },
     );
+    running = started.catch((error: unknown) => {
+      if (closed) return;
+      throw error;
+    });
     return running;
   }
 
   return bridge;
 }
 
-function actionableState(resource: ApiTaskResource): HermesAttentionPayload["state"] | undefined {
+type ObservableTask = ApiTaskResource | TaskListPage["tasks"][number];
+
+function actionableState(resource: ObservableTask): HermesAttentionPayload["state"] | undefined {
   if (resource.state === "waiting" && resource.retryable === true) return "waiting";
   if (
     resource.state === "blocked" ||
@@ -231,7 +272,7 @@ function actionableState(resource: ApiTaskResource): HermesAttentionPayload["sta
 }
 
 function attentionPayload(
-  resource: ApiTaskResource,
+  resource: ObservableTask,
   sourceId: string,
   eventSequence?: number,
 ): HermesAttentionPayload {
@@ -241,7 +282,9 @@ function attentionPayload(
     event: "usine_attention",
     sourceId,
     taskId: resource.taskId,
-    repositoryId: resource.repository?.id ?? resource.writer.repositoryIdentity,
+    repositoryId:
+      ("repository" in resource ? resource.repository?.id : undefined) ??
+      resource.writer.repositoryIdentity,
     revision: resource.revision,
     ...(eventSequence === undefined ? {} : { eventSequence }),
     state,
@@ -249,18 +292,19 @@ function attentionPayload(
 }
 
 function consumeEvents(
-  bridge: HermesBridge,
+  upstream: HermesBridgeUpstream,
   runtime: ManagedRuntime.ManagedRuntime<Clock.Clock, never>,
+  handleEvent: (envelope: ApiEventEnvelope) => Effect.Effect<void, unknown>,
+  notifyUnavailable: Effect.Effect<void, unknown>,
+  notifyReconnected: Effect.Effect<void, unknown>,
 ): Effect.Effect<void> {
   return Effect.gen(function* () {
     while (true) {
       const subscription = yield* Effect.exit(
         Effect.tryPromise({
           try: async (signal) => {
-            for await (const envelope of bridge.upstream.subscribe(signal)) {
-              runtime
-                .runPromise(Effect.tryPromise(() => bridge.handleEvent(envelope)))
-                .catch(() => undefined);
+            for await (const envelope of upstream.subscribe(signal)) {
+              await runtime.runPromise(handleEvent(envelope)).catch(() => undefined);
             }
             return !signal.aborted;
           },
@@ -272,13 +316,9 @@ function consumeEvents(
       } else if (!subscription.value) {
         return;
       }
-      yield* Effect.tryPromise(() => bridge.notifyUnavailable()).pipe(
-        Effect.catchCause(() => Effect.void),
-      );
+      yield* notifyUnavailable.pipe(Effect.catchCause(() => Effect.void));
       yield* Effect.sleep(250);
-      yield* Effect.tryPromise(() => bridge.notifyReconnected()).pipe(
-        Effect.catchCause(() => Effect.void),
-      );
+      yield* notifyReconnected.pipe(Effect.catchCause(() => Effect.void));
     }
   }).pipe(Effect.catchCause(() => Effect.void));
 }
@@ -317,7 +357,7 @@ class HermesWebhookDispatcher {
         ? this.options.runtime.runSync(Deferred.make<void, unknown>())
         : undefined;
       const offered = this.options.runtime.runSync(
-        Queue.offer(this.queue, { payload: signal, done }),
+        Queue.offer(this.queue, { payload: signal, requestId: newWebhookRequestId(), done }),
       );
       if (!offered) return Promise.resolve();
       this.active = true;
@@ -344,7 +384,7 @@ class HermesWebhookDispatcher {
             this.reconciliationPending = false;
           }
           this.active = true;
-          return Effect.exit(this.sendWithRetry(signal.payload)).pipe(
+          return Effect.exit(this.sendWithRetry(signal)).pipe(
             Effect.flatMap((exit) =>
               signal.done ? Deferred.done(signal.done, exit) : Effect.void,
             ),
@@ -360,13 +400,12 @@ class HermesWebhookDispatcher {
   }
 
   private sendWithRetry(
-    payload: HermesAttentionPayload | HermesInstancePayload,
+    signal: WebhookSignal,
   ): Effect.Effect<void, PermanentWebhookError | TransientWebhookError> {
+    const payload = signal.payload;
     const body = JSON.stringify(payload);
-    const key = webhookDeliveryKey(payload);
-    const requestId = stableWebhookRequestId(key);
     const attempt = Effect.tryPromise({
-      try: (signal) => {
+      try: (abortSignal) => {
         const timestamp = Math.floor(this.options.now() / 1_000);
         return this.options.fetch(this.options.url, {
           method: "POST",
@@ -374,10 +413,10 @@ class HermesWebhookDispatcher {
             "content-type": "application/json",
             "X-Webhook-Signature-V2": signHermesWebhook(this.options.secret, timestamp, body),
             "X-Webhook-Timestamp": String(timestamp),
-            "X-Request-ID": requestId,
+            "X-Request-ID": signal.requestId,
           },
           body,
-          signal,
+          signal: abortSignal,
         });
       },
       catch: (error) => new TransientWebhookError(error),
@@ -404,6 +443,7 @@ class HermesWebhookDispatcher {
 
 interface WebhookSignal {
   readonly payload: HermesAttentionPayload | HermesInstancePayload;
+  readonly requestId: string;
   readonly done: Deferred.Deferred<void, unknown> | undefined;
 }
 
@@ -440,20 +480,6 @@ function makeBridgeClock(
   };
 }
 
-function webhookDeliveryKey(payload: HermesAttentionPayload | HermesInstancePayload): string {
-  if (payload.event === "usine_attention") {
-    return [
-      payload.sourceId,
-      "attention",
-      payload.taskId,
-      payload.revision,
-      payload.eventSequence ?? "reconciliation",
-      payload.state,
-    ].join(":");
-  }
-  return [payload.sourceId, "instance", payload.event].join(":");
-}
-
 function isTransientWebhookStatus(status: number): boolean {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
@@ -461,22 +487,27 @@ function isTransientWebhookStatus(status: number): boolean {
 export function createUsineBridgeUpstream(baseUrl: string): HermesBridgeUpstream {
   const client = Effect.runSync(makeUsineApiClient(baseUrl));
   return {
-    serverSnapshot: (limit = defaultTaskLimit) =>
-      runEffectRequest(client.snapshot({ query: { limit } })),
-    listTasks: (limit = defaultTaskLimit) =>
-      runEffectRequest(client.tasks.list({ query: { limit } })),
-    getTask: async (taskId) => {
+    serverSnapshot: (limit = defaultTaskLimit, signal) =>
+      runEffectRequest(client.snapshot({ query: { limit } }), signal),
+    listTasks: (limit = defaultTaskLimit, signal) =>
+      runEffectRequest(client.tasks.list({ query: { limit } }), signal),
+    getTask: async (taskId, signal) => {
       try {
-        return await runEffectRequest(client.tasks.get({ params: { taskId } }));
+        return await runEffectRequest(client.tasks.get({ params: { taskId } }), signal);
       } catch (error) {
         if (isNotFound(error)) return null;
         throw error;
       }
     },
-    taskHistory: (taskId, after = 0, limit = 200) =>
-      runEffectRequest(client.tasks.history({ params: { taskId }, query: { after, limit } })),
-    submitTask: (submission) => runEffectRequest(client.tasks.submit({ payload: submission })),
-    retryTask: (taskId) => runEffectRequest(client.tasks.retry({ params: { taskId } })),
+    taskHistory: (taskId, after = 0, limit = 200, signal) =>
+      runEffectRequest(
+        client.tasks.history({ params: { taskId }, query: { after, limit } }),
+        signal,
+      ),
+    submitTask: (submission, signal) =>
+      runEffectRequest(client.tasks.submit({ payload: submission }), signal),
+    retryTask: (taskId, signal) =>
+      runEffectRequest(client.tasks.retry({ params: { taskId } }), signal),
     subscribe: (signal) => subscribeEvents(baseUrl, signal),
   };
 }

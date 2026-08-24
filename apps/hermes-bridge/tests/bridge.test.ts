@@ -239,6 +239,30 @@ describe("Hermes supervisor bridge attention", () => {
     ).toHaveLength(1);
   });
 
+  test("uses bounded list resources during reconciliation and re-reads live events", async () => {
+    const source = listedUpstream([task("blocked")]);
+    let taskReads = 0;
+    const getTask = source.getTask.bind(source);
+    source.getTask = async (...args) => {
+      taskReads += 1;
+      return getTask(...args);
+    };
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async () => new Response("ok", { status: 200 }),
+      now: () => 1_000,
+    });
+
+    await bridge.reconcile("startup");
+    expect(taskReads).toBe(0);
+    await bridge.handleEvent(event("coding_tool_completed"));
+    expect(taskReads).toBe(1);
+    await bridge.close();
+  });
+
   test("re-reads the TaskResource and ignores a coding-tool invalidation while non-actionable", async () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
@@ -631,8 +655,9 @@ describe("Hermes supervisor bridge attention", () => {
     await bridge.notifyUnavailable();
     await bridge.notifyReconnected();
     await bridge.notifyReconnected();
+    await bridge.notifyUnavailable();
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(JSON.parse(requests[0].body)).toEqual({
       event: "usine_instance_unavailable",
       sourceId: "usine-instance-269",
@@ -641,6 +666,42 @@ describe("Hermes supervisor bridge attention", () => {
       event: "usine_instance_reconnected",
       sourceId: "usine-instance-269",
     });
+    expect(requests[0].headers.get("X-Request-ID")).not.toBe(
+      requests[2].headers.get("X-Request-ID"),
+    );
+  });
+
+  test("starts idempotently inside the runtime and close aborts its reconciliation read", async () => {
+    let listStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      listStarted = resolve;
+    });
+    let listSignal: AbortSignal | undefined;
+    const source = upstream(task("blocked"));
+    source.listTasks = async (_limit, signal) => {
+      listSignal = signal;
+      listStarted();
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { tasks: [] };
+    };
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async () => new Response("ok", { status: 200 }),
+      now: () => 1_000,
+    });
+
+    const first = bridge.start();
+    const second = bridge.start();
+    expect(first).toBe(second);
+    await started;
+    await bridge.close();
+    await expect(first).resolves.toBeUndefined();
+    expect(listSignal?.aborted).toBe(true);
   });
 
   test("reconciles a terminal found after reconnect without replaying an offline terminal wake", async () => {

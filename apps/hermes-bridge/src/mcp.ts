@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -104,10 +104,42 @@ export async function startHermesBridgeMcpHttp(
 ): Promise<HermesMcpHttpHandle> {
   const host = options.host ?? "127.0.0.1";
   if (!isLoopbackHost(host)) throw new Error("Hermes MCP host must be loopback");
-  const sessions = new Map<
-    string,
-    { transport: StreamableHTTPServerTransport; server: McpServer }
-  >();
+  type Session = { transport: StreamableHTTPServerTransport; server: McpServer };
+  let session: Session | undefined;
+  let initialization: Promise<void> = Promise.resolve();
+  let closed = false;
+
+  const initialize = (request: IncomingMessage, response: ServerResponse, body: unknown) => {
+    const previous = initialization;
+    const operation = previous.then(async () => {
+      if (closed) throw new Error("Hermes MCP endpoint is closed");
+      const previousSession = session;
+      session = undefined;
+      await previousSession?.server.close().catch(() => undefined);
+      if (closed) throw new Error("Hermes MCP endpoint is closed");
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+      });
+      const server = createHermesBridgeMcpServer(options.upstream);
+      const next = { transport, server };
+      transport.onclose = () => {
+        if (session === next) session = undefined;
+      };
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(request, response, body);
+        if (closed) throw new Error("Hermes MCP endpoint is closed");
+        session = next;
+      } catch (error) {
+        await server.close().catch(() => undefined);
+        throw error;
+      }
+    });
+    initialization = operation.catch(() => undefined);
+    return operation;
+  };
+
   const http = createServer(async (request, response) => {
     if (request.url?.split("?", 1)[0] !== "/mcp") {
       response.statusCode = 404;
@@ -117,24 +149,13 @@ export async function startHermesBridgeMcpHttp(
     try {
       const sessionId = request.headers["mcp-session-id"];
       const body = request.method === "POST" ? await requestBody(request) : undefined;
-      let session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
-      if (!session) {
-        if (!isInitializeRequest(body)) {
-          response.statusCode = 400;
-          response.end("MCP session is unavailable");
-          return;
-        }
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-        });
-        const server = createHermesBridgeMcpServer(options.upstream);
-        session = { transport, server };
-        transport.onclose = () => {
-          if (transport.sessionId) sessions.delete(transport.sessionId);
-        };
-        await server.connect(transport);
-        await transport.handleRequest(request, response, body);
-        if (transport.sessionId) sessions.set(transport.sessionId, session);
+      if (isInitializeRequest(body)) {
+        await initialize(request, response, body);
+        return;
+      }
+      if (!session || typeof sessionId !== "string" || session.transport.sessionId !== sessionId) {
+        response.statusCode = 400;
+        response.end("MCP session is unavailable");
         return;
       }
       await session.transport.handleRequest(request, response, body);
@@ -156,8 +177,14 @@ export async function startHermesBridgeMcpHttp(
     url: `http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${address.port}/mcp`,
     close() {
       if (closePromise) return closePromise;
+      closed = true;
       closePromise = (async () => {
-        for (const { server } of sessions.values()) await server.close();
+        await initialization;
+        if (session) {
+          const currentSession = session;
+          session = undefined;
+          await currentSession.server.close().catch(() => undefined);
+        }
         await new Promise<void>((resolve, reject) =>
           http.close((error) => (error ? reject(error) : resolve())),
         );

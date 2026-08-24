@@ -355,6 +355,64 @@ describe("Hermes supervisor bridge acceptance", () => {
       expect(
         (await client.callTool({ name: "usine_task_retry", arguments: { taskId } })).isError,
       ).toBe(true);
+
+      const replacement = new Client({ name: "replacement-mcp-client", version: "1.0.0" });
+      const simultaneousA = new Client({ name: "simultaneous-a", version: "1.0.0" });
+      const simultaneousB = new Client({ name: "simultaneous-b", version: "1.0.0" });
+      const finalClient = new Client({ name: "final-mcp-client", version: "1.0.0" });
+      try {
+        await replacement.connect(new StreamableHTTPClientTransport(new URL(bridge.mcp.url)));
+        await expect(
+          client.callTool({ name: "usine_task_get", arguments: { taskId } }),
+        ).rejects.toThrow();
+        expect(
+          (
+            await replacement.callTool({
+              name: "usine_task_get",
+              arguments: { taskId },
+            })
+          ).isError,
+        ).not.toBe(true);
+        const simultaneousResults = await Promise.allSettled([
+          simultaneousA.connect(new StreamableHTTPClientTransport(new URL(bridge.mcp.url))),
+          simultaneousB.connect(new StreamableHTTPClientTransport(new URL(bridge.mcp.url))),
+        ]);
+        const simultaneousClients = [simultaneousA, simultaneousB];
+        const usableSimultaneousClients: Client[] = [];
+        for (const [index, candidate] of simultaneousClients.entries()) {
+          if (simultaneousResults[index]?.status !== "fulfilled") continue;
+          try {
+            const result = await candidate.callTool({
+              name: "usine_task_get",
+              arguments: { taskId },
+            });
+            if (result.isError !== true) usableSimultaneousClients.push(candidate);
+          } catch {
+            // A fulfilled initialize can already have been replaced by the other client.
+          }
+        }
+        expect(usableSimultaneousClients).toHaveLength(1);
+        const simultaneousWinner = usableSimultaneousClients[0];
+        if (!simultaneousWinner) throw new Error("one simultaneous MCP session must be usable");
+        await finalClient.connect(new StreamableHTTPClientTransport(new URL(bridge.mcp.url)));
+        await expect(
+          simultaneousWinner.callTool({ name: "usine_task_get", arguments: { taskId } }),
+        ).rejects.toThrow();
+        expect(
+          (
+            await finalClient.callTool({
+              name: "usine_task_get",
+              arguments: { taskId },
+            })
+          ).isError,
+        ).not.toBe(true);
+      } finally {
+        await Promise.all(
+          [replacement, simultaneousA, simultaneousB, finalClient].map((candidate) =>
+            candidate.close().catch(() => undefined),
+          ),
+        );
+      }
     } finally {
       webhook.releaseAttention();
       await client.close().catch(() => undefined);

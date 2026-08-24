@@ -26,11 +26,17 @@ export async function startHermesBridge(
 ): Promise<HermesBridgeRuntimeHandle> {
   const upstream = createUsineBridgeUpstream(options.usineUrl);
   const bridge = createHermesBridge({ ...options, upstream });
-  const mcp = await startHermesBridgeMcpHttp({
-    upstream,
-    host: options.mcpHost,
-    port: options.mcpPort,
-  });
+  let mcp: HermesMcpHttpHandle;
+  try {
+    mcp = await startHermesBridgeMcpHttp({
+      upstream,
+      host: options.mcpHost,
+      port: options.mcpPort,
+    });
+  } catch (error) {
+    await bridge.close().catch(() => undefined);
+    throw error;
+  }
   void bridge.start().catch(() => undefined);
   let closePromise: Promise<void> | undefined;
   return {
