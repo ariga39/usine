@@ -9,19 +9,28 @@ import {
 
 async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
   const guide = await readFile(new URL("../docs/AGENT_QUICKSTART.md", import.meta.url), "utf8");
-  const environment = {
-    USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "example-app",
-    USINE_FORGE_PROFILE_RELEASE_APP_ID: "123456",
-    USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "123456",
-    USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "./app-private-key.pem",
-    USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "example-owner/example-repository",
-  } satisfies NodeJS.ProcessEnv;
+  const block = guide.match(/### Forge GitHub App profile[\s\S]*?```sh\n([\s\S]*?)\n```/)?.[1];
+  if (!block) throw new Error("agent quickstart is missing the Forge environment block");
 
-  for (const key of Object.keys(environment)) {
-    if (!guide.includes(`export ${key}=`)) {
-      throw new Error(`agent quickstart is missing documented host variable ${key}`);
-    }
+  const replacements = new Map([
+    ["<GITHUB_APP_SLUG>", "example-app"],
+    ["<GITHUB_APP_ID>", "123456"],
+    ["<GITHUB_INSTALLATION_ID>", "123456"],
+    ["<GITHUB_APP_PRIVATE_KEY_PATH>", "./app-private-key.pem"],
+    ["<GITHUB_OWNER>/<GITHUB_REPOSITORY>", "example-owner/example-repository"],
+  ]);
+  const environment: NodeJS.ProcessEnv = {};
+  for (const line of block.split("\n")) {
+    const assignment = line.match(/^export ([A-Z][A-Z0-9_]*)="([^"]+)"$/);
+    const key = assignment?.[1];
+    const placeholder = assignment?.[2];
+    if (!key || !placeholder) throw new Error(`invalid Forge environment line: ${line}`);
+    const value = replacements.get(placeholder);
+    if (!value) throw new Error(`unexpected Forge environment placeholder: ${placeholder}`);
+    environment[key] = value;
   }
+  if (Object.keys(environment).length !== replacements.size)
+    throw new Error("agent quickstart Forge environment block is incomplete");
   return environment;
 }
 

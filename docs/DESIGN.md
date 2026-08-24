@@ -126,13 +126,13 @@ The legal state names are `admitted`, `waiting`, `candidate`, `checked`, `review
 | `merged` | GitHub reported and the server observed an exact approved-head merge effect with a merge commit SHA. | None. |
 | `blocked` | The coordinator recorded a classified product, provider, evidence, budget, delivery, or platform blocker. | None. |
 
-The reducer in [`task-state.ts`](../packages/task-authority/src/task-state.ts) enforces the following lifecycle properties:
+Task Authority's reducer and the Candidate Workspace enforce the following lifecycle properties:
 
-- A new Candidate clears check, review, delivery, and blocker evidence. Its fence must equal the reserved activation and its parent must be the accepted prior Candidate or contract base.
+- A new Candidate clears check, review, delivery, and blocker evidence. The reducer requires its fence to equal the reserved activation and, after the first Candidate, requires its parent to be the accepted prior Candidate. Candidate Workspace separately requires the initial Candidate to descend from the contract base.
 - A check must belong to the current Candidate. A review requires a passing check for that same SHA. A delivery requires a passing check and an `approved` review for that same SHA.
 - `changes_requested` findings are recorded as one repair batch before one implementer activation. Individual findings do not each wake an agent.
 - Only an implementer failure in the `turn` phase with `failureClass: "network"` may become `waiting`. Reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission do not implicitly retry.
-- `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline, consumes the next activation budget, and returns to the stored resume state. If the deadline or activation budget is exhausted, the Task becomes `blocked`.
+- `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline and returns to the stored resume state; the subsequent Delivery Run reserves the next activation. Deadline exhaustion blocks the retry, while an exhausted activation budget is rejected as a retry conflict.
 - `reviewed_pr` is the no-merge terminal. `merged` requires both immutable merge authority and a Delivery Effect whose approved head and PR number match the reviewed delivery; the merge commit SHA must also be exact.
 
 ## 5. Behavioral packages and composition

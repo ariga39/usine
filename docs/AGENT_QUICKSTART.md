@@ -89,7 +89,15 @@ export USINE_FORGE_PROFILE_RELEASE_REPOSITORY="<GITHUB_OWNER>/<GITHUB_REPOSITORY
 export USINE_FORGE_PROFILE_RELEASE_GIT_URL="<GIT_REMOTE_URL>"
 ```
 
-The configured repository must match the registration's `owner` and `name`, case-insensitively. App ID and installation ID must be positive integers. Forge credentials are resolved only at the host execution boundary.
+The configured repository must match the registration's `owner` and `name`, case-insensitively. The App ID must be nonblank, and the installation ID must be a positive integer. Forge credentials are resolved only at the host execution boundary.
+
+Install the Forge App on the registered repository with these repository permissions:
+
+| Permission | Access | Used for |
+|---|---|---|
+| Contents | Read and write | Read the base and push the isolated candidate branch. |
+| Pull requests | Read and write | Create, inspect, attest, and, when authorized, merge the exact candidate PR. |
+| Issues | Read and write | Publish the exact-SHA attestation as an Issue/PR comment. |
 
 ### Optional GitHub read profile
 
@@ -102,10 +110,19 @@ export USINE_GITHUB_READ_PROFILE_READ_ONLY_INSTALLATION_ID="<READ_INSTALLATION_I
 export USINE_GITHUB_READ_PROFILE_READ_ONLY_PRIVATE_KEY_PATH="<READ_APP_PRIVATE_KEY_PATH>"
 export USINE_GITHUB_READ_PROFILE_READ_ONLY_REPOSITORY="<GITHUB_OWNER>/<GITHUB_REPOSITORY>"
 export USINE_GITHUB_READ_PROFILE_READ_ONLY_IMPLEMENTER_TOOLS="github_issue_get,github_issue_comments"
-export USINE_GITHUB_READ_PROFILE_READ_ONLY_REVIEWER_TOOLS="github_pull_request_get,github_pull_request_reviews,github_pull_request_checks"
+export USINE_GITHUB_READ_PROFILE_READ_ONLY_REVIEWER_TOOLS="github_issue_get,github_issue_comments,github_file_get,github_commit_get"
 ```
 
-The allowed tool names are `github_issue_get`, `github_issue_comments`, `github_pull_request_get`, `github_pull_request_reviews`, `github_pull_request_checks`, `github_file_get`, and `github_commit_get`. If a role-specific tool list is omitted, the current implementation enables the complete list for that role. The read capability is bound to the frozen Repository and Issue. Pull-request reads require an authorized delivered-PR fact. Read credentials do not become Forge credentials and do not enter worker environment variables or durable public resources.
+Grant the read App only the repository permissions needed by its enabled tools:
+
+| Tools | Required repository permission |
+|---|---|
+| `github_issue_get`, `github_issue_comments` | Issues: read |
+| `github_pull_request_get`, `github_pull_request_reviews` | Pull requests: read |
+| `github_pull_request_checks` | Checks: read |
+| `github_file_get`, `github_commit_get` | Contents: read |
+
+The allowed tool names are `github_issue_get`, `github_issue_comments`, `github_pull_request_get`, `github_pull_request_reviews`, `github_pull_request_checks`, `github_file_get`, and `github_commit_get`. If a role-specific tool list is omitted, the current implementation enables the complete list for that role. The read capability is bound to the frozen Repository and Issue. Pull-request reads require an authorized delivered-PR fact; current pre-delivery role sessions have no delivered-PR binding, so the example enables only Issue, file, and commit tools. Read credentials do not become Forge credentials and do not enter worker environment variables or durable public resources.
 
 ### Optional role-output normalizer
 
