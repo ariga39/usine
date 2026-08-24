@@ -127,6 +127,24 @@ async function waitForWebhookAttention(
   return request;
 }
 
+async function waitForWebhookReconciliation(
+  fixture: HermesWebhookFixture,
+  occurrence: number,
+): Promise<HermesWebhookRequest> {
+  const request = await waitFor(
+    async () => {
+      const reconciliations = fixture.requests.filter((candidate) => {
+        const payload = JSON.parse(candidate.body) as { event?: string };
+        return payload.event === "usine_instance_reconciled";
+      });
+      return reconciliations[occurrence - 1];
+    },
+    (recordedRequest) => recordedRequest !== undefined,
+  );
+  if (!request) throw new Error("Hermes reconciliation request was not recorded");
+  return request;
+}
+
 function expectSignedWebhook(request: HermesWebhookRequest, secret: string): void {
   const timestamp = request.headers.get("X-Webhook-Timestamp");
   expect(timestamp).toMatch(/^1700000000$/);
@@ -322,7 +340,18 @@ describe("Hermes supervisor bridge acceptance", () => {
       expect(webhook.attentionCompleted()).toBe(false);
 
       webhook.releaseAttention();
-      await waitForWebhookAttention(webhook, "blocked");
+      const reconciliation = await waitForWebhookReconciliation(webhook, 2);
+      expect(JSON.parse(reconciliation.body)).toEqual({
+        event: "usine_instance_reconciled",
+        sourceId: "test-instance-269",
+      });
+      expectSignedWebhook(reconciliation, "test-webhook-secret");
+      expect(
+        webhook.requests.some((request) => {
+          const payload = JSON.parse(request.body) as { event?: string; state?: string };
+          return payload.event === "usine_attention" && payload.state === "blocked";
+        }),
+      ).toBe(false);
       expect(
         (await client.callTool({ name: "usine_task_retry", arguments: { taskId } })).isError,
       ).toBe(true);
