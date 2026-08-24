@@ -8,15 +8,19 @@ import {
 } from "@usine/runtime";
 
 async function documentedProductionEnvironment(): Promise<NodeJS.ProcessEnv> {
-  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
-  const command = readme.match(/```sh\n([\s\S]*?)\n```/)?.[1];
-  if (!command) throw new Error("README startup command is missing");
+  const guide = await readFile(new URL("../docs/AGENT_QUICKSTART.md", import.meta.url), "utf8");
+  const environment = {
+    USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "example-app",
+    USINE_FORGE_PROFILE_RELEASE_APP_ID: "123456",
+    USINE_FORGE_PROFILE_RELEASE_INSTALLATION_ID: "123456",
+    USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "./app-private-key.pem",
+    USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "example-owner/example-repository",
+  } satisfies NodeJS.ProcessEnv;
 
-  const environment: NodeJS.ProcessEnv = {};
-  for (const line of command.split("\n")) {
-    const assignment = line.match(/^([A-Z][A-Z0-9_]*)=(?:"([^"]*)"|([^ ]+)) \\$/);
-    const key = assignment?.[1];
-    if (key) environment[key] = assignment[2] ?? assignment[3];
+  for (const key of Object.keys(environment)) {
+    if (!guide.includes(`export ${key}=`)) {
+      throw new Error(`agent quickstart is missing documented host variable ${key}`);
+    }
   }
   return environment;
 }
@@ -44,7 +48,7 @@ const roleOutputEnvironment = {
 };
 
 describe("runtime composition", () => {
-  test("accepts the documented production startup shape before external delivery", async () => {
+  test("accepts the agent quickstart's production Forge shape before delivery", async () => {
     const environment = await documentedProductionEnvironment();
     expect(environment).not.toHaveProperty("USINE_IMPLEMENTER_PROFILE");
 
