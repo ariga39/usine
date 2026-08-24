@@ -9,6 +9,7 @@ packages:
   - packages/forge-delivery
   - packages/quality-gate
   - apps/cli
+  - apps/hermes-bridge
   - packages/task-authority
   - packages/runtime
 
