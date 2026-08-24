@@ -39,7 +39,7 @@ export async function startHermesBridge(
     close() {
       if (closePromise) return closePromise;
       closePromise = (async () => {
-        bridge.close();
+        await bridge.close();
         await mcp.close();
       })();
       return closePromise;

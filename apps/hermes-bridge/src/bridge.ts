@@ -1,5 +1,15 @@
 import { createHash, createHmac } from "node:crypto";
-import { Effect } from "effect";
+import {
+  Clock,
+  Cause,
+  Deferred,
+  Duration,
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Queue,
+  Schedule,
+} from "effect";
 import {
   decodeApiEventEnvelope,
   makeUsineApiClient,
@@ -34,7 +44,6 @@ export interface HermesBridgeOptions {
   taskLimit?: number;
   maxWebhookAttempts?: number;
   webhookRetryDelayMs?: number;
-  maxPendingWebhookSignals?: number;
 }
 
 export interface HermesAttentionPayload {
@@ -59,7 +68,7 @@ export interface HermesBridge {
   notifyUnavailable(): Promise<void>;
   notifyReconnected(): Promise<void>;
   start(signal?: AbortSignal): Promise<void>;
-  close(): void;
+  close(): Promise<void>;
 }
 
 export function signHermesWebhook(secret: string, timestamp: number, body: string): string {
@@ -83,21 +92,23 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     options.sleep ??
     ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const taskLimit = options.taskLimit ?? defaultTaskLimit;
+  const clock = makeBridgeClock(now, sleep);
+  const runtime: ManagedRuntime.ManagedRuntime<Clock.Clock, never> = ManagedRuntime.make(
+    Layer.succeed<Clock.Clock, Clock.Clock>(Clock.Clock, clock),
+  );
   const dispatcher = new HermesWebhookDispatcher({
+    runtime,
     url: options.webhookUrl,
     secret: options.webhookSecret,
     fetch: fetchImpl,
     now,
-    sleep,
     maxAttempts: options.maxWebhookAttempts ?? 3,
     retryDelayMs: options.webhookRetryDelayMs ?? 250,
-    maxPendingSignals: options.maxPendingWebhookSignals ?? 128,
   });
   const taskStates = new Map<
     string,
     { classification: HermesAttentionPayload["state"]; revision: number } | undefined
   >();
-  const controller = new AbortController();
   let unavailable = false;
   let initialReconciliationNotified = false;
   let running: Promise<void> | undefined;
@@ -159,10 +170,13 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     notifyUnavailable: () => {
       if (unavailable) return Promise.resolve();
       unavailable = true;
-      return dispatcher.enqueue({
-        event: "usine_instance_unavailable",
-        sourceId: options.sourceId,
-      });
+      return dispatcher.enqueue(
+        {
+          event: "usine_instance_unavailable",
+          sourceId: options.sourceId,
+        },
+        true,
+      );
     },
     async notifyReconnected() {
       if (!unavailable) return Promise.resolve();
@@ -172,26 +186,35 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
         return;
       }
       unavailable = false;
-      enqueueBestEffort({
-        event: "usine_instance_reconnected",
-        sourceId: options.sourceId,
-      });
+      return dispatcher.enqueue(
+        {
+          event: "usine_instance_reconnected",
+          sourceId: options.sourceId,
+        },
+        true,
+      );
     },
-    async start(signal = controller.signal) {
-      try {
-        await bridge.reconcile("startup");
-      } catch {
-        await bridge.notifyUnavailable().catch(() => undefined);
-      }
-      if (running) return running;
-      running = consumeEvents(bridge, signal);
-      return running;
+    start(signal?: AbortSignal) {
+      return startBridge(bridge, signal);
     },
     close() {
-      controller.abort();
-      dispatcher.close();
+      return dispatcher.close();
     },
   };
+
+  async function startBridge(bridgeInstance: HermesBridge, signal?: AbortSignal): Promise<void> {
+    try {
+      await bridgeInstance.reconcile("startup");
+    } catch {
+      await bridgeInstance.notifyUnavailable().catch(() => undefined);
+    }
+    if (running) return running;
+    running = runtime.runPromise(
+      consumeEvents(bridgeInstance, runtime),
+      signal === undefined ? undefined : { signal },
+    );
+    return running;
+  }
 
   return bridge;
 }
@@ -225,102 +248,127 @@ function attentionPayload(
   };
 }
 
-async function consumeEvents(bridge: HermesBridge, signal: AbortSignal): Promise<void> {
-  while (!signal.aborted) {
-    try {
-      for await (const envelope of bridge.upstream.subscribe(signal)) {
-        if (signal.aborted) return;
-        void bridge.handleEvent(envelope).catch(() => undefined);
+function consumeEvents(
+  bridge: HermesBridge,
+  runtime: ManagedRuntime.ManagedRuntime<Clock.Clock, never>,
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    while (true) {
+      const subscription = yield* Effect.exit(
+        Effect.tryPromise({
+          try: async (signal) => {
+            for await (const envelope of bridge.upstream.subscribe(signal)) {
+              runtime
+                .runPromise(Effect.tryPromise(() => bridge.handleEvent(envelope)))
+                .catch(() => undefined);
+            }
+            return !signal.aborted;
+          },
+          catch: (error) => error,
+        }),
+      );
+      if (subscription._tag === "Failure") {
+        if (Cause.hasInterruptsOnly(subscription.cause)) return;
+      } else if (!subscription.value) {
+        return;
       }
-      if (!signal.aborted) await bridge.notifyUnavailable();
-    } catch {
-      if (signal.aborted) return;
-      await bridge.notifyUnavailable();
+      yield* Effect.tryPromise(() => bridge.notifyUnavailable()).pipe(
+        Effect.catchCause(() => Effect.void),
+      );
+      yield* Effect.sleep(250);
+      yield* Effect.tryPromise(() => bridge.notifyReconnected()).pipe(
+        Effect.catchCause(() => Effect.void),
+      );
     }
-    if (signal.aborted) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 250));
-    try {
-      await bridge.notifyReconnected();
-    } catch {
-      // The next event-loop pass will retry reconciliation after another connection attempt.
-    }
-  }
+  }).pipe(Effect.catchCause(() => Effect.void));
 }
 
 interface HermesWebhookDispatcherOptions {
+  runtime: ManagedRuntime.ManagedRuntime<Clock.Clock, never>;
   url: string;
   secret: string;
   fetch: typeof fetch;
   now: () => number;
-  sleep: (delayMs: number) => Promise<void>;
   maxAttempts: number;
   retryDelayMs: number;
-  maxPendingSignals: number;
 }
 
 class HermesWebhookDispatcher {
-  private readonly pending = new Map<string, PendingWebhookSignal>();
-  private active: PendingWebhookSignal | undefined;
-  private draining = false;
+  private readonly queue: Queue.Queue<WebhookSignal>;
+  private active = false;
+  private reconciliationPending = false;
+  private closePromise: Promise<void> | undefined;
 
-  constructor(private readonly options: HermesWebhookDispatcherOptions) {}
-
-  enqueue(payload: HermesAttentionPayload | HermesInstancePayload): Promise<void> {
-    const key = webhookDeliveryKey(payload);
-    const existing = this.active?.key === key ? this.active : this.pending.get(key);
-    if (existing) return existing.promise;
-    if (this.pending.size >= this.options.maxPendingSignals) return Promise.resolve();
-    let resolve!: () => void;
-    let reject!: (error: unknown) => void;
-    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
-    const signal = { key, payload, promise, resolve, reject };
-    this.pending.set(key, signal);
-    void this.drain();
-    return promise;
+  constructor(private readonly options: HermesWebhookDispatcherOptions) {
+    this.queue = options.runtime.runSync(Queue.dropping(2));
+    options.runtime.runFork(this.consume());
   }
 
-  close(): void {
-    // In-flight requests are intentionally allowed to finish; no durable queue is created.
-  }
-
-  private async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
+  enqueue(
+    payload: HermesAttentionPayload | HermesInstancePayload,
+    awaitDelivery = false,
+  ): Promise<void> {
+    const reconciliation = this.active || this.reconciliationPending;
+    if (reconciliation && this.reconciliationPending) return Promise.resolve();
+    const signal = reconciliation ? reconciliationPayload(payload.sourceId) : payload;
+    const complete = awaitDelivery && signal.event !== "usine_instance_reconciled";
     try {
-      while (this.pending.size > 0) {
-        const next = this.pending.values().next().value;
-        if (!next) return;
-        this.pending.delete(next.key);
-        this.active = next;
-        try {
-          await this.sendWithRetry(next.payload, next.key);
-          next.resolve();
-        } catch (error) {
-          next.reject(error);
-        } finally {
-          this.active = undefined;
-        }
-      }
-    } finally {
-      this.draining = false;
-      if (this.pending.size > 0) void this.drain();
+      const done = complete
+        ? this.options.runtime.runSync(Deferred.make<void, unknown>())
+        : undefined;
+      const offered = this.options.runtime.runSync(
+        Queue.offer(this.queue, { payload: signal, done }),
+      );
+      if (!offered) return Promise.resolve();
+      this.active = true;
+      if (signal.event === "usine_instance_reconciled") this.reconciliationPending = true;
+      return complete && done
+        ? this.options.runtime.runPromise(Deferred.await(done))
+        : Promise.resolve();
+    } catch {
+      // The managed runtime is closed; best-effort notifications have no caller to fail.
+      return Promise.resolve();
     }
   }
 
-  private async sendWithRetry(
+  close(): Promise<void> {
+    if (!this.closePromise) this.closePromise = this.options.runtime.dispose();
+    return this.closePromise;
+  }
+
+  private consume(): Effect.Effect<never, unknown> {
+    return Effect.forever(
+      Queue.take(this.queue).pipe(
+        Effect.flatMap((signal) => {
+          if (signal.payload.event === "usine_instance_reconciled") {
+            this.reconciliationPending = false;
+          }
+          this.active = true;
+          return Effect.exit(this.sendWithRetry(signal.payload)).pipe(
+            Effect.flatMap((exit) =>
+              signal.done ? Deferred.done(signal.done, exit) : Effect.void,
+            ),
+            Effect.ensuring(
+              Effect.sync(() => {
+                this.active = false;
+              }),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  private sendWithRetry(
     payload: HermesAttentionPayload | HermesInstancePayload,
-    key: string,
-  ): Promise<void> {
+  ): Effect.Effect<void, PermanentWebhookError | TransientWebhookError> {
     const body = JSON.stringify(payload);
+    const key = webhookDeliveryKey(payload);
     const requestId = stableWebhookRequestId(key);
-    let lastError: unknown;
-    for (let attempt = 0; attempt < this.options.maxAttempts; attempt += 1) {
-      const timestamp = Math.floor(this.options.now() / 1_000);
-      try {
-        const response = await this.options.fetch(this.options.url, {
+    const attempt = Effect.tryPromise({
+      try: (signal) => {
+        const timestamp = Math.floor(this.options.now() / 1_000);
+        return this.options.fetch(this.options.url, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -329,33 +377,68 @@ class HermesWebhookDispatcher {
             "X-Request-ID": requestId,
           },
           body,
+          signal,
         });
-        if (!response.ok) {
-          if (!isTransientWebhookStatus(response.status))
-            throw new PermanentWebhookError(`Hermes webhook returned ${response.status}`);
-          throw new Error(`Hermes webhook returned ${response.status}`);
-        }
-        return;
-      } catch (error) {
-        if (error instanceof PermanentWebhookError) throw error;
-        lastError = error;
-        if (attempt + 1 < this.options.maxAttempts)
-          await this.options.sleep(this.options.retryDelayMs * 2 ** attempt);
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error("Hermes webhook delivery failed");
+      },
+      catch: (error) => new TransientWebhookError(error),
+    }).pipe(
+      Effect.flatMap((response) => {
+        if (response.ok) return Effect.void;
+        if (!isTransientWebhookStatus(response.status))
+          return Effect.fail(
+            new PermanentWebhookError(`Hermes webhook returned ${response.status}`),
+          );
+        return Effect.fail(new TransientWebhookError(`Hermes webhook returned ${response.status}`));
+      }),
+    );
+    return Effect.retry(attempt, {
+      schedule: Schedule.recurs(Math.max(0, this.options.maxAttempts - 1)).pipe(
+        Schedule.addDelay(({ attempt: retryAttempt }) =>
+          Effect.succeed(Duration.millis(this.options.retryDelayMs * 2 ** (retryAttempt - 1))),
+        ),
+      ),
+      while: (error) => error instanceof TransientWebhookError,
+    });
   }
 }
 
-interface PendingWebhookSignal {
-  key: string;
-  payload: HermesAttentionPayload | HermesInstancePayload;
-  promise: Promise<void>;
-  resolve: () => void;
-  reject: (error: unknown) => void;
+interface WebhookSignal {
+  readonly payload: HermesAttentionPayload | HermesInstancePayload;
+  readonly done: Deferred.Deferred<void, unknown> | undefined;
 }
 
 class PermanentWebhookError extends Error {}
+
+class TransientWebhookError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
+function reconciliationPayload(sourceId: string): HermesInstancePayload {
+  return { event: "usine_instance_reconciled", sourceId };
+}
+
+function makeBridgeClock(
+  now: () => number,
+  sleep: (delayMs: number) => Promise<void>,
+): Clock.Clock {
+  const currentTimeMillisUnsafe = () => now();
+  const currentTimeNanosUnsafe = () => BigInt(Math.floor(currentTimeMillisUnsafe() * 1_000_000));
+  return {
+    currentTimeMillisUnsafe,
+    currentTimeMillis: Effect.sync(currentTimeMillisUnsafe),
+    currentTimeNanosUnsafe,
+    currentTimeNanos: Effect.sync(currentTimeNanosUnsafe),
+    monotonicTimeNanosUnsafe: currentTimeNanosUnsafe,
+    monotonicTimeNanos: Effect.sync(currentTimeNanosUnsafe),
+    sleep: (duration) =>
+      Effect.tryPromise({
+        try: () => sleep(Duration.toMillis(duration)),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      }).pipe(Effect.orDie),
+  };
+}
 
 function webhookDeliveryKey(payload: HermesAttentionPayload | HermesInstancePayload): string {
   if (payload.event === "usine_attention") {
