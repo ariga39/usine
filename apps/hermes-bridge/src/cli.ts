@@ -9,6 +9,7 @@ function required(environment: NodeJS.ProcessEnv, name: string): string {
 export async function runHermesBridge(environment: NodeJS.ProcessEnv = process.env): Promise<void> {
   const handle = await startHermesBridge({
     usineUrl: required(environment, "USINE_SERVER_URL"),
+    sourceId: required(environment, "USINE_SOURCE_ID"),
     webhookUrl: required(environment, "HERMES_WEBHOOK_URL"),
     webhookSecret: required(environment, "HERMES_WEBHOOK_SECRET"),
     mcpHost: environment.HERMES_BRIDGE_HOST?.trim() || "127.0.0.1",

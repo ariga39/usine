@@ -49,12 +49,16 @@ const task = (
   },
 });
 
-const event = (type: ApiEventEnvelope["event"]["data"]["type"]): ApiEventEnvelope => ({
-  taskId: "task-269",
+const eventFor = (
+  taskId: string,
+  type: ApiEventEnvelope["event"]["data"]["type"],
+  sequence = 9,
+): ApiEventEnvelope => ({
+  taskId,
   repositoryId: "repository-269",
   event: {
-    taskId: "task-269",
-    sequence: 9,
+    taskId,
+    sequence,
     eventId: "event-269",
     occurredAtEpochMs: 1_000,
     data:
@@ -75,6 +79,9 @@ const event = (type: ApiEventEnvelope["event"]["data"]["type"]): ApiEventEnvelop
           },
   },
 });
+
+const event = (type: ApiEventEnvelope["event"]["data"]["type"]): ApiEventEnvelope =>
+  eventFor("task-269", type);
 
 function upstream(resource: ApiTaskResource): HermesBridgeUpstream {
   return {
@@ -118,7 +125,83 @@ function listedUpstream(resources: ApiTaskResource[]): HermesBridgeUpstream {
   };
 }
 
+async function settleWebhookDelivery(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 describe("Hermes supervisor bridge attention", () => {
+  test("emits exactly one initial reconciliation signal after a successful startup read", async () => {
+    const requests: RecordedRequest[] = [];
+    const bridge = createHermesBridge({
+      upstream: listedUpstream([task("blocked")]),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    await bridge.reconcile("startup");
+    await bridge.reconcile("startup");
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0].body)).toEqual({
+      event: "usine_instance_reconciled",
+      sourceId: "usine-instance-269",
+    });
+  });
+
+  test("does not classify a startup webhook failure as a Usine outage", async () => {
+    const requests: RecordedRequest[] = [];
+    const bridge = createHermesBridge({
+      upstream: listedUpstream([task("blocked")]),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      maxWebhookAttempts: 1,
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("bad", { status: 400 });
+      },
+      now: () => 1_000,
+    });
+
+    await expect(bridge.reconcile("startup")).resolves.toBeUndefined();
+    await settleWebhookDelivery();
+    await bridge.notifyReconnected();
+
+    expect(
+      requests.every((request) => JSON.parse(request.body).event !== "usine_instance_unavailable"),
+    ).toBe(true);
+  });
+
+  test("does not block event reconciliation or announce outage on webhook failure", async () => {
+    const requests: RecordedRequest[] = [];
+    const bridge = createHermesBridge({
+      upstream: upstream(task("blocked")),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      maxWebhookAttempts: 1,
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("busy", { status: 503 });
+      },
+      now: () => 1_000,
+    });
+
+    await expect(bridge.handleEvent(event("coding_tool_completed"))).resolves.toBeUndefined();
+    await settleWebhookDelivery();
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0].body).event).toBe("usine_attention");
+    await bridge.notifyReconnected();
+    expect(requests).toHaveLength(1);
+  });
+
   test("wakes current retryable waiting Tasks on startup and baselines existing terminals", async () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
@@ -126,6 +209,7 @@ describe("Hermes supervisor bridge attention", () => {
         task("waiting", true, "task-waiting"),
         task("blocked", false, "task-terminal"),
       ]),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -137,18 +221,27 @@ describe("Hermes supervisor bridge attention", () => {
 
     await bridge.reconcile("startup");
 
-    expect(requests).toHaveLength(1);
-    expect(JSON.parse(requests[0].body)).toMatchObject({
+    expect(requests).toHaveLength(2);
+    const attention = requests.find(
+      (request) => JSON.parse(request.body).event === "usine_attention",
+    );
+    expect(attention).toBeDefined();
+    expect(JSON.parse(attention?.body ?? "")).toMatchObject({
       event: "usine_attention",
+      sourceId: "usine-instance-269",
       taskId: "task-waiting",
       state: "waiting",
     });
+    expect(
+      requests.filter((request) => JSON.parse(request.body).event === "usine_instance_reconciled"),
+    ).toHaveLength(1);
   });
 
   test("re-reads the TaskResource and ignores a coding-tool invalidation while non-actionable", async () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
       upstream: upstream(task("admitted")),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -167,6 +260,7 @@ describe("Hermes supervisor bridge attention", () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
       upstream: upstream(task("waiting", true)),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -188,16 +282,53 @@ describe("Hermes supervisor bridge attention", () => {
     );
     expect(JSON.parse(body ?? "")).toEqual({
       event: "usine_attention",
+      sourceId: "usine-instance-269",
       taskId: "task-269",
       repositoryId: "repository-269",
+      revision: 4,
+      eventSequence: 9,
       state: "waiting",
     });
+  });
+
+  test("anchors a changed Task revision and event sequence to a new delivery identity", async () => {
+    const requests: RecordedRequest[] = [];
+    let current = task("blocked");
+    const source = upstream(current);
+    source.getTask = async () => current;
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    await bridge.handleEvent(eventFor("task-269", "coding_tool_completed", 9));
+    current = { ...current, revision: 5 };
+    await bridge.handleEvent(eventFor("task-269", "coding_tool_completed", 10));
+
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(requests[1].body)).toMatchObject({
+      sourceId: "usine-instance-269",
+      revision: 5,
+      eventSequence: 10,
+      state: "blocked",
+    });
+    expect(requests[0]?.headers.get("X-Request-ID")).not.toBe(
+      requests[1]?.headers.get("X-Request-ID"),
+    );
   });
 
   test("wakes a terminal Task once after an intermediate event is re-read", async () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
       upstream: upstream(task("blocked")),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -213,6 +344,7 @@ describe("Hermes supervisor bridge attention", () => {
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0].body)).toMatchObject({
       event: "usine_attention",
+      sourceId: "usine-instance-269",
       state: "blocked",
     });
   });
@@ -222,6 +354,7 @@ describe("Hermes supervisor bridge attention", () => {
     let attempts = 0;
     const bridge = createHermesBridge({
       upstream: upstream(task("blocked")),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       maxWebhookAttempts: 2,
@@ -243,10 +376,63 @@ describe("Hermes supervisor bridge attention", () => {
     expect(requests[0]?.headers.get("X-Request-ID")).toBe(requests[1]?.headers.get("X-Request-ID"));
   });
 
+  test("serializes distinct deliveries and does not retry a permanent client error", async () => {
+    const requests: RecordedRequest[] = [];
+    const statuses: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    let releaseFirst!: () => void;
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      signalFirstStarted = resolve;
+    });
+    const bridge = createHermesBridge({
+      upstream: listedUpstream([task("blocked"), task("blocked", false, "task-270")]),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        requests.push(recordRequest(init));
+        if (requests.length === 1) {
+          signalFirstStarted();
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+          active -= 1;
+          statuses.push(200);
+          return new Response("ok", { status: 200 });
+        }
+        active -= 1;
+        statuses.push(400);
+        return new Response("bad", { status: 400 });
+      },
+      now: () => 1_000,
+    });
+
+    const first = bridge.handleEvent(eventFor("task-269", "coding_tool_completed", 9));
+    await firstStarted;
+    const second = bridge.handleEvent(eventFor("task-270", "coding_tool_completed", 10));
+    await Promise.resolve();
+
+    expect(requests).toHaveLength(1);
+    releaseFirst();
+    const results = await Promise.allSettled([first, second]);
+    await settleWebhookDelivery();
+
+    expect(results[0]?.status).toBe("fulfilled");
+    expect(results[1]?.status).toBe("fulfilled");
+    expect(requests).toHaveLength(2);
+    expect(statuses).toEqual([200, 400]);
+    expect(maxActive).toBe(1);
+  });
+
   test("emits one unavailable and one reconnected signal per observed outage", async () => {
     const requests: RecordedRequest[] = [];
     const bridge = createHermesBridge({
       upstream: upstream(task("admitted")),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -262,8 +448,14 @@ describe("Hermes supervisor bridge attention", () => {
     await bridge.notifyReconnected();
 
     expect(requests).toHaveLength(2);
-    expect(JSON.parse(requests[0].body)).toEqual({ event: "usine_instance_unavailable" });
-    expect(JSON.parse(requests[1].body)).toEqual({ event: "usine_instance_reconnected" });
+    expect(JSON.parse(requests[0].body)).toEqual({
+      event: "usine_instance_unavailable",
+      sourceId: "usine-instance-269",
+    });
+    expect(JSON.parse(requests[1].body)).toEqual({
+      event: "usine_instance_reconnected",
+      sourceId: "usine-instance-269",
+    });
   });
 
   test("reconciles a terminal found after reconnect without replaying an offline terminal wake", async () => {
@@ -271,6 +463,7 @@ describe("Hermes supervisor bridge attention", () => {
     const resources = [task("admitted")];
     const bridge = createHermesBridge({
       upstream: listedUpstream(resources),
+      sourceId: "usine-instance-269",
       webhookUrl: "<HERMES_WEBHOOK_URL>",
       webhookSecret: "test-secret",
       fetch: async (_input, init) => {
@@ -285,8 +478,49 @@ describe("Hermes supervisor bridge attention", () => {
     await bridge.notifyReconnected();
 
     expect(requests).toHaveLength(2);
-    expect(JSON.parse(requests[0].body)).toEqual({ event: "usine_instance_unavailable" });
-    expect(JSON.parse(requests[1].body)).toEqual({ event: "usine_instance_reconnected" });
+    expect(JSON.parse(requests[0].body)).toEqual({
+      event: "usine_instance_unavailable",
+      sourceId: "usine-instance-269",
+    });
+    expect(JSON.parse(requests[1].body)).toEqual({
+      event: "usine_instance_reconnected",
+      sourceId: "usine-instance-269",
+    });
+  });
+
+  test("announces recovery only after a successful reconciliation read", async () => {
+    const requests: RecordedRequest[] = [];
+    const source = listedUpstream([task("admitted")]);
+    const listTasks = source.listTasks.bind(source);
+    let reachable = false;
+    source.listTasks = async (limit) => {
+      if (!reachable) throw new Error("Usine is unavailable");
+      return listTasks(limit);
+    };
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      now: () => 1_000,
+    });
+
+    await bridge.notifyUnavailable();
+    await bridge.notifyReconnected();
+    expect(requests).toHaveLength(1);
+
+    reachable = true;
+    await bridge.notifyReconnected();
+
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(requests[1].body)).toEqual({
+      event: "usine_instance_reconnected",
+      sourceId: "usine-instance-269",
+    });
   });
 
   test("exposes only bounded snapshot, Task inspection, submit, and retry MCP tools", async () => {

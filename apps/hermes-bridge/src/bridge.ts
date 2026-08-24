@@ -25,6 +25,7 @@ export interface HermesBridgeUpstream {
 
 export interface HermesBridgeOptions {
   upstream: HermesBridgeUpstream;
+  sourceId: string;
   webhookUrl: string;
   webhookSecret: string;
   fetch?: typeof fetch;
@@ -38,13 +39,17 @@ export interface HermesBridgeOptions {
 
 export interface HermesAttentionPayload {
   event: "usine_attention";
+  sourceId: string;
   taskId: string;
   repositoryId: string;
+  revision: number;
+  eventSequence?: number;
   state: "waiting" | "blocked" | "reviewed_pr" | "merged";
 }
 
 export interface HermesInstancePayload {
-  event: "usine_instance_unavailable" | "usine_instance_reconnected";
+  event: "usine_instance_unavailable" | "usine_instance_reconnected" | "usine_instance_reconciled";
+  sourceId: string;
 }
 
 export interface HermesBridge {
@@ -70,6 +75,7 @@ function runEffectRequest<A>(effect: Effect.Effect<A, unknown>): Promise<A> {
 }
 
 export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
+  if (options.sourceId.trim() === "") throw new Error("Hermes source ID is required");
   const upstream = options.upstream;
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetch ?? globalThis.fetch;
@@ -87,55 +93,89 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     retryDelayMs: options.webhookRetryDelayMs ?? 250,
     maxPendingSignals: options.maxPendingWebhookSignals ?? 128,
   });
-  const taskStates = new Map<string, ApiTaskResource["state"] | undefined>();
+  const taskStates = new Map<
+    string,
+    { classification: HermesAttentionPayload["state"]; revision: number } | undefined
+  >();
   const controller = new AbortController();
   let unavailable = false;
+  let initialReconciliationNotified = false;
   let running: Promise<void> | undefined;
+
+  const enqueueBestEffort = (payload: HermesAttentionPayload | HermesInstancePayload): void => {
+    void dispatcher.enqueue(payload).catch(() => undefined);
+  };
 
   const observeTask = async (
     resource: ApiTaskResource | null,
     mode: "event" | "startup" | "reconnect",
+    eventSequence?: number,
   ): Promise<void> => {
     if (!resource) return;
     const previous = taskStates.get(resource.taskId);
     const actionable = actionableState(resource);
+    const current = actionable
+      ? { classification: actionable, revision: resource.revision }
+      : undefined;
     if (mode === "startup" || mode === "reconnect") {
-      taskStates.set(resource.taskId, actionable);
-      if (resource.state === "waiting" && resource.retryable === true && previous !== "waiting") {
-        await dispatcher.enqueue(attentionPayload(resource));
+      taskStates.set(resource.taskId, current);
+      if (
+        resource.state === "waiting" &&
+        resource.retryable === true &&
+        previous?.classification !== "waiting"
+      ) {
+        enqueueBestEffort(attentionPayload(resource, options.sourceId));
       }
       return;
     }
-    taskStates.set(resource.taskId, actionable);
-    if (actionable !== undefined && previous !== actionable) {
-      await dispatcher.enqueue(attentionPayload(resource));
+    taskStates.set(resource.taskId, current);
+    if (
+      current &&
+      (previous?.classification !== current.classification ||
+        previous.revision !== current.revision)
+    ) {
+      enqueueBestEffort(attentionPayload(resource, options.sourceId, eventSequence));
     }
   };
 
   const bridge: HermesBridge = {
     upstream,
     async handleEvent(envelope) {
-      await observeTask(await upstream.getTask(envelope.taskId), "event");
+      await observeTask(await upstream.getTask(envelope.taskId), "event", envelope.event.sequence);
     },
     async reconcile(mode = "startup") {
       const tasks = await upstream.listTasks(taskLimit);
       await Promise.all(
         tasks.tasks.map(async (item) => observeTask(await upstream.getTask(item.taskId), mode)),
       );
+      if (mode === "startup" && !initialReconciliationNotified) {
+        initialReconciliationNotified = true;
+        enqueueBestEffort({
+          event: "usine_instance_reconciled",
+          sourceId: options.sourceId,
+        });
+      }
     },
     notifyUnavailable: () => {
       if (unavailable) return Promise.resolve();
       unavailable = true;
-      return dispatcher.enqueue({ event: "usine_instance_unavailable" });
+      return dispatcher.enqueue({
+        event: "usine_instance_unavailable",
+        sourceId: options.sourceId,
+      });
     },
     async notifyReconnected() {
       if (!unavailable) return Promise.resolve();
-      const notification = dispatcher
-        .enqueue({ event: "usine_instance_reconnected" })
-        .catch(() => undefined);
-      await bridge.reconcile("reconnect");
+      try {
+        await bridge.reconcile("reconnect");
+      } catch {
+        return;
+      }
       unavailable = false;
-      await notification;
+      enqueueBestEffort({
+        event: "usine_instance_reconnected",
+        sourceId: options.sourceId,
+      });
     },
     async start(signal = controller.signal) {
       try {
@@ -167,13 +207,20 @@ function actionableState(resource: ApiTaskResource): HermesAttentionPayload["sta
   return undefined;
 }
 
-function attentionPayload(resource: ApiTaskResource): HermesAttentionPayload {
+function attentionPayload(
+  resource: ApiTaskResource,
+  sourceId: string,
+  eventSequence?: number,
+): HermesAttentionPayload {
   const state = actionableState(resource);
   if (!state) throw new Error("cannot create attention payload for a non-actionable Task");
   return {
     event: "usine_attention",
+    sourceId,
     taskId: resource.taskId,
     repositoryId: resource.repository?.id ?? resource.writer.repositoryIdentity,
+    revision: resource.revision,
+    ...(eventSequence === undefined ? {} : { eventSequence }),
     state,
   };
 }
@@ -212,23 +259,55 @@ interface HermesWebhookDispatcherOptions {
 }
 
 class HermesWebhookDispatcher {
-  private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly pending = new Map<string, PendingWebhookSignal>();
+  private active: PendingWebhookSignal | undefined;
+  private draining = false;
 
   constructor(private readonly options: HermesWebhookDispatcherOptions) {}
 
   enqueue(payload: HermesAttentionPayload | HermesInstancePayload): Promise<void> {
-    const key =
-      payload.event === "usine_attention" ? `${payload.taskId}:${payload.state}` : payload.event;
-    const existing = this.inFlight.get(key);
-    if (existing) return existing;
-    if (this.inFlight.size >= this.options.maxPendingSignals) return Promise.resolve();
-    const request = this.sendWithRetry(payload, key).finally(() => this.inFlight.delete(key));
-    this.inFlight.set(key, request);
-    return request;
+    const key = webhookDeliveryKey(payload);
+    const existing = this.active?.key === key ? this.active : this.pending.get(key);
+    if (existing) return existing.promise;
+    if (this.pending.size >= this.options.maxPendingSignals) return Promise.resolve();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const signal = { key, payload, promise, resolve, reject };
+    this.pending.set(key, signal);
+    void this.drain();
+    return promise;
   }
 
   close(): void {
     // In-flight requests are intentionally allowed to finish; no durable queue is created.
+  }
+
+  private async drain(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (this.pending.size > 0) {
+        const next = this.pending.values().next().value;
+        if (!next) return;
+        this.pending.delete(next.key);
+        this.active = next;
+        try {
+          await this.sendWithRetry(next.payload, next.key);
+          next.resolve();
+        } catch (error) {
+          next.reject(error);
+        } finally {
+          this.active = undefined;
+        }
+      }
+    } finally {
+      this.draining = false;
+      if (this.pending.size > 0) void this.drain();
+    }
   }
 
   private async sendWithRetry(
@@ -251,9 +330,14 @@ class HermesWebhookDispatcher {
           },
           body,
         });
-        if (!response.ok) throw new Error(`Hermes webhook returned ${response.status}`);
+        if (!response.ok) {
+          if (!isTransientWebhookStatus(response.status))
+            throw new PermanentWebhookError(`Hermes webhook returned ${response.status}`);
+          throw new Error(`Hermes webhook returned ${response.status}`);
+        }
         return;
       } catch (error) {
+        if (error instanceof PermanentWebhookError) throw error;
         lastError = error;
         if (attempt + 1 < this.options.maxAttempts)
           await this.options.sleep(this.options.retryDelayMs * 2 ** attempt);
@@ -261,6 +345,34 @@ class HermesWebhookDispatcher {
     }
     throw lastError instanceof Error ? lastError : new Error("Hermes webhook delivery failed");
   }
+}
+
+interface PendingWebhookSignal {
+  key: string;
+  payload: HermesAttentionPayload | HermesInstancePayload;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+class PermanentWebhookError extends Error {}
+
+function webhookDeliveryKey(payload: HermesAttentionPayload | HermesInstancePayload): string {
+  if (payload.event === "usine_attention") {
+    return [
+      payload.sourceId,
+      "attention",
+      payload.taskId,
+      payload.revision,
+      payload.eventSequence ?? "reconciliation",
+      payload.state,
+    ].join(":");
+  }
+  return [payload.sourceId, "instance", payload.event].join(":");
+}
+
+function isTransientWebhookStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
 
 export function createUsineBridgeUpstream(baseUrl: string): HermesBridgeUpstream {

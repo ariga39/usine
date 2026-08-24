@@ -16,6 +16,7 @@ Use placeholders in deployment material and keep real values outside the reposit
 
 ```text
 USINE_SERVER_URL=<LOOPBACK_USINE_SERVER_URL>
+USINE_SOURCE_ID=<OPAQUE_LOGICAL_USINE_SOURCE_ID>
 HERMES_WEBHOOK_URL=<HERMES_GENERIC_V2_WEBHOOK_URL>
 HERMES_WEBHOOK_SECRET=<HERMES_WEBHOOK_SECRET>
 HERMES_BRIDGE_HOST=<LOOPBACK_MCP_HOST>
@@ -26,11 +27,14 @@ Configure a normal Hermes webhook route that starts a fresh agent run. Do not us
 mode. Configure Hermes' MCP client with the bridge's `/mcp` URL and allow only the six `usine_*`
 tools listed by the bridge. The bridge rejects non-loopback MCP binding.
 
-The current Task list is a bounded, unpaginated window. It is not exhaustive historical discovery.
+Every webhook body includes the configured opaque source ID. Task attention includes the latest Task
+revision and, for event-triggered wakes, the triggering event sequence. The current Task list is a
+bounded, unpaginated window. It is not exhaustive historical discovery.
 On process startup, current retryable waiting Tasks may wake and existing terminal Tasks are treated
-as baseline. After an observed outage, the bridge sends one unavailable signal, then one reconnected
-signal and reconciles current state. Terminal transitions that happen while the bridge is offline can
-be missed because the bridge has no durable ledger or replay cursor.
+as baseline. After an observed outage, the bridge sends one unavailable signal, reconciles current
+state only after Usine responds, and then sends one reconnected signal. Terminal transitions that
+happen while the bridge is offline can be missed because the bridge has no durable ledger or replay
+cursor.
 
 Run the bundled executable with Node 24 and the configured environment:
 
