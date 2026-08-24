@@ -6,6 +6,8 @@ Usine is a TypeScript/Node coordinator and CLI that moves an authorized developm
 
 The design authorities are [DESIGN](docs/DESIGN.md), [DEVELOPMENT](docs/DEVELOPMENT.md), and [DECISIONS](docs/DECISIONS.md). GitHub Issues authorize individual outcomes. Repo skills under `.agents/skills/` are on-demand methods, never competing authority.
 
+To operate Usine for an authorized project task, use [the agent quickstart](docs/AGENT_QUICKSTART.md). To develop Usine itself, follow this bootstrap and [DEVELOPMENT](docs/DEVELOPMENT.md).
+
 ## Start work
 
 Read the active Issue, its PR and unresolved review threads, then inspect the branch, base SHA, status, and complete diff. Read the canonical sections relevant to the behavior and identify its owner, active falsifier, and next observable outcome before editing. Repeat after compaction, handoff, worktree/Issue changes, or user direction corrections. Repository and GitHub facts override summaries and agent claims.
