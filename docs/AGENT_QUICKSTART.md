@@ -267,6 +267,20 @@ Human-readable output is the default for resource reads; add `--json` for the st
 
 `task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. `task evidence` drains paginated history, rereads the current Task, and reports separate implementer/reviewer Role Runs joined to the current bounded Candidate, check, review, repair, and delivery facts. It has no live-event cursor to resume: start with `task history`, `task watch --after <LAST_SEQUENCE>`, or `task evidence` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get`, `task watch`, and `task evidence` are the canonical Task reads.
 
+### Controlled implementer-profile evaluation
+
+The operator can run one committed, bounded paired evaluation through the CLI:
+
+```sh
+node apps/cli/dist/cli.mjs profile evaluate "<EVALUATION_PLAN>" --subject-role implementer --json
+```
+
+The plan names one evaluation Repository, baseline/candidate implementer profiles, one fixed reviewer profile, a finite `maxTasks` bound, and committed baseline/candidate Task Contract paths for each unique case/repetition identity. Its `baseSha`, contract semantics, non-merge authority, and repository/project-check facts must match across every pair. The plan may name a host-private `registrationPath`; otherwise the command reads `repository.json` beside the plan to restore the complete prior registration. Keep that registration file out of committed or GitHub-facing content when it contains host paths.
+
+The command validates the complete plan, committed unchanged inputs, profile configurations, and existing Task identities before its first registration mutation or submission. It switches only the implementer profile, runs baseline then candidate serially, reuses completed Task IDs, waits for admitted Tasks, and restores the prior registration after success, failure, cancellation, or interruption to the extent the existing registration boundary permits. A Task with an active writer prevents profile switching.
+
+The report uses only public `task evidence` facts. A passing exact-SHA project check and fresh approved review are required before effort can affect the result; drift, missing evidence, failed checks, interruptions, and unavailable usage remain explicit and produce an `inconclusive` recommendation. Session Archive content is never scoring input.
+
 ### Session Archive operations
 
 Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.

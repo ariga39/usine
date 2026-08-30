@@ -26,8 +26,6 @@ import { CandidateWorkspace } from "@usine/candidate-workspace";
 import {
   CodexCodingSession,
   codexAppServerProfilesFromEnvironment,
-  resolveCodexProfile,
-  validateCodexProfile,
   type CodingSessionCleanup,
   type CodingSessionMcpServerResolution,
 } from "@usine/coding-session";

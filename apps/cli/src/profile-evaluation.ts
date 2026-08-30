@@ -6,6 +6,7 @@ import { Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import {
   contractIssues,
+  hashTaskContract,
   repositoryRegistrationSchema,
   taskContractSchema,
   type RepositorySnapshot,
@@ -117,6 +118,26 @@ export interface ProfileEvaluateOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface ProfileEvaluationServices {
+  readonly inspectRepository: typeof inspectRepository;
+  readonly listTasks: typeof listTasks;
+  readonly registerRepository: typeof registerRepository;
+  readonly submitTask: typeof submitTask;
+  readonly taskStatus: typeof taskStatus;
+  readonly followTask: typeof followTask;
+  readonly taskEvidence: typeof taskEvidence;
+}
+
+const defaultServices: ProfileEvaluationServices = {
+  inspectRepository,
+  listTasks,
+  registerRepository,
+  submitTask,
+  taskStatus,
+  followTask,
+  taskEvidence,
+};
+
 export class ProfileEvaluationValidationError extends Error {
   readonly code = "invalid_evaluation_plan";
   readonly kind = "validation" as const;
@@ -151,6 +172,10 @@ export async function readProfileEvaluationPlan(
 
   const pairs = [...plan.pairs];
   const contracts: TaskContract[] = [];
+  const taskIds = new Set<string>();
+  const contractPaths = new Set<string>();
+  const deliveryBranches = new Set<string>();
+  const deliveryIssues = new Set<number>();
   for (const pair of pairs) {
     const baselinePath = resolveRepositoryFile(
       repositoryRoot,
@@ -162,6 +187,12 @@ export async function readProfileEvaluationPlan(
       pair.candidateContractPath,
       "candidate contract",
     );
+    if (contractPaths.has(baselinePath) || contractPaths.has(candidatePath))
+      throw new ProfileEvaluationValidationError(
+        `${pair.id}:${pair.repetition}: contract files must be unique`,
+      );
+    contractPaths.add(baselinePath);
+    contractPaths.add(candidatePath);
     await requireCommittedFile(repositoryRoot, baselinePath, "baseline contract");
     await requireCommittedFile(repositoryRoot, candidatePath, "candidate contract");
     const baseline = parseContract(
@@ -173,11 +204,33 @@ export async function readProfileEvaluationPlan(
       "candidate contract",
     );
     validatePair(plan, pair, baseline, candidate);
+    if (taskIds.has(baseline.id) || taskIds.has(candidate.id) || baseline.id === candidate.id)
+      throw new ProfileEvaluationValidationError(
+        `${pair.id}:${pair.repetition}: Task IDs must be unique`,
+      );
+    taskIds.add(baseline.id);
+    taskIds.add(candidate.id);
+    if (
+      deliveryBranches.has(baseline.delivery.branch) ||
+      deliveryBranches.has(candidate.delivery.branch) ||
+      baseline.delivery.branch === candidate.delivery.branch ||
+      deliveryIssues.has(baseline.delivery.issue) ||
+      deliveryIssues.has(candidate.delivery.issue) ||
+      baseline.delivery.issue === candidate.delivery.issue
+    )
+      throw new ProfileEvaluationValidationError(
+        `${pair.id}:${pair.repetition}: Task delivery identities must be unique`,
+      );
+    deliveryBranches.add(baseline.delivery.branch);
+    deliveryBranches.add(candidate.delivery.branch);
+    deliveryIssues.add(baseline.delivery.issue);
+    deliveryIssues.add(candidate.delivery.issue);
     contracts.push(baseline, candidate);
   }
 
   const registration = await readRestorationRegistration(plan, absolutePlanPath);
   await validateRegistration(plan, registration, repositoryRoot);
+  for (const contract of contracts) validateContractRepository(contract, registration);
   for (const profile of [plan.baselineProfile, plan.candidateProfile, plan.reviewerProfile]) {
     validateCodexProfile(profile);
     await resolveCodexProfile(profile, environment);
@@ -209,6 +262,7 @@ export async function runProfileEvaluateCommand(
   options: ProfileEvaluateOptions,
   serverUrl: string,
   environment: NodeJS.ProcessEnv = process.env,
+  services: ProfileEvaluationServices = defaultServices,
 ): Promise<void> {
   return runCommand("profile_evaluate_failed", async () => {
     if (options.subjectRole !== "implementer")
@@ -216,32 +270,29 @@ export async function runProfileEvaluateCommand(
         subjectRole: options.subjectRole,
       });
     const loaded = await readProfileEvaluationPlan(options.planPath, environment);
-    const current = await inspectRepository(serverUrl, loaded.plan.repositoryId);
+    const current = await services.inspectRepository(serverUrl, loaded.plan.repositoryId);
     if (!current)
       throw new CliFailure("repository_not_found", "not_found", {
         repositoryId: loaded.plan.repositoryId,
       });
     if (
-      current.owner !== loaded.registration.owner ||
-      current.name !== loaded.registration.name ||
+      current.owner.toLowerCase() !== loaded.registration.owner.toLowerCase() ||
+      current.name.toLowerCase() !== loaded.registration.name.toLowerCase() ||
       current.baseBranch !== loaded.registration.baseBranch
     )
       throw new ProfileEvaluationValidationError(
         "plan registration does not match the registered Repository",
       );
-    await ensureRepositoryIdle(
-      serverUrl,
-      `${loaded.registration.owner}/${loaded.registration.name}`.toLowerCase(),
-    );
-    const report = await executeProfileEvaluation(loaded, serverUrl, options.signal);
+    const report = await executeProfileEvaluation(loaded, serverUrl, options.signal, services);
     process.stdout.write(options.json ? `${JSON.stringify(report)}\n` : renderReport(report));
   });
 }
 
-async function executeProfileEvaluation(
+export async function executeProfileEvaluation(
   loaded: Awaited<ReturnType<typeof readProfileEvaluationPlan>>,
   serverUrl: string,
   signal?: AbortSignal,
+  services: ProfileEvaluationServices = defaultServices,
 ): Promise<ProfileEvaluationReport> {
   const { plan, registration } = loaded;
   const reports: Record<"baseline" | "candidate", EvaluationTaskReport[]> = {
@@ -253,7 +304,7 @@ async function executeProfileEvaluation(
     projectCheck: { ...registration.projectCheck },
     gitAuthor: { ...registration.gitAuthor },
   };
-  let activeRegistration = originalRegistration;
+  let contractIndex = 0;
   try {
     for (const pair of plan.pairs) {
       for (const side of ["baseline", "candidate"] as const) {
@@ -261,71 +312,95 @@ async function executeProfileEvaluation(
         const contractPath =
           side === "baseline" ? pair.baselineContractPath : pair.candidateContractPath;
         const profile = side === "baseline" ? plan.baselineProfile : plan.candidateProfile;
-        await ensureRepositoryIdle(
-          serverUrl,
-          `${originalRegistration.owner}/${originalRegistration.name}`.toLowerCase(),
-        );
-        activeRegistration = {
-          ...originalRegistration,
-          implementerProfile: profile,
-          reviewerProfile: plan.reviewerProfile,
-        };
-        await registerRepository(serverUrl, activeRegistration);
-        const contract = parseContract(
-          await readUtf8(resolve(loaded.repositoryRoot, contractPath), "task contract"),
-          "task contract",
-        );
-        let task = await taskStatus(serverUrl, contract.id);
-        if (!task)
-          task = await submitTask(serverUrl, {
+        const contract = loaded.contracts[contractIndex++];
+        if (!contract) throw new Error(`validated contract is missing for ${pair.id}`);
+        let task = await services.taskStatus(serverUrl, contract.id);
+        if (task) {
+          await validateExistingTask(
+            task,
+            contract,
+            resolve(loaded.repositoryRoot, contractPath),
+            originalRegistration,
+          );
+        }
+        if (!task) {
+          await ensureRepositoryIdle(
+            serverUrl,
+            `${originalRegistration.owner}/${originalRegistration.name}`.toLowerCase(),
+            services,
+          );
+          const evaluationRegistration = {
+            ...originalRegistration,
+            implementerProfile: profile,
+            reviewerProfile: plan.reviewerProfile,
+          };
+          await services.registerRepository(serverUrl, evaluationRegistration);
+          task = await services.submitTask(serverUrl, {
             contractPath: resolve(loaded.repositoryRoot, contractPath),
             repositoryId: plan.repositoryId,
           });
+        }
         if (!isTerminalOrWaiting(task.state))
-          task = await followTask(serverUrl, task.taskId, {
+          task = await services.followTask(serverUrl, task.taskId, {
             timeoutMs: contract.budget.maxElapsedMs,
+            signal,
           });
         if (!isTerminalOrWaiting(task.state))
           throw new Error(`Task ${task.taskId} did not reach a durable stopping state`);
         if (task.state === "waiting")
           throw new Error(`Task ${task.taskId} is waiting for an explicit retry`);
-        const evidence = await taskEvidence(serverUrl, task.taskId);
+        const evidence = await services.taskEvidence(serverUrl, task.taskId);
         if (!evidence) throw new Error(`Task evidence is unavailable for ${task.taskId}`);
+        throwIfAborted(signal);
         reports[side].push({
           id: `${pair.id}:${pair.repetition}:${side}`,
           pairId: pair.id,
           repetition: pair.repetition,
           taskId: task.taskId,
           evidence,
-        } as EvaluationTaskReport);
+        });
       }
     }
   } finally {
-    await registerRepository(serverUrl, originalRegistration).catch((error) => {
+    await services.registerRepository(serverUrl, originalRegistration).catch((error) => {
       throw new Error(`evaluation Repository restoration failed: ${String(error)}`);
     });
   }
-  return makeReport(plan, reports);
+  return compareProfileEvaluation(plan, reports);
 }
 
-function makeReport(
+export function compareProfileEvaluation(
   plan: ProfileEvaluationPlan,
   reports: Record<"baseline" | "candidate", EvaluationTaskReport[]>,
 ): ProfileEvaluationReport {
   const baseline = profileReport(plan.baselineProfile, plan.reviewerProfile, reports.baseline);
   const candidate = profileReport(plan.candidateProfile, plan.reviewerProfile, reports.candidate);
   const reasons = [...new Set([...baseline.reasons, ...candidate.reasons])].toSorted();
-  const comparison = {
-    baseline: baseline.metrics,
-    candidate: candidate.metrics,
-    delta: metricDelta(baseline.metrics, candidate.metrics),
-  };
+  const comparable =
+    reasons.length === 0 && baseline.correctness === "passed" && candidate.correctness === "passed";
+  const comparison = comparable
+    ? {
+        baseline: baseline.metrics,
+        candidate: candidate.metrics,
+        delta: metricDelta(baseline.metrics, candidate.metrics),
+      }
+    : {
+        baseline: unknownMetrics(),
+        candidate: unknownMetrics(),
+        delta: unknownMetrics(),
+      };
   let recommendation: ProfileEvaluationReport["recommendation"] = "inconclusive";
   if (reasons.length === 0) {
-    const candidateBetter = strictlyLessOrEqual(candidate.metrics, baseline.metrics);
-    const baselineBetter = strictlyLessOrEqual(baseline.metrics, candidate.metrics);
-    if (candidateBetter && !baselineBetter) recommendation = "candidate";
-    else if (baselineBetter && !candidateBetter) recommendation = "baseline";
+    if (baseline.correctness === "passed" && candidate.correctness === "failed") {
+      recommendation = "baseline";
+    } else if (candidate.correctness === "passed" && baseline.correctness === "failed") {
+      recommendation = "candidate";
+    } else {
+      const candidateBetter = strictlyLessOrEqual(candidate.metrics, baseline.metrics);
+      const baselineBetter = strictlyLessOrEqual(baseline.metrics, candidate.metrics);
+      if (candidateBetter && !baselineBetter) recommendation = "candidate";
+      else if (baselineBetter && !candidateBetter) recommendation = "baseline";
+    }
   }
   return {
     schemaVersion: 1,
@@ -369,16 +444,20 @@ function profileReport(
       reasons.push(`${task.taskId}:implementer_profile_unknown`);
     }
     for (const run of evidence.roleRuns.implementer) {
-      if (run.requestedProfile !== profile || run.effectiveProfile.profileName !== profile)
+      if (run.requestedProfile !== profile || run.effectiveProfile.profileName !== profile) {
+        if (correctness !== "failed") correctness = "unknown";
         reasons.push(`${task.taskId}:implementer_profile_drift`);
+      }
     }
     for (const run of evidence.roleRuns.reviewer) {
       // Reviewer profile is checked against the plan by the caller's fixed registration.
       if (
         run.requestedProfile !== reviewerProfile ||
         run.effectiveProfile.profileName !== reviewerProfile
-      )
+      ) {
+        if (correctness !== "failed") correctness = "unknown";
         reasons.push(`${task.taskId}:reviewer_profile_drift`);
+      }
     }
     if (evidence.roleRuns.reviewer.length === 0)
       reasons.push(`${task.taskId}:reviewer_profile_unknown`);
@@ -392,6 +471,16 @@ function profileReport(
 
 function aggregateMetrics(tasks: readonly EvaluationTaskReport[]): EvaluationMetricSet {
   const implementerRuns = tasks.flatMap((task) => task.evidence.roleRuns.implementer);
+  if (implementerRuns.length === 0)
+    return {
+      implementerActivations: null,
+      repairBatches: null,
+      interruptions: null,
+      elapsedMs: null,
+      inputTokens: null,
+      outputTokens: null,
+      toolFailures: null,
+    };
   const activationValues = tasks.map((task) =>
     task.evidence.roleRuns.implementer.length > 0
       ? task.evidence.roleRuns.implementer.length
@@ -475,6 +564,18 @@ function difference(baseline: number | null, candidate: number | null): number |
   return baseline === null || candidate === null ? null : candidate - baseline;
 }
 
+function unknownMetrics(): EvaluationMetricSet {
+  return {
+    implementerActivations: null,
+    repairBatches: null,
+    interruptions: null,
+    elapsedMs: null,
+    inputTokens: null,
+    outputTokens: null,
+    toolFailures: null,
+  };
+}
+
 function validatePlanShape(plan: ProfileEvaluationPlan): void {
   if (plan.subjectRole !== "implementer")
     throw new ProfileEvaluationValidationError("subjectRole must be implementer");
@@ -484,16 +585,20 @@ function validatePlanShape(plan: ProfileEvaluationPlan): void {
     throw new ProfileEvaluationValidationError("plan baseSha must be a lowercase 40-character SHA");
   if (!Number.isSafeInteger(plan.maxTasks) || plan.maxTasks < 2 || plan.maxTasks > 200)
     throw new ProfileEvaluationValidationError("maxTasks must be between 2 and 200");
+  if (plan.baselineProfile === plan.candidateProfile)
+    throw new ProfileEvaluationValidationError(
+      "baseline and candidate profiles must be different evaluation factors",
+    );
   if (plan.pairs.length === 0 || plan.pairs.length * 2 > plan.maxTasks)
     throw new ProfileEvaluationValidationError("plan exceeds its maximum-task bound");
   const ids = new Set<string>();
   for (const pair of plan.pairs) {
     if (!identifier.test(pair.id) || !Number.isSafeInteger(pair.repetition) || pair.repetition < 1)
       throw new ProfileEvaluationValidationError("pair identities are invalid");
-    if (ids.has(pair.id) || ids.has(`${pair.id}:${pair.repetition}`))
+    const identity = `${pair.id}:${pair.repetition}`;
+    if (ids.has(identity))
       throw new ProfileEvaluationValidationError("paired-case identities must be unique");
-    ids.add(pair.id);
-    ids.add(`${pair.id}:${pair.repetition}`);
+    ids.add(identity);
     for (const path of [pair.baselineContractPath, pair.candidateContractPath])
       if (isAbsolute(path) || path.trim() === "" || relative(".", path).startsWith(".."))
         throw new ProfileEvaluationValidationError("contract paths must be repository-relative");
@@ -519,7 +624,12 @@ function validatePair(
     throw new ProfileEvaluationValidationError(
       `${pair.id}: contract Repository drifts from the plan`,
     );
-  const semantics = (contract: TaskContract) => ({
+  if (JSON.stringify(contractSemantics(baseline)) !== JSON.stringify(contractSemantics(candidate)))
+    throw new ProfileEvaluationValidationError(`${pair.id}: paired contract semantics drift`);
+}
+
+function contractSemantics(contract: TaskContract) {
+  return {
     baseSha: contract.baseSha,
     instructions: contract.instructions,
     acceptance: contract.acceptance,
@@ -527,51 +637,133 @@ function validatePair(
     budget: contract.budget,
     delivery: { title: contract.delivery.title, body: contract.delivery.body },
     authorization: { delivery: contract.authorization.delivery },
-  });
-  if (JSON.stringify(semantics(baseline)) !== JSON.stringify(semantics(candidate)))
-    throw new ProfileEvaluationValidationError(`${pair.id}: paired contract semantics drift`);
+  };
+}
+
+function validateContractRepository(
+  contract: TaskContract,
+  registration: RepositorySnapshot,
+): void {
+  const url = new URL(contract.authorization.source);
+  const [, owner, name] = url.pathname.split("/");
+  if (
+    owner?.toLowerCase() !== registration.owner.toLowerCase() ||
+    name?.toLowerCase() !== registration.name.toLowerCase()
+  )
+    throw new ProfileEvaluationValidationError(
+      `${contract.id}: authorization does not name the evaluation Repository`,
+    );
+}
+
+async function validateExistingTask(
+  task: import("@usine/task-authority").TaskResource,
+  contract: TaskContract,
+  contractPath: string,
+  registration: RepositorySnapshot,
+): Promise<void> {
+  if (task.taskId !== contract.id)
+    throw new ProfileEvaluationValidationError(`${contract.id}: existing Task identity drifted`);
+  if (task.mergeAuthorized)
+    throw new ProfileEvaluationValidationError(
+      `${contract.id}: existing Task grants merge authority`,
+    );
+  if (
+    task.writer.repositoryIdentity.toLowerCase() !==
+    `${registration.owner}/${registration.name}`.toLowerCase()
+  )
+    throw new ProfileEvaluationValidationError(`${contract.id}: existing Task Repository drifted`);
+  const rawContract = await readUtf8(contractPath, "task contract");
+  if (task.contractHash !== hashTaskContract(rawContract))
+    throw new ProfileEvaluationValidationError(`${contract.id}: existing Task contract drifted`);
 }
 
 function normalizePlan(input: unknown): ProfileEvaluationPlan {
   if (!isRecord(input))
     throw new ProfileEvaluationValidationError("evaluation plan must be an object");
+  if (input.profiles !== undefined && !isRecord(input.profiles))
+    throw new ProfileEvaluationValidationError("evaluation plan profiles are invalid");
   const profiles = isRecord(input.profiles) ? input.profiles : undefined;
+  const allowedKeys = new Set([
+    "schemaVersion",
+    "id",
+    "planId",
+    "repositoryId",
+    "baseSha",
+    "subjectRole",
+    "baselineProfile",
+    "candidateProfile",
+    "reviewerProfile",
+    "profiles",
+    "maxTasks",
+    "pairs",
+    "cases",
+    "registrationPath",
+    "restoreRegistrationPath",
+  ]);
+  if (Object.keys(input).some((key) => !allowedKeys.has(key)))
+    throw new ProfileEvaluationValidationError("evaluation plan has unexpected fields");
+  if (input.pairs !== undefined && input.cases !== undefined)
+    throw new ProfileEvaluationValidationError("evaluation plan must use one pair list");
+  if (
+    profiles &&
+    Object.keys(profiles).some(
+      (key) => key !== "baseline" && key !== "candidate" && key !== "reviewer",
+    )
+  )
+    throw new ProfileEvaluationValidationError("evaluation plan profiles have unexpected fields");
+  if (profiles && Object.values(profiles).some((profile) => typeof profile !== "string"))
+    throw new ProfileEvaluationValidationError("evaluation plan profiles are invalid");
   const rawPairs = input.pairs ?? input.cases;
   if (!isRecord(input) || !Array.isArray(rawPairs))
     throw new ProfileEvaluationValidationError("plan must contain paired contracts");
   const baselineProfile = input.baselineProfile ?? profiles?.baseline;
   const candidateProfile = input.candidateProfile ?? profiles?.candidate;
   const schemaVersion = input.schemaVersion ?? 1;
+  const reviewerProfileInput = input.reviewerProfile ?? profiles?.reviewer;
   if (
     schemaVersion !== 1 ||
-    typeof input.id !== "string" ||
+    typeof (input.id ?? input.planId) !== "string" ||
     typeof input.repositoryId !== "string" ||
     typeof input.baseSha !== "string" ||
     input.subjectRole !== "implementer" ||
-    typeof reviewerProfileValue(input.reviewerProfile) !== "string" ||
+    typeof reviewerProfileValue(reviewerProfileInput) !== "string" ||
     typeof input.maxTasks !== "number" ||
     typeof baselineProfile !== "string" ||
     typeof candidateProfile !== "string"
   )
     throw new ProfileEvaluationValidationError("plan must name baseline and candidate profiles");
-  const reviewerProfile = reviewerProfileValue(input.reviewerProfile);
+  const reviewerProfile = reviewerProfileValue(reviewerProfileInput);
   if (reviewerProfile === undefined)
     throw new ProfileEvaluationValidationError("plan must name a reviewer profile");
+  const id = input.id ?? input.planId;
+  const repositoryId = input.repositoryId;
+  const baseSha = input.baseSha;
+  const subjectRole = input.subjectRole;
+  const maxTasks = input.maxTasks;
+  const registrationPath = input.registrationPath ?? input.restoreRegistrationPath;
+  if (
+    typeof id !== "string" ||
+    typeof repositoryId !== "string" ||
+    typeof baseSha !== "string" ||
+    subjectRole !== "implementer" ||
+    typeof maxTasks !== "number"
+  )
+    throw new ProfileEvaluationValidationError("evaluation plan has invalid fields");
+  if (registrationPath !== undefined && typeof registrationPath !== "string")
+    throw new ProfileEvaluationValidationError("evaluation plan registrationPath is invalid");
   const pairs = rawPairs.map(parsePair);
   const plan: ProfileEvaluationPlan = {
     schemaVersion,
-    id: input.id,
-    repositoryId: input.repositoryId,
-    baseSha: input.baseSha,
-    subjectRole: input.subjectRole,
+    id,
+    repositoryId,
+    baseSha,
+    subjectRole,
     baselineProfile,
     candidateProfile,
     reviewerProfile,
-    maxTasks: input.maxTasks,
+    maxTasks,
     pairs,
-    ...(typeof input.registrationPath === "string"
-      ? { registrationPath: input.registrationPath }
-      : {}),
+    ...(registrationPath === undefined ? {} : { registrationPath }),
   };
   return plan;
 }
@@ -583,17 +775,47 @@ function reviewerProfileValue(value: unknown): string | undefined {
 function parsePair(input: unknown): ProfileEvaluationPair {
   if (
     !isRecord(input) ||
-    typeof input.id !== "string" ||
+    typeof (input.id ?? input.caseId) !== "string" ||
     typeof input.repetition !== "number" ||
-    typeof input.baselineContractPath !== "string" ||
-    typeof input.candidateContractPath !== "string"
+    typeof (input.baselineContractPath ?? input.baselineContract ?? input.baseline) !== "string" ||
+    typeof (input.candidateContractPath ?? input.candidateContract ?? input.candidate) !== "string"
+  )
+    throw new ProfileEvaluationValidationError("paired contract identity is invalid");
+  if (
+    Object.keys(input).some(
+      (key) =>
+        ![
+          "id",
+          "caseId",
+          "repetition",
+          "baselineContractPath",
+          "candidateContractPath",
+          "baselineContract",
+          "candidateContract",
+          "baseline",
+          "candidate",
+        ].includes(key),
+    )
+  )
+    throw new ProfileEvaluationValidationError("paired contract identity has unexpected fields");
+  const id = typeof input.id === "string" ? input.id : input.caseId;
+  const repetition = input.repetition;
+  const baselineContractPath =
+    input.baselineContractPath ?? input.baselineContract ?? input.baseline;
+  const candidateContractPath =
+    input.candidateContractPath ?? input.candidateContract ?? input.candidate;
+  if (
+    typeof id !== "string" ||
+    typeof repetition !== "number" ||
+    typeof baselineContractPath !== "string" ||
+    typeof candidateContractPath !== "string"
   )
     throw new ProfileEvaluationValidationError("paired contract identity is invalid");
   return {
-    id: input.id,
-    repetition: input.repetition,
-    baselineContractPath: input.baselineContractPath,
-    candidateContractPath: input.candidateContractPath,
+    id,
+    repetition,
+    baselineContractPath,
+    candidateContractPath,
   };
 }
 
@@ -601,8 +823,12 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
-async function ensureRepositoryIdle(serverUrl: string, repositoryIdentity: string): Promise<void> {
-  const page = await listTasks(serverUrl, 200);
+async function ensureRepositoryIdle(
+  serverUrl: string,
+  repositoryIdentity: string,
+  services: ProfileEvaluationServices,
+): Promise<void> {
+  const page = await services.listTasks(serverUrl, 200);
   const active = page.tasks.find(
     (task) =>
       task.writer.repositoryIdentity.toLowerCase() === repositoryIdentity &&
@@ -641,7 +867,7 @@ async function readRestorationRegistration(
   try {
     return repositoryRegistrationSchema.parse(
       JSON.parse(await readUtf8(path, "Repository registration")),
-    ) as RepositorySnapshot;
+    );
   } catch {
     throw new ProfileEvaluationValidationError("Repository registration is unreadable or invalid");
   }
@@ -651,7 +877,7 @@ async function validateRegistration(
   plan: ProfileEvaluationPlan,
   registration: RepositorySnapshot,
   repositoryRoot: string,
-): void {
+): Promise<void> {
   if (registration.id !== plan.repositoryId)
     throw new ProfileEvaluationValidationError(
       "restoration registration Repository ID differs from the plan",
@@ -700,8 +926,7 @@ async function requireCommittedFile(
       "--",
       relativePath,
     ]);
-    if (tracked.stdout.trim() !== relativePath)
-      throw new Error("file is not tracked");
+    if (tracked.stdout.trim() !== relativePath) throw new Error("file is not tracked");
     await execFile("git", ["-C", repositoryRoot, "diff", "--quiet", "HEAD", "--", relativePath]);
   } catch (error) {
     throw new ProfileEvaluationValidationError(

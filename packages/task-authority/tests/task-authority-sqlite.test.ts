@@ -144,6 +144,39 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("rejects Repository profile switches while its writer lease is active", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const registration = {
+      id: "profile-switch-repository",
+      path: "/repositories/profile-switch",
+      owner: "example",
+      name: "profile-switch",
+      baseBranch: "main",
+      implementerProfile: "baseline-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "forge-profile",
+      githubReadProfile: null,
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    };
+    await authority.registerRepository(registration);
+    await authority.admit({
+      contract: { ...makeContract("profile-switch-task"), repositoryId: registration.id },
+      contractHash: "profile-switch-hash",
+      repositoryIdentity: "example/profile-switch",
+      repository: registration,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    await expect(
+      authority.registerRepository({ ...registration, implementerProfile: "candidate-profile" }),
+    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+    await expect(
+      authority.registerRepository({ ...registration, reviewerProfile: "other-reviewer" }),
+    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+  });
+
   test("accepts one explicit retry while retaining the lease and active slot", async () => {
     const path = await makeDatabase();
     const first = authorityAt(path);

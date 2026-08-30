@@ -243,6 +243,7 @@ export interface FollowOptions {
   intervalMs?: number;
   afterSequence?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
   onEvent?: (event: TaskEvent) => void;
 }
 
@@ -255,6 +256,7 @@ export async function followTask(
   let afterSequence = options.afterSequence ?? 0;
   const startedAt = Date.now();
   while (true) {
+    if (options.signal?.aborted) throw new Error("task follow cancelled");
     const result = await taskStatus(serverUrl, taskId);
     if (!result) throw new ServerClientError(`task not found: ${taskId}`, 404);
     while (true) {
@@ -280,8 +282,27 @@ export async function followTask(
           : "task follow reached its durable deadline",
         408,
       );
-    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingMs)));
+    await waitForFollowInterval(Math.min(intervalMs, remainingMs), options.signal);
   }
+}
+
+function waitForFollowInterval(intervalMs: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, intervalMs));
+  const activeSignal = signal;
+  if (activeSignal.aborted) return Promise.reject(new Error("task follow cancelled"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, intervalMs);
+    const abort = () => {
+      clearTimeout(timer);
+      activeSignal.removeEventListener("abort", abort);
+      reject(new Error("task follow cancelled"));
+    };
+    function done() {
+      activeSignal.removeEventListener("abort", abort);
+      resolve();
+    }
+    activeSignal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function apiScope(scope: EventScope): ApiEventScope {
