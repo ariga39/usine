@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vite-plus/test";
-import { SessionArchiveWriter } from "@usine/coding-session";
+import { SessionArchiveWriter } from "../../../packages/coding-session/src/session-archive.js";
 import {
   runArchiveCleanupCommand,
   runArchiveExportCommand,

@@ -6,6 +6,7 @@ import {
   type TaskObservationEventData,
   type TaskResult,
   type TaskWaitingResumeState,
+  originalTaskContract,
 } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
 import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
@@ -16,9 +17,10 @@ function implementerPrompt(
   check: CheckResult | null,
   findings: string[],
 ): string {
+  const taskContract = originalTaskContract(input.contract);
   return [
     "Role: implementer. Work only on the frozen authorized Task Contract.",
-    `Task Contract: ${JSON.stringify(input.contract)}`,
+    `Task Contract: ${JSON.stringify(taskContract)}`,
     `Current candidate parent SHA: ${previousSha}`,
     check
       ? `Failed project check evidence: ${JSON.stringify(check)}`
@@ -85,7 +87,7 @@ async function runCodingAttempt(
   const observation = await services.session.run({
     role: input.implementer.role,
     workspace: workspace.path,
-    contract: input.contract,
+    contract: originalTaskContract(input.contract),
     prompt: implementerPrompt(input, previousSha, check, findings),
     profile: input.implementer.profile,
     sandbox: input.implementer.sandbox,

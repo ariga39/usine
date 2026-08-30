@@ -1,4 +1,4 @@
-import { mkdir, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,11 +9,13 @@ import {
   listSessionArchives,
   readSessionArchive,
   readSessionArchiveManifest,
-  SessionArchiveWriter,
-  sessionArchiveProfileSnapshot,
-  sessionArchiveDirectory,
   type SessionArchive,
 } from "@usine/coding-session";
+import {
+  SessionArchiveWriter,
+  sessionArchiveDirectory,
+  sessionArchiveProfileSnapshot,
+} from "../src/session-archive.js";
 import type { TaskContract } from "@usine/task-authority";
 
 const contract = {
@@ -81,6 +83,33 @@ async function writeArchive(
 }
 
 describe("Session Archive operator boundary", () => {
+  test("keeps mutable capture internals out of the package API", async () => {
+    const publicApi = (await import("@usine/coding-session")) as Record<string, unknown>;
+    expect(publicApi).not.toHaveProperty("SessionArchiveWriter");
+    expect(publicApi).not.toHaveProperty("sessionArchiveProfileSnapshot");
+    expect(publicApi).not.toHaveProperty("sessionArchiveDirectory");
+  });
+
+  async function rewriteArchive(
+    stateDirectory: string,
+    archiveId: string,
+    mutate: (archive: Record<string, any>) => void,
+  ): Promise<void> {
+    const path = join(sessionArchiveDirectory(stateDirectory), `${archiveId}.json`);
+    const archive = JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
+    mutate(archive);
+    archive.byteLength = 0;
+    for (;;) {
+      const bytes = JSON.stringify(archive);
+      const byteLength = Buffer.byteLength(bytes);
+      if (archive.byteLength === byteLength) {
+        await writeFile(path, bytes, { encoding: "utf8", mode: 0o600 });
+        return;
+      }
+      archive.byteLength = byteLength;
+    }
+  }
+
   test("truncates explicitly and keeps each archive within its configured bound", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-limit-"));
     const result = await writeArchive(stateDirectory, "1", { maxArchiveBytes: 700 });
@@ -229,7 +258,7 @@ describe("Session Archive operator boundary", () => {
 
   test("prunes a corrupt valid-ID entry without allowing managed files to grow", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-corrupt-"));
-    await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true });
+    await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true, mode: 0o700 });
     const corruptId = "archive_33333333-3333-3333-3333-333333333333";
     await writeFile(join(sessionArchiveDirectory(stateDirectory), `${corruptId}.json`), "corrupt");
     const first = await writeArchive(stateDirectory, "1", { maxArchives: 1 });
@@ -250,6 +279,79 @@ describe("Session Archive operator boundary", () => {
     expect(files).toHaveLength(2);
   });
 
+  test("keeps archive storage private regardless of process umask", async () => {
+    const previousUmask = process.umask(0);
+    try {
+      const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-permissions-"));
+      const result = await writeArchive(stateDirectory, "1");
+      const directoryMode = (await stat(sessionArchiveDirectory(stateDirectory))).mode & 0o777;
+      const fileMode =
+        (await stat(join(sessionArchiveDirectory(stateDirectory), `${result.archiveId}.json`)))
+          .mode & 0o777;
+      expect(directoryMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    } finally {
+      process.umask(previousUmask);
+    }
+  });
+
+  test("rejects tampered identity, profile checksum, declared length, and hard-bound files", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-integrity-"));
+    const identity = await writeArchive(stateDirectory, "1");
+    await rewriteArchive(stateDirectory, identity.archiveId, (archive) => {
+      archive.archiveId = "archive_ffffffff-ffff-ffff-ffff-ffffffffffff";
+    });
+    await expect(readSessionArchive(stateDirectory, identity.archiveId)).rejects.toMatchObject({
+      code: "session_archive_corrupt",
+    });
+
+    const profile = await writeArchive(stateDirectory, "2");
+    await rewriteArchive(stateDirectory, profile.archiveId, (archive) => {
+      archive.profile.model = "tampered-model";
+    });
+    await expect(readSessionArchive(stateDirectory, profile.archiveId)).rejects.toMatchObject({
+      code: "session_archive_corrupt",
+    });
+
+    const length = await writeArchive(stateDirectory, "3");
+    const lengthPath = join(sessionArchiveDirectory(stateDirectory), `${length.archiveId}.json`);
+    const lengthArchive = JSON.parse(await readFile(lengthPath, "utf8")) as Record<string, unknown>;
+    lengthArchive.byteLength = Number(lengthArchive.byteLength) + 1;
+    await writeFile(lengthPath, JSON.stringify(lengthArchive), { encoding: "utf8", mode: 0o600 });
+    await expect(readSessionArchive(stateDirectory, length.archiveId)).rejects.toMatchObject({
+      code: "session_archive_corrupt",
+    });
+
+    const oversized = await writeArchive(stateDirectory, "4");
+    await writeFile(
+      join(sessionArchiveDirectory(stateDirectory), `${oversized.archiveId}.json`),
+      Buffer.alloc(10 * 1024 * 1024 + 1),
+      { mode: 0o600 },
+    );
+    await expect(readSessionArchive(stateDirectory, oversized.archiveId)).rejects.toMatchObject({
+      code: "session_archive_corrupt",
+    });
+  });
+
+  test("skips one corrupt archive while listing and cleaning valid Task archives", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-list-corrupt-"));
+    const valid = await writeArchive(stateDirectory, "1");
+    const corruptId = "archive_44444444-4444-4444-4444-444444444444";
+    await writeFile(join(sessionArchiveDirectory(stateDirectory), `${corruptId}.json`), "corrupt", {
+      mode: 0o600,
+    });
+
+    await expect(listSessionArchives(stateDirectory, contract.id)).resolves.toEqual([
+      expect.objectContaining({ archiveId: valid.archiveId }),
+    ]);
+    await expect(cleanupSessionArchives(stateDirectory, { taskId: contract.id })).resolves.toEqual({
+      removedArchiveIds: [valid.archiveId],
+    });
+    await expect(readSessionArchive(stateDirectory, corruptId)).rejects.toMatchObject({
+      code: "session_archive_corrupt",
+    });
+  });
+
   test("rejects malformed, traversal, absolute, missing, corrupt, and symlink IDs with typed errors", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-safe-"));
     await expect(readSessionArchive(stateDirectory, "../outside")).rejects.toMatchObject({
@@ -265,9 +367,15 @@ describe("Session Archive operator boundary", () => {
       code: "session_archive_not_found",
     });
 
-    await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true });
+    await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true, mode: 0o700 });
     const corruptId = "archive_11111111-1111-1111-1111-111111111111";
-    await writeFile(join(sessionArchiveDirectory(stateDirectory), `${corruptId}.json`), "not json");
+    await writeFile(
+      join(sessionArchiveDirectory(stateDirectory), `${corruptId}.json`),
+      "not json",
+      {
+        mode: 0o600,
+      },
+    );
     await expect(readSessionArchive(stateDirectory, corruptId)).rejects.toMatchObject({
       code: "session_archive_corrupt",
     });
@@ -277,6 +385,22 @@ describe("Session Archive operator boundary", () => {
       join(sessionArchiveDirectory(stateDirectory), `${symlinkId}.json`),
     );
     await expect(readSessionArchive(stateDirectory, symlinkId)).rejects.toMatchObject({
+      code: "session_archive_unsafe_path",
+    });
+
+    const unsafeDirectoryState = await mkdtemp(join(tmpdir(), "usine-session-archive-unsafe-dir-"));
+    await symlink(tmpdir(), sessionArchiveDirectory(unsafeDirectoryState));
+    await expect(listSessionArchives(unsafeDirectoryState)).rejects.toMatchObject({
+      code: "session_archive_unsafe_path",
+    });
+
+    const unsafeFileState = await mkdtemp(join(tmpdir(), "usine-session-archive-unsafe-file-"));
+    const unsafeFile = await writeArchive(unsafeFileState, "1");
+    await chmod(
+      join(sessionArchiveDirectory(unsafeFileState), `${unsafeFile.archiveId}.json`),
+      0o644,
+    );
+    await expect(readSessionArchive(unsafeFileState, unsafeFile.archiveId)).rejects.toMatchObject({
       code: "session_archive_unsafe_path",
     });
   });

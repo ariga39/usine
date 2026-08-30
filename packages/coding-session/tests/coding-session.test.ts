@@ -2378,6 +2378,97 @@ describe("Coding Session", () => {
     });
   });
 
+  test("keeps an undefined normalizer as a complete, decodable schema-invalid archive", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-undefined-output-"));
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("provider response"), "undefined-output-thread"),
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => undefined,
+      },
+    );
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "undefined normalizer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "role_output_schema_invalid",
+      archiveStatus: "stored",
+    });
+    const archive = completeArchive(
+      await readSessionArchive(stateDirectory, observation.archiveId!),
+    );
+    expect(archive).toMatchObject({
+      rawFinalResponse: "provider response",
+      normalizedOutput: null,
+      completeness: "complete",
+      captureStatus: "stored",
+    });
+  });
+
+  test("keeps non-JSON provider evidence and normalized output non-authoritative", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-non-json-"));
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const nonJsonItem = {
+      type: "command_execution",
+      id: "non-json-command",
+      aggregated_output: circular,
+      status: "completed",
+    } as unknown as ThreadItem;
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(async () => sdkTurn("provider response"), "non-json-thread", undefined, [
+          nonJsonItem,
+        ]),
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => circular,
+      },
+    );
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "non-json capture",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "role_output_schema_invalid",
+      archiveStatus: "stored",
+    });
+    const archive = completeArchive(
+      await readSessionArchive(stateDirectory, observation.archiveId!),
+    );
+    expect(archive).toMatchObject({
+      completeness: "complete",
+      normalizedOutput: null,
+      captureStatus: "stored",
+    });
+    expect(archive.items).toContainEqual(
+      expect.objectContaining({ type: "command_execution", id: "non-json-command" }),
+    );
+  });
+
   test.each(["provider failure", "cancellation", "schema-invalid"] as const)(
     "leaves a retrievable archive after %s",
     async (mode) => {

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { chmod, lstat, mkdir, open, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskContract } from "@usine/task-authority";
 import { z } from "zod";
@@ -273,7 +274,13 @@ export class SessionArchiveWriter {
   }
 
   setNormalizedOutput(output: unknown): void {
-    this.record.normalizedOutput = cloneJsonValue(output);
+    const cloned = cloneJsonValue(output);
+    if (cloned === undefined) {
+      this.record.normalizedOutput = null;
+      this.warnings.add("normalized_output_unavailable");
+    } else {
+      this.record.normalizedOutput = cloned;
+    }
     void this.schedulePersist();
   }
 
@@ -313,16 +320,20 @@ export class SessionArchiveWriter {
   private async persistNow(): Promise<void> {
     if (this.writeFailure) return;
     try {
-      await mkdir(sessionArchiveDirectory(this.options.stateDirectory), { recursive: true });
+      const directory = await ensureArchiveDirectory(this.options.stateDirectory, true);
       this.record.updatedAtEpochMs = Date.now();
       const encoded = encodeBoundedRecord(this.record, this.maxArchiveBytes, this.warnings);
       if (Buffer.byteLength(encoded.bytes) > this.maxArchiveBytes)
         throw new Error("session archive byte bound is too small for its metadata");
       this.record = encoded.record;
-      const path = archivePath(this.options.stateDirectory, this.archiveId);
+      const path = join(directory, `${this.archiveId}.json`);
       const temporary = `${path}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, encoded.bytes, { encoding: "utf8", flag: "wx" });
+        await writeFile(temporary, encoded.bytes, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        });
         await rename(temporary, path);
       } finally {
         await unlink(temporary).catch(() => undefined);
@@ -345,9 +356,8 @@ export class SessionArchiveWriter {
     try {
       if (!this.writeFailure) {
         try {
-          const entries = await readdir(sessionArchiveDirectory(this.options.stateDirectory), {
-            withFileTypes: true,
-          });
+          const directory = await ensureArchiveDirectory(this.options.stateDirectory, false);
+          const entries = await readdir(directory, { withFileTypes: true });
           const records = await Promise.all(
             entries
               .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
@@ -482,11 +492,15 @@ async function writeArchiveSnapshot(
   const encoded = serializeWithByteLength(record);
   if (Buffer.byteLength(encoded.bytes) > maxBytes)
     throw new Error("session archive tombstone exceeds byte bound");
-  await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true });
-  const path = archivePath(stateDirectory, archiveId);
+  const directory = await ensureArchiveDirectory(stateDirectory, true);
+  const path = join(directory, `${archiveId}.json`);
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, encoded.bytes, { encoding: "utf8", flag: "wx" });
+    await writeFile(temporary, encoded.bytes, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
     await rename(temporary, path);
   } finally {
     await unlink(temporary).catch(() => undefined);
@@ -497,11 +511,18 @@ export async function readSessionArchive(
   stateDirectory: string,
   archiveId: string,
 ): Promise<SessionArchive> {
-  const path = archivePath(stateDirectory, archiveId);
-  let stat;
-  try {
-    stat = await lstat(path);
-  } catch (error) {
+  const fileName = archivePathName(archiveId);
+  const directory = await ensureArchiveDirectory(stateDirectory, false).catch((error) => {
+    if (error instanceof SessionArchiveError && error.code === "session_archive_not_found")
+      throw new SessionArchiveError(
+        "session_archive_not_found",
+        "session archive not found",
+        archiveId,
+      );
+    throw error;
+  });
+  const path = join(directory, `${fileName}.json`);
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch((error) => {
     if (isErrno(error, "ENOENT"))
       throw new SessionArchiveError(
         "session_archive_not_found",
@@ -513,22 +534,53 @@ export async function readSessionArchive(
       "session archive cannot be inspected",
       archiveId,
     );
-  }
-  if (!stat.isFile())
-    throw new SessionArchiveError(
-      "session_archive_unsafe_path",
-      "session archive is not a regular file",
-      archiveId,
-    );
+  });
   try {
-    const value = JSON.parse(await readFile(path, "utf8"));
-    return sessionArchiveSchema.or(sessionArchiveTombstoneSchema).parse(value);
-  } catch {
+    const stat = await handle.stat();
+    if (!stat.isFile() || !isPrivateMode(stat.mode))
+      throw new SessionArchiveError(
+        "session_archive_unsafe_path",
+        "session archive is not a private regular file",
+        archiveId,
+      );
+    if (stat.size > MAX_ARCHIVE_BYTES)
+      throw new SessionArchiveError(
+        "session_archive_corrupt",
+        "session archive exceeds the hard byte bound",
+        archiveId,
+      );
+    const bytes = await handle.readFile();
+    if (bytes.length > MAX_ARCHIVE_BYTES)
+      throw new SessionArchiveError(
+        "session_archive_corrupt",
+        "session archive exceeds the hard byte bound",
+        archiveId,
+      );
+    const archive = sessionArchiveSchema
+      .or(sessionArchiveTombstoneSchema)
+      .parse(JSON.parse(bytes.toString("utf8")));
+    if (archive.archiveId !== archiveId || archive.byteLength !== bytes.length)
+      throw new SessionArchiveError(
+        "session_archive_corrupt",
+        "session archive identity or byte length is invalid",
+        archiveId,
+      );
+    if ("profile" in archive && archive.profile.sha256 !== profileChecksum(archive.profile))
+      throw new SessionArchiveError(
+        "session_archive_corrupt",
+        "session archive profile checksum is invalid",
+        archiveId,
+      );
+    return archive;
+  } catch (error) {
+    if (error instanceof SessionArchiveError) throw error;
     throw new SessionArchiveError(
       "session_archive_corrupt",
       "session archive is corrupt",
       archiveId,
     );
+  } finally {
+    await handle.close();
   }
 }
 
@@ -546,20 +598,34 @@ export async function listSessionArchives(
   limit = 200,
 ): Promise<SessionArchiveManifest[]> {
   if (taskId !== undefined) assertDurableId(taskId, "task ID");
-  const directory = sessionArchiveDirectory(stateDirectory);
-  let entries;
+  let directory: string;
   try {
-    entries = await readdir(directory, { withFileTypes: true });
+    directory = await ensureArchiveDirectory(stateDirectory, false);
   } catch (error) {
-    if (isErrno(error, "ENOENT")) return [];
+    if (error instanceof SessionArchiveError && error.code === "session_archive_not_found")
+      return [];
     throw error;
   }
+  const entries = await readdir(directory, { withFileTypes: true });
   const manifests: SessionArchiveManifest[] = [];
   for (const entry of entries) {
     if (!entry.name.endsWith(".json")) continue;
     const archiveId = entry.name.slice(0, -5);
-    const manifest = await readSessionArchiveManifest(stateDirectory, archiveId);
-    if (taskId === undefined || manifest.taskId === taskId) manifests.push(manifest);
+    try {
+      const manifest = await readSessionArchiveManifest(stateDirectory, archiveId);
+      if (taskId === undefined || manifest.taskId === taskId) manifests.push(manifest);
+    } catch (error) {
+      if (
+        error instanceof SessionArchiveError &&
+        [
+          "session_archive_corrupt",
+          "session_archive_unsafe_path",
+          "session_archive_invalid_id",
+        ].includes(error.code)
+      )
+        continue;
+      throw error;
+    }
   }
   return manifests
     .toSorted((left, right) => right.createdAtEpochMs - left.createdAtEpochMs)
@@ -599,13 +665,47 @@ export const exportSessionArchive = readSessionArchive;
 export const cleanupArchives = cleanupSessionArchives;
 
 function archivePath(stateDirectory: string, archiveId: string): string {
+  return join(sessionArchiveDirectory(stateDirectory), `${archivePathName(archiveId)}.json`);
+}
+
+function archivePathName(archiveId: string): string {
   if (!isSessionArchiveId(archiveId))
     throw new SessionArchiveError(
       "session_archive_invalid_id",
       "archive ID is malformed",
       archiveId,
     );
-  return join(sessionArchiveDirectory(stateDirectory), `${archiveId}.json`);
+  return archiveId;
+}
+
+async function ensureArchiveDirectory(stateDirectory: string, create: boolean): Promise<string> {
+  const directory = sessionArchiveDirectory(stateDirectory);
+  if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
+  let stat;
+  try {
+    stat = await lstat(directory);
+  } catch (error) {
+    if (isErrno(error, "ENOENT"))
+      throw new SessionArchiveError(
+        "session_archive_not_found",
+        "session archive directory not found",
+      );
+    throw new SessionArchiveError(
+      "session_archive_unsafe_path",
+      "session archive directory cannot be inspected",
+    );
+  }
+  if (!stat.isDirectory() || !isPrivateMode(stat.mode))
+    throw new SessionArchiveError(
+      "session_archive_unsafe_path",
+      "session archive directory is not private",
+    );
+  if (create) await chmod(directory, 0o700);
+  return directory;
+}
+
+function isPrivateMode(mode: number): boolean {
+  return (mode & 0o077) === 0;
 }
 
 function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
@@ -757,7 +857,11 @@ function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema
 
 function cloneJsonValue(value: unknown): unknown {
   if (value === undefined) return undefined;
-  return JSON.parse(JSON.stringify(value)) as unknown;
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeLabel(value: unknown): string {
@@ -794,8 +898,15 @@ function profileSnapshot(
   const fields = profileSnapshotFieldsSchema.parse(result);
   return {
     ...fields,
-    sha256: createHash("sha256").update(JSON.stringify(fields), "utf8").digest("hex"),
+    sha256: profileChecksum(fields),
   };
+}
+
+function profileChecksum(
+  profile: SessionArchiveProfileSnapshot | z.infer<typeof profileSnapshotFieldsSchema>,
+): string {
+  const { sha256: _sha256, ...fields } = profile as SessionArchiveProfileSnapshot;
+  return createHash("sha256").update(JSON.stringify(fields), "utf8").digest("hex");
 }
 
 export function sessionArchiveProfileSnapshot(

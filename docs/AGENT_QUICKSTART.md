@@ -268,7 +268,7 @@ Human-readable output is the default for resource reads; add `--json` for the st
 
 ### Session Archive operations
 
-Session Archive content is sensitive: it can contain the authorized prompt, provider tool arguments/output, raw response, and normalized output. Normal Task resources, snapshots, logs, and history expose at most an opaque archive ID and capture status. Archive content is never returned by the loopback HTTP API.
+Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, and history expose at most an opaque archive ID and capture status. Archive content is never returned by the loopback HTTP API.
 
 Use the host-local CLI against the configured state root. Listing and manifest inspection are metadata-only:
 
