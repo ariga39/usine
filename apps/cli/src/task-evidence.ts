@@ -311,7 +311,7 @@ function archiveEvidence(archive: {
   status: "stored" | "truncated" | "failed" | "pruned";
   completeness?: "complete" | "partial";
 }) {
-  if (archive.status === "failed")
+  if (archive.status === "failed" || archive.status === "pruned")
     return { archiveId: archive.archiveId, status: "unavailable" as const };
   if (archive.status === "stored" && archive.completeness === undefined)
     return { archiveId: archive.archiveId, status: "unavailable" as const };

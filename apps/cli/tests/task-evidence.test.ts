@@ -75,12 +75,14 @@ describe("task evidence", () => {
         completeness: "complete",
       }),
       event(3, { archiveId: "archive_legacy", status: "stored" }),
+      event(4, { archiveId: "archive_pruned", status: "pruned", completeness: "partial" }),
     ]);
 
     expect(evidence.roleRuns.implementer.map((run) => run.archive)).toEqual([
       { archiveId: "archive_partial", status: "partial" },
       { archiveId: "archive_failed", status: "unavailable" },
       { archiveId: "archive_legacy", status: "unavailable" },
+      { archiveId: "archive_pruned", status: "unavailable" },
     ]);
   });
 

@@ -710,7 +710,7 @@ describe("Coding Session", () => {
               model: "https://private.example/v1/model",
               modelReasoningEffort: "low" as const,
             },
-            { config: { model_provider: "/private/provider-config" } },
+            { config: { model_provider: "private.example" } },
           ),
       },
     );
@@ -728,6 +728,26 @@ describe("Coding Session", () => {
     });
 
     expect(observation.effectiveProfile).toMatchObject({ model: null, modelProvider: null });
+    expect(() =>
+      decodeTaskObservationEventInput({
+        eventId: "unsafe-profile-observation",
+        occurredAtEpochMs: 1,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "succeeded",
+          sessionId: "coding-session:1:implementer",
+          requestedProfile: observation.requestedProfile,
+          effectiveProfile: {
+            ...observation.effectiveProfile,
+            model: "https://private.example/v1/model",
+            modelProvider: "private.example",
+          },
+          usage: observation.usage,
+        },
+      }),
+    ).toThrow();
     expect(() =>
       decodeTaskObservationEventInput({
         eventId: "safe-profile-observation",
