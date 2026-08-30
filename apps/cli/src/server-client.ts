@@ -20,6 +20,7 @@ import {
   isTerminalState,
   isWaitingState,
 } from "@usine/task-authority";
+import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
 export type TaskSubmission = ApiTaskSubmission;
 
@@ -167,6 +168,30 @@ export async function taskEvents(
   return runRequest(
     client.tasks.history({ params: { taskId }, query: { after: afterSequence, limit } }),
   );
+}
+
+export async function taskEvidence(
+  serverUrl: string,
+  taskId: string,
+  limit = 200,
+): Promise<TaskEvidence | null> {
+  const task = await taskStatus(serverUrl, taskId);
+  if (!task) return null;
+  const events: TaskEvent[] = [];
+  let afterSequence = 0;
+  while (true) {
+    const page = await taskEvents(serverUrl, taskId, afterSequence, limit);
+    events.push(...page.events);
+    const highestEventSequence = page.events.reduce(
+      (highest, event) => Math.max(highest, event.sequence),
+      afterSequence,
+    );
+    const nextSequence = Math.max(afterSequence, page.nextSequence, highestEventSequence);
+    if (page.events.length === 0 || nextSequence <= afterSequence) break;
+    afterSequence = nextSequence;
+    if (page.events.length < limit) break;
+  }
+  return deriveTaskEvidence(task, events);
 }
 
 export type EventScope = ApiEventScope;
