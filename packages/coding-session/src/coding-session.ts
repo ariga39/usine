@@ -202,7 +202,6 @@ export interface CodingSessionOptions {
 
 export interface SessionObservation<T = unknown> {
   status: "completed" | "failed" | "cancelled";
-  sessionId: string | null;
   output: T | null;
   usage: { inputTokens?: number; outputTokens?: number } | null;
   summary: string;
@@ -223,6 +222,10 @@ export interface SessionObservation<T = unknown> {
   requestedProfile?: string;
   /** Sanitized effective profile facts owned by Coding Session. */
   effectiveProfile?: EffectiveSessionProfile;
+}
+
+interface CapturedSessionObservation<T = unknown> extends SessionObservation<T> {
+  sessionId: string | null;
 }
 
 export interface CodingSessionCleanup {
@@ -340,11 +343,12 @@ export class CodexCodingSession {
       : undefined;
     await archive?.begin();
     const observation = await this.runProviderCaptured(request, archive);
+    const { sessionId: _sessionId, ...publicObservation } = observation;
     if (!archive)
       return {
-        ...observation,
-        requestedProfile: observation.requestedProfile ?? request.profile,
-        effectiveProfile: observation.effectiveProfile ?? unavailableEffectiveProfile(),
+        ...publicObservation,
+        requestedProfile: publicObservation.requestedProfile ?? request.profile,
+        effectiveProfile: publicObservation.effectiveProfile ?? unavailableEffectiveProfile(),
       };
     const archiveResult = await archive.finish({
       status: observation.status,
@@ -355,9 +359,9 @@ export class CodexCodingSession {
       failureClass: observation.failureClass,
     });
     return {
-      ...observation,
-      requestedProfile: observation.requestedProfile ?? request.profile,
-      effectiveProfile: observation.effectiveProfile ?? unavailableEffectiveProfile(),
+      ...publicObservation,
+      requestedProfile: publicObservation.requestedProfile ?? request.profile,
+      effectiveProfile: publicObservation.effectiveProfile ?? unavailableEffectiveProfile(),
       archiveId: archiveResult.archiveId,
       archiveStatus: archiveResult.archiveStatus,
       archiveCompleteness: archiveResult.completeness,
@@ -368,7 +372,7 @@ export class CodexCodingSession {
   private async runProviderCaptured<T = unknown>(
     request: SessionRequest<T>,
     archive?: SessionArchiveWriter,
-  ): Promise<SessionObservation<T>> {
+  ): Promise<CapturedSessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
     let remaining: number;
     try {

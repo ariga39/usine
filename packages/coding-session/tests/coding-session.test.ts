@@ -2294,6 +2294,7 @@ describe("Coding Session", () => {
       archiveStatus: "stored",
       archiveId: expect.stringMatching(/^archive_[0-9a-f-]+$/),
     });
+    expect("sessionId" in observation).toBe(false);
     expect(JSON.stringify(observation)).not.toContain("sensitive prompt");
     const archive = completeArchive(
       await readSessionArchive(stateDirectory, observation.archiveId!),
