@@ -45,6 +45,7 @@ export interface RoleRunEffort {
 export interface RoleRunEvidence {
   readonly role: EvidenceRole;
   readonly activation: number | null;
+  readonly reviewCycle: number | null;
   readonly requestedProfile: string | null;
   readonly effectiveProfile: EffectiveRoleProfile;
   readonly effort: RoleRunEffort;
@@ -115,7 +116,14 @@ export function deriveTaskEvidence(
       observedOutcomeIds.add(identity);
     }
     const key = `${data.role}:${data.activation}:${data.sessionId}`;
-    const run = runs.get(key) ?? mutableRoleRun(data.role, data.activation, data.sessionId);
+    const explicitReviewCycle =
+      data.type === "coding_session_started" || data.type === "coding_session_completed"
+        ? data.reviewCycle
+        : undefined;
+    const run =
+      runs.get(key) ??
+      mutableRoleRun(data.role, data.activation, data.sessionId, explicitReviewCycle);
+    if (explicitReviewCycle !== undefined) run.reviewCycle = explicitReviewCycle;
     if (data.type === "coding_session_started") {
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
     } else if (data.type === "coding_session_completed") {
@@ -140,9 +148,7 @@ export function deriveTaskEvidence(
     const candidateSha =
       run.role === "implementer"
         ? candidateByActivation.get(run.activation ?? -1) ?? null
-        : run.activation === null
-          ? null
-          : reviewByCycle.get(reviewCycle(run.sessionId) ?? -1) ?? null;
+        : reviewByCycle.get(run.reviewCycle ?? -1) ?? null;
     run.outcome.candidateSha = candidateSha;
     run.outcome.taskRelation = relationToTask(candidateSha, task);
   }
@@ -168,6 +174,7 @@ export const taskEvidenceFrom = deriveTaskEvidence;
 interface MutableRoleRun {
   role: EvidenceRole;
   activation: number | null;
+  reviewCycle: number | null;
   sessionId: string;
   requestedProfile: string | null;
   effectiveProfile: EffectiveRoleProfile;
@@ -181,10 +188,16 @@ interface MutableRoleRun {
   };
 }
 
-function mutableRoleRun(role: EvidenceRole, activation: number, sessionId = "unknown"): MutableRoleRun {
+function mutableRoleRun(
+  role: EvidenceRole,
+  candidateFence: number,
+  sessionId = "unknown",
+  reviewCycle: number | undefined,
+): MutableRoleRun {
   return {
     role,
-    activation,
+    activation: role === "implementer" ? candidateFence : null,
+    reviewCycle: role === "reviewer" ? (reviewCycle ?? null) : null,
     sessionId,
     requestedProfile: null,
     effectiveProfile: unavailableEffectiveProfile(),
@@ -198,11 +211,6 @@ function mutableRoleRun(role: EvidenceRole, activation: number, sessionId = "unk
 function toPublicRoleRun(run: MutableRoleRun): RoleRunEvidence {
   const { sessionId: _sessionId, ...publicRun } = run;
   return publicRun;
-}
-
-function reviewCycle(sessionId: string): number | null {
-  const match = /^review-session:([0-9]+):/.exec(sessionId);
-  return match?.[1] === undefined ? null : Number(match[1]);
 }
 
 function isRoleRunEvent(
@@ -305,7 +313,9 @@ function unavailableEffectiveProfile(): EffectiveRoleProfile {
 }
 
 function roleRunOrder(left: RoleRunEvidence, right: RoleRunEvidence): number {
-  return (left.activation ?? Number.MAX_SAFE_INTEGER) - (right.activation ?? Number.MAX_SAFE_INTEGER);
+  const leftOrder = left.role === "reviewer" ? left.reviewCycle : left.activation;
+  const rightOrder = right.role === "reviewer" ? right.reviewCycle : right.activation;
+  return (leftOrder ?? Number.MAX_SAFE_INTEGER) - (rightOrder ?? Number.MAX_SAFE_INTEGER);
 }
 
 export function renderTaskEvidence(evidence: TaskEvidence, json: boolean): string {
@@ -323,7 +333,7 @@ export function renderTaskEvidence(evidence: TaskEvidence, json: boolean): strin
 
 function renderRoleRun(run: RoleRunEvidence): string {
   return [
-    `  activation=${run.activation ?? "unknown"} requested-profile=${run.requestedProfile ?? "unknown"}`,
+    `  ${run.role === "reviewer" ? `review-cycle=${run.reviewCycle ?? "unknown"}` : `activation=${run.activation ?? "unknown"}`} requested-profile=${run.requestedProfile ?? "unknown"}`,
     `    effective=${run.effectiveProfile.profileName ?? "unavailable"} model=${run.effectiveProfile.model ?? "unavailable"} provider=${run.effectiveProfile.modelProvider ?? "unavailable"} adapter=${run.effectiveProfile.adapter ?? "unavailable"} reasoning=${run.effectiveProfile.reasoningEffort ?? "unavailable"}`,
     `    status=${run.outcome.status} usage=${run.usage ? JSON.stringify(run.usage) : "unavailable"} archive=${run.archive.archiveId ?? "unavailable"} (${run.archive.status})`,
     `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} phase=${run.effort.phase ?? "unknown"}`,

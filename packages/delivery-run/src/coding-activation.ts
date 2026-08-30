@@ -11,7 +11,6 @@ import {
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
 import {
   blockTask,
-  effectiveProfileObservation,
   emitCodingInterruption,
   emitCodingObservation,
 } from "./delivery-progress.js";
@@ -129,7 +128,7 @@ async function runCodingAttempt(
       outcome: "cancelled",
       sessionId,
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
-      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
@@ -155,7 +154,7 @@ async function runCodingAttempt(
       outcome: observation.status === "cancelled" ? "cancelled" : "failed",
       sessionId,
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
-      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
@@ -179,7 +178,7 @@ async function runCodingAttempt(
       outcome: "blocked",
       sessionId,
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
-      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
@@ -197,7 +196,7 @@ async function runCodingAttempt(
     outcome: "succeeded",
     sessionId,
     requestedProfile: observation.requestedProfile ?? input.implementer.profile,
-    effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+    ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
     usage: observation.usage ?? null,
     ...archiveReference(observation),
   });

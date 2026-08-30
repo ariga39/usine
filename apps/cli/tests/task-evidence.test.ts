@@ -84,6 +84,53 @@ describe("task evidence", () => {
     ]);
   });
 
+  test("identifies reviewer runs by explicit review cycle, not Candidate fence or opaque ID", () => {
+    const taskId = "review-cycle-task";
+    const sha = "c".repeat(40);
+    const task = {
+      taskId,
+      state: "reviewed",
+      candidateSha: sha,
+      check: { sha, status: "passed", exitCode: 0 },
+      review: { sha, verdict: "approved", classification: "approved", findingCount: 0 },
+    } as TaskResource;
+    const event = (sequence: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `review-cycle-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data,
+      });
+
+    const evidence = deriveTaskEvidence(task, [
+      event(1, { type: "candidate_frozen", sha, fence: 7 }),
+      event(2, {
+        type: "coding_session_started",
+        role: "reviewer",
+        activation: 7,
+        reviewCycle: 2,
+        sessionId: "opaque-provider-correlation",
+      }),
+      event(3, {
+        type: "coding_session_completed",
+        role: "reviewer",
+        activation: 7,
+        reviewCycle: 2,
+        outcome: "succeeded",
+        sessionId: "opaque-provider-correlation",
+      }),
+      event(4, { type: "review_completed", sha, cycle: 2, verdict: "approved" }),
+    ]);
+
+    expect(evidence.roleRuns.reviewer[0]).toMatchObject({
+      role: "reviewer",
+      activation: null,
+      reviewCycle: 2,
+      outcome: { candidateSha: sha, taskRelation: "accepted_exact_sha" },
+    });
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);
@@ -143,12 +190,14 @@ describe("task evidence", () => {
         type: "coding_session_started",
         role: "reviewer",
         activation: 1,
+        reviewCycle: 1,
         sessionId: "review-session:1:reviewer",
       }),
       event(7, {
         type: "coding_session_completed",
         role: "reviewer",
         activation: 1,
+        reviewCycle: 1,
         outcome: "succeeded",
         sessionId: "review-session:1:reviewer",
       }),
@@ -188,6 +237,7 @@ describe("task evidence", () => {
           {
             role: "implementer",
             activation: 1,
+            reviewCycle: null,
             requestedProfile: "writer-profile",
             effectiveProfile: {
               profileName: "writer-profile",
@@ -216,6 +266,7 @@ describe("task evidence", () => {
           {
             role: "reviewer",
             activation: 1,
+            reviewCycle: 1,
             requestedProfile: "review-profile",
             effectiveProfile: {
               profileName: "review-profile",

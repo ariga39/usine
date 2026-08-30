@@ -55,6 +55,7 @@ const eventData = Schema.Union([
     type: Schema.Literal("coding_session_started"),
     role,
     activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
     requestedProfile: Schema.optional(safeObservationId),
   }),
@@ -111,6 +112,7 @@ const eventData = Schema.Union([
     type: Schema.Literal("coding_session_completed"),
     role,
     activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
     outcome,
     sessionId: safeObservationId,
     requestedProfile: Schema.optional(safeObservationId),
@@ -212,6 +214,7 @@ const observationData = Schema.Union([
     type: Schema.Literal("coding_session_started"),
     role,
     activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
     requestedProfile: Schema.optional(safeObservationId),
   }),
@@ -268,6 +271,7 @@ const observationData = Schema.Union([
     type: Schema.Literal("coding_session_completed"),
     role,
     activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
     outcome,
     sessionId: safeObservationId,
     requestedProfile: Schema.optional(safeObservationId),
@@ -331,7 +335,14 @@ export function decodeTaskEvent(input: unknown): TaskEvent {
 const dataFields: Record<string, readonly string[]> = {
   task_admitted: ["type", "contractHash"],
   activation_reserved: ["type", "activation", "recovery"],
-  coding_session_started: ["type", "role", "activation", "sessionId", "requestedProfile"],
+  coding_session_started: [
+    "type",
+    "role",
+    "activation",
+    "reviewCycle",
+    "sessionId",
+    "requestedProfile",
+  ],
   coding_thread_started: ["type", "role", "activation", "sessionId"],
   coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
   coding_tool_completed: [
@@ -367,6 +378,7 @@ const dataFields: Record<string, readonly string[]> = {
     "type",
     "role",
     "activation",
+    "reviewCycle",
     "outcome",
     "sessionId",
     "requestedProfile",
@@ -404,9 +416,9 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
   const actual = Object.keys(input);
   const optional =
     input.type === "coding_session_started"
-      ? new Set(["requestedProfile"])
+      ? new Set(["reviewCycle", "requestedProfile"])
       : input.type === "coding_session_completed"
-        ? new Set(["requestedProfile", "effectiveProfile", "usage", "archive"])
+        ? new Set(["reviewCycle", "requestedProfile", "effectiveProfile", "usage", "archive"])
         : new Set<string>();
   assertExactKeys(input, expected.filter((key) => !optional.has(key) || actual.includes(key)));
 }
