@@ -24,6 +24,7 @@ import {
 import { assertLoopbackHttpUrl } from "./loopback.js";
 
 const defaultTaskLimit = 100;
+export const hermesBridgeObservationLimit = defaultTaskLimit * 2;
 const defaultWebhookAttemptTimeoutMs = 10_000;
 
 export interface HermesBridgeUpstream {
@@ -118,11 +119,24 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     ),
   });
   const sourceUpstream = options.upstream;
-  const trackedTaskIds = new Set<string>();
-  const trackedRepositoryIds = new Map<string, string>();
+  type TaskObservation = {
+    readonly repositoryId?: string;
+    readonly classification?: HermesAttentionPayload["state"];
+    readonly revision?: number;
+  };
+  const trackedTasks = new Map<string, TaskObservation>();
+  const rememberTask = (taskId: string, patch: Partial<TaskObservation> = {}): void => {
+    const prior = trackedTasks.get(taskId);
+    trackedTasks.delete(taskId);
+    trackedTasks.set(taskId, { ...prior, ...patch });
+    while (trackedTasks.size > hermesBridgeObservationLimit) {
+      const oldest = trackedTasks.keys().next().value;
+      if (oldest === undefined) break;
+      trackedTasks.delete(oldest);
+    }
+  };
   const trackTask = (taskId: string, repositoryId?: string): void => {
-    trackedTaskIds.add(taskId);
-    if (repositoryId !== undefined) trackedRepositoryIds.set(taskId, repositoryId);
+    rememberTask(taskId, repositoryId === undefined ? {} : { repositoryId });
   };
   const upstream: HermesBridgeUpstream = {
     serverSnapshot: async (limit, signal) => {
@@ -158,10 +172,6 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     },
     subscribe: () => sourceUpstream.subscribe(),
   };
-  const taskStates = new Map<
-    string,
-    { classification: HermesAttentionPayload["state"]; revision: number } | undefined
-  >();
   let unavailable = false;
   let initialReconciliationNotified = false;
   let running: Promise<void> | undefined;
@@ -178,13 +188,17 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     eventRepositoryId?: string,
   ): Promise<void> => {
     if (!resource) return;
-    const previous = taskStates.get(resource.taskId);
+    const previous = trackedTasks.get(resource.taskId);
     const actionable = actionableState(resource);
     const current = actionable
       ? { classification: actionable, revision: resource.revision }
       : undefined;
+    rememberTask(resource.taskId, {
+      ...(eventRepositoryId === undefined ? {} : { repositoryId: eventRepositoryId }),
+      classification: current?.classification,
+      revision: current?.revision,
+    });
     if (mode === "startup" || mode === "reconnect") {
-      taskStates.set(resource.taskId, current);
       if (
         resource.state === "waiting" &&
         resource.retryable === true &&
@@ -196,7 +210,6 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
       }
       return;
     }
-    taskStates.set(resource.taskId, current);
     if (
       current &&
       (previous?.classification !== current.classification ||
@@ -228,15 +241,15 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
         const listedTaskIds = new Set(tasks.tasks.map((resource) => resource.taskId));
         await Promise.all(
           tasks.tasks.map((resource) =>
-            observeTask(resource, mode, undefined, trackedRepositoryIds.get(resource.taskId)),
+            observeTask(resource, mode, undefined, trackedTasks.get(resource.taskId)?.repositoryId),
           ),
         );
         await Promise.all(
-          [...trackedTaskIds]
-            .filter((taskId) => !listedTaskIds.has(taskId))
-            .map(async (taskId) => {
+          [...trackedTasks.entries()]
+            .filter(([taskId]) => !listedTaskIds.has(taskId))
+            .map(async ([taskId, observation]) => {
               const resource = await upstream.getTask(taskId, signal);
-              await observeTask(resource, mode, undefined, trackedRepositoryIds.get(taskId));
+              await observeTask(resource, mode, undefined, observation.repositoryId);
             }),
         );
         if (mode === "startup" && !initialReconciliationNotified) {

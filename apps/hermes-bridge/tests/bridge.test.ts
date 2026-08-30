@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import {
   createHermesBridge,
   createUsineBridgeUpstream,
+  hermesBridgeObservationLimit,
   type HermesBridgeUpstream,
 } from "../src/bridge.js";
 import { createHermesBridgeMcpServer, startHermesBridgeMcpHttp } from "../src/mcp.js";
@@ -127,6 +128,36 @@ function listedUpstream(resources: ApiTaskResource[]): HermesBridgeUpstream {
       })),
     }),
     getTask: async (taskId) => resources.find((resource) => resource.taskId === taskId) ?? null,
+  };
+}
+
+function taskWithRepository(
+  state: ApiTaskResource["state"],
+  taskId: string,
+  retryable = false,
+): ApiTaskResource {
+  return {
+    ...task(state, retryable, taskId),
+    repository: {
+      id: `repository-${taskId}`,
+      owner: "example",
+      name: taskId,
+      baseBranch: "main",
+    },
+  };
+}
+
+function listResource(resource: ApiTaskResource) {
+  return {
+    taskId: resource.taskId,
+    revision: resource.revision,
+    deadlineEpochMs: resource.deadlineEpochMs,
+    state: resource.state,
+    candidateSha: resource.candidateSha,
+    activeActivation: resource.activeActivation,
+    retryable: resource.retryable ?? false,
+    writer: resource.writer,
+    evidence: resource.evidence,
   };
 }
 
@@ -310,6 +341,153 @@ describe("Hermes supervisor bridge attention", () => {
       repositoryId: "repository-269",
       state: "waiting",
     });
+    await bridge.close();
+  });
+
+  test("bounds Task observations while retaining and rediscovering owning paths", async () => {
+    const requests: RecordedRequest[] = [];
+    const listTaskId = "list-window-task";
+    const eventTaskId = "event-rediscovery-task";
+    const submittedTaskId = "submitted-recent-task";
+    const mcpTaskId = "mcp-read-recent-task";
+    const historyTaskId = "mcp-history-recent-task";
+    const retryTaskId = "mcp-retry-recent-task";
+    let listMode: "single" | "full" = "single";
+    let requestedListLimit: number | undefined;
+    let collectReconnectReads = false;
+    const reconnectReads: string[] = [];
+    const listStateReads: string[] = [];
+    const resources = new Map<string, ApiTaskResource>([
+      [listTaskId, taskWithRepository("admitted", listTaskId)],
+      [eventTaskId, taskWithRepository("admitted", eventTaskId)],
+    ]);
+    const source = listedUpstream([resources.get(listTaskId)!]);
+    source.listTasks = async (limit) => {
+      requestedListLimit = limit;
+      if (listMode === "single") {
+        return { tasks: [listResource(resources.get(listTaskId)!)] };
+      }
+      return {
+        tasks: [...resources.values()]
+          .filter((resource) => resource.taskId.startsWith("full-list-"))
+          .map((resource) => {
+            const value = listResource(resource);
+            return new Proxy(value, {
+              get(target, property, receiver) {
+                if (property === "state") listStateReads.push(target.taskId);
+                return Reflect.get(target, property, receiver);
+              },
+            });
+          }),
+      };
+    };
+    source.getTask = async (taskId) => {
+      if (collectReconnectReads) reconnectReads.push(taskId);
+      return resources.get(taskId) ?? null;
+    };
+    source.submitTask = async () => resources.get(submittedTaskId)!;
+    source.taskHistory = async (taskId) => ({ taskId, events: [], nextSequence: 0 });
+    source.retryTask = async (taskId) => resources.get(taskId)!;
+    const bridge = createHermesBridge({
+      upstream: source,
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        return new Response("ok", { status: 200 });
+      },
+      taskLimit: hermesBridgeObservationLimit + 25,
+      now: () => 1_000,
+    });
+
+    await bridge.reconcile("startup");
+    await bridge.handleEvent(eventFor(eventTaskId, "coding_tool_completed"));
+    for (let index = 0; index < hermesBridgeObservationLimit + 25; index += 1) {
+      const highCardinalityTaskId = `high-cardinality-${index}`;
+      resources.set(highCardinalityTaskId, taskWithRepository("admitted", highCardinalityTaskId));
+      await bridge.upstream.getTask(highCardinalityTaskId);
+    }
+
+    resources.set(submittedTaskId, taskWithRepository("waiting", submittedTaskId, true));
+    resources.set(mcpTaskId, taskWithRepository("admitted", mcpTaskId));
+    resources.set(historyTaskId, taskWithRepository("admitted", historyTaskId));
+    resources.set(retryTaskId, taskWithRepository("admitted", retryTaskId));
+    await bridge.upstream.submitTask({
+      contractPath: "<COMMITTED_CONTRACT_PATH>",
+      repositoryId: `repository-${submittedTaskId}`,
+    });
+    await bridge.upstream.getTask(mcpTaskId);
+    await bridge.upstream.taskHistory(historyTaskId);
+    await bridge.upstream.retryTask(retryTaskId);
+    resources.set(listTaskId, taskWithRepository("waiting", listTaskId, true));
+    collectReconnectReads = true;
+    await bridge.notifyUnavailable();
+    requests.length = 0;
+    await bridge.notifyReconnected();
+    await expect
+      .poll(() =>
+        requests.some(
+          (request) =>
+            (JSON.parse(request.body) as { event?: string }).event === "usine_instance_reconciled",
+        ),
+      )
+      .toBe(true);
+    collectReconnectReads = false;
+
+    const reconnectAttentionIds = requests
+      .map((request) => JSON.parse(request.body) as { event?: string; taskId?: string })
+      .filter((payload) => payload.event === "usine_attention")
+      .map((payload) => payload.taskId);
+    expect(reconnectAttentionIds).toContain(listTaskId);
+    expect(reconnectReads).toContain(submittedTaskId);
+    expect(reconnectReads).toContain(mcpTaskId);
+    expect(reconnectReads).toContain(historyTaskId);
+    expect(reconnectReads).toContain(retryTaskId);
+    expect(new Set(reconnectReads).size).toBeLessThanOrEqual(hermesBridgeObservationLimit - 1);
+
+    const fullListIds = Array.from(
+      { length: hermesBridgeObservationLimit + 25 },
+      (_, index) => `full-list-${index}`,
+    );
+    for (const [index, taskId] of fullListIds.entries()) {
+      resources.set(
+        taskId,
+        taskWithRepository(
+          index === 0 || index === fullListIds.length - 1 ? "waiting" : "admitted",
+          taskId,
+          index === 0 || index === fullListIds.length - 1,
+        ),
+      );
+    }
+    listMode = "full";
+    requests.length = 0;
+    await bridge.notifyUnavailable();
+    requests.length = 0;
+    await bridge.notifyReconnected();
+    await expect
+      .poll(() =>
+        requests.some(
+          (request) =>
+            (JSON.parse(request.body) as { event?: string }).event === "usine_instance_reconciled",
+        ),
+      )
+      .toBe(true);
+    await settleWebhookDelivery();
+    expect(requestedListLimit).toBe(hermesBridgeObservationLimit + 25);
+    expect(new Set(listStateReads).size).toBe(fullListIds.length);
+    expect(listStateReads).toEqual(expect.arrayContaining([fullListIds[0], fullListIds.at(-1)]));
+
+    resources.set(eventTaskId, taskWithRepository("waiting", eventTaskId, true));
+    await bridge.handleEvent(eventFor(eventTaskId, "task_waiting", 10));
+    await expect
+      .poll(() =>
+        requests
+          .map((request) => JSON.parse(request.body) as { event?: string; taskId?: string })
+          .filter((payload) => payload.event === "usine_attention")
+          .map((payload) => payload.taskId),
+      )
+      .toContain(eventTaskId);
     await bridge.close();
   });
 

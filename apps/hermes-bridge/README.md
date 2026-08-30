@@ -35,7 +35,10 @@ state, not a second scheduler or durable agent-session store.
 
 Every webhook body includes the configured opaque source ID. Task attention includes the latest Task
 revision and, for event-triggered wakes, the triggering event sequence. The current Task list is a
-bounded, unpaginated window. It is not exhaustive historical discovery.
+bounded, unpaginated window. It is not exhaustive historical discovery. Process-local Task IDs,
+Repository IDs, and classifications have a fixed 200-observation bound with recency eviction; a
+full current list response is still processed even when it exceeds that retained bound. Eviction is
+observation-only: there is no replay guarantee after disconnect or restart.
 On process startup, current retryable waiting Tasks may wake and existing terminal Tasks are treated
 as baseline. After an observed outage, the bridge sends one unavailable signal, reconciles current
 state only after Usine responds, and then sends one reconnected signal. Terminal transitions that
