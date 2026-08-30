@@ -629,6 +629,110 @@ describe("Hermes supervisor bridge attention", () => {
     );
   });
 
+  test("interrupts an unresolved attempt, retries it, and delivers a later coalesced signal", async () => {
+    const requests: RecordedRequest[] = [];
+    let attempts = 0;
+    let firstStarted!: () => void;
+    let retryStarted!: () => void;
+    let laterStarted!: () => void;
+    let firstAborted = false;
+    const firstAttempt = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const retryAttempt = new Promise<void>((resolve) => {
+      retryStarted = resolve;
+    });
+    const laterAttempt = new Promise<void>((resolve) => {
+      laterStarted = resolve;
+    });
+    const resources = [task("blocked"), task("blocked", false, "task-270")];
+    const bridge = createHermesBridge({
+      upstream: listedUpstream(resources),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      maxWebhookAttempts: 2,
+      webhookAttemptTimeoutMs: 25,
+      webhookRetryDelayMs: 0,
+      sleep: async () => undefined,
+      fetch: async (_input, init) => {
+        attempts += 1;
+        requests.push(recordRequest(init));
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected an abort signal");
+        if (attempts === 1) {
+          signal.addEventListener("abort", () => {
+            firstAborted = true;
+          });
+          firstStarted();
+          return new Promise<Response>(() => undefined);
+        }
+        if (attempts === 2) {
+          retryStarted();
+          return new Response(null, { status: 204 });
+        }
+        laterStarted();
+        return new Response(null, { status: 204 });
+      },
+      now: () => 1_000,
+    });
+
+    const first = bridge.handleEvent(eventFor("task-269", "coding_tool_completed", 9));
+    await firstAttempt;
+    const later = bridge.handleEvent(eventFor("task-270", "coding_tool_completed", 10));
+    await retryAttempt;
+    await laterAttempt;
+    await Promise.all([first, later]);
+    await bridge.close();
+
+    expect(firstAborted).toBe(true);
+    expect(requests).toHaveLength(3);
+    expect(requests[0]?.body).toBe(requests[1]?.body);
+    expect(requests[0]?.headers.get("X-Request-ID")).toBe(requests[1]?.headers.get("X-Request-ID"));
+    expect(JSON.parse(requests[2]?.body ?? "")).toEqual({
+      event: "usine_instance_reconciled",
+      sourceId: "usine-instance-269",
+    });
+  });
+
+  test("closes promptly when an unresolved webhook fetch ignores abort", async () => {
+    const requests: RecordedRequest[] = [];
+    let fetchStarted!: () => void;
+    let fetchAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      fetchAborted = resolve;
+    });
+    const bridge = createHermesBridge({
+      upstream: upstream(task("blocked")),
+      sourceId: "usine-instance-269",
+      webhookUrl: "<HERMES_WEBHOOK_URL>",
+      webhookSecret: "test-secret",
+      maxWebhookAttempts: 1,
+      webhookAttemptTimeoutMs: 60_000,
+      fetch: async (_input, init) => {
+        requests.push(recordRequest(init));
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected an abort signal");
+        signal.addEventListener("abort", fetchAborted, { once: true });
+        fetchStarted();
+        return new Promise<Response>(() => undefined);
+      },
+      now: () => 1_000,
+    });
+
+    const delivery = bridge.handleEvent(event("coding_tool_completed"));
+    void delivery.catch(() => undefined);
+    await started;
+    const closing = bridge.close();
+    await aborted;
+    await closing;
+
+    expect(requests).toHaveLength(1);
+  });
+
   test("stops a pending retry when the bridge closes", async () => {
     const requests: RecordedRequest[] = [];
     let releaseSleep!: () => void;

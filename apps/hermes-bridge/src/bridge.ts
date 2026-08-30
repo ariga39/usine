@@ -24,6 +24,7 @@ import {
 import { assertLoopbackHttpUrl } from "./loopback.js";
 
 const defaultTaskLimit = 100;
+const defaultWebhookAttemptTimeoutMs = 10_000;
 
 export interface HermesBridgeUpstream {
   serverSnapshot(limit?: number, signal?: AbortSignal): Promise<ServerSnapshot>;
@@ -51,6 +52,7 @@ export interface HermesBridgeOptions {
   taskLimit?: number;
   maxWebhookAttempts?: number;
   webhookRetryDelayMs?: number;
+  webhookAttemptTimeoutMs?: number;
 }
 
 export interface HermesAttentionPayload {
@@ -110,6 +112,10 @@ export function createHermesBridge(options: HermesBridgeOptions): HermesBridge {
     now,
     maxAttempts: options.maxWebhookAttempts ?? 3,
     retryDelayMs: options.webhookRetryDelayMs ?? 250,
+    attemptTimeoutMs: Math.max(
+      1,
+      options.webhookAttemptTimeoutMs ?? defaultWebhookAttemptTimeoutMs,
+    ),
   });
   const sourceUpstream = options.upstream;
   const trackedTaskIds = new Set<string>();
@@ -396,6 +402,7 @@ interface HermesWebhookDispatcherOptions {
   now: () => number;
   maxAttempts: number;
   retryDelayMs: number;
+  attemptTimeoutMs: number;
 }
 
 class HermesWebhookDispatcher {
@@ -493,6 +500,14 @@ class HermesWebhookDispatcher {
             new PermanentWebhookError(`Hermes webhook returned ${response.status}`),
           );
         return Effect.fail(new TransientWebhookError(`Hermes webhook returned ${response.status}`));
+      }),
+      Effect.timeout(Duration.millis(this.options.attemptTimeoutMs)),
+      Effect.mapError((error) => {
+        if (error instanceof PermanentWebhookError || error instanceof TransientWebhookError)
+          return error;
+        return new TransientWebhookError(
+          `Hermes webhook attempt timed out after ${this.options.attemptTimeoutMs}ms`,
+        );
       }),
     );
     return Effect.retry(attempt, {
