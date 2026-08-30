@@ -177,6 +177,55 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     ).rejects.toThrow("cannot switch repository profiles while a Task is active");
   });
 
+  test("allows unrelated registration updates and profile switches after terminal lease release", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const registration = {
+      id: "profile-switch-release",
+      path: "/repositories/profile-switch-release",
+      owner: "example",
+      name: "profile-switch-release",
+      baseBranch: "main",
+      implementerProfile: "baseline-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "forge-profile",
+      githubReadProfile: null,
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    };
+    await authority.registerRepository(registration);
+    const admitted = await authority.admit({
+      contract: { ...makeContract("profile-switch-release-task"), repositoryId: registration.id },
+      contractHash: "profile-switch-release-hash",
+      repositoryIdentity: "example/profile-switch-release",
+      repository: registration,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    await expect(
+      authority.registerRepository({
+        ...registration,
+        projectCheck: { command: "false", timeoutMs: 2_000 },
+      }),
+    ).resolves.toMatchObject({ projectCheck: { command: "false", timeoutMs: 2_000 } });
+
+    const blocked = await authority.block(
+      { taskId: admitted.taskId, revision: admitted.revision },
+      "release test",
+    );
+    expect(blocked.state).toBe("blocked");
+    await expect(
+      authority.registerRepository({
+        ...registration,
+        implementerProfile: "candidate-profile",
+        reviewerProfile: "other-reviewer",
+      }),
+    ).resolves.toMatchObject({
+      implementerProfile: "candidate-profile",
+      reviewerProfile: "other-reviewer",
+    });
+  });
+
   test("accepts one explicit retry while retaining the lease and active slot", async () => {
     const path = await makeDatabase();
     const first = authorityAt(path);

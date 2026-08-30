@@ -77,6 +77,7 @@ export interface CodexProfileSelection {
   model: string;
   modelReasoningEffort?: ModelReasoningEffort;
   developerInstructions?: string;
+  config?: Readonly<Record<string, unknown>>;
 }
 
 interface ResolvedCodexProfile extends CodexProfileSelection {

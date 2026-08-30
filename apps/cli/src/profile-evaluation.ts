@@ -1,12 +1,16 @@
-import { readFile, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import {
   contractIssues,
   hashTaskContract,
+  isTerminalState,
+  isWaitingState,
   repositoryRegistrationSchema,
   taskContractSchema,
   type RepositorySnapshot,
@@ -29,6 +33,10 @@ const execFile = promisify(execFileCallback);
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const changedFactors = ["model_stack", "reasoning", "developer_instructions"] as const;
+const usineBuildRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+export type ProfileEvaluationChangedFactor = (typeof changedFactors)[number];
 
 export interface ProfileEvaluationPair {
   readonly id: string;
@@ -43,31 +51,15 @@ export interface ProfileEvaluationPlan {
   readonly repositoryId: string;
   readonly baseSha: string;
   readonly subjectRole: "implementer";
+  readonly changedFactor: ProfileEvaluationChangedFactor;
   readonly baselineProfile: string;
   readonly candidateProfile: string;
   readonly reviewerProfile: string;
   readonly maxTasks: number;
+  readonly usineBuild: string;
+  readonly reportPath: string;
+  readonly registrationPath: string;
   readonly pairs: readonly ProfileEvaluationPair[];
-  readonly registrationPath?: string;
-}
-
-export interface ProfileEvaluationPlanInput {
-  readonly schemaVersion?: 1;
-  readonly id: string;
-  readonly repositoryId: string;
-  readonly baseSha: string;
-  readonly subjectRole: "implementer";
-  readonly baselineProfile?: string;
-  readonly candidateProfile?: string;
-  readonly reviewerProfile: string;
-  readonly profiles?: {
-    readonly baseline: string;
-    readonly candidate: string;
-  };
-  readonly maxTasks: number;
-  readonly pairs?: readonly ProfileEvaluationPair[];
-  readonly cases?: readonly ProfileEvaluationPair[];
-  readonly registrationPath?: string;
 }
 
 export interface EvaluationTaskReport {
@@ -93,6 +85,9 @@ export interface ProfileEvaluationReport {
   readonly planId: string;
   readonly repositoryId: string;
   readonly subjectRole: "implementer";
+  readonly changedFactor: ProfileEvaluationChangedFactor;
+  readonly usineBuild: string;
+  readonly reportPath: string;
   readonly baseline: EvaluationProfileReport;
   readonly candidate: EvaluationProfileReport;
   readonly comparison: {
@@ -148,6 +143,16 @@ export class ProfileEvaluationValidationError extends Error {
   }
 }
 
+export class ProfileEvaluationRestorationError extends Error {
+  readonly code = "evaluation_repository_restore_failed";
+  readonly kind = "server" as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ProfileEvaluationRestorationError";
+  }
+}
+
 export async function readProfileEvaluationPlan(
   planPath: string,
   environment: NodeJS.ProcessEnv = process.env,
@@ -156,6 +161,11 @@ export async function readProfileEvaluationPlan(
   contracts: readonly TaskContract[];
   registration: RepositorySnapshot;
   repositoryRoot: string;
+  profileSelections: {
+    readonly baseline: Awaited<ReturnType<typeof resolveProfile>>;
+    readonly candidate: Awaited<ReturnType<typeof resolveProfile>>;
+    readonly reviewer: Awaited<ReturnType<typeof resolveProfile>>;
+  };
 }> {
   const absolutePlanPath = await realpath(resolve(planPath)).catch(() => {
     throw new ProfileEvaluationValidationError("evaluation plan is unreadable");
@@ -169,6 +179,8 @@ export async function readProfileEvaluationPlan(
     throw new ProfileEvaluationValidationError(
       "plan baseSha is not an ancestor of the evaluation Repository",
     );
+  if ((await readUsineBuild()) !== plan.usineBuild)
+    throw new ProfileEvaluationValidationError("plan is bound to a different Usine build");
 
   const pairs = [...plan.pairs];
   const contracts: TaskContract[] = [];
@@ -230,12 +242,26 @@ export async function readProfileEvaluationPlan(
 
   const registration = await readRestorationRegistration(plan, absolutePlanPath);
   await validateRegistration(plan, registration, repositoryRoot);
+  const reportPath = resolveRepositoryFile(repositoryRoot, plan.reportPath, "report");
+  const registrationPath = resolve(dirname(absolutePlanPath), plan.registrationPath);
+  if (
+    reportPath === absolutePlanPath ||
+    contractPaths.has(reportPath) ||
+    reportPath === registrationPath
+  )
+    throw new ProfileEvaluationValidationError(
+      "report path must not replace the plan, registration, or a contract",
+    );
   for (const contract of contracts) validateContractRepository(contract, registration);
-  for (const profile of [plan.baselineProfile, plan.candidateProfile, plan.reviewerProfile]) {
-    validateCodexProfile(profile);
-    await resolveCodexProfile(profile, environment);
-  }
-  return { plan, contracts, registration, repositoryRoot };
+  validateCodexProfile(registration.implementerProfile);
+  validateCodexProfile(registration.reviewerProfile);
+  const profileSelections = {
+    baseline: await resolveProfile(plan.baselineProfile, environment),
+    candidate: await resolveProfile(plan.candidateProfile, environment),
+    reviewer: await resolveProfile(plan.reviewerProfile, environment),
+  };
+  validateProfileFactor(plan, profileSelections.baseline, profileSelections.candidate);
+  return { plan, contracts, registration, repositoryRoot, profileSelections };
 }
 
 export function profileCommand(serverUrl: string, environment: NodeJS.ProcessEnv = process.env) {
@@ -284,8 +310,19 @@ export async function runProfileEvaluateCommand(
         "plan registration does not match the registered Repository",
       );
     const report = await executeProfileEvaluation(loaded, serverUrl, options.signal, services);
-    process.stdout.write(options.json ? `${JSON.stringify(report)}\n` : renderReport(report));
+    const reportJson = `${JSON.stringify(report)}\n`;
+    await writeEvaluationReport(loaded, reportJson);
+    process.stdout.write(options.json ? reportJson : renderReport(report));
   });
+}
+
+async function writeEvaluationReport(
+  loaded: Awaited<ReturnType<typeof readProfileEvaluationPlan>>,
+  report: string,
+): Promise<void> {
+  const path = resolve(loaded.repositoryRoot, loaded.plan.reportPath);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, report, "utf8");
 }
 
 export async function executeProfileEvaluation(
@@ -304,6 +341,11 @@ export async function executeProfileEvaluation(
     projectCheck: { ...registration.projectCheck },
     gitAuthor: { ...registration.gitAuthor },
   };
+  throwIfAborted(signal);
+  const existingTasks = await preflightExistingTasks(loaded, serverUrl, services);
+  let registrationChanged = false;
+  let primaryError: unknown;
+  let failed = false;
   let contractIndex = 0;
   try {
     for (const pair of plan.pairs) {
@@ -314,15 +356,7 @@ export async function executeProfileEvaluation(
         const profile = side === "baseline" ? plan.baselineProfile : plan.candidateProfile;
         const contract = loaded.contracts[contractIndex++];
         if (!contract) throw new Error(`validated contract is missing for ${pair.id}`);
-        let task = await services.taskStatus(serverUrl, contract.id);
-        if (task) {
-          await validateExistingTask(
-            task,
-            contract,
-            resolve(loaded.repositoryRoot, contractPath),
-            originalRegistration,
-          );
-        }
+        let task = existingTasks.get(contract.id) ?? null;
         if (!task) {
           await ensureRepositoryIdle(
             serverUrl,
@@ -334,18 +368,19 @@ export async function executeProfileEvaluation(
             implementerProfile: profile,
             reviewerProfile: plan.reviewerProfile,
           };
+          registrationChanged = true;
           await services.registerRepository(serverUrl, evaluationRegistration);
           task = await services.submitTask(serverUrl, {
             contractPath: resolve(loaded.repositoryRoot, contractPath),
             repositoryId: plan.repositoryId,
           });
         }
-        if (!isTerminalOrWaiting(task.state))
+        if (!isTerminalState(task.state) && !isWaitingState(task.state))
           task = await services.followTask(serverUrl, task.taskId, {
             timeoutMs: contract.budget.maxElapsedMs,
             signal,
           });
-        if (!isTerminalOrWaiting(task.state))
+        if (!isTerminalState(task.state) && !isWaitingState(task.state))
           throw new Error(`Task ${task.taskId} did not reach a durable stopping state`);
         if (task.state === "waiting")
           throw new Error(`Task ${task.taskId} is waiting for an explicit retry`);
@@ -361,21 +396,94 @@ export async function executeProfileEvaluation(
         });
       }
     }
-  } finally {
-    await services.registerRepository(serverUrl, originalRegistration).catch((error) => {
-      throw new Error(`evaluation Repository restoration failed: ${String(error)}`);
-    });
+  } catch (error) {
+    failed = true;
+    primaryError = error;
   }
-  return compareProfileEvaluation(plan, reports);
+  let restorationError: unknown;
+  if (registrationChanged)
+    try {
+      await services.registerRepository(serverUrl, originalRegistration);
+    } catch (error) {
+      restorationError = error;
+    }
+  if (failed && restorationError !== undefined) {
+    const cause = new AggregateError(
+      [primaryError, restorationError],
+      "evaluation and Repository restoration failed",
+    );
+    throw new ProfileEvaluationRestorationError(cause.message, { cause });
+  }
+  if (failed) throw primaryError;
+  if (restorationError !== undefined) {
+    const cause = new AggregateError(
+      [restorationError],
+      "evaluation Repository restoration failed",
+    );
+    throw new ProfileEvaluationRestorationError(cause.message, { cause });
+  }
+  return compareProfileEvaluation(plan, reports, {
+    baseline: expectedEvidenceProfile(loaded.profileSelections.baseline),
+    candidate: expectedEvidenceProfile(loaded.profileSelections.candidate),
+    reviewer: expectedEvidenceProfile(loaded.profileSelections.reviewer),
+  });
+}
+
+async function preflightExistingTasks(
+  loaded: Awaited<ReturnType<typeof readProfileEvaluationPlan>>,
+  serverUrl: string,
+  services: ProfileEvaluationServices,
+): Promise<Map<string, import("@usine/task-authority").TaskResource>> {
+  const tasks = new Map<string, import("@usine/task-authority").TaskResource>();
+  let contractIndex = 0;
+  for (const pair of loaded.plan.pairs) {
+    for (const side of ["baseline", "candidate"] as const) {
+      const contractPath =
+        side === "baseline" ? pair.baselineContractPath : pair.candidateContractPath;
+      const contract = loaded.contracts[contractIndex++];
+      if (!contract) throw new Error(`validated contract is missing for ${pair.id}`);
+      const task = await services.taskStatus(serverUrl, contract.id);
+      if (task) {
+        await validateExistingTask(
+          task,
+          contract,
+          resolve(loaded.repositoryRoot, contractPath),
+          loaded.registration,
+        );
+        tasks.set(contract.id, task);
+      }
+    }
+  }
+  return tasks;
 }
 
 export function compareProfileEvaluation(
   plan: ProfileEvaluationPlan,
   reports: Record<"baseline" | "candidate", EvaluationTaskReport[]>,
+  expectedProfiles?: {
+    readonly baseline: ExpectedEvidenceProfile;
+    readonly candidate: ExpectedEvidenceProfile;
+    readonly reviewer: ExpectedEvidenceProfile;
+  },
 ): ProfileEvaluationReport {
-  const baseline = profileReport(plan.baselineProfile, plan.reviewerProfile, reports.baseline);
-  const candidate = profileReport(plan.candidateProfile, plan.reviewerProfile, reports.candidate);
-  const reasons = [...new Set([...baseline.reasons, ...candidate.reasons])].toSorted();
+  const baseline = profileReport(
+    plan.baselineProfile,
+    plan.reviewerProfile,
+    reports.baseline,
+    expectedProfiles?.baseline,
+    expectedProfiles?.reviewer,
+  );
+  const candidate = profileReport(
+    plan.candidateProfile,
+    plan.reviewerProfile,
+    reports.candidate,
+    expectedProfiles?.candidate,
+    expectedProfiles?.reviewer,
+  );
+  const driftReasons = validateEvidenceDrift(plan, reports);
+  const reasons = [
+    ...new Set([...baseline.reasons, ...candidate.reasons, ...driftReasons]),
+  ].toSorted();
   const comparable =
     reasons.length === 0 && baseline.correctness === "passed" && candidate.correctness === "passed";
   const comparison = comparable
@@ -407,6 +515,9 @@ export function compareProfileEvaluation(
     planId: plan.id,
     repositoryId: plan.repositoryId,
     subjectRole: plan.subjectRole,
+    changedFactor: plan.changedFactor,
+    usineBuild: plan.usineBuild,
+    reportPath: plan.reportPath,
     baseline: {
       profile: baseline.profile,
       tasks: reports.baseline,
@@ -429,6 +540,8 @@ function profileReport(
   profile: string,
   reviewerProfile: string,
   tasks: readonly EvaluationTaskReport[],
+  expectedProfile?: ExpectedEvidenceProfile,
+  expectedReviewer?: ExpectedEvidenceProfile,
 ) {
   const reasons: string[] = [];
   let correctness: EvaluationProfileReport["correctness"] = "passed";
@@ -444,29 +557,183 @@ function profileReport(
       reasons.push(`${task.taskId}:implementer_profile_unknown`);
     }
     for (const run of evidence.roleRuns.implementer) {
-      if (run.requestedProfile !== profile || run.effectiveProfile.profileName !== profile) {
+      if (
+        !matchesExpectedProfile(run, profile, expectedProfile) ||
+        !hasRequiredEffectiveIdentity(run)
+      ) {
         if (correctness !== "failed") correctness = "unknown";
-        reasons.push(`${task.taskId}:implementer_profile_drift`);
+        reasons.push(
+          `${task.taskId}:${hasRequiredEffectiveIdentity(run) ? "implementer_profile_drift" : "implementer_profile_unknown"}`,
+        );
       }
     }
     for (const run of evidence.roleRuns.reviewer) {
-      // Reviewer profile is checked against the plan by the caller's fixed registration.
       if (
-        run.requestedProfile !== reviewerProfile ||
-        run.effectiveProfile.profileName !== reviewerProfile
+        !matchesExpectedProfile(run, reviewerProfile, expectedReviewer) ||
+        !hasRequiredEffectiveIdentity(run)
       ) {
         if (correctness !== "failed") correctness = "unknown";
-        reasons.push(`${task.taskId}:reviewer_profile_drift`);
+        reasons.push(
+          `${task.taskId}:${hasRequiredEffectiveIdentity(run) ? "reviewer_profile_drift" : "reviewer_profile_unknown"}`,
+        );
       }
     }
-    if (evidence.roleRuns.reviewer.length === 0)
+    if (evidence.roleRuns.reviewer.length === 0) {
+      if (correctness !== "failed") correctness = "unknown";
       reasons.push(`${task.taskId}:reviewer_profile_unknown`);
+    }
   }
   if (tasks.length === 0) {
     correctness = "unknown";
     reasons.push(`${profile}:missing_tasks`);
   }
   return { profile, correctness, metrics: aggregateMetrics(tasks), reasons };
+}
+
+interface ExpectedEvidenceProfile {
+  readonly model: string;
+  readonly modelProvider: string | null;
+  readonly reasoningEffort: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"]["reasoningEffort"];
+  readonly developerInstructionsSha256: string | null;
+  readonly adapter: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"]["adapter"];
+}
+
+function expectedEvidenceProfile(
+  selection: Awaited<ReturnType<typeof resolveProfile>>,
+): ExpectedEvidenceProfile {
+  const provider = selection.config?.model_provider;
+  return {
+    model: selection.model,
+    modelProvider: typeof provider === "string" ? provider : null,
+    reasoningEffort: selection.modelReasoningEffort ?? null,
+    developerInstructionsSha256: selection.developerInstructions
+      ? createHash("sha256").update(selection.developerInstructions, "utf8").digest("hex")
+      : null,
+    adapter: selection.adapter,
+  };
+}
+
+function matchesExpectedProfile(
+  run: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number],
+  expectedName: string,
+  expected?: ExpectedEvidenceProfile,
+): boolean {
+  if (run.requestedProfile !== expectedName || run.effectiveProfile.profileName !== expectedName)
+    return false;
+  if (!expected) return true;
+  const effective = run.effectiveProfile;
+  return (
+    effective.model === expected.model &&
+    effective.modelProvider === expected.modelProvider &&
+    effective.reasoningEffort === expected.reasoningEffort &&
+    effective.developerInstructionsSha256 === expected.developerInstructionsSha256 &&
+    effective.adapter === expected.adapter
+  );
+}
+
+function hasRequiredEffectiveIdentity(
+  run: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number],
+): boolean {
+  const profile = run.effectiveProfile;
+  return (
+    run.requestedProfile !== null &&
+    profile.profileName !== null &&
+    profile.configSha256 !== null &&
+    profile.adapter !== null &&
+    profile.model !== null
+  );
+}
+
+function validateEvidenceDrift(
+  plan: ProfileEvaluationPlan,
+  reports: Record<"baseline" | "candidate", EvaluationTaskReport[]>,
+): string[] {
+  const reasons: string[] = [];
+  const allReviewerRuns = [...reports.baseline, ...reports.candidate].flatMap((task) =>
+    task.evidence.roleRuns.reviewer.map((run) => ({ taskId: task.taskId, run })),
+  );
+  const reviewerReference = allReviewerRuns[0]?.run.effectiveProfile;
+  if (reviewerReference) {
+    for (const { taskId, run } of allReviewerRuns) {
+      if (
+        !hasRequiredEffectiveIdentity(run) ||
+        !sameEffectiveIdentity(run.effectiveProfile, reviewerReference)
+      )
+        reasons.push(`${taskId}:reviewer_profile_drift`);
+    }
+  }
+
+  const byPair = new Map<
+    string,
+    { baseline?: EvaluationTaskReport; candidate?: EvaluationTaskReport }
+  >();
+  for (const side of ["baseline", "candidate"] as const) {
+    for (const report of reports[side]) {
+      const key = `${report.pairId}:${report.repetition}`;
+      const pair = byPair.get(key) ?? {};
+      pair[side] = report;
+      byPair.set(key, pair);
+    }
+  }
+  for (const pair of byPair.values()) {
+    if (!pair.baseline || !pair.candidate) continue;
+    const baselineRuns = pair.baseline.evidence.roleRuns.implementer;
+    const candidateRuns = pair.candidate.evidence.roleRuns.implementer;
+    if (baselineRuns.length === 0 || candidateRuns.length === 0) continue;
+    const count = Math.max(baselineRuns.length, candidateRuns.length);
+    for (let index = 0; index < count; index += 1) {
+      const baseline = baselineRuns[index];
+      const candidate = candidateRuns[index];
+      if (!baseline || !candidate) {
+        reasons.push(`${pair.baseline.taskId}:implementer_profile_drift`);
+        reasons.push(`${pair.candidate.taskId}:implementer_profile_drift`);
+        continue;
+      }
+      if (
+        !hasRequiredEffectiveIdentity(baseline) ||
+        !hasRequiredEffectiveIdentity(candidate) ||
+        !sameAllowedImplementerIdentity(
+          plan.changedFactor,
+          baseline.effectiveProfile,
+          candidate.effectiveProfile,
+        )
+      ) {
+        reasons.push(`${pair.baseline.taskId}:implementer_profile_drift`);
+        reasons.push(`${pair.candidate.taskId}:implementer_profile_drift`);
+      }
+    }
+  }
+  return reasons;
+}
+
+const effectiveIdentityFields = [
+  "profileName",
+  "configSha256",
+  "adapter",
+  "model",
+  "modelProvider",
+  "reasoningEffort",
+  "developerInstructionsSha256",
+] as const;
+
+function sameEffectiveIdentity(
+  left: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
+  right: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
+): boolean {
+  return effectiveIdentityFields.every((field) => left[field] === right[field]);
+}
+
+function sameAllowedImplementerIdentity(
+  changedFactor: ProfileEvaluationChangedFactor,
+  baseline: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
+  candidate: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
+): boolean {
+  const fixedFields = {
+    model_stack: ["adapter", "reasoningEffort", "developerInstructionsSha256"] as const,
+    reasoning: ["adapter", "model", "modelProvider", "developerInstructionsSha256"] as const,
+    developer_instructions: ["adapter", "model", "modelProvider", "reasoningEffort"] as const,
+  }[changedFactor];
+  return fixedFields.every((field) => baseline[field] === candidate[field]);
 }
 
 function aggregateMetrics(tasks: readonly EvaluationTaskReport[]): EvaluationMetricSet {
@@ -583,6 +850,16 @@ function validatePlanShape(plan: ProfileEvaluationPlan): void {
     throw new ProfileEvaluationValidationError("plan identifiers are invalid");
   if (!exactSha.test(plan.baseSha))
     throw new ProfileEvaluationValidationError("plan baseSha must be a lowercase 40-character SHA");
+  if (!isChangedFactor(plan.changedFactor))
+    throw new ProfileEvaluationValidationError("plan changedFactor is invalid");
+  if (!exactSha.test(plan.usineBuild))
+    throw new ProfileEvaluationValidationError(
+      "plan usineBuild must be a lowercase 40-character SHA",
+    );
+  if (plan.reportPath.trim() === "" || isAbsolute(plan.reportPath))
+    throw new ProfileEvaluationValidationError("reportPath must be repository-relative");
+  if (plan.registrationPath.trim() === "")
+    throw new ProfileEvaluationValidationError("registrationPath must not be blank");
   if (!Number.isSafeInteger(plan.maxTasks) || plan.maxTasks < 2 || plan.maxTasks > 200)
     throw new ProfileEvaluationValidationError("maxTasks must be between 2 and 200");
   if (plan.baselineProfile === plan.candidateProfile)
@@ -606,6 +883,121 @@ function validatePlanShape(plan: ProfileEvaluationPlan): void {
   for (const profile of [plan.baselineProfile, plan.candidateProfile, plan.reviewerProfile])
     if (!profileName.test(profile))
       throw new ProfileEvaluationValidationError("profile names are invalid");
+}
+
+async function readUsineBuild(): Promise<string> {
+  try {
+    const build = (
+      await execFile("git", ["-C", usineBuildRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+    ).stdout.trim();
+    if (!exactSha.test(build)) throw new Error("current Usine build is not an exact commit");
+    return build;
+  } catch {
+    throw new ProfileEvaluationValidationError("current Usine build is unavailable");
+  }
+}
+
+async function resolveProfile(profile: string, environment: NodeJS.ProcessEnv) {
+  try {
+    const selection = await resolveCodexProfile(profile, environment);
+    if (!selection.config)
+      throw new ProfileEvaluationValidationError(
+        `${profile}: resolved profile configuration is unavailable`,
+      );
+    return { ...selection, adapter: adapterForProfile(profile, environment) };
+  } catch (error) {
+    if (error instanceof ProfileEvaluationValidationError) throw error;
+    throw new ProfileEvaluationValidationError(
+      `${profile}: resolved profile configuration is unavailable`,
+    );
+  }
+}
+
+function adapterForProfile(profile: string, environment: NodeJS.ProcessEnv): "sdk" | "app-server" {
+  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
+  if (!configured) return "sdk";
+  const profiles = configured.split(",").map((entry) => entry.trim());
+  if (profiles.some((entry) => !profileName.test(entry)))
+    throw new ProfileEvaluationValidationError("USINE_CODEX_APP_SERVER_PROFILES is invalid");
+  return profiles.includes(profile) ? "app-server" : "sdk";
+}
+
+function validateProfileFactor(
+  plan: ProfileEvaluationPlan,
+  baseline: Awaited<ReturnType<typeof resolveProfile>>,
+  candidate: Awaited<ReturnType<typeof resolveProfile>>,
+): void {
+  const baselineFields = profileFields(baseline);
+  const candidateFields = profileFields(candidate);
+  if (plan.baselineProfile === plan.candidateProfile)
+    throw new ProfileEvaluationValidationError("baseline and candidate profiles must be distinct");
+  const factorFields = {
+    model_stack: ["model", "modelProvider", "modelProviders", "modelCatalogJson"] as const,
+    reasoning: ["reasoningEffort"] as const,
+    developer_instructions: ["developerInstructions"] as const,
+  }[plan.changedFactor];
+  const allFields = [
+    "model",
+    "modelProvider",
+    "modelProviders",
+    "modelCatalogJson",
+    "reasoningEffort",
+    "developerInstructions",
+    "reasoningSummary",
+    "verbosity",
+    "personality",
+    "serviceTier",
+  ] as const;
+  const differs = (field: (typeof allFields)[number]) =>
+    stableJson(baselineFields[field]) !== stableJson(candidateFields[field]);
+  if (!factorFields.some(differs))
+    throw new ProfileEvaluationValidationError(
+      `baseline and candidate profiles do not differ in changedFactor ${plan.changedFactor}`,
+    );
+  const factorFieldSet = new Set<string>(factorFields);
+  const unrelated = allFields.filter((field) => !factorFieldSet.has(field) && differs(field));
+  if (unrelated.length > 0)
+    throw new ProfileEvaluationValidationError(
+      `profiles differ outside changedFactor ${plan.changedFactor}: ${unrelated.join(",")}`,
+    );
+}
+
+interface ProfileFields {
+  readonly model: string;
+  readonly modelProvider: unknown;
+  readonly modelProviders: unknown;
+  readonly modelCatalogJson: unknown;
+  readonly reasoningEffort: unknown;
+  readonly developerInstructions: unknown;
+  readonly reasoningSummary: unknown;
+  readonly verbosity: unknown;
+  readonly personality: unknown;
+  readonly serviceTier: unknown;
+}
+
+function profileFields(selection: Awaited<ReturnType<typeof resolveProfile>>): ProfileFields {
+  const config = selection.config;
+  return {
+    model: selection.model,
+    modelProvider: config?.model_provider ?? null,
+    modelProviders: config?.model_providers ?? null,
+    modelCatalogJson: config?.model_catalog_json ?? null,
+    reasoningEffort: selection.modelReasoningEffort ?? null,
+    developerInstructions: selection.developerInstructions ?? null,
+    reasoningSummary: config?.model_reasoning_summary ?? null,
+    verbosity: config?.model_verbosity ?? null,
+    personality: config?.personality ?? null,
+    serviceTier: config?.service_tier ?? null,
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+    .join(",")}}`;
 }
 
 function validatePair(
@@ -672,6 +1064,14 @@ async function validateExistingTask(
     `${registration.owner}/${registration.name}`.toLowerCase()
   )
     throw new ProfileEvaluationValidationError(`${contract.id}: existing Task Repository drifted`);
+  if (
+    !task.repository ||
+    task.repository.id !== registration.id ||
+    task.repository.owner.toLowerCase() !== registration.owner.toLowerCase() ||
+    task.repository.name.toLowerCase() !== registration.name.toLowerCase() ||
+    task.repository.baseBranch !== registration.baseBranch
+  )
+    throw new ProfileEvaluationValidationError(`${contract.id}: existing Task snapshot drifted`);
   const rawContract = await readUtf8(contractPath, "task contract");
   if (task.contractHash !== hashTaskContract(rawContract))
     throw new ProfileEvaluationValidationError(`${contract.id}: existing Task contract drifted`);
@@ -680,142 +1080,85 @@ async function validateExistingTask(
 function normalizePlan(input: unknown): ProfileEvaluationPlan {
   if (!isRecord(input))
     throw new ProfileEvaluationValidationError("evaluation plan must be an object");
-  if (input.profiles !== undefined && !isRecord(input.profiles))
-    throw new ProfileEvaluationValidationError("evaluation plan profiles are invalid");
-  const profiles = isRecord(input.profiles) ? input.profiles : undefined;
   const allowedKeys = new Set([
     "schemaVersion",
     "id",
-    "planId",
     "repositoryId",
     "baseSha",
     "subjectRole",
+    "changedFactor",
     "baselineProfile",
     "candidateProfile",
     "reviewerProfile",
-    "profiles",
     "maxTasks",
+    "usineBuild",
+    "reportPath",
     "pairs",
-    "cases",
     "registrationPath",
-    "restoreRegistrationPath",
   ]);
   if (Object.keys(input).some((key) => !allowedKeys.has(key)))
     throw new ProfileEvaluationValidationError("evaluation plan has unexpected fields");
-  if (input.pairs !== undefined && input.cases !== undefined)
-    throw new ProfileEvaluationValidationError("evaluation plan must use one pair list");
-  if (
-    profiles &&
-    Object.keys(profiles).some(
-      (key) => key !== "baseline" && key !== "candidate" && key !== "reviewer",
-    )
-  )
-    throw new ProfileEvaluationValidationError("evaluation plan profiles have unexpected fields");
-  if (profiles && Object.values(profiles).some((profile) => typeof profile !== "string"))
-    throw new ProfileEvaluationValidationError("evaluation plan profiles are invalid");
-  const rawPairs = input.pairs ?? input.cases;
-  if (!isRecord(input) || !Array.isArray(rawPairs))
+  if (!Array.isArray(input.pairs))
     throw new ProfileEvaluationValidationError("plan must contain paired contracts");
-  const baselineProfile = input.baselineProfile ?? profiles?.baseline;
-  const candidateProfile = input.candidateProfile ?? profiles?.candidate;
-  const schemaVersion = input.schemaVersion ?? 1;
-  const reviewerProfileInput = input.reviewerProfile ?? profiles?.reviewer;
   if (
-    schemaVersion !== 1 ||
-    typeof (input.id ?? input.planId) !== "string" ||
+    input.schemaVersion !== 1 ||
+    typeof input.id !== "string" ||
     typeof input.repositoryId !== "string" ||
     typeof input.baseSha !== "string" ||
     input.subjectRole !== "implementer" ||
-    typeof reviewerProfileValue(reviewerProfileInput) !== "string" ||
+    !isChangedFactor(input.changedFactor) ||
+    typeof input.baselineProfile !== "string" ||
+    typeof input.candidateProfile !== "string" ||
+    typeof input.reviewerProfile !== "string" ||
     typeof input.maxTasks !== "number" ||
-    typeof baselineProfile !== "string" ||
-    typeof candidateProfile !== "string"
+    typeof input.usineBuild !== "string" ||
+    typeof input.reportPath !== "string" ||
+    typeof input.registrationPath !== "string"
   )
-    throw new ProfileEvaluationValidationError("plan must name baseline and candidate profiles");
-  const reviewerProfile = reviewerProfileValue(reviewerProfileInput);
-  if (reviewerProfile === undefined)
-    throw new ProfileEvaluationValidationError("plan must name a reviewer profile");
-  const id = input.id ?? input.planId;
-  const repositoryId = input.repositoryId;
-  const baseSha = input.baseSha;
-  const subjectRole = input.subjectRole;
-  const maxTasks = input.maxTasks;
-  const registrationPath = input.registrationPath ?? input.restoreRegistrationPath;
-  if (
-    typeof id !== "string" ||
-    typeof repositoryId !== "string" ||
-    typeof baseSha !== "string" ||
-    subjectRole !== "implementer" ||
-    typeof maxTasks !== "number"
-  )
-    throw new ProfileEvaluationValidationError("evaluation plan has invalid fields");
-  if (registrationPath !== undefined && typeof registrationPath !== "string")
-    throw new ProfileEvaluationValidationError("evaluation plan registrationPath is invalid");
-  const pairs = rawPairs.map(parsePair);
+    throw new ProfileEvaluationValidationError("evaluation plan has missing or invalid fields");
   const plan: ProfileEvaluationPlan = {
-    schemaVersion,
-    id,
-    repositoryId,
-    baseSha,
-    subjectRole,
-    baselineProfile,
-    candidateProfile,
-    reviewerProfile,
-    maxTasks,
-    pairs,
-    ...(registrationPath === undefined ? {} : { registrationPath }),
+    schemaVersion: 1,
+    id: input.id,
+    repositoryId: input.repositoryId,
+    baseSha: input.baseSha,
+    subjectRole: "implementer",
+    changedFactor: input.changedFactor,
+    baselineProfile: input.baselineProfile,
+    candidateProfile: input.candidateProfile,
+    reviewerProfile: input.reviewerProfile,
+    maxTasks: input.maxTasks,
+    usineBuild: input.usineBuild,
+    reportPath: input.reportPath,
+    registrationPath: input.registrationPath,
+    pairs: input.pairs.map(parsePair),
   };
   return plan;
 }
 
-function reviewerProfileValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+function isChangedFactor(value: unknown): value is ProfileEvaluationChangedFactor {
+  return value === "model_stack" || value === "reasoning" || value === "developer_instructions";
 }
 
 function parsePair(input: unknown): ProfileEvaluationPair {
   if (
     !isRecord(input) ||
-    typeof (input.id ?? input.caseId) !== "string" ||
+    typeof input.id !== "string" ||
     typeof input.repetition !== "number" ||
-    typeof (input.baselineContractPath ?? input.baselineContract ?? input.baseline) !== "string" ||
-    typeof (input.candidateContractPath ?? input.candidateContract ?? input.candidate) !== "string"
+    typeof input.baselineContractPath !== "string" ||
+    typeof input.candidateContractPath !== "string"
   )
     throw new ProfileEvaluationValidationError("paired contract identity is invalid");
   if (
     Object.keys(input).some(
-      (key) =>
-        ![
-          "id",
-          "caseId",
-          "repetition",
-          "baselineContractPath",
-          "candidateContractPath",
-          "baselineContract",
-          "candidateContract",
-          "baseline",
-          "candidate",
-        ].includes(key),
+      (key) => !["id", "repetition", "baselineContractPath", "candidateContractPath"].includes(key),
     )
   )
     throw new ProfileEvaluationValidationError("paired contract identity has unexpected fields");
-  const id = typeof input.id === "string" ? input.id : input.caseId;
-  const repetition = input.repetition;
-  const baselineContractPath =
-    input.baselineContractPath ?? input.baselineContract ?? input.baseline;
-  const candidateContractPath =
-    input.candidateContractPath ?? input.candidateContract ?? input.candidate;
-  if (
-    typeof id !== "string" ||
-    typeof repetition !== "number" ||
-    typeof baselineContractPath !== "string" ||
-    typeof candidateContractPath !== "string"
-  )
-    throw new ProfileEvaluationValidationError("paired contract identity is invalid");
   return {
-    id,
-    repetition,
-    baselineContractPath,
-    candidateContractPath,
+    id: input.id,
+    repetition: input.repetition,
+    baselineContractPath: input.baselineContractPath,
+    candidateContractPath: input.candidateContractPath,
   };
 }
 
@@ -861,9 +1204,7 @@ async function readRestorationRegistration(
   plan: ProfileEvaluationPlan,
   planPath: string,
 ): Promise<RepositorySnapshot> {
-  const path = plan.registrationPath
-    ? resolve(dirname(planPath), plan.registrationPath)
-    : resolve(dirname(planPath), "repository.json");
+  const path = resolve(dirname(planPath), plan.registrationPath);
   try {
     return repositoryRegistrationSchema.parse(
       JSON.parse(await readUtf8(path, "Repository registration")),
@@ -960,11 +1301,6 @@ function parseJson(raw: string, label: string): unknown {
   } catch {
     throw new ProfileEvaluationValidationError(`${label} is not JSON`);
   }
-}
-function isTerminalOrWaiting(state: string): boolean {
-  return (
-    state === "reviewed_pr" || state === "merged" || state === "blocked" || state === "waiting"
-  );
 }
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("profile evaluation cancelled");

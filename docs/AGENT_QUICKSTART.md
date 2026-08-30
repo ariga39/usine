@@ -275,7 +275,35 @@ The operator can run one committed, bounded paired evaluation through the CLI:
 node apps/cli/dist/cli.mjs profile evaluate "<EVALUATION_PLAN>" --subject-role implementer --json
 ```
 
-The plan names one evaluation Repository, baseline/candidate implementer profiles, one fixed reviewer profile, a finite `maxTasks` bound, and committed baseline/candidate Task Contract paths for each unique case/repetition identity. Its `baseSha`, contract semantics, non-merge authority, and repository/project-check facts must match across every pair. The plan may name a host-private `registrationPath`; otherwise the command reads `repository.json` beside the plan to restore the complete prior registration. Keep that registration file out of committed or GitHub-facing content when it contains host paths.
+The committed plan uses exactly this schemaVersion 1 shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "evaluation-plan",
+  "repositoryId": "evaluation",
+  "baseSha": "<40-CHARACTER_BASE_SHA>",
+  "subjectRole": "implementer",
+  "changedFactor": "model_stack",
+  "baselineProfile": "baseline-profile",
+  "candidateProfile": "candidate-profile",
+  "reviewerProfile": "fixed-reviewer",
+  "maxTasks": 2,
+  "usineBuild": "<40-CHARACTER_USINE_COMMIT_SHA>",
+  "reportPath": "reports/evaluation-report.json",
+  "registrationPath": "repository.json",
+  "pairs": [
+    {
+      "id": "case-one",
+      "repetition": 1,
+      "baselineContractPath": "baseline.json",
+      "candidateContractPath": "candidate.json"
+    }
+  ]
+}
+```
+
+`changedFactor` is exactly one of `model_stack`, `reasoning`, or `developer_instructions`. `model_stack` covers the model, provider, provider-map, and catalog configuration used to serve it. Every pair must keep its base SHA, Task semantics, budgets, project-check registration, and non-merge authority fixed. `usineBuild` must equal the exact commit currently checked out by the Usine CLI; this binds the report to the implementation that performed the evaluation. `reportPath` is a Repository-relative output path and is written as deterministic JSON after a successful run. `registrationPath` identifies the complete prior host-side registration to restore; keep that file out of committed or GitHub-facing content when it contains host paths.
 
 The command validates the complete plan, committed unchanged inputs, profile configurations, and existing Task identities before its first registration mutation or submission. It switches only the implementer profile, runs baseline then candidate serially, reuses completed Task IDs, waits for admitted Tasks, and restores the prior registration after success, failure, cancellation, or interruption to the extent the existing registration boundary permits. A Task with an active writer prevents profile switching.
 
