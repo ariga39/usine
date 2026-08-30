@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   Codex,
   type CodexOptions,
@@ -6,6 +7,7 @@ import {
   type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
+  type ModelReasoningEffort,
 } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
@@ -83,6 +85,16 @@ export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Recor
 
 export type SessionRole = "implementer" | "reviewer";
 export type SandboxMode = "workspace-write" | "read-only";
+
+export interface EffectiveSessionProfile {
+  profileName: string | null;
+  configSha256: string | null;
+  adapter: "sdk" | "app-server" | null;
+  model: string | null;
+  modelProvider: string | null;
+  reasoningEffort: ModelReasoningEffort | null;
+  developerInstructionsSha256: string | null;
+}
 
 export interface CodingSessionMcpServer {
   name: string;
@@ -206,6 +218,10 @@ export interface SessionObservation<T = unknown> {
   archiveId?: string;
   archiveStatus?: SessionArchiveCaptureStatus;
   archiveWarnings?: string[];
+  /** The requested profile survives even when profile resolution fails. */
+  requestedProfile?: string;
+  /** Sanitized effective profile facts owned by Coding Session. */
+  effectiveProfile?: EffectiveSessionProfile;
 }
 
 export interface CodingSessionCleanup {
@@ -323,7 +339,12 @@ export class CodexCodingSession {
       : undefined;
     await archive?.begin();
     const observation = await this.runProviderCaptured(request, archive);
-    if (!archive) return observation;
+    if (!archive)
+      return {
+        ...observation,
+        requestedProfile: observation.requestedProfile ?? request.profile,
+        effectiveProfile: observation.effectiveProfile ?? unavailableEffectiveProfile(),
+      };
     const archiveResult = await archive.finish({
       status: observation.status,
       sessionId: observation.sessionId,
@@ -334,6 +355,8 @@ export class CodexCodingSession {
     });
     return {
       ...observation,
+      requestedProfile: observation.requestedProfile ?? request.profile,
+      effectiveProfile: observation.effectiveProfile ?? unavailableEffectiveProfile(),
       archiveId: archiveResult.archiveId,
       archiveStatus: archiveResult.archiveStatus,
       archiveWarnings: archiveResult.warnings,
@@ -377,6 +400,7 @@ export class CodexCodingSession {
         failureClass,
       };
     }
+    let effectiveProfile = unavailableEffectiveProfile();
     try {
       const profileName = validateCodexProfile(request.profile);
       let profileSelection: ResolvedCodexProfile;
@@ -385,12 +409,22 @@ export class CodexCodingSession {
           profileName,
           await this.profileResolver(profileName, request.environment ?? this.options.environment),
         );
-        archive?.setProfile(
-          sessionArchiveProfileSnapshot(profileName, {
+        const snapshot = sessionArchiveProfileSnapshot(profileName, {
             ...profileSelection,
             ...profileSelection.config,
-          }),
-        );
+          });
+        archive?.setProfile(snapshot);
+        effectiveProfile = {
+          profileName,
+          configSha256: snapshot.sha256,
+          adapter: null,
+          model: snapshot.model ?? null,
+          modelProvider: snapshot.modelProvider ?? null,
+          reasoningEffort: snapshot.modelReasoningEffort ?? null,
+          developerInstructionsSha256: snapshot.developerInstructions
+            ? hashText(snapshot.developerInstructions)
+            : null,
+        };
       } catch (error) {
         if (error instanceof CodexProfileSelectionError) throw error;
         throw new CodexProfileSelectionError(
@@ -424,6 +458,7 @@ export class CodexCodingSession {
       }
       let result: ProviderTurnResult;
       if (this.appServerProfiles.has(profileName)) {
+        effectiveProfile = { ...effectiveProfile, adapter: "app-server" };
         archive?.setAdapter("app-server");
         if (!this.options.executionStateDirectory)
           throw new Error("app-server execution state directory is unavailable");
@@ -439,6 +474,7 @@ export class CodexCodingSession {
           onUsage: (usage) => archive?.setUsage(usageFrom(usage)),
         });
       } else {
+        effectiveProfile = { ...effectiveProfile, adapter: "sdk" };
         archive?.setAdapter("sdk");
         let client: Codex;
         try {
@@ -483,6 +519,8 @@ export class CodexCodingSession {
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
           return {
+            requestedProfile: request.profile,
+            effectiveProfile,
             status: "failed",
             sessionId: result.sessionId,
             output: null,
@@ -504,6 +542,8 @@ export class CodexCodingSession {
         } catch (error) {
           if (abortSignal.aborted)
             return {
+              requestedProfile: request.profile,
+              effectiveProfile,
               status: "cancelled",
               sessionId: null,
               output: null,
@@ -514,6 +554,8 @@ export class CodexCodingSession {
               failureClass: deadlineSignal.aborted ? "timeout" : "cancellation",
             };
           return {
+            requestedProfile: request.profile,
+            effectiveProfile,
             status: "failed",
             sessionId: result.sessionId,
             output: null,
@@ -529,6 +571,8 @@ export class CodexCodingSession {
         parsed = effectiveRequest.outputSchema.safeParse(normalized);
         if (!parsed.success) {
           return {
+            requestedProfile: request.profile,
+            effectiveProfile,
             status: "failed",
             sessionId: result.sessionId,
             output: null,
@@ -543,6 +587,8 @@ export class CodexCodingSession {
       }
       archive?.setNormalizedOutput(parsed.data);
       return {
+        requestedProfile: request.profile,
+        effectiveProfile,
         status: "completed",
         sessionId: result.sessionId,
         output: parsed.data,
@@ -566,6 +612,8 @@ export class CodexCodingSession {
               ? new CodingSessionInterruption(phase, "configuration", error.message)
               : new CodingSessionInterruption(phase, classifyAdapterFailure(error));
       return {
+        requestedProfile: request.profile,
+        effectiveProfile,
         status: deadlineExpired || cancelled ? "cancelled" : "failed",
         sessionId: null,
         output: null,
@@ -704,6 +752,22 @@ function usageFrom(
         inputTokens: usage.input_tokens,
         outputTokens: usage.output_tokens,
       };
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function unavailableEffectiveProfile(): EffectiveSessionProfile {
+  return {
+    profileName: null,
+    configSha256: null,
+    adapter: null,
+    model: null,
+    modelProvider: null,
+    reasoningEffort: null,
+    developerInstructionsSha256: null,
+  };
 }
 
 function safeFailureMessage(error: CodingSessionInterruption): string {

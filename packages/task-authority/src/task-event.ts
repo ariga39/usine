@@ -4,6 +4,9 @@ const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9
 const safeObservationId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
 );
+const safeEvidenceValue = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:/+ -]{0,255}$/),
+);
 const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
@@ -12,6 +15,19 @@ const archiveStatus = Schema.Literals(["stored", "truncated", "failed", "pruned"
 const archiveReference = Schema.Struct({
   archiveId: safeObservationId,
   status: archiveStatus,
+});
+const effectiveProfile = Schema.Struct({
+  profileName: Schema.NullOr(safeObservationId),
+  configSha256: Schema.NullOr(exactHash),
+  adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server"])),
+  model: Schema.NullOr(safeEvidenceValue),
+  modelProvider: Schema.NullOr(safeEvidenceValue),
+  reasoningEffort: Schema.NullOr(Schema.Literals(["minimal", "low", "medium", "high", "xhigh"])),
+  developerInstructionsSha256: Schema.NullOr(exactHash),
+});
+const usage = Schema.Struct({
+  inputTokens: Schema.optional(Schema.Natural),
+  outputTokens: Schema.optional(Schema.Natural),
 });
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
@@ -38,6 +54,7 @@ const eventData = Schema.Union([
     role,
     activation: Schema.Natural,
     sessionId: safeObservationId,
+    requestedProfile: Schema.optional(safeObservationId),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
@@ -94,6 +111,9 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     outcome,
     sessionId: safeObservationId,
+    requestedProfile: Schema.optional(safeObservationId),
+    effectiveProfile: Schema.optional(effectiveProfile),
+    usage: Schema.optional(Schema.NullOr(usage)),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -191,6 +211,7 @@ const observationData = Schema.Union([
     role,
     activation: Schema.Natural,
     sessionId: safeObservationId,
+    requestedProfile: Schema.optional(safeObservationId),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
@@ -247,6 +268,9 @@ const observationData = Schema.Union([
     activation: Schema.Natural,
     outcome,
     sessionId: safeObservationId,
+    requestedProfile: Schema.optional(safeObservationId),
+    effectiveProfile: Schema.optional(effectiveProfile),
+    usage: Schema.optional(Schema.NullOr(usage)),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -305,7 +329,7 @@ export function decodeTaskEvent(input: unknown): TaskEvent {
 const dataFields: Record<string, readonly string[]> = {
   task_admitted: ["type", "contractHash"],
   activation_reserved: ["type", "activation", "recovery"],
-  coding_session_started: ["type", "role", "activation", "sessionId"],
+  coding_session_started: ["type", "role", "activation", "sessionId", "requestedProfile"],
   coding_thread_started: ["type", "role", "activation", "sessionId"],
   coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
   coding_tool_completed: [
@@ -337,7 +361,17 @@ const dataFields: Record<string, readonly string[]> = {
     "sessionId",
     "outcomeId",
   ],
-  coding_session_completed: ["type", "role", "activation", "outcome", "sessionId", "archive"],
+  coding_session_completed: [
+    "type",
+    "role",
+    "activation",
+    "outcome",
+    "sessionId",
+    "requestedProfile",
+    "effectiveProfile",
+    "usage",
+    "archive",
+  ],
   coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
   candidate_frozen: ["type", "sha", "fence"],
   project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
@@ -366,6 +400,11 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
   const expected = dataFields[input.type];
   if (!expected) throw new Error("event data type is invalid");
   const actual = Object.keys(input);
-  const optionalArchive = input.type === "coding_session_completed" && !actual.includes("archive");
-  assertExactKeys(input, optionalArchive ? expected.filter((key) => key !== "archive") : expected);
+  const optional =
+    input.type === "coding_session_started"
+      ? new Set(["requestedProfile"])
+      : input.type === "coding_session_completed"
+        ? new Set(["requestedProfile", "effectiveProfile", "usage", "archive"])
+        : new Set<string>();
+  assertExactKeys(input, expected.filter((key) => !optional.has(key) || actual.includes(key)));
 }

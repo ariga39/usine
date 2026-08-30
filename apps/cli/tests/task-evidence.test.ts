@@ -1,7 +1,102 @@
 import { describe, expect, test } from "vite-plus/test";
-import { renderTaskEvidence, type TaskEvidence } from "../src/task-evidence.js";
+import { deriveTaskEvidence, renderTaskEvidence, type TaskEvidence } from "../src/task-evidence.js";
+import { decodeTaskEvent, type TaskEvent, type TaskResource } from "@usine/task-authority";
 
 describe("task evidence", () => {
+  test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
+    const taskId = "history-evidence-task";
+    const sha = "a".repeat(40);
+    const event = (sequence: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `event-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data,
+      });
+    const task = {
+      taskId,
+      state: "reviewed_pr",
+      candidateSha: sha,
+      review: { sha, verdict: "approved", classification: "approved", findingCount: 0 },
+    } as TaskResource;
+    const evidence = deriveTaskEvidence(task, [
+      event(1, {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+      }),
+      event(2, {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "coding-session:1:implementer",
+      }),
+      event(3, {
+        type: "coding_tool_completed",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:tool:stable",
+        tool: "shell",
+        outcome: "succeeded",
+      }),
+      event(4, {
+        type: "coding_tool_completed",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:tool:stable",
+        tool: "shell",
+        outcome: "succeeded",
+      }),
+      event(5, {
+        type: "candidate_frozen",
+        sha,
+        fence: 1,
+      }),
+      event(6, {
+        type: "coding_session_started",
+        role: "reviewer",
+        activation: 1,
+        sessionId: "review-session:1:reviewer",
+      }),
+      event(7, {
+        type: "coding_session_completed",
+        role: "reviewer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "review-session:1:reviewer",
+      }),
+      event(8, { type: "review_completed", sha, cycle: 1, verdict: "approved" }),
+    ]);
+
+    expect(evidence.roleRuns.implementer[0]).toMatchObject({
+      requestedProfile: null,
+      effectiveProfile: {
+        profileName: null,
+        configSha256: null,
+        adapter: null,
+        model: null,
+        modelProvider: null,
+        reasoningEffort: null,
+        developerInstructionsSha256: null,
+      },
+      usage: null,
+      archive: { archiveId: null, status: "unavailable" },
+      outcome: { candidateSha: sha, taskRelation: "accepted_exact_sha" },
+    });
+    expect(evidence.roleRuns.implementer[0]?.effort.observations).toHaveLength(1);
+    expect(evidence.roleRuns.reviewer[0]?.outcome).toMatchObject({
+      candidateSha: sha,
+      taskRelation: "accepted_exact_sha",
+    });
+    expect(renderTaskEvidence(evidence, false)).toContain("requested-profile=unknown");
+    expect(renderTaskEvidence(evidence, false)).toContain("archive=unavailable (unavailable)");
+  });
+
   test("renders separate implementer and reviewer Role Runs for one exact Task outcome", () => {
     const evidence: TaskEvidence = {
       schemaVersion: 1,
@@ -28,7 +123,11 @@ describe("task evidence", () => {
             },
             usage: { inputTokens: 12, outputTokens: 7 },
             archive: { archiveId: "archive_writer", status: "complete" },
-            outcome: { status: "succeeded", candidateSha: "a".repeat(40) },
+            outcome: {
+              status: "succeeded",
+              candidateSha: "a".repeat(40),
+              taskRelation: "accepted_exact_sha",
+            },
           },
         ],
         reviewer: [
@@ -52,7 +151,11 @@ describe("task evidence", () => {
             },
             usage: { inputTokens: 5, outputTokens: 3 },
             archive: { archiveId: "archive_reviewer", status: "complete" },
-            outcome: { status: "succeeded", candidateSha: "a".repeat(40) },
+            outcome: {
+              status: "succeeded",
+              candidateSha: "a".repeat(40),
+              taskRelation: "accepted_exact_sha",
+            },
           },
         ],
       },

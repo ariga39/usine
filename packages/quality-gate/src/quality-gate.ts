@@ -4,6 +4,7 @@ import {
   reviewerOutputSchema,
   type CodingSessionFailureClass,
   type CodingSessionPhase,
+  type EffectiveSessionProfile,
   type RolePolicy,
   type SessionArchiveCaptureStatus,
 } from "@usine/coding-session";
@@ -39,6 +40,8 @@ export interface QualityGateOptions {
 export interface ReviewAttemptObservation {
   review: ReviewVerdict;
   usage: SessionUsage | null;
+  requestedProfile?: string;
+  effectiveProfile?: EffectiveSessionProfile;
   interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
   archive?: { archiveId: string; status: SessionArchiveCaptureStatus };
 }
@@ -56,6 +59,8 @@ interface QualityGateSession {
         usage?: SessionUsage | null;
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
+        requestedProfile?: string;
+        effectiveProfile?: EffectiveSessionProfile;
       }
   >;
 }
@@ -178,6 +183,8 @@ export class QualityGate {
               findings: [],
             },
             usage: observation.usage ?? null,
+            requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
+            effectiveProfile: observation.effectiveProfile,
             ...(observation.phase && observation.failureClass
               ? {
                   interruption: {
@@ -199,6 +206,8 @@ export class QualityGate {
               findings: [],
             },
             usage: observation.usage ?? null,
+            requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
+            effectiveProfile: observation.effectiveProfile,
             ...(observation.archiveId && observation.archiveStatus
               ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
               : {}),
@@ -206,6 +215,8 @@ export class QualityGate {
         return {
           review: observation.output,
           usage: observation.usage ?? null,
+          requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
+          effectiveProfile: observation.effectiveProfile,
           ...(observation.archiveId && observation.archiveStatus
             ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
             : {}),

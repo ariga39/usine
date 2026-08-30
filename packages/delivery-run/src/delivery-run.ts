@@ -27,6 +27,7 @@ import {
 import { activateImplementer } from "./coding-activation.js";
 import {
   blockTask,
+  effectiveProfileObservation,
   emitCodingInterruption,
   emitCodingObservation,
   emitObservation,
@@ -78,6 +79,8 @@ interface DeliveryRunSession {
         usage?: { inputTokens?: number; outputTokens?: number } | null;
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
+        requestedProfile?: string;
+        effectiveProfile?: SessionObservation<ImplementerOutput>["effectiveProfile"];
       }
   >;
 }
@@ -185,6 +188,9 @@ export async function executeDeliveryRun(
       );
       let review: ReviewVerdict;
       let reviewArchive: ReviewAttemptObservation["archive"];
+      let reviewRequestedProfile: string | undefined;
+      let reviewEffectiveProfile = effectiveProfileObservation(undefined);
+      let reviewUsage: ReviewAttemptObservation["usage"] = null;
       const reviewObservationCounter = { value: 0 };
       const reviewSessionId = `review-session:${cycle}:${input.reviewer?.role ?? "reviewer"}`;
       await emitObservation(services, result.taskId, {
@@ -195,6 +201,7 @@ export async function executeDeliveryRun(
           role: input.reviewer?.role ?? "reviewer",
           activation: result.candidateFence,
           sessionId: reviewSessionId,
+          requestedProfile: input.reviewer?.profile,
         },
       });
       try {
@@ -216,6 +223,9 @@ export async function executeDeliveryRun(
             ),
         );
         reviewArchive = observation.archive;
+        reviewRequestedProfile = observation.requestedProfile;
+        reviewEffectiveProfile = effectiveProfileObservation(observation.effectiveProfile);
+        reviewUsage = observation.usage;
         if (observation.interruption)
           await emitCodingInterruption(
             services,
@@ -239,6 +249,9 @@ export async function executeDeliveryRun(
             activation: result.candidateFence,
             outcome: input.signal?.aborted ? "cancelled" : "failed",
             sessionId: reviewSessionId,
+            requestedProfile: input.reviewer?.profile,
+            effectiveProfile: effectiveProfileObservation(undefined),
+            usage: null,
           },
         });
         if (input.signal?.aborted) throw error;
@@ -253,6 +266,9 @@ export async function executeDeliveryRun(
           activation: result.candidateFence,
           outcome: review.verdict === "inconclusive" ? "failed" : "succeeded",
           sessionId: reviewSessionId,
+          requestedProfile: reviewRequestedProfile ?? input.reviewer?.profile,
+          effectiveProfile: reviewEffectiveProfile,
+          usage: reviewUsage,
           ...(reviewArchive ? { archive: reviewArchive } : {}),
         },
       });

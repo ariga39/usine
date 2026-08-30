@@ -2,6 +2,7 @@ import type {
   CodingSessionFailureClass,
   CodingSessionObservation,
   CodingSessionPhase,
+  EffectiveSessionProfile,
 } from "@usine/coding-session";
 import type {
   TaskObservationEventData,
@@ -107,6 +108,22 @@ export function emitCodingInterruption(
       failureClass: interruption.failureClass,
     },
   }).then(() => undefined);
+}
+
+export function effectiveProfileObservation(
+  profile: EffectiveSessionProfile | undefined,
+): EffectiveSessionProfile {
+  return (
+    profile ?? {
+      profileName: null,
+      configSha256: null,
+      adapter: null,
+      model: null,
+      modelProvider: null,
+      reasoningEffort: null,
+      developerInstructionsSha256: null,
+    }
+  );
 }
 
 export async function blockTask(

@@ -9,7 +9,12 @@ import {
   originalTaskContract,
 } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
-import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
+import {
+  blockTask,
+  effectiveProfileObservation,
+  emitCodingInterruption,
+  emitCodingObservation,
+} from "./delivery-progress.js";
 
 function implementerPrompt(
   input: DeliveryRunInput,
@@ -83,6 +88,7 @@ async function runCodingAttempt(
     role: input.implementer.role,
     activation: reservation.activation,
     sessionId,
+    requestedProfile: input.implementer.profile,
   });
   const observation = await services.session.run({
     role: input.implementer.role,
@@ -122,6 +128,9 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "cancelled",
       sessionId,
+      requestedProfile: observation.requestedProfile ?? input.implementer.profile,
+      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
     throw new Error("task execution cancelled");
@@ -145,6 +154,9 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: observation.status === "cancelled" ? "cancelled" : "failed",
       sessionId,
+      requestedProfile: observation.requestedProfile ?? input.implementer.profile,
+      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
     return {
@@ -166,6 +178,9 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "blocked",
       sessionId,
+      requestedProfile: observation.requestedProfile ?? input.implementer.profile,
+      effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+      usage: observation.usage ?? null,
       ...archiveReference(observation),
     });
     return {
@@ -181,6 +196,9 @@ async function runCodingAttempt(
     activation: reservation.activation,
     outcome: "succeeded",
     sessionId,
+    requestedProfile: observation.requestedProfile ?? input.implementer.profile,
+    effectiveProfile: effectiveProfileObservation(observation.effectiveProfile),
+    usage: observation.usage ?? null,
     ...archiveReference(observation),
   });
   try {
