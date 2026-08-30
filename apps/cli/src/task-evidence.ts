@@ -17,6 +17,8 @@ export interface EffectiveRoleProfile {
 }
 
 export interface RoleRunEffort {
+  elapsedMs: number | null;
+  counts: { turns: number; tools: number; mcpTools: number };
   phase: "startup" | "thread" | "turn" | "output" | null;
   failureClass:
     | "transport"
@@ -124,7 +126,12 @@ export function deriveTaskEvidence(
       runs.get(key) ??
       mutableRoleRun(data.role, data.activation, data.sessionId, explicitReviewCycle);
     if (explicitReviewCycle !== undefined) run.reviewCycle = explicitReviewCycle;
+    if (run.terminalObserved) continue;
     if (data.type === "coding_session_started") {
+      run.sessionStartedAtEpochMs = Math.min(
+        run.sessionStartedAtEpochMs ?? event.occurredAtEpochMs,
+        event.occurredAtEpochMs,
+      );
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
     } else if (data.type === "coding_session_completed") {
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
@@ -132,12 +139,19 @@ export function deriveTaskEvidence(
       run.usage = data.usage ?? run.usage;
       run.archive = data.archive ? archiveEvidence(data.archive) : run.archive;
       run.outcome.status = data.outcome;
+      run.terminalAtEpochMs = event.occurredAtEpochMs;
+      run.terminalObserved = true;
     } else if (data.type === "coding_session_interrupted") {
       run.effort.phase = data.phase;
       run.effort.failureClass = data.failureClass;
       run.outcome.status = data.failureClass === "cancellation" ? "cancelled" : "failed";
+      run.terminalAtEpochMs = event.occurredAtEpochMs;
+      run.terminalObserved = true;
     } else {
       run.effort.observations.push(effortObservation(data));
+      if (data.type === "coding_turn_started") run.effort.counts.turns += 1;
+      if (data.type === "coding_tool_completed") run.effort.counts.tools += 1;
+      if (data.type === "coding_mcp_tool_completed") run.effort.counts.mcpTools += 1;
       if (data.type === "coding_turn_started") run.effort.phase = "turn";
       if (data.type === "coding_turn_completed") run.effort.phase = "output";
     }
@@ -151,6 +165,10 @@ export function deriveTaskEvidence(
         : reviewByCycle.get(run.reviewCycle ?? -1) ?? null;
     run.outcome.candidateSha = candidateSha;
     run.outcome.taskRelation = relationToTask(candidateSha, task);
+    run.effort.elapsedMs =
+      run.sessionStartedAtEpochMs === null || run.terminalAtEpochMs === null
+        ? null
+        : Math.max(0, run.terminalAtEpochMs - run.sessionStartedAtEpochMs);
   }
 
   const roleRuns = { implementer: [] as RoleRunEvidence[], reviewer: [] as RoleRunEvidence[] };
@@ -176,6 +194,9 @@ interface MutableRoleRun {
   activation: number | null;
   reviewCycle: number | null;
   sessionId: string;
+  sessionStartedAtEpochMs: number | null;
+  terminalAtEpochMs: number | null;
+  terminalObserved: boolean;
   requestedProfile: string | null;
   effectiveProfile: EffectiveRoleProfile;
   effort: RoleRunEffort;
@@ -199,9 +220,18 @@ function mutableRoleRun(
     activation: role === "implementer" ? candidateFence : null,
     reviewCycle: role === "reviewer" ? (reviewCycle ?? null) : null,
     sessionId,
+    sessionStartedAtEpochMs: null,
+    terminalAtEpochMs: null,
+    terminalObserved: false,
     requestedProfile: null,
     effectiveProfile: unavailableEffectiveProfile(),
-    effort: { phase: null, failureClass: null, observations: [] },
+    effort: {
+      elapsedMs: null,
+      counts: { turns: 0, tools: 0, mcpTools: 0 },
+      phase: null,
+      failureClass: null,
+      observations: [],
+    },
     usage: null,
     archive: { archiveId: null, status: "unavailable" },
     outcome: { status: "unknown", candidateSha: null, taskRelation: "not_observed" },
@@ -336,7 +366,7 @@ function renderRoleRun(run: RoleRunEvidence): string {
     `  ${run.role === "reviewer" ? `review-cycle=${run.reviewCycle ?? "unknown"}` : `activation=${run.activation ?? "unknown"}`} requested-profile=${run.requestedProfile ?? "unknown"}`,
     `    effective=${run.effectiveProfile.profileName ?? "unavailable"} model=${run.effectiveProfile.model ?? "unavailable"} provider=${run.effectiveProfile.modelProvider ?? "unavailable"} adapter=${run.effectiveProfile.adapter ?? "unavailable"} reasoning=${run.effectiveProfile.reasoningEffort ?? "unavailable"}`,
     `    status=${run.outcome.status} usage=${run.usage ? JSON.stringify(run.usage) : "unavailable"} archive=${run.archive.archiveId ?? "unavailable"} (${run.archive.status})`,
-    `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} phase=${run.effort.phase ?? "unknown"}`,
+    `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} elapsed-ms=${run.effort.elapsedMs ?? "unknown"} turns=${run.effort.counts.turns} tools=${run.effort.counts.tools} mcp-tools=${run.effort.counts.mcpTools} phase=${run.effort.phase ?? "unknown"}`,
     `    relation=${run.outcome.taskRelation}`,
   ].join("\n");
 }

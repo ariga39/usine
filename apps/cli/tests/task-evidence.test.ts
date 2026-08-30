@@ -131,6 +131,95 @@ describe("task evidence", () => {
     });
   });
 
+  test("derives elapsed effort and bounded turn/tool observations without double counting", () => {
+    const taskId = "effort-evidence-task";
+    const event = (sequence: number, occurredAtEpochMs: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `effort-${sequence}`,
+        occurredAtEpochMs,
+        data,
+      });
+    const evidence = deriveTaskEvidence(
+      { taskId, state: "admitted", candidateSha: null } as TaskResource,
+      [
+        event(1, 1_000, {
+          type: "coding_session_started",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+        }),
+        event(2, 1_100, {
+          type: "coding_thread_started",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+        }),
+        event(3, 1_200, {
+          type: "coding_turn_started",
+          role: "implementer",
+          activation: 1,
+          turn: 1,
+          sessionId: "coding-session:1:implementer",
+        }),
+        event(4, 1_300, {
+          type: "coding_tool_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          outcomeId: "effort:tool:1",
+          tool: "shell",
+          outcome: "succeeded",
+        }),
+        event(5, 1_400, {
+          type: "coding_mcp_tool_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          outcomeId: "effort:mcp:1",
+          server: "github_read",
+          tool: "github_issue_get",
+          outcome: "succeeded",
+        }),
+        event(6, 1_500, {
+          type: "coding_turn_completed",
+          role: "implementer",
+          activation: 1,
+          turn: 1,
+          sessionId: "coding-session:1:implementer",
+          outcomeId: "effort:turn:1",
+          outcome: "succeeded",
+        }),
+        event(7, 1_600, {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "succeeded",
+          sessionId: "coding-session:1:implementer",
+          usage: { inputTokens: 10, outputTokens: 4 },
+        }),
+        event(8, 1_700, {
+          type: "coding_tool_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          outcomeId: "effort:tool:1",
+          tool: "shell",
+          outcome: "succeeded",
+        }),
+      ],
+    );
+
+    expect(evidence.roleRuns.implementer[0]).toMatchObject({
+      usage: { inputTokens: 10, outputTokens: 4 },
+      effort: {
+        elapsedMs: 600,
+        counts: { turns: 1, tools: 1, mcpTools: 1 },
+      },
+    });
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);
@@ -157,11 +246,13 @@ describe("task evidence", () => {
         sessionId: "coding-session:1:implementer",
       }),
       event(2, {
-        type: "coding_session_completed",
+        type: "coding_tool_completed",
         role: "implementer",
         activation: 1,
-        outcome: "succeeded",
         sessionId: "coding-session:1:implementer",
+        outcomeId: "coding:1:tool:stable",
+        tool: "shell",
+        outcome: "succeeded",
       }),
       event(3, {
         type: "coding_tool_completed",
@@ -173,13 +264,11 @@ describe("task evidence", () => {
         outcome: "succeeded",
       }),
       event(4, {
-        type: "coding_tool_completed",
+        type: "coding_session_completed",
         role: "implementer",
         activation: 1,
-        sessionId: "coding-session:1:implementer",
-        outcomeId: "coding:1:tool:stable",
-        tool: "shell",
         outcome: "succeeded",
+        sessionId: "coding-session:1:implementer",
       }),
       event(5, {
         type: "candidate_frozen",
@@ -248,8 +337,10 @@ describe("task evidence", () => {
               reasoningEffort: "low",
               developerInstructionsSha256: "2".repeat(64),
             },
-            effort: {
-              phase: "output",
+      effort: {
+        elapsedMs: 0,
+        counts: { turns: 0, tools: 0, mcpTools: 0 },
+        phase: "output",
               failureClass: null,
               observations: [{ type: "turn_completed", turn: 1, outcome: "succeeded" }],
             },
@@ -278,6 +369,8 @@ describe("task evidence", () => {
               developerInstructionsSha256: "4".repeat(64),
             },
             effort: {
+              elapsedMs: 0,
+              counts: { turns: 0, tools: 0, mcpTools: 0 },
               phase: "output",
               failureClass: null,
               observations: [{ type: "turn_completed", turn: 1, outcome: "succeeded" }],
