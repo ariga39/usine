@@ -35,6 +35,12 @@ import {
   validateCodexProfile,
   type CodexProfileResolver,
 } from "./codex-profile.js";
+import {
+  sessionArchiveProfileSnapshot,
+  SessionArchiveWriter,
+  type SessionArchiveCaptureStatus,
+  type SessionArchiveOptions,
+} from "./session-archive.js";
 
 type ResolvedCodexProfile = ReturnType<typeof normalizeCodexProfileSelection>;
 
@@ -175,6 +181,7 @@ export function createOpenAICompatibleRoleOutputTransform(
 export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
   executionStateDirectory?: string;
+  sessionArchive?: SessionArchiveOptions;
   appServerProfiles?: readonly string[];
   profileResolver?: CodexProfileResolver;
   roleOutputTransform?: RoleOutputTransform;
@@ -196,6 +203,9 @@ export interface SessionObservation<T = unknown> {
     | "role_output_transform_failed"
     | "role_output_schema_invalid"
     | null;
+  archiveId?: string;
+  archiveStatus?: SessionArchiveCaptureStatus;
+  archiveWarnings?: string[];
 }
 
 export interface CodingSessionCleanup {
@@ -297,6 +307,43 @@ export class CodexCodingSession {
   private async runProvider<T = unknown>(
     request: SessionRequest<T>,
   ): Promise<SessionObservation<T>> {
+    const archiveDirectory =
+      this.options.sessionArchive?.stateDirectory ?? this.options.executionStateDirectory;
+    const archive = archiveDirectory
+      ? new SessionArchiveWriter(
+          this.options.sessionArchive ?? { stateDirectory: archiveDirectory },
+          {
+            taskId: request.contract.id,
+            role: request.role,
+            attempt: request.execution.attempt,
+            contract: request.contract,
+            prompt: request.prompt,
+          },
+        )
+      : undefined;
+    await archive?.begin();
+    const observation = await this.runProviderCaptured(request, archive);
+    if (!archive) return observation;
+    const archiveResult = await archive.finish({
+      status: observation.status,
+      sessionId: observation.sessionId,
+      usage: observation.usage,
+      failure: observation.failure,
+      phase: observation.phase,
+      failureClass: observation.failureClass,
+    });
+    return {
+      ...observation,
+      archiveId: archiveResult.archiveId,
+      archiveStatus: archiveResult.archiveStatus,
+      archiveWarnings: archiveResult.warnings,
+    };
+  }
+
+  private async runProviderCaptured<T = unknown>(
+    request: SessionRequest<T>,
+    archive?: SessionArchiveWriter,
+  ): Promise<SessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
     let remaining: number;
     try {
@@ -338,6 +385,12 @@ export class CodexCodingSession {
           profileName,
           await this.profileResolver(profileName, request.environment ?? this.options.environment),
         );
+        archive?.setProfile(
+          sessionArchiveProfileSnapshot(profileName, {
+            ...profileSelection,
+            ...profileSelection.config,
+          }),
+        );
       } catch (error) {
         if (error instanceof CodexProfileSelectionError) throw error;
         throw new CodexProfileSelectionError(
@@ -371,6 +424,7 @@ export class CodexCodingSession {
       }
       let result: ProviderTurnResult;
       if (this.appServerProfiles.has(profileName)) {
+        archive?.setAdapter("app-server");
         if (!this.options.executionStateDirectory)
           throw new Error("app-server execution state directory is unavailable");
         const environment = effectiveRequest.environment ?? this.options.environment;
@@ -379,8 +433,13 @@ export class CodexCodingSession {
           environment: explicitWorkerEnvironment(environment),
           executionStateDirectory: this.options.executionStateDirectory,
           profileSelection,
+          onItemCompleted: (item) => archive?.addCompletedItem(item),
+          onSessionId: (sessionId) => archive?.setSessionId(sessionId),
+          onPhase: (nextPhase) => archive?.setPhase(nextPhase),
+          onUsage: (usage) => archive?.setUsage(usageFrom(usage)),
         });
       } else {
+        archive?.setAdapter("sdk");
         let client: Codex;
         try {
           client = await this.createClient(effectiveRequest, profileSelection);
@@ -397,10 +456,12 @@ export class CodexCodingSession {
         let thread: Thread;
         try {
           thread = client.startThread(threadOptions);
+          archive?.setSessionId(thread.id);
         } catch (error) {
           throw new CodingSessionInterruption("thread", classifyAdapterFailure(error));
         }
         phase = "turn";
+        archive?.setPhase("turn");
         const turnOptions: TurnOptions = {
           signal: abortSignal,
           outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
@@ -410,10 +471,14 @@ export class CodexCodingSession {
           effectiveRequest.prompt,
           turnOptions,
           effectiveRequest.onObservation,
+          (item) => archive?.addCompletedItem(item),
         );
         result = { ...sdkResult, sessionId: thread.id };
       }
       phase = "output";
+      archive?.setPhase("output");
+      archive?.setSessionId(result.sessionId);
+      archive?.setProviderResult(result.finalResponse, usageFrom(result.usage));
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
@@ -460,6 +525,7 @@ export class CodexCodingSession {
             failureCode: "role_output_transform_failed",
           };
         }
+        archive?.setNormalizedOutput(normalized);
         parsed = effectiveRequest.outputSchema.safeParse(normalized);
         if (!parsed.success) {
           return {
@@ -475,6 +541,7 @@ export class CodexCodingSession {
           };
         }
       }
+      archive?.setNormalizedOutput(parsed.data);
       return {
         status: "completed",
         sessionId: result.sessionId,
@@ -547,6 +614,7 @@ async function runStreamedTurn(
   prompt: string,
   options: TurnOptions,
   onObservation?: SessionRequest["onObservation"],
+  onItemCompleted?: (item: ThreadItem) => void,
 ): Promise<RunResult> {
   try {
     const streamed = await thread.runStreamed(prompt, options);
@@ -565,6 +633,7 @@ async function runStreamedTurn(
           break;
         case "item.completed":
           items.push(event.item);
+          onItemCompleted?.(event.item);
           if (event.item.type === "agent_message") finalResponse = event.item.text;
           await emitCompletedItem(event.item, onObservation);
           break;

@@ -131,6 +131,13 @@ export function resolveTaskContract(
   };
 }
 
+/** Return the caller-owned contract without host-resolved Repository facts. */
+export function originalTaskContract(contract: ResolvedTaskContract): TaskContract {
+  const { repository: _repository, projectCheck: _projectCheck, delivery, ...original } = contract;
+  const { baseBranch: _baseBranch, ...originalDelivery } = delivery;
+  return { ...original, delivery: originalDelivery };
+}
+
 export function contractIssues(error: z.ZodError): Array<{ path: string; message: string }> {
   return error.issues.map((issue) => ({
     path: issue.path.join("."),

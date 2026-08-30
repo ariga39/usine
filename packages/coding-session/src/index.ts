@@ -48,3 +48,18 @@ export {
   type ImplementerOutput,
   type ReviewerOutput,
 } from "./role-output.js";
+export {
+  cleanupSessionArchives,
+  exportSessionArchive,
+  listSessionArchives,
+  readSessionArchive,
+  readSessionArchiveManifest,
+  SessionArchiveError,
+  type SessionArchive,
+  type SessionArchiveCleanupSelection,
+  type SessionArchiveFailureCode,
+  type SessionArchiveManifest,
+  type SessionArchiveOptions,
+  type SessionArchiveStatus,
+  type SessionArchiveCaptureStatus,
+} from "./session-archive.js";

@@ -8,6 +8,11 @@ const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
 const outcome = Schema.Literals(["succeeded", "failed", "cancelled", "blocked"]);
+const archiveStatus = Schema.Literals(["stored", "truncated", "failed", "pruned"]);
+const archiveReference = Schema.Struct({
+  archiveId: safeObservationId,
+  status: archiveStatus,
+});
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
 const codingSessionFailureClass = Schema.Literals([
@@ -89,6 +94,7 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     outcome,
     sessionId: safeObservationId,
+    archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_session_interrupted"),
@@ -241,6 +247,7 @@ const observationData = Schema.Union([
     activation: Schema.Natural,
     outcome,
     sessionId: safeObservationId,
+    archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_session_interrupted"),
@@ -330,7 +337,7 @@ const dataFields: Record<string, readonly string[]> = {
     "sessionId",
     "outcomeId",
   ],
-  coding_session_completed: ["type", "role", "activation", "outcome", "sessionId"],
+  coding_session_completed: ["type", "role", "activation", "outcome", "sessionId", "archive"],
   coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
   candidate_frozen: ["type", "sha", "fence"],
   project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
@@ -358,5 +365,7 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
   if (typeof input.type !== "string") throw new Error("event data type is invalid");
   const expected = dataFields[input.type];
   if (!expected) throw new Error("event data type is invalid");
-  assertExactKeys(input, expected);
+  const actual = Object.keys(input);
+  const optionalArchive = input.type === "coding_session_completed" && !actual.includes("archive");
+  assertExactKeys(input, optionalArchive ? expected.filter((key) => key !== "archive") : expected);
 }

@@ -51,6 +51,8 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   });
   let reviewerSchema: unknown;
   let reviewerEnvironment: NodeJS.ProcessEnv | undefined;
+  let reviewerContract: unknown;
+  let reviewerPrompt: string | undefined;
   let sessionStatus: "completed" | "failed" = "completed";
   let reviewerSha = base;
   const gate = new QualityGate({
@@ -59,12 +61,18 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
       run: async ({
         outputSchema,
         environment,
+        contract: requestContract,
+        prompt,
       }: {
         outputSchema: unknown;
         environment?: NodeJS.ProcessEnv;
+        contract: unknown;
+        prompt: string;
       }) => {
         reviewerSchema = outputSchema;
         reviewerEnvironment = environment;
+        reviewerContract = requestContract;
+        reviewerPrompt = prompt;
         return {
           status: sessionStatus,
           sessionId: "review",
@@ -109,6 +117,14 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   expect(review.verdict).toBe("approved");
   expect(reviewerSchema).toBe(reviewerOutputSchema);
   expect(reviewerEnvironment).toEqual(testEnvironment);
+  expect(reviewerContract).toMatchObject({
+    authorization: { delivery: true },
+    delivery: { branch: "agent/test", issue: 1 },
+  });
+  expect(reviewerContract).not.toHaveProperty("repository");
+  expect(reviewerContract).not.toHaveProperty("projectCheck");
+  expect(reviewerContract).not.toHaveProperty("delivery.baseBranch");
+  expect(reviewerPrompt).toContain(`Task Contract: ${JSON.stringify(reviewerContract)}`);
   reviewerSha = "b".repeat(40);
   const staleReview = await gate.review(task, base, check, 1);
   expect(staleReview).toMatchObject({

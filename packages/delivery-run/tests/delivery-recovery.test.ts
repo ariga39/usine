@@ -214,6 +214,8 @@ describe("Delivery Run durable phase recovery", () => {
   test("records provider-neutral coding observations without raw session data", async () => {
     const id = `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fake = fakeAuthority(persistedResult("admitted", id));
+    let implementerContract: unknown;
+    let implementerPrompt: string | undefined;
     const result = await executeDeliveryRun(
       {
         contract: contract(id),
@@ -238,6 +240,8 @@ describe("Delivery Run durable phase recovery", () => {
         },
         session: {
           run: async (request) => {
+            implementerContract = request.contract;
+            implementerPrompt = request.prompt;
             await request.onObservation?.({
               type: "mcp_unavailable",
               server: "github_read_implementer",
@@ -249,6 +253,8 @@ describe("Delivery Run durable phase recovery", () => {
               summary: "completed",
               failure: null,
               usage: { inputTokens: 12, outputTokens: 7 },
+              archiveId: "archive_00000000-0000-0000-0000-000000000001",
+              archiveStatus: "stored" as const,
             };
           },
         },
@@ -276,6 +282,10 @@ describe("Delivery Run durable phase recovery", () => {
                 findings: [],
               },
               usage: { inputTokens: 5, outputTokens: 3 },
+              archive: {
+                archiveId: "archive_00000000-0000-0000-0000-000000000002",
+                status: "stored" as const,
+              },
             };
           },
         },
@@ -292,6 +302,14 @@ describe("Delivery Run durable phase recovery", () => {
     );
 
     expect(result.state).toBe("reviewed_pr");
+    expect(implementerContract).toMatchObject({
+      authorization: { delivery: true },
+      delivery: { branch: "agent/recovery", issue: 80 },
+    });
+    expect(implementerContract).not.toHaveProperty("repository");
+    expect(implementerContract).not.toHaveProperty("projectCheck");
+    expect(implementerContract).not.toHaveProperty("delivery.baseBranch");
+    expect(implementerPrompt).toContain(`Task Contract: ${JSON.stringify(implementerContract)}`);
     expect(fake.getObservations().map(({ data }) => data.type)).toEqual([
       "coding_session_started",
       "coding_mcp_unavailable",
@@ -299,6 +317,18 @@ describe("Delivery Run durable phase recovery", () => {
       "coding_session_started",
       "coding_mcp_tool_completed",
       "coding_session_completed",
+    ]);
+    expect(
+      fake
+        .getObservations()
+        .map(({ data }) => (data.type === "coding_session_completed" ? data.archive : undefined)),
+    ).toEqual([
+      undefined,
+      undefined,
+      { archiveId: "archive_00000000-0000-0000-0000-000000000001", status: "stored" },
+      undefined,
+      undefined,
+      { archiveId: "archive_00000000-0000-0000-0000-000000000002", status: "stored" },
     ]);
     expect(
       fake

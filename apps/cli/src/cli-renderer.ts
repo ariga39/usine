@@ -7,6 +7,7 @@ import type {
   TaskListPage,
   TaskResource,
 } from "@usine/task-authority";
+import type { SessionArchiveManifest } from "@usine/runtime";
 
 export function renderJson(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -76,6 +77,21 @@ export function renderServerSnapshot(snapshot: ServerSnapshot, json: boolean): s
     `Repositories: ${snapshot.repositories.length}`,
     `Tasks: ${snapshot.tasks.length}`,
     `Coding sessions: ${snapshot.codingSessions.length}`,
+    "",
+  ].join("\n");
+}
+
+export function renderArchiveList(
+  manifests: readonly SessionArchiveManifest[],
+  json: boolean,
+): string {
+  if (json) return renderJson({ archives: manifests });
+  return [
+    "ARCHIVE ID\tTASK ID\tROLE\tATTEMPT\tSTATUS\tCAPTURE\tCOMPLETENESS",
+    ...manifests.map(
+      (archive) =>
+        `${archive.archiveId}\t${archive.taskId}\t${archive.role}\t${archive.attempt}\t${archive.status}\t${archive.captureStatus}\t${archive.completeness}`,
+    ),
     "",
   ].join("\n");
 }

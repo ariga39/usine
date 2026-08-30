@@ -24,6 +24,10 @@ interface AppServerRunOptions {
   environment: NodeJS.ProcessEnv;
   executionStateDirectory: string;
   profileSelection: ReturnType<typeof normalizeCodexProfileSelection>;
+  onItemCompleted?: (item: Record<string, unknown>) => void | Promise<void>;
+  onSessionId?: (sessionId: string) => void;
+  onPhase?: (phase: CodingSessionPhase) => void;
+  onUsage?: (usage: AppServerRunResult["usage"]) => void;
 }
 
 class AppServerCancelled extends Error {}
@@ -223,6 +227,10 @@ export async function runCodexAppServer({
   environment,
   executionStateDirectory,
   profileSelection,
+  onItemCompleted,
+  onSessionId,
+  onPhase,
+  onUsage,
 }: AppServerRunOptions): Promise<AppServerRunResult> {
   let launcher: Awaited<ReturnType<typeof createCodexLauncher>>;
   let child: ChildProcessWithoutNullStreams;
@@ -378,7 +386,10 @@ export async function runCodexAppServer({
                     if (item.type === "agentMessage" && typeof item.text === "string")
                       finalResponse = item.text;
                     yield* Effect.tryPromise({
-                      try: () => emitAppServerItem(item, request.onObservation),
+                      try: async () => {
+                        await onItemCompleted?.(item);
+                        await emitAppServerItem(item, request.onObservation);
+                      },
                       catch: asError,
                     });
                     break;
@@ -390,6 +401,7 @@ export async function runCodexAppServer({
                       input_tokens: event.tokenUsage.last.inputTokens,
                       output_tokens: event.tokenUsage.last.outputTokens,
                     };
+                    onUsage?.(usage);
                     break;
                   }
                   case "turn/completed": {
@@ -451,6 +463,7 @@ export async function runCodexAppServer({
         throwIfAborted(request.signal);
         transport.notify("initialized", {});
         phase = "thread";
+        onPhase?.(phase);
         const thread = threadStartResponseSchema.parse(
           yield* requestAppServer("thread/start", {
             cwd: request.workspace,
@@ -464,8 +477,10 @@ export async function runCodexAppServer({
           }),
         );
         threadId = thread.thread.id;
+        onSessionId?.(threadId);
         throwIfAborted(request.signal);
         phase = "turn";
+        onPhase?.(phase);
         const turn = turnStartResponseSchema.parse(
           yield* requestAppServer("turn/start", {
             threadId,

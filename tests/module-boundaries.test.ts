@@ -6,6 +6,7 @@ import { execa } from "execa";
 import { expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
 import {
+  originalTaskContract,
   resolveTaskContract,
   taskContractSchema,
   type RepositorySnapshot,
@@ -329,6 +330,15 @@ test.each([["repository mismatch", "https://github.com/other/usine/issues/1"]])(
     );
   },
 );
+
+test("resolved host facts never enter the original Task Contract passed to a role", () => {
+  const parsed = taskContractSchema.parse(contract());
+  const resolved = resolveTaskContract(parsed, repository);
+  expect(originalTaskContract(resolved)).toEqual(parsed);
+  expect(originalTaskContract(resolved)).not.toHaveProperty("repository");
+  expect(originalTaskContract(resolved)).not.toHaveProperty("projectCheck");
+  expect(originalTaskContract(resolved)).not.toHaveProperty("delivery.baseBranch");
+});
 
 test("CLI rejects whitespace-only repository IDs before admission", async () => {
   const directory = await mkdtemp(join(tmpdir(), "usine-cli-"));

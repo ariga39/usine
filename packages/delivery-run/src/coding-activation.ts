@@ -1,11 +1,12 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
-import { implementerOutputSchema } from "@usine/coding-session";
+import { implementerOutputSchema, type SessionArchiveCaptureStatus } from "@usine/coding-session";
 import {
   deadlineExpired,
   type CheckResult,
   type TaskObservationEventData,
   type TaskResult,
   type TaskWaitingResumeState,
+  originalTaskContract,
 } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
 import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
@@ -16,9 +17,10 @@ function implementerPrompt(
   check: CheckResult | null,
   findings: string[],
 ): string {
+  const taskContract = originalTaskContract(input.contract);
   return [
     "Role: implementer. Work only on the frozen authorized Task Contract.",
-    `Task Contract: ${JSON.stringify(input.contract)}`,
+    `Task Contract: ${JSON.stringify(taskContract)}`,
     `Current candidate parent SHA: ${previousSha}`,
     check
       ? `Failed project check evidence: ${JSON.stringify(check)}`
@@ -85,7 +87,7 @@ async function runCodingAttempt(
   const observation = await services.session.run({
     role: input.implementer.role,
     workspace: workspace.path,
-    contract: input.contract,
+    contract: originalTaskContract(input.contract),
     prompt: implementerPrompt(input, previousSha, check, findings),
     profile: input.implementer.profile,
     sandbox: input.implementer.sandbox,
@@ -120,6 +122,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "cancelled",
       sessionId,
+      ...archiveReference(observation),
     });
     throw new Error("task execution cancelled");
   }
@@ -142,6 +145,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: observation.status === "cancelled" ? "cancelled" : "failed",
       sessionId,
+      ...archiveReference(observation),
     });
     return {
       status: "failed",
@@ -162,6 +166,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "blocked",
       sessionId,
+      ...archiveReference(observation),
     });
     return {
       status: "failed",
@@ -176,6 +181,7 @@ async function runCodingAttempt(
     activation: reservation.activation,
     outcome: "succeeded",
     sessionId,
+    ...archiveReference(observation),
   });
   try {
     const candidate = await services.workspace.freeze(workspace, previousSha, input.contract);
@@ -197,6 +203,15 @@ async function runCodingAttempt(
       retryable: false,
     };
   }
+}
+
+function archiveReference(observation: {
+  archiveId?: string;
+  archiveStatus?: SessionArchiveCaptureStatus;
+}): { archive?: { archiveId: string; status: SessionArchiveCaptureStatus } } {
+  return observation.archiveId && observation.archiveStatus
+    ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+    : {};
 }
 
 export async function activateImplementer(
