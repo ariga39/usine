@@ -1,0 +1,24 @@
+{
+  "name": "@usine/hermes-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "usine-hermes-bridge": "dist/cli.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "vp pack",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@usine/runtime": "workspace:*",
+    "effect": "4.0.0-rc.110",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

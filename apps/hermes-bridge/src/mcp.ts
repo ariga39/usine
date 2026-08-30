@@ -1,0 +1,219 @@
+import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import type { HermesBridgeUpstream } from "./bridge.js";
+import { assertLoopbackHost } from "./loopback.js";
+
+const maxBodyBytes = 65_536;
+const maxLimit = 100;
+
+export const hermesBridgeToolNames = [
+  "usine_server_snapshot",
+  "usine_task_list",
+  "usine_task_get",
+  "usine_task_history",
+  "usine_task_submit",
+  "usine_task_retry",
+] as const;
+
+export type HermesBridgeToolName = (typeof hermesBridgeToolNames)[number];
+
+export interface HermesMcpHttpOptions {
+  upstream: HermesBridgeUpstream;
+  host?: string;
+  port?: number;
+}
+
+export interface HermesMcpHttpHandle {
+  readonly url: string;
+  close(): Promise<void>;
+}
+
+export function createHermesBridgeMcpServer(upstream: HermesBridgeUpstream): McpServer {
+  const server = new McpServer(
+    { name: "usine-hermes-bridge", version: "0.1.0" },
+    { capabilities: { tools: {} } },
+  );
+
+  server.registerTool(
+    "usine_server_snapshot",
+    {
+      description: "Read the bounded current Usine server snapshot.",
+      inputSchema: { limit: z.number().int().min(1).max(maxLimit).optional() },
+    },
+    async ({ limit }) => callSafely(() => upstream.serverSnapshot(limit)),
+  );
+  server.registerTool(
+    "usine_task_list",
+    {
+      description:
+        "Read the bounded current Task list window; it is not exhaustive historical discovery.",
+      inputSchema: { limit: z.number().int().min(1).max(maxLimit).optional() },
+    },
+    async ({ limit }) => callSafely(() => upstream.listTasks(limit)),
+  );
+  server.registerTool(
+    "usine_task_get",
+    {
+      description: "Read one current public Task resource by identifier.",
+      inputSchema: { taskId: z.string().min(1) },
+    },
+    async ({ taskId }) => callSafely(() => upstream.getTask(taskId)),
+  );
+  server.registerTool(
+    "usine_task_history",
+    {
+      description: "Read bounded durable history for one Task after a sequence.",
+      inputSchema: {
+        taskId: z.string().min(1),
+        after: z.number().int().min(0).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ taskId, after, limit }) =>
+      callSafely(() => upstream.taskHistory(taskId, after, limit)),
+  );
+  server.registerTool(
+    "usine_task_submit",
+    {
+      description: "Submit an existing committed Task Contract to Usine.",
+      inputSchema: {
+        contractPath: z.string().min(1),
+        repositoryId: z.string().min(1).optional(),
+      },
+    },
+    async ({ contractPath, repositoryId }) =>
+      callSafely(() => upstream.submitTask({ contractPath, repositoryId })),
+  );
+  server.registerTool(
+    "usine_task_retry",
+    {
+      description: "Request the existing explicit retry mutation for one waiting Task.",
+      inputSchema: { taskId: z.string().min(1) },
+    },
+    async ({ taskId }) => callSafely(() => upstream.retryTask(taskId)),
+  );
+  return server;
+}
+
+export async function startHermesBridgeMcpHttp(
+  options: HermesMcpHttpOptions,
+): Promise<HermesMcpHttpHandle> {
+  const host = options.host ?? "127.0.0.1";
+  assertLoopbackHost(host);
+  type Session = { transport: StreamableHTTPServerTransport; server: McpServer };
+  let session: Session | undefined;
+  let initialization: Promise<void> = Promise.resolve();
+  let closed = false;
+
+  const initialize = (request: IncomingMessage, response: ServerResponse, body: unknown) => {
+    const previous = initialization;
+    const operation = previous.then(async () => {
+      if (closed) throw new Error("Hermes MCP endpoint is closed");
+      const previousSession = session;
+      session = undefined;
+      await previousSession?.server.close().catch(() => undefined);
+      if (closed) throw new Error("Hermes MCP endpoint is closed");
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+      });
+      const server = createHermesBridgeMcpServer(options.upstream);
+      const next = { transport, server };
+      transport.onclose = () => {
+        if (session === next) session = undefined;
+      };
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(request, response, body);
+        if (closed) throw new Error("Hermes MCP endpoint is closed");
+        session = next;
+      } catch (error) {
+        await server.close().catch(() => undefined);
+        throw error;
+      }
+    });
+    initialization = operation.catch(() => undefined);
+    return operation;
+  };
+
+  const http = createServer(async (request, response) => {
+    if (request.url?.split("?", 1)[0] !== "/mcp") {
+      response.statusCode = 404;
+      response.end();
+      return;
+    }
+    try {
+      const sessionId = request.headers["mcp-session-id"];
+      const body = request.method === "POST" ? await requestBody(request) : undefined;
+      if (isInitializeRequest(body)) {
+        await initialize(request, response, body);
+        return;
+      }
+      if (!session || typeof sessionId !== "string" || session.transport.sessionId !== sessionId) {
+        response.statusCode = 400;
+        response.end("MCP session is unavailable");
+        return;
+      }
+      await session.transport.handleRequest(request, response, body);
+    } catch {
+      if (!response.headersSent) {
+        response.statusCode = 500;
+        response.end("MCP request failed");
+      }
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    http.once("error", reject);
+    http.listen(options.port ?? 0, host, resolve);
+  });
+  const address = http.address();
+  if (!address || typeof address === "string") throw new Error("Hermes MCP host did not bind");
+  let closePromise: Promise<void> | undefined;
+  return {
+    url: `http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${address.port}/mcp`,
+    close() {
+      if (closePromise) return closePromise;
+      closed = true;
+      closePromise = (async () => {
+        await initialization;
+        if (session) {
+          const currentSession = session;
+          session = undefined;
+          await currentSession.server.close().catch(() => undefined);
+        }
+        await new Promise<void>((resolve, reject) =>
+          http.close((error) => (error ? reject(error) : resolve())),
+        );
+      })();
+      return closePromise;
+    },
+  };
+}
+
+async function callSafely<T>(operation: () => Promise<T>): Promise<CallToolResult> {
+  try {
+    const value = await operation();
+    return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
+  } catch {
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: "Usine operation unavailable" }],
+    };
+  }
+}
+
+async function requestBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let length = 0;
+  for await (const chunk of request) {
+    const value = Buffer.from(chunk);
+    length += value.length;
+    if (length > maxBodyBytes) throw new Error("MCP request is too large");
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
