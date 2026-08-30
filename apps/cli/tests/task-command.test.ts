@@ -63,7 +63,7 @@ describe("task evidence command", () => {
     let taskReads = 0;
     const originalFetch = globalThis.fetch;
     const output: string[] = [];
-    const originalWrite = process.stdout.write;
+    const originalWrite = process.stdout.write.bind(process.stdout);
     globalThis.fetch = async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       if (url.pathname.endsWith(`/v1/tasks/${taskId}`)) {
@@ -147,7 +147,7 @@ describe("task evidence command", () => {
     const requestedAfter: number[] = [];
     const originalFetch = globalThis.fetch;
     const output: string[] = [];
-    const originalWrite = process.stdout.write;
+    const originalWrite = process.stdout.write.bind(process.stdout);
     globalThis.fetch = async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       if (url.pathname.endsWith(`/v1/tasks/${taskId}`))

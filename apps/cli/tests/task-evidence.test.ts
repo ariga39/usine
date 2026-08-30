@@ -606,6 +606,11 @@ describe("task evidence", () => {
       task: {
         state: "reviewed_pr",
         candidateSha: "a".repeat(40),
+        candidateFence: null,
+        check: null,
+        review: null,
+        repairBatches: null,
+        delivery: null,
         relation: "accepted_exact_sha",
       },
     };

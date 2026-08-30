@@ -253,8 +253,19 @@ describe("Delivery Run durable phase recovery", () => {
               summary: "completed",
               failure: null,
               usage: { inputTokens: 12, outputTokens: 7 },
+              requestedProfile: "implementer-profile",
+              effectiveProfile: {
+                profileName: "implementer-profile",
+                configSha256: "1".repeat(64),
+                adapter: "sdk" as const,
+                model: "gpt-5.4",
+                modelProvider: "openai",
+                reasoningEffort: "low" as const,
+                developerInstructionsSha256: "2".repeat(64),
+              },
               archiveId: "archive_00000000-0000-0000-0000-000000000001",
               archiveStatus: "stored" as const,
+              archiveCompleteness: "complete" as const,
             };
           },
         },
@@ -282,9 +293,20 @@ describe("Delivery Run durable phase recovery", () => {
                 findings: [],
               },
               usage: { inputTokens: 5, outputTokens: 3 },
+              requestedProfile: "reviewer-profile",
+              effectiveProfile: {
+                profileName: "reviewer-profile",
+                configSha256: "3".repeat(64),
+                adapter: "app-server" as const,
+                model: "gpt-5.4",
+                modelProvider: "openai",
+                reasoningEffort: "high" as const,
+                developerInstructionsSha256: "4".repeat(64),
+              },
               archive: {
                 archiveId: "archive_00000000-0000-0000-0000-000000000002",
                 status: "stored" as const,
+                completeness: "partial" as const,
               },
             };
           },
@@ -321,14 +343,56 @@ describe("Delivery Run durable phase recovery", () => {
     expect(
       fake
         .getObservations()
-        .map(({ data }) => (data.type === "coding_session_completed" ? data.archive : undefined)),
+        .filter(({ data }) => data.type === "coding_session_completed")
+        .map(({ data }) => data),
     ).toEqual([
-      undefined,
-      undefined,
-      { archiveId: "archive_00000000-0000-0000-0000-000000000001", status: "stored" },
-      undefined,
-      undefined,
-      { archiveId: "archive_00000000-0000-0000-0000-000000000002", status: "stored" },
+      {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "coding-session:1:implementer",
+        requestedProfile: "implementer-profile",
+        effectiveProfile: {
+          profileName: "implementer-profile",
+          configSha256: "1".repeat(64),
+          adapter: "sdk",
+          model: "gpt-5.4",
+          modelProvider: "openai",
+          reasoningEffort: "low",
+          developerInstructionsSha256: "2".repeat(64),
+        },
+        usage: { inputTokens: 12, outputTokens: 7 },
+        archive: {
+          archiveId: "archive_00000000-0000-0000-0000-000000000001",
+          status: "stored",
+          completeness: "complete",
+        },
+      },
+      {
+        type: "coding_session_completed",
+        role: "reviewer",
+        activation: 1,
+        reviewCycle: 1,
+        outcome: "succeeded",
+        sessionId: "review-session:1:reviewer",
+        requestedProfile: "reviewer-profile",
+        effectiveProfile: {
+          profileName: "reviewer-profile",
+          configSha256: "3".repeat(64),
+          adapter: "app-server",
+          model: "gpt-5.4",
+          modelProvider: "openai",
+          reasoningEffort: "high",
+          developerInstructionsSha256: "4".repeat(64),
+        },
+        usage: { inputTokens: 5, outputTokens: 3 },
+        archive: {
+          archiveId: "archive_00000000-0000-0000-0000-000000000002",
+          status: "stored",
+          completeness: "partial",
+        },
+      },
     ]);
     expect(
       fake
@@ -343,7 +407,7 @@ describe("Delivery Run durable phase recovery", () => {
       null,
     ]);
     expect(JSON.stringify(fake.getObservations())).not.toMatch(
-      /prompt|stdout|stderr|profile|token/i,
+      /provider-thread|provider-session|sensitive prompt|runtime-evidence|private instruction|https?:\/\/|raw-payload/i,
     );
   });
 
