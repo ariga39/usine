@@ -84,11 +84,7 @@ export interface TaskEvidence {
       readonly prNumber: number;
       readonly merged: boolean;
     } | null;
-    readonly relation:
-      | "accepted_exact_sha"
-      | "not_yet_accepted"
-      | "stale_or_unavailable"
-      | "blocked";
+    readonly relation: "accepted_exact_sha" | "not_yet_accepted" | "blocked";
   };
 }
 
@@ -311,9 +307,11 @@ function archiveEvidence(archive: {
   status: "stored" | "truncated" | "failed" | "pruned";
   completeness?: "complete" | "partial";
 }) {
-  if (archive.status === "failed" || archive.status === "pruned")
-    return { archiveId: archive.archiveId, status: "unavailable" as const };
-  if (archive.status === "stored" && archive.completeness === undefined)
+  if (
+    archive.completeness === undefined ||
+    archive.status === "failed" ||
+    archive.status === "pruned"
+  )
     return { archiveId: archive.archiveId, status: "unavailable" as const };
   return {
     archiveId: archive.archiveId,

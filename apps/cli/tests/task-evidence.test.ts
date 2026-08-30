@@ -76,6 +76,7 @@ describe("task evidence", () => {
       }),
       event(3, { archiveId: "archive_legacy", status: "stored" }),
       event(4, { archiveId: "archive_pruned", status: "pruned", completeness: "partial" }),
+      event(5, { archiveId: "archive_truncated_legacy", status: "truncated" }),
     ]);
 
     expect(evidence.roleRuns.implementer.map((run) => run.archive)).toEqual([
@@ -83,6 +84,7 @@ describe("task evidence", () => {
       { archiveId: "archive_failed", status: "unavailable" },
       { archiveId: "archive_legacy", status: "unavailable" },
       { archiveId: "archive_pruned", status: "unavailable" },
+      { archiveId: "archive_truncated_legacy", status: "unavailable" },
     ]);
   });
 

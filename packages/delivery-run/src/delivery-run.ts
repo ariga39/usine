@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FrozenCandidate, WriterWorkspace } from "@usine/candidate-workspace";
 import type {
   CodingSessionObservation,
@@ -192,14 +193,17 @@ export async function executeDeliveryRun(
       let reviewEffectiveProfile: ReviewAttemptObservation["effectiveProfile"];
       let reviewUsage: ReviewAttemptObservation["usage"] = null;
       const reviewObservationCounter = { value: 0 };
-      const reviewSessionId = `review-session:${cycle}:${input.reviewer?.role ?? "reviewer"}`;
+      const reviewInvocationId = randomUUID();
+      const reviewSessionId = `review-session:${cycle}:${reviewInvocationId}`;
+      const reviewEventPrefix = `review:${cycle}:${reviewInvocationId}`;
+      const reviewActivation = 0;
       await emitObservation(services, result.taskId, {
-        eventId: `review:${cycle}:session-started`,
+        eventId: `${reviewEventPrefix}:session-started`,
         occurredAtEpochMs: Date.now(),
         data: {
           type: "coding_session_started",
           role: input.reviewer?.role ?? "reviewer",
-          activation: result.candidateFence,
+          activation: reviewActivation,
           reviewCycle: cycle,
           sessionId: reviewSessionId,
           requestedProfile: input.reviewer?.profile,
@@ -216,9 +220,9 @@ export async function executeDeliveryRun(
               services,
               result.taskId,
               input.reviewer?.role ?? "reviewer",
-              result.candidateFence!,
+              reviewActivation,
               reviewSessionId,
-              `review:${cycle}`,
+              reviewEventPrefix,
               reviewObservationCounter,
               sessionObservation,
             ),
@@ -232,9 +236,9 @@ export async function executeDeliveryRun(
             services,
             result.taskId,
             input.reviewer?.role ?? "reviewer",
-            result.candidateFence,
+            reviewActivation,
             reviewSessionId,
-            `review:${cycle}`,
+            reviewEventPrefix,
             reviewObservationCounter,
             observation.interruption,
           );
@@ -242,12 +246,12 @@ export async function executeDeliveryRun(
         throwIfAborted(input.signal);
       } catch (error) {
         await emitObservation(services, result.taskId, {
-          eventId: `review:${cycle}:session-completed`,
+          eventId: `${reviewEventPrefix}:session-completed`,
           occurredAtEpochMs: Date.now(),
           data: {
             type: "coding_session_completed",
             role: input.reviewer?.role ?? "reviewer",
-            activation: result.candidateFence,
+            activation: reviewActivation,
             reviewCycle: cycle,
             outcome: input.signal?.aborted ? "cancelled" : "failed",
             sessionId: reviewSessionId,
@@ -259,12 +263,12 @@ export async function executeDeliveryRun(
         return blockTask(services, result, error instanceof Error ? error.message : String(error));
       }
       await emitObservation(services, result.taskId, {
-        eventId: `review:${cycle}:session-completed`,
+        eventId: `${reviewEventPrefix}:session-completed`,
         occurredAtEpochMs: Date.now(),
         data: {
           type: "coding_session_completed",
           role: input.reviewer?.role ?? "reviewer",
-          activation: result.candidateFence,
+          activation: reviewActivation,
           reviewCycle: cycle,
           outcome: review.verdict === "inconclusive" ? "failed" : "succeeded",
           sessionId: reviewSessionId,

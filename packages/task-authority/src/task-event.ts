@@ -4,6 +4,7 @@ const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9
 const safeObservationId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
 );
+const safeProfileName = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/));
 const safeEvidenceValue = Schema.String.check(
   Schema.makeFilter((value) =>
     isSafeEvidenceIdentity(value) ? undefined : "must be a bounded non-hostname identity",
@@ -21,7 +22,7 @@ const archiveReference = Schema.Struct({
   completeness: Schema.optional(archiveCompleteness),
 });
 const effectiveProfile = Schema.Struct({
-  profileName: Schema.NullOr(safeObservationId),
+  profileName: Schema.NullOr(safeProfileName),
   configSha256: Schema.NullOr(exactHash),
   adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server"])),
   model: Schema.NullOr(safeEvidenceValue),
@@ -66,7 +67,7 @@ const eventData = Schema.Union([
     activation: Schema.Natural,
     reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
-    requestedProfile: Schema.optional(safeObservationId),
+    requestedProfile: Schema.optional(safeProfileName),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
@@ -124,7 +125,7 @@ const eventData = Schema.Union([
     reviewCycle: Schema.optional(Schema.Natural),
     outcome,
     sessionId: safeObservationId,
-    requestedProfile: Schema.optional(safeObservationId),
+    requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
     archive: Schema.optional(archiveReference),
@@ -225,7 +226,7 @@ const observationData = Schema.Union([
     activation: Schema.Natural,
     reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
-    requestedProfile: Schema.optional(safeObservationId),
+    requestedProfile: Schema.optional(safeProfileName),
   }),
   Schema.Struct({
     type: Schema.Literal("coding_thread_started"),
@@ -283,7 +284,7 @@ const observationData = Schema.Union([
     reviewCycle: Schema.optional(Schema.Natural),
     outcome,
     sessionId: safeObservationId,
-    requestedProfile: Schema.optional(safeObservationId),
+    requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
     archive: Schema.optional(archiveReference),

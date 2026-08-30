@@ -137,6 +137,58 @@ describe("Task event stream", () => {
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
   });
 
+  test("accepts a bounded configured profile name through role evidence", async () => {
+    const taskId = `events-profile-boundary-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    const profile = `p${"x".repeat(127)}`;
+    await authority.appendObservation(taskId, {
+      eventId: "profile-boundary-started",
+      occurredAtEpochMs: 205,
+      data: {
+        type: "coding_session_started",
+        role: "reviewer",
+        activation: 1,
+        reviewCycle: 1,
+        sessionId: "review-session:1:boundary",
+        requestedProfile: profile,
+      },
+    });
+    await authority.appendObservation(taskId, {
+      eventId: "profile-boundary-completed",
+      occurredAtEpochMs: 206,
+      data: {
+        type: "coding_session_completed",
+        role: "reviewer",
+        activation: 1,
+        reviewCycle: 1,
+        outcome: "succeeded",
+        sessionId: "review-session:1:boundary",
+        requestedProfile: profile,
+        effectiveProfile: {
+          profileName: profile,
+          configSha256: "a".repeat(64),
+          adapter: "sdk",
+          model: "gpt-5.4",
+          modelProvider: "openai",
+          reasoningEffort: "high",
+          developerInstructionsSha256: null,
+        },
+        usage: null,
+      },
+    });
+
+    await expect(authority.listEvents(taskId)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ data: expect.objectContaining({ requestedProfile: profile }) }),
+        expect.objectContaining({
+          data: expect.objectContaining({
+            effectiveProfile: expect.objectContaining({ profileName: profile }),
+          }),
+        }),
+      ]),
+    );
+  });
+
   test("records only sanitized MCP outcomes and unavailable fallback", async () => {
     const taskId = `events-mcp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);
