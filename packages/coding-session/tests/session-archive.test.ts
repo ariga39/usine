@@ -90,6 +90,16 @@ describe("Session Archive operator boundary", () => {
     expect(publicApi).not.toHaveProperty("sessionArchiveDirectory");
   });
 
+  test("keeps provider maps and catalogs out of the whitelist snapshot", () => {
+    const profile = sessionArchiveProfileSnapshot("reviewer", {
+      model: "reviewer-model",
+      model_providers: { private: { base_url: "https://private.example.test" } },
+      model_catalog_json: '{"endpoint":"https://private.example.test"}',
+    });
+    expect(profile).not.toHaveProperty("modelProviders");
+    expect(profile).not.toHaveProperty("modelCatalogJson");
+  });
+
   async function rewriteArchive(
     stateDirectory: string,
     archiveId: string,

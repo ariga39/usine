@@ -12,7 +12,7 @@ import {
   runProfileEvaluateCommand,
   ProfileEvaluationRestorationError,
 } from "../src/profile-evaluation.js";
-import type { TaskEvidence } from "../src/task-evidence.js";
+import type { RoleRunEvidence, TaskEvidence } from "../src/task-evidence.js";
 import type { RepositoryResource, TaskResource } from "@usine/task-authority";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -118,6 +118,79 @@ async function fixture(pairDrift = false) {
   return { root, planPath, environment: { CODEX_HOME: codexHome } };
 }
 
+function evaluationRun(profile: string, elapsedMs: number, activation: number): RoleRunEvidence {
+  return {
+    role: "implementer",
+    activation,
+    reviewCycle: null,
+    requestedProfile: profile,
+    effectiveProfile: {
+      profileName: profile,
+      configSha256: "1".repeat(64),
+      adapter: "sdk",
+      model: "test-model",
+      modelProvider: null,
+      reasoningEffort: null,
+      developerInstructionsSha256: null,
+    },
+    effort: {
+      elapsedMs,
+      counts: { turns: 1, tools: 0, mcpTools: 0 },
+      phase: "output",
+      failureClass: null,
+      observations: [],
+    },
+    usage: { inputTokens: 1, outputTokens: 1 },
+    archive: { archiveId: null, status: "unavailable" },
+    outcome: {
+      status: "succeeded",
+      candidateSha: "b".repeat(40),
+      taskRelation: "accepted_exact_sha",
+    },
+  };
+}
+
+function evaluationReviewer(): RoleRunEvidence {
+  return {
+    ...evaluationRun("fixed-reviewer", 1, 1),
+    role: "reviewer",
+    activation: null,
+    reviewCycle: 1,
+  };
+}
+
+function evaluationEvidence(
+  profile: string,
+  taskId: string,
+  activations: readonly number[],
+): TaskEvidence {
+  return {
+    schemaVersion: 1,
+    taskId,
+    roleRuns: {
+      implementer: activations.map((activation) =>
+        evaluationRun(profile, activation * 10, activation),
+      ),
+      reviewer: [evaluationReviewer()],
+    },
+    task: {
+      state: "reviewed_pr",
+      candidateSha: "b".repeat(40),
+      candidateFence: 1,
+      check: { sha: "b".repeat(40), status: "passed", exitCode: 0 },
+      review: {
+        sha: "b".repeat(40),
+        verdict: "approved",
+        classification: "approved",
+        findingCount: 0,
+      },
+      repairBatches: 0,
+      delivery: null,
+      relation: "accepted_exact_sha",
+    },
+  };
+}
+
 describe("profile evaluate plan boundary", () => {
   test("accepts a committed pair and resolves all named profiles before execution", async () => {
     const value = await fixture();
@@ -185,6 +258,16 @@ describe("profile evaluate plan boundary", () => {
     expect(requests).toBe(0);
     expect(process.exitCode).toBe(7);
     process.exitCode = 0;
+  });
+
+  test("holds the adapter fixed before the evaluation can contact the server", async () => {
+    const value = await fixture();
+    await expect(
+      readProfileEvaluationPlan(value.planPath, {
+        ...value.environment,
+        USINE_CODEX_APP_SERVER_PROFILES: "candidate-profile",
+      }),
+    ).rejects.toThrow("profiles differ outside changedFactor model_stack: adapter");
   });
 
   test("fails semantic pair drift before the public command contacts the server", async () => {
@@ -336,6 +419,52 @@ describe("profile evaluate plan boundary", () => {
     expect(inconclusive.recommendation).toBe("inconclusive");
     expect(inconclusive.candidate.metrics.elapsedMs).toBe(null);
 
+    const missingComparisonEvidence = accepted("baseline-profile", 10);
+    const missingComparisonReport = compareProfileEvaluation(plan, {
+      baseline: [
+        {
+          id: "baseline",
+          pairId: "case",
+          repetition: 1,
+          taskId: "baseline-task",
+          evidence: {
+            ...missingComparisonEvidence,
+            roleRuns: {
+              ...missingComparisonEvidence.roleRuns,
+              implementer: [
+                {
+                  ...missingComparisonEvidence.roleRuns.implementer[0]!,
+                  effort: {
+                    ...missingComparisonEvidence.roleRuns.implementer[0]!.effort,
+                    elapsedMs: null,
+                  },
+                  usage: null,
+                },
+              ],
+            },
+            task: { ...missingComparisonEvidence.task, repairBatches: null },
+          },
+        },
+      ],
+      candidate: [
+        {
+          id: "candidate",
+          pairId: "case",
+          repetition: 1,
+          taskId: "candidate-task",
+          evidence: accepted("candidate-profile", 20),
+        },
+      ],
+    });
+    expect(missingComparisonReport.recommendation).toBe("inconclusive");
+    expect(missingComparisonReport.inconclusiveReasons).toEqual(
+      expect.arrayContaining([
+        "comparison:elapsedMs:missing_evidence",
+        "comparison:inputTokens:missing_evidence",
+        "comparison:repairBatches:missing_evidence",
+      ]),
+    );
+
     const drifted = accepted("candidate-profile", 20);
     const driftReport = compareProfileEvaluation(plan, {
       baseline: [
@@ -366,6 +495,7 @@ describe("profile evaluate plan boundary", () => {
 
     const effectiveFactorDrift = accepted("candidate-profile", 20);
     const expectedProfile = {
+      configSha256: "1".repeat(64),
       model: "candidate-model",
       modelProvider: null,
       reasoningEffort: null,
@@ -460,6 +590,172 @@ describe("profile evaluate plan boundary", () => {
     );
   });
 
+  test("keeps unequal activation counts comparable and reports their delta", () => {
+    const plan = {
+      schemaVersion: 1 as const,
+      id: "activation-plan",
+      repositoryId: "evaluation",
+      baseSha: "a".repeat(40),
+      subjectRole: "implementer" as const,
+      changedFactor: "model_stack" as const,
+      baselineProfile: "baseline-profile",
+      candidateProfile: "candidate-profile",
+      reviewerProfile: "fixed-reviewer",
+      maxTasks: 2,
+      usineBuild: "a".repeat(40),
+      reportPath: "report.json",
+      registrationPath: "repository.json",
+      pairs: [],
+    };
+    const report = compareProfileEvaluation(plan, {
+      baseline: [
+        {
+          id: "baseline",
+          pairId: "case",
+          repetition: 1,
+          taskId: "baseline-task",
+          evidence: evaluationEvidence("baseline-profile", "baseline-task", [1]),
+        },
+      ],
+      candidate: [
+        {
+          id: "candidate",
+          pairId: "case",
+          repetition: 1,
+          taskId: "candidate-task",
+          evidence: evaluationEvidence("candidate-profile", "candidate-task", [1, 2]),
+        },
+      ],
+    });
+    expect(report.recommendation).toBe("baseline");
+    expect(report.comparison.baseline.implementerActivations).toBe(1);
+    expect(report.comparison.candidate.implementerActivations).toBe(2);
+    expect(report.comparison.delta.implementerActivations).toBe(1);
+  });
+
+  test("lets correctness choose a winner before efficiency", () => {
+    const plan = {
+      schemaVersion: 1 as const,
+      id: "correctness-plan",
+      repositoryId: "evaluation",
+      baseSha: "a".repeat(40),
+      subjectRole: "implementer" as const,
+      changedFactor: "model_stack" as const,
+      baselineProfile: "baseline-profile",
+      candidateProfile: "candidate-profile",
+      reviewerProfile: "fixed-reviewer",
+      maxTasks: 2,
+      usineBuild: "a".repeat(40),
+      reportPath: "report.json",
+      registrationPath: "repository.json",
+      pairs: [],
+    };
+    const acceptedBaseline = evaluationEvidence("baseline-profile", "baseline-task", [1]);
+    const acceptedCandidate = evaluationEvidence("candidate-profile", "candidate-task", [1]);
+    const failedCandidate = {
+      ...acceptedCandidate,
+      task: { ...acceptedCandidate.task, state: "blocked" as const, relation: "blocked" as const },
+    };
+    const failedBaseline = {
+      ...acceptedBaseline,
+      task: { ...acceptedBaseline.task, state: "blocked" as const, relation: "blocked" as const },
+    };
+    const report = (baselineEvidence: TaskEvidence, candidateEvidence: TaskEvidence) =>
+      compareProfileEvaluation(plan, {
+        baseline: [
+          {
+            id: "baseline",
+            pairId: "case",
+            repetition: 1,
+            taskId: baselineEvidence.taskId,
+            evidence: baselineEvidence,
+          },
+        ],
+        candidate: [
+          {
+            id: "candidate",
+            pairId: "case",
+            repetition: 1,
+            taskId: candidateEvidence.taskId,
+            evidence: candidateEvidence,
+          },
+        ],
+      });
+    expect(report(acceptedBaseline, failedCandidate).recommendation).toBe("baseline");
+    expect(report(failedBaseline, acceptedCandidate).recommendation).toBe("candidate");
+  });
+
+  test("binds evidence to the expected full profile checksum", () => {
+    const plan = {
+      schemaVersion: 1 as const,
+      id: "checksum-plan",
+      repositoryId: "evaluation",
+      baseSha: "a".repeat(40),
+      subjectRole: "implementer" as const,
+      changedFactor: "model_stack" as const,
+      baselineProfile: "baseline-profile",
+      candidateProfile: "candidate-profile",
+      reviewerProfile: "fixed-reviewer",
+      maxTasks: 2,
+      usineBuild: "a".repeat(40),
+      reportPath: "report.json",
+      registrationPath: "repository.json",
+      pairs: [],
+    };
+    const evidence = evaluationEvidence("baseline-profile", "baseline-task", [1]);
+    const report = compareProfileEvaluation(
+      plan,
+      {
+        baseline: [
+          {
+            id: "baseline",
+            pairId: "case",
+            repetition: 1,
+            taskId: "baseline-task",
+            evidence,
+          },
+        ],
+        candidate: [
+          {
+            id: "candidate",
+            pairId: "case",
+            repetition: 1,
+            taskId: "candidate-task",
+            evidence: { ...evidence, taskId: "candidate-task" },
+          },
+        ],
+      },
+      {
+        baseline: {
+          configSha256: "2".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+        candidate: {
+          configSha256: "1".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+        reviewer: {
+          configSha256: "1".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+      },
+    );
+    expect(report.recommendation).toBe("inconclusive");
+    expect(report.inconclusiveReasons).toContain("baseline-task:implementer_profile_drift");
+  });
+
   test("restores the complete registration when a serial run fails after switching", async () => {
     const value = await fixture();
     const registrations: string[] = [];
@@ -526,8 +822,6 @@ describe("profile evaluate plan boundary", () => {
       listTasks: async () => ({ tasks: [] }),
       registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
         registrations.push(registration.implementerProfile);
-        if (registration.implementerProfile === "candidate-profile")
-          throw new Error("switch failed");
         return {
           id: "evaluation",
           revision: registrations.length,
@@ -538,7 +832,9 @@ describe("profile evaluate plan boundary", () => {
       },
       taskStatus: async (_url: string, taskId: string) =>
         taskId === "baseline-task" ? terminalTask(taskId) : null,
-      submitTask: async () => terminalTask("baseline-task"),
+      submitTask: async () => {
+        throw new Error("submit failed");
+      },
       followTask: async () => terminalTask("baseline-task"),
       taskEvidence: async (_url: string, taskId: string) => evidence(taskId),
     };
@@ -695,9 +991,10 @@ describe("profile evaluate plan boundary", () => {
     process.exitCode = 0;
   });
 
-  test("refuses the first profile switch when another Task owns the writer lease", async () => {
+  test("does not restore when the atomic profile-switch guard rejects", async () => {
     const value = await fixture();
     const registrations: string[] = [];
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
     const services = {
       inspectRepository: async (): Promise<RepositoryResource> => ({
         id: "evaluation",
@@ -706,49 +1003,19 @@ describe("profile evaluate plan boundary", () => {
         name: "evaluation",
         baseBranch: "main",
       }),
-      listTasks: async () => ({
-        tasks: [
-          {
-            taskId: "active-task",
-            revision: 1,
-            deadlineEpochMs: 1,
-            state: "admitted" as const,
-            candidateSha: null,
-            activeActivation: 1,
-            retryable: false,
-            writer: { repositoryIdentity: "example/evaluation" },
-            evidence: {
-              implementerActivations: 1,
-              reviewCycles: 0,
-              changesRequestedBatches: 0,
-              restartRecoveries: 0,
-            },
-          },
-        ],
-      }),
       registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
         registrations.push(registration.implementerProfile);
-        return {
-          id: "evaluation",
-          revision: 1,
-          owner: "example",
-          name: "evaluation",
-          baseBranch: "main",
-        };
+        throw new Error("cannot switch repository profiles while a Task is active");
       },
       taskStatus: async () => null,
       submitTask: async () => terminalTaskForEvaluation("baseline-task"),
       followTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => minimalAcceptedEvidence("baseline-task"),
     };
-    await runProfileEvaluateCommand(
-      { planPath: value.planPath, subjectRole: "implementer", json: true },
-      "http://server.test",
-      value.environment,
-      services,
-    );
-    expect(registrations).toEqual([]);
-    process.exitCode = 0;
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+    expect(registrations).toEqual(["baseline-profile"]);
   });
 
   test("restores after cancellation at the evidence boundary", async () => {

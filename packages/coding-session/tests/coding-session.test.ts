@@ -32,11 +32,13 @@ import {
   readSessionArchive,
   readSessionArchiveManifest,
   listSessionArchives,
+  resolveCodexProfile,
   reviewerOutputSchema,
   type SessionArchive,
   type CodexProfileResolver,
 } from "@usine/coding-session";
 import { decodeTaskObservationEventInput, type TaskContract } from "@usine/task-authority";
+import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
 import { z } from "zod";
 
 const sha = "a".repeat(40);
@@ -764,6 +766,43 @@ describe("Coding Session", () => {
     ).not.toThrow();
   });
 
+  test("uses a digest-only identity for hidden provider and catalog configuration", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "usine-codex-profile-digest-"));
+    const profilePath = join(codexHome, "reviewer-profile.config.toml");
+    const writeProfile = async (providerUrl: string, catalogUrl: string) => {
+      await writeFile(
+        profilePath,
+        [
+          'model = "reviewer-model"',
+          `model_catalog_json = '{"endpoint":"${catalogUrl}"}'`,
+          "[model_providers.private]",
+          `base_url = "${providerUrl}"`,
+          "",
+        ].join("\n"),
+      );
+    };
+    await writeProfile("https://provider-one.example.test", "https://catalog-one.example.test");
+    const first = await resolveCodexProfile("reviewer-profile", { CODEX_HOME: codexHome });
+    await writeProfile("https://provider-two.example.test", "https://catalog-one.example.test");
+    const providerChanged = await resolveCodexProfile("reviewer-profile", {
+      CODEX_HOME: codexHome,
+    });
+    await writeProfile("https://provider-two.example.test", "https://catalog-two.example.test");
+    const catalogChanged = await resolveCodexProfile("reviewer-profile", { CODEX_HOME: codexHome });
+
+    expect(first.configSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(providerChanged.configSha256).not.toBe(first.configSha256);
+    expect(catalogChanged.configSha256).not.toBe(providerChanged.configSha256);
+    const archiveProfile = sessionArchiveProfileSnapshot("reviewer-profile", {
+      ...catalogChanged,
+      ...catalogChanged.config,
+    });
+    expect(JSON.stringify(archiveProfile)).not.toContain("provider-two.example.test");
+    expect(JSON.stringify(archiveProfile)).not.toContain("catalog-two.example.test");
+    expect(archiveProfile).not.toHaveProperty("modelProviders");
+    expect(archiveProfile).not.toHaveProperty("modelCatalogJson");
+  });
+
   test("applies synthetic role model selection at both adapter boundaries", async () => {
     const fixture = await fakeAppServerEnvironment(
       "success",
@@ -1011,6 +1050,8 @@ describe("Coding Session", () => {
         sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       },
     });
+    expect(observation.effectiveProfile?.configSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(observation.effectiveProfile?.configSha256).not.toBe(archive.profile.sha256);
     expect(archive.items.map((item) => item.type)).toEqual([
       "commandExecution",
       "mcpToolCall",

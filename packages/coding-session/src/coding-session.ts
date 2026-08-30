@@ -422,7 +422,7 @@ export class CodexCodingSession {
         archive?.setProfile(snapshot);
         effectiveProfile = {
           profileName,
-          configSha256: snapshot.sha256,
+          configSha256: profileSelection.configSha256,
           adapter: null,
           model: safeEvidenceIdentity(snapshot.model),
           modelProvider: safeEvidenceIdentity(snapshot.modelProvider),

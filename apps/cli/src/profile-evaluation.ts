@@ -22,7 +22,6 @@ import {
   followTask,
   inspectRepository,
   registerRepository,
-  listTasks,
   submitTask,
   taskEvidence,
   taskStatus,
@@ -34,7 +33,7 @@ const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const changedFactors = ["model_stack", "reasoning", "developer_instructions"] as const;
-const usineBuildRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 export type ProfileEvaluationChangedFactor = (typeof changedFactors)[number];
 
@@ -115,7 +114,6 @@ export interface ProfileEvaluateOptions {
 
 export interface ProfileEvaluationServices {
   readonly inspectRepository: typeof inspectRepository;
-  readonly listTasks: typeof listTasks;
   readonly registerRepository: typeof registerRepository;
   readonly submitTask: typeof submitTask;
   readonly taskStatus: typeof taskStatus;
@@ -125,7 +123,6 @@ export interface ProfileEvaluationServices {
 
 const defaultServices: ProfileEvaluationServices = {
   inspectRepository,
-  listTasks,
   registerRepository,
   submitTask,
   taskStatus,
@@ -179,8 +176,10 @@ export async function readProfileEvaluationPlan(
     throw new ProfileEvaluationValidationError(
       "plan baseSha is not an ancestor of the evaluation Repository",
     );
-  if ((await readUsineBuild()) !== plan.usineBuild)
-    throw new ProfileEvaluationValidationError("plan is bound to a different Usine build");
+  if ((await readUsineSourceCommit()) !== plan.usineBuild)
+    throw new ProfileEvaluationValidationError(
+      "plan is bound to a different Usine source checkout commit",
+    );
 
   const pairs = [...plan.pairs];
   const contracts: TaskContract[] = [];
@@ -358,18 +357,13 @@ export async function executeProfileEvaluation(
         if (!contract) throw new Error(`validated contract is missing for ${pair.id}`);
         let task = existingTasks.get(contract.id) ?? null;
         if (!task) {
-          await ensureRepositoryIdle(
-            serverUrl,
-            `${originalRegistration.owner}/${originalRegistration.name}`.toLowerCase(),
-            services,
-          );
           const evaluationRegistration = {
             ...originalRegistration,
             implementerProfile: profile,
             reviewerProfile: plan.reviewerProfile,
           };
-          registrationChanged = true;
           await services.registerRepository(serverUrl, evaluationRegistration);
+          registrationChanged = true;
           task = await services.submitTask(serverUrl, {
             contractPath: resolve(loaded.repositoryRoot, contractPath),
             repositoryId: plan.repositoryId,
@@ -481,11 +475,15 @@ export function compareProfileEvaluation(
     expectedProfiles?.reviewer,
   );
   const driftReasons = validateEvidenceDrift(plan, reports);
+  const bothPassed = baseline.correctness === "passed" && candidate.correctness === "passed";
+  const comparisonReasons = bothPassed
+    ? comparisonEvidenceReasons(baseline.metrics, candidate.metrics)
+    : [];
   const reasons = [
-    ...new Set([...baseline.reasons, ...candidate.reasons, ...driftReasons]),
+    ...new Set([...baseline.reasons, ...candidate.reasons, ...driftReasons, ...comparisonReasons]),
   ].toSorted();
-  const comparable =
-    reasons.length === 0 && baseline.correctness === "passed" && candidate.correctness === "passed";
+  const nonGateReasons = reasons.filter((reason) => !reason.endsWith(":hard_correctness_gate"));
+  const comparable = bothPassed && reasons.length === 0;
   const comparison = comparable
     ? {
         baseline: baseline.metrics,
@@ -498,17 +496,23 @@ export function compareProfileEvaluation(
         delta: unknownMetrics(),
       };
   let recommendation: ProfileEvaluationReport["recommendation"] = "inconclusive";
-  if (reasons.length === 0) {
-    if (baseline.correctness === "passed" && candidate.correctness === "failed") {
-      recommendation = "baseline";
-    } else if (candidate.correctness === "passed" && baseline.correctness === "failed") {
-      recommendation = "candidate";
-    } else {
-      const candidateBetter = strictlyLessOrEqual(candidate.metrics, baseline.metrics);
-      const baselineBetter = strictlyLessOrEqual(baseline.metrics, candidate.metrics);
-      if (candidateBetter && !baselineBetter) recommendation = "candidate";
-      else if (baselineBetter && !candidateBetter) recommendation = "baseline";
-    }
+  if (
+    nonGateReasons.length === 0 &&
+    baseline.correctness === "passed" &&
+    candidate.correctness === "failed"
+  ) {
+    recommendation = "baseline";
+  } else if (
+    nonGateReasons.length === 0 &&
+    baseline.correctness === "failed" &&
+    candidate.correctness === "passed"
+  ) {
+    recommendation = "candidate";
+  } else if (comparable) {
+    const candidateBetter = strictlyLessOrEqual(candidate.metrics, baseline.metrics);
+    const baselineBetter = strictlyLessOrEqual(baseline.metrics, candidate.metrics);
+    if (candidateBetter && !baselineBetter) recommendation = "candidate";
+    else if (baselineBetter && !candidateBetter) recommendation = "baseline";
   }
   return {
     schemaVersion: 1,
@@ -591,6 +595,7 @@ function profileReport(
 }
 
 interface ExpectedEvidenceProfile {
+  readonly configSha256: string;
   readonly model: string;
   readonly modelProvider: string | null;
   readonly reasoningEffort: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"]["reasoningEffort"];
@@ -603,6 +608,7 @@ function expectedEvidenceProfile(
 ): ExpectedEvidenceProfile {
   const provider = selection.config?.model_provider;
   return {
+    configSha256: selection.configSha256 ?? "",
     model: selection.model,
     modelProvider: typeof provider === "string" ? provider : null,
     reasoningEffort: selection.modelReasoningEffort ?? null,
@@ -623,6 +629,7 @@ function matchesExpectedProfile(
   if (!expected) return true;
   const effective = run.effectiveProfile;
   return (
+    effective.configSha256 === expected.configSha256 &&
     effective.model === expected.model &&
     effective.modelProvider === expected.modelProvider &&
     effective.reasoningEffort === expected.reasoningEffort &&
@@ -680,30 +687,52 @@ function validateEvidenceDrift(
     const baselineRuns = pair.baseline.evidence.roleRuns.implementer;
     const candidateRuns = pair.candidate.evidence.roleRuns.implementer;
     if (baselineRuns.length === 0 || candidateRuns.length === 0) continue;
-    const count = Math.max(baselineRuns.length, candidateRuns.length);
-    for (let index = 0; index < count; index += 1) {
-      const baseline = baselineRuns[index];
-      const candidate = candidateRuns[index];
-      if (!baseline || !candidate) {
-        reasons.push(`${pair.baseline.taskId}:implementer_profile_drift`);
-        reasons.push(`${pair.candidate.taskId}:implementer_profile_drift`);
-        continue;
-      }
-      if (
-        !hasRequiredEffectiveIdentity(baseline) ||
-        !hasRequiredEffectiveIdentity(candidate) ||
-        !sameAllowedImplementerIdentity(
-          plan.changedFactor,
-          baseline.effectiveProfile,
-          candidate.effectiveProfile,
-        )
-      ) {
-        reasons.push(`${pair.baseline.taskId}:implementer_profile_drift`);
-        reasons.push(`${pair.candidate.taskId}:implementer_profile_drift`);
-      }
+    const baselineIdentity = stableImplementerIdentity(pair.baseline.taskId, baselineRuns, reasons);
+    const candidateIdentity = stableImplementerIdentity(
+      pair.candidate.taskId,
+      candidateRuns,
+      reasons,
+    );
+    if (
+      baselineIdentity &&
+      candidateIdentity &&
+      !sameAllowedImplementerIdentity(plan.changedFactor, baselineIdentity, candidateIdentity)
+    ) {
+      reasons.push(`${pair.baseline.taskId}:implementer_profile_drift`);
+      reasons.push(`${pair.candidate.taskId}:implementer_profile_drift`);
     }
   }
   return reasons;
+}
+
+type EffectiveImplementerProfile =
+  EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"];
+
+function stableImplementerIdentity(
+  taskId: string,
+  runs: readonly EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number][],
+  reasons: string[],
+): EffectiveImplementerProfile | null {
+  if (runs.length === 0) return null;
+  const first = runs[0]!;
+  const activations = new Set<number>();
+  let unknown = false;
+  let drifted = false;
+  for (const run of runs) {
+    if (!hasRequiredEffectiveIdentity(run) || run.activation === null) {
+      unknown = true;
+      continue;
+    }
+    if (
+      activations.has(run.activation) ||
+      !sameEffectiveIdentity(run.effectiveProfile, first.effectiveProfile)
+    )
+      drifted = true;
+    activations.add(run.activation);
+  }
+  if (unknown) reasons.push(`${taskId}:implementer_profile_unknown`);
+  if (drifted) reasons.push(`${taskId}:implementer_profile_drift`);
+  return unknown || drifted ? null : first.effectiveProfile;
 }
 
 const effectiveIdentityFields = [
@@ -773,6 +802,28 @@ function aggregateMetrics(tasks: readonly EvaluationTaskReport[]): EvaluationMet
     ),
   };
 }
+
+function comparisonEvidenceReasons(
+  baseline: EvaluationMetricSet,
+  candidate: EvaluationMetricSet,
+): string[] {
+  const reasons: string[] = [];
+  for (const key of metricKeys) {
+    if (baseline[key] === null || candidate[key] === null)
+      reasons.push(`comparison:${key}:missing_evidence`);
+  }
+  return reasons;
+}
+
+const metricKeys: readonly (keyof EvaluationMetricSet)[] = [
+  "implementerActivations",
+  "repairBatches",
+  "interruptions",
+  "elapsedMs",
+  "inputTokens",
+  "outputTokens",
+  "toolFailures",
+];
 
 function sum(values: readonly (number | null)[]): number | null {
   let total = 0;
@@ -885,15 +936,16 @@ function validatePlanShape(plan: ProfileEvaluationPlan): void {
       throw new ProfileEvaluationValidationError("profile names are invalid");
 }
 
-async function readUsineBuild(): Promise<string> {
+async function readUsineSourceCommit(): Promise<string> {
   try {
-    const build = (
-      await execFile("git", ["-C", usineBuildRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+    const sourceCommit = (
+      await execFile("git", ["-C", usineSourceRoot, "rev-parse", "--verify", "HEAD^{commit}"])
     ).stdout.trim();
-    if (!exactSha.test(build)) throw new Error("current Usine build is not an exact commit");
-    return build;
+    if (!exactSha.test(sourceCommit))
+      throw new Error("Usine source checkout is not an exact commit");
+    return sourceCommit;
   } catch {
-    throw new ProfileEvaluationValidationError("current Usine build is unavailable");
+    throw new ProfileEvaluationValidationError("Usine source checkout commit is unavailable");
   }
 }
 
@@ -941,6 +993,7 @@ function validateProfileFactor(
     "modelProvider",
     "modelProviders",
     "modelCatalogJson",
+    "adapter",
     "reasoningEffort",
     "developerInstructions",
     "reasoningSummary",
@@ -967,6 +1020,7 @@ interface ProfileFields {
   readonly modelProvider: unknown;
   readonly modelProviders: unknown;
   readonly modelCatalogJson: unknown;
+  readonly adapter: "sdk" | "app-server";
   readonly reasoningEffort: unknown;
   readonly developerInstructions: unknown;
   readonly reasoningSummary: unknown;
@@ -982,6 +1036,7 @@ function profileFields(selection: Awaited<ReturnType<typeof resolveProfile>>): P
     modelProvider: config?.model_provider ?? null,
     modelProviders: config?.model_providers ?? null,
     modelCatalogJson: config?.model_catalog_json ?? null,
+    adapter: selection.adapter,
     reasoningEffort: selection.modelReasoningEffort ?? null,
     developerInstructions: selection.developerInstructions ?? null,
     reasoningSummary: config?.model_reasoning_summary ?? null,
@@ -1164,25 +1219,6 @@ function parsePair(input: unknown): ProfileEvaluationPair {
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input);
-}
-
-async function ensureRepositoryIdle(
-  serverUrl: string,
-  repositoryIdentity: string,
-  services: ProfileEvaluationServices,
-): Promise<void> {
-  const page = await services.listTasks(serverUrl, 200);
-  const active = page.tasks.find(
-    (task) =>
-      task.writer.repositoryIdentity.toLowerCase() === repositoryIdentity &&
-      task.state !== "reviewed_pr" &&
-      task.state !== "merged" &&
-      task.state !== "blocked",
-  );
-  if (active)
-    throw new ProfileEvaluationValidationError(
-      `cannot switch profiles while Task ${active.taskId} is active`,
-    );
 }
 
 function parseContract(raw: string, label: string): TaskContract {
