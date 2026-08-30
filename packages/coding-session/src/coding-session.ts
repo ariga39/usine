@@ -38,6 +38,7 @@ import {
 import {
   sessionArchiveProfileSnapshot,
   SessionArchiveWriter,
+  type SessionArchiveCaptureStatus,
   type SessionArchiveOptions,
 } from "./session-archive.js";
 
@@ -203,7 +204,7 @@ export interface SessionObservation<T = unknown> {
     | "role_output_schema_invalid"
     | null;
   archiveId?: string;
-  archiveStatus?: "stored" | "truncated" | "failed";
+  archiveStatus?: SessionArchiveCaptureStatus;
   archiveWarnings?: string[];
 }
 

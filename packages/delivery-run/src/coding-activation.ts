@@ -1,5 +1,5 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
-import { implementerOutputSchema } from "@usine/coding-session";
+import { implementerOutputSchema, type SessionArchiveCaptureStatus } from "@usine/coding-session";
 import {
   deadlineExpired,
   type CheckResult,
@@ -205,8 +205,8 @@ async function runCodingAttempt(
 
 function archiveReference(observation: {
   archiveId?: string;
-  archiveStatus?: "stored" | "truncated" | "failed";
-}): { archive?: { archiveId: string; status: "stored" | "truncated" | "failed" } } {
+  archiveStatus?: SessionArchiveCaptureStatus;
+}): { archive?: { archiveId: string; status: SessionArchiveCaptureStatus } } {
   return observation.archiveId && observation.archiveStatus
     ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
     : {};

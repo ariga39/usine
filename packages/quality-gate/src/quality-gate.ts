@@ -5,6 +5,7 @@ import {
   type CodingSessionFailureClass,
   type CodingSessionPhase,
   type RolePolicy,
+  type SessionArchiveCaptureStatus,
 } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import { remainingUntil, type CheckResult, type ReviewVerdict } from "@usine/task-authority";
@@ -34,7 +35,7 @@ export interface ReviewAttemptObservation {
   review: ReviewVerdict;
   usage: SessionUsage | null;
   interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
-  archive?: { archiveId: string; status: "stored" | "truncated" | "failed" };
+  archive?: { archiveId: string; status: SessionArchiveCaptureStatus };
 }
 
 interface QualityGateWorkspace {
@@ -49,7 +50,7 @@ interface QualityGateSession {
         failureClass?: SessionObservation<ReviewerOutput>["failureClass"];
         usage?: SessionUsage | null;
         archiveId?: string;
-        archiveStatus?: "stored" | "truncated" | "failed";
+        archiveStatus?: SessionArchiveCaptureStatus;
       }
   >;
 }

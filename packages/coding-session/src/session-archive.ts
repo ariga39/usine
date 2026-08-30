@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskContract } from "@usine/task-authority";
@@ -11,23 +11,12 @@ const DEFAULT_MAX_ARCHIVE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_ARCHIVES = 100;
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
 const MAX_ARCHIVES = 1000;
+const MAX_TOMBSTONES = MAX_ARCHIVES;
+const MAX_MANAGED_ARCHIVES = MAX_ARCHIVES + MAX_TOMBSTONES;
 const archivePruneLocks = new Map<string, Promise<void>>();
 
-const profileSnapshotSchema = z
-  .object({
-    name: z.string(),
-    model: z.string().optional(),
-    modelReasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
-    modelProvider: z.string().optional(),
-    modelReasoningSummary: z.string().optional(),
-    modelVerbosity: z.string().optional(),
-    personality: z.string().optional(),
-    serviceTier: z.string().optional(),
-  })
-  .strict();
-
 const archiveStatusSchema = z.enum(["completed", "failed", "cancelled"]);
-const archiveCaptureStatusSchema = z.enum(["stored", "truncated", "failed"]);
+const archiveCaptureStatusSchema = z.enum(["stored", "truncated", "failed", "pruned"]);
 const failureClassSchema = z
   .enum([
     "transport",
@@ -42,6 +31,24 @@ const failureClassSchema = z
   .nullable();
 const archiveItemSchema = z.record(z.string(), z.unknown());
 
+const profileSnapshotFieldsSchema = z
+  .object({
+    name: z.string(),
+    model: z.string().optional(),
+    modelReasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+    modelProvider: z.string().optional(),
+    modelReasoningSummary: z.string().optional(),
+    modelVerbosity: z.string().optional(),
+    personality: z.string().optional(),
+    serviceTier: z.string().optional(),
+    developerInstructions: z.string().optional(),
+  })
+  .strict();
+
+const profileSnapshotSchema = profileSnapshotFieldsSchema.extend({
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
 export const sessionArchiveSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -53,6 +60,7 @@ export const sessionArchiveSchema = z
     updatedAtEpochMs: z.number().int(),
     status: archiveStatusSchema,
     captureStatus: archiveCaptureStatusSchema,
+    completeness: z.enum(["complete", "partial"]),
     sessionId: z.string().nullable(),
     adapter: z.enum(["sdk", "app-server"]).nullable(),
     phase: z.enum(["startup", "thread", "turn", "output"]).nullable(),
@@ -76,7 +84,31 @@ export const sessionArchiveSchema = z
   })
   .strict();
 
-export type SessionArchive = z.infer<typeof sessionArchiveSchema>;
+const sessionArchiveTombstoneSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    archiveId: z.string().regex(archiveIdPattern),
+    taskId: z.string().regex(durableIdPattern),
+    role: z.enum(["implementer", "reviewer"]),
+    attempt: z.string().regex(durableIdPattern),
+    createdAtEpochMs: z.number().int(),
+    updatedAtEpochMs: z.number().int(),
+    status: archiveStatusSchema,
+    captureStatus: z.literal("pruned"),
+    completeness: z.literal("partial"),
+    sessionId: z.string().nullable(),
+    adapter: z.enum(["sdk", "app-server"]).nullable(),
+    phase: z.enum(["startup", "thread", "turn", "output"]).nullable(),
+    failureClass: failureClassSchema,
+    byteLength: z.number().int().nonnegative(),
+    truncated: z.literal(false),
+    warnings: z.array(z.string()),
+  })
+  .strict();
+
+type CompleteSessionArchive = z.infer<typeof sessionArchiveSchema>;
+export type SessionArchive = CompleteSessionArchive | z.infer<typeof sessionArchiveTombstoneSchema>;
+export type SessionArchiveTombstone = z.infer<typeof sessionArchiveTombstoneSchema>;
 export type SessionArchiveStatus = z.infer<typeof archiveStatusSchema>;
 export type SessionArchiveCaptureStatus = z.infer<typeof archiveCaptureStatusSchema>;
 export type SessionArchiveProfileSnapshot = z.infer<typeof profileSnapshotSchema>;
@@ -91,6 +123,7 @@ export interface SessionArchiveManifest {
   updatedAtEpochMs: number;
   status: SessionArchiveStatus;
   captureStatus: SessionArchiveCaptureStatus;
+  completeness: "complete" | "partial";
   sessionId: string | null;
   adapter: SessionArchive["adapter"];
   phase: SessionArchive["phase"];
@@ -145,8 +178,9 @@ export class SessionArchiveWriter {
   readonly archiveId = `archive_${randomUUID()}`;
   private readonly maxArchiveBytes: number;
   private readonly maxArchives: number;
-  private record: SessionArchive;
+  private record: CompleteSessionArchive;
   private writeFailure: string | null = null;
+  private providerCompleted = false;
   private readonly warnings = new Set<string>();
   private persistence = Promise.resolve();
 
@@ -171,14 +205,15 @@ export class SessionArchiveWriter {
       updatedAtEpochMs: now,
       status: "failed",
       captureStatus: "stored",
+      completeness: "partial",
       sessionId: null,
       adapter: null,
       phase: "startup",
       failureClass: null,
       failure: null,
       prompt: input.prompt,
-      contract: sanitizeJsonValue(input.contract),
-      profile: { name: "unknown" },
+      contract: cloneJsonValue(input.contract),
+      profile: profileSnapshot("unknown", {}),
       items: [],
       rawFinalResponse: null,
       normalizedOutput: null,
@@ -194,7 +229,7 @@ export class SessionArchiveWriter {
   }
 
   setProfile(profile: SessionArchiveProfileSnapshot): void {
-    this.record.profile = profile;
+    this.record.profile = profileSnapshot(profile.name, profile);
     void this.schedulePersist();
   }
 
@@ -225,26 +260,27 @@ export class SessionArchiveWriter {
     void this.schedulePersist();
   }
 
-  setUsage(usage: SessionArchive["usage"]): void {
+  setUsage(usage: CompleteSessionArchive["usage"]): void {
     this.record.usage = usage;
     void this.schedulePersist();
   }
 
-  setProviderResult(rawFinalResponse: string, usage: SessionArchive["usage"]): void {
+  setProviderResult(rawFinalResponse: string, usage: CompleteSessionArchive["usage"]): void {
     this.record.rawFinalResponse = rawFinalResponse;
     this.record.usage = usage;
+    this.providerCompleted = true;
     void this.schedulePersist();
   }
 
   setNormalizedOutput(output: unknown): void {
-    this.record.normalizedOutput = sanitizeJsonValue(output);
+    this.record.normalizedOutput = cloneJsonValue(output);
     void this.schedulePersist();
   }
 
   async finish(input: {
     status: SessionArchiveStatus;
     sessionId: string | null;
-    usage: SessionArchive["usage"];
+    usage: CompleteSessionArchive["usage"];
     failure: string | null;
     phase: SessionArchive["phase"];
     failureClass: SessionArchive["failureClass"];
@@ -259,6 +295,7 @@ export class SessionArchiveWriter {
     this.record.failure = input.failure;
     this.record.phase = input.phase ?? this.record.phase;
     this.record.failureClass = input.failureClass;
+    this.record.completeness = this.providerCompleted ? "complete" : "partial";
     await this.schedulePersist();
     await this.prune();
     return {
@@ -311,27 +348,60 @@ export class SessionArchiveWriter {
           const entries = await readdir(sessionArchiveDirectory(this.options.stateDirectory), {
             withFileTypes: true,
           });
-          const files = entries
-            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-            .map((entry) => entry.name.slice(0, -5));
           const records = await Promise.all(
-            files.map(async (archiveId) => ({
-              archiveId,
-              createdAt: (await readSessionArchive(this.options.stateDirectory, archiveId))
-                .createdAtEpochMs,
-            })),
+            entries
+              .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+              .map((entry) =>
+                managedArchive(this.options.stateDirectory, entry.name.slice(0, -5), entry.name),
+              ),
           );
-          const orderedRecords = records.toSorted(
-            (left, right) => left.createdAt - right.createdAt,
-          );
-          let remaining = records.length;
-          for (const record of orderedRecords) {
-            if (remaining <= this.maxArchives) break;
+          const live = records
+            .filter((record) => record.archive?.captureStatus !== "pruned")
+            .toSorted((left, right) => left.createdAt - right.createdAt);
+          const tombstones = records
+            .filter((record) => record.archive?.captureStatus === "pruned")
+            .toSorted((left, right) => left.createdAt - right.createdAt);
+          let liveCount = live.length;
+          for (const record of live) {
+            if (liveCount <= this.maxArchives) break;
             if (record.archiveId === this.archiveId) continue;
+            if (record.archive && record.archive.captureStatus !== "pruned") {
+              try {
+                const tombstone = prunedTombstone(record.archive);
+                await writeArchiveSnapshot(
+                  this.options.stateDirectory,
+                  record.archiveId,
+                  tombstone,
+                  this.maxArchiveBytes,
+                );
+                tombstones.push({
+                  ...record,
+                  createdAt: tombstone.updatedAtEpochMs,
+                  archive: tombstone,
+                });
+                liveCount -= 1;
+                this.warnings.add(`pruned:${record.archiveId}`);
+              } catch {
+                this.warnings.add(`prune_failed:${record.archiveId}`);
+              }
+            } else {
+              try {
+                await unlink(record.path);
+                liveCount -= 1;
+                this.warnings.add(`corrupt_pruned:${record.archiveId}`);
+              } catch {
+                this.warnings.add(`prune_failed:${record.archiveId}`);
+              }
+            }
+          }
+          for (const record of tombstones.toSorted(
+            (left, right) => left.createdAt - right.createdAt,
+          )) {
+            if (tombstones.length <= Math.min(this.maxArchives, MAX_TOMBSTONES)) break;
             try {
-              await unlink(archivePath(this.options.stateDirectory, record.archiveId));
-              remaining -= 1;
-              this.warnings.add(`pruned:${record.archiveId}`);
+              await unlink(record.path);
+              tombstones.splice(tombstones.indexOf(record), 1);
+              this.warnings.add(`tombstone_pruned:${record.archiveId}`);
             } catch {
               this.warnings.add(`prune_failed:${record.archiveId}`);
             }
@@ -345,6 +415,81 @@ export class SessionArchiveWriter {
       release();
       if (archivePruneLocks.get(lockKey) === current) archivePruneLocks.delete(lockKey);
     }
+  }
+}
+
+interface ManagedArchive {
+  archiveId: string;
+  path: string;
+  createdAt: number;
+  archive?: SessionArchive;
+}
+
+async function managedArchive(
+  stateDirectory: string,
+  archiveId: string,
+  fileName: string,
+): Promise<ManagedArchive> {
+  const path = join(sessionArchiveDirectory(stateDirectory), fileName);
+  let createdAt = 0;
+  try {
+    createdAt = (await lstat(path)).mtimeMs;
+  } catch {
+    // The retention pass is best effort; a concurrent removal is handled below.
+  }
+  try {
+    const archive = await readSessionArchive(stateDirectory, archiveId);
+    return {
+      archiveId,
+      path,
+      createdAt:
+        archive.captureStatus === "pruned" ? archive.updatedAtEpochMs : archive.createdAtEpochMs,
+      archive,
+    };
+  } catch {
+    return { archiveId, path, createdAt };
+  }
+}
+
+function prunedTombstone(archive: CompleteSessionArchive): SessionArchiveTombstone {
+  return {
+    schemaVersion: 1,
+    archiveId: archive.archiveId,
+    taskId: archive.taskId,
+    role: archive.role,
+    attempt: archive.attempt,
+    createdAtEpochMs: archive.createdAtEpochMs,
+    updatedAtEpochMs: Date.now(),
+    status: archive.status,
+    captureStatus: "pruned",
+    completeness: "partial",
+    sessionId: archive.sessionId,
+    adapter: archive.adapter,
+    phase: archive.phase,
+    failureClass: archive.failureClass,
+    byteLength: 0,
+    truncated: false,
+    warnings: ["archive_pruned"],
+  };
+}
+
+async function writeArchiveSnapshot(
+  stateDirectory: string,
+  archiveId: string,
+  record: SessionArchiveTombstone,
+  maxBytes: number,
+): Promise<void> {
+  const encoded = serializeWithByteLength(record);
+  if (Buffer.byteLength(encoded.bytes) > maxBytes)
+    throw new Error("session archive tombstone exceeds byte bound");
+  await mkdir(sessionArchiveDirectory(stateDirectory), { recursive: true });
+  const path = archivePath(stateDirectory, archiveId);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, encoded.bytes, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
   }
 }
 
@@ -376,7 +521,8 @@ export async function readSessionArchive(
       archiveId,
     );
   try {
-    return sessionArchiveSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    const value = JSON.parse(await readFile(path, "utf8"));
+    return sessionArchiveSchema.or(sessionArchiveTombstoneSchema).parse(value);
   } catch {
     throw new SessionArchiveError(
       "session_archive_corrupt",
@@ -417,7 +563,7 @@ export async function listSessionArchives(
   }
   return manifests
     .toSorted((left, right) => right.createdAtEpochMs - left.createdAtEpochMs)
-    .slice(0, Math.min(Math.max(1, Math.trunc(limit)), MAX_ARCHIVES));
+    .slice(0, Math.min(Math.max(1, Math.trunc(limit)), MAX_MANAGED_ARCHIVES));
 }
 
 export interface SessionArchiveCleanupSelection {
@@ -439,7 +585,7 @@ export async function cleanupSessionArchives(
     await readSessionArchiveManifest(stateDirectory, selection.archiveId);
     ids = [selection.archiveId];
   } else {
-    ids = (await listSessionArchives(stateDirectory, selection.taskId, MAX_ARCHIVES)).map(
+    ids = (await listSessionArchives(stateDirectory, selection.taskId, MAX_MANAGED_ARCHIVES)).map(
       (manifest) => manifest.archiveId,
     );
   }
@@ -473,6 +619,7 @@ function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
     updatedAtEpochMs,
     status,
     captureStatus,
+    completeness,
     sessionId,
     adapter,
     phase,
@@ -491,6 +638,7 @@ function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
     updatedAtEpochMs,
     status,
     captureStatus,
+    completeness,
     sessionId,
     adapter,
     phase,
@@ -502,10 +650,10 @@ function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
 }
 
 function encodeBoundedRecord(
-  record: SessionArchive,
+  record: CompleteSessionArchive,
   maxBytes: number,
   warnings: Set<string>,
-): { record: SessionArchive; bytes: string } {
+): { record: CompleteSessionArchive; bytes: string } {
   let candidate = { ...record, warnings: [...new Set([...record.warnings, ...warnings])] };
   let encoded = serializeWithByteLength(candidate);
   if (Buffer.byteLength(encoded.bytes) <= maxBytes) return encoded;
@@ -513,6 +661,7 @@ function encodeBoundedRecord(
   candidate = {
     ...candidate,
     captureStatus: "truncated",
+    completeness: "partial",
     truncated: true,
     warnings: [...new Set([...candidate.warnings, "archive_truncated"])],
     items: [],
@@ -527,15 +676,17 @@ function encodeBoundedRecord(
       ...candidate,
       warnings: ["archive_truncated"],
       failure: candidate.failure ? "<truncated>" : null,
-      profile: { name: candidate.profile.name },
+      profile: profileSnapshot(candidate.profile.name, {}),
     };
     encoded = serializeWithByteLength(candidate);
   }
   return encoded;
 }
 
-function serializeWithByteLength(record: SessionArchive): {
-  record: SessionArchive;
+function serializeWithByteLength<T extends { byteLength: number }>(
+  record: T,
+): {
+  record: T;
   bytes: string;
 } {
   let candidate = { ...record, byteLength: 0 };
@@ -559,12 +710,12 @@ function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema
     case "commandExecution":
       return {
         ...base,
-        output:
-          typeof value.aggregated_output === "string"
-            ? redactPath(value.aggregated_output)
-            : typeof value.aggregatedOutput === "string"
-              ? redactPath(value.aggregatedOutput)
-              : "",
+        ...(Object.hasOwn(value, "command") ? { command: cloneJsonValue(value.command) } : {}),
+        ...(Object.hasOwn(value, "aggregated_output")
+          ? { output: cloneJsonValue(value.aggregated_output) }
+          : Object.hasOwn(value, "aggregatedOutput")
+            ? { output: cloneJsonValue(value.aggregatedOutput) }
+            : {}),
         ...(typeof value.exit_code === "number"
           ? { exitCode: value.exit_code }
           : typeof value.exitCode === "number"
@@ -573,7 +724,10 @@ function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema
       };
     case "file_change":
     case "fileChange":
-      return { ...base, changeCount: Array.isArray(value.changes) ? value.changes.length : 0 };
+      return {
+        ...base,
+        ...(Object.hasOwn(value, "changes") ? { changes: cloneJsonValue(value.changes) } : {}),
+      };
     case "mcp_tool_call":
     case "mcpToolCall":
       return {
@@ -581,17 +735,17 @@ function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema
         server: safeLabel(value.server),
         tool: safeLabel(value.tool),
         ...(Object.hasOwn(value, "arguments")
-          ? { arguments: sanitizeJsonValue(value.arguments) }
+          ? { arguments: cloneJsonValue(value.arguments) }
           : {}),
-        ...(Object.hasOwn(value, "result") ? { output: sanitizeJsonValue(value.result) } : {}),
-        ...(Object.hasOwn(value, "error") ? { error: sanitizeJsonValue(value.error) } : {}),
+        ...(Object.hasOwn(value, "result") ? { output: cloneJsonValue(value.result) } : {}),
+        ...(Object.hasOwn(value, "error") ? { error: cloneJsonValue(value.error) } : {}),
       };
     case "agent_message":
     case "agentMessage":
     case "reasoning":
       return {
         ...base,
-        ...(typeof value.text === "string" ? { text: redactPath(value.text) } : {}),
+        ...(typeof value.text === "string" ? { text: value.text } : {}),
       };
     case "web_search":
     case "webSearch":
@@ -601,27 +755,9 @@ function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema
   }
 }
 
-function sanitizeJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeJsonValue);
-  if (!isRecord(value)) return typeof value === "string" ? redactPath(value) : value;
-  const result: Record<string, unknown> = {};
-  for (const [key, nested] of Object.entries(value)) {
-    if (
-      /^(argv|args|command|cwd|path|workspace|workspace_path|working_directory|environment|env|url|mcp_url|headers|token|access_token|api_key|secret|secrets|credential|credentials|private_key|privatekey|authorization)$/i.test(
-        key,
-      )
-    ) {
-      if (key === "args" && typeof nested === "object")
-        result.arguments = sanitizeJsonValue(nested);
-      continue;
-    }
-    result[key] = sanitizeJsonValue(nested);
-  }
-  return result;
-}
-
-function redactPath(value: string): string {
-  return value.replace(/(?:\/(?:Users|home|private|tmp)\/|[A-Za-z]:\\)[^\s"']+/g, "<path>");
+function cloneJsonValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
 function safeLabel(value: unknown): string {
@@ -634,33 +770,32 @@ function profileSnapshot(
   profile: string,
   selection: Record<string, unknown>,
 ): SessionArchiveProfileSnapshot {
-  const result: SessionArchiveProfileSnapshot = { name: profile };
+  const result: Record<string, string> = { name: profile };
   for (const [source, target] of [
     ["model", "model"],
     ["modelReasoningEffort", "modelReasoningEffort"],
+    ["developerInstructions", "developerInstructions"],
+    ["modelProvider", "modelProvider"],
+    ["modelReasoningSummary", "modelReasoningSummary"],
+    ["modelVerbosity", "modelVerbosity"],
+    ["personality", "personality"],
+    ["serviceTier", "serviceTier"],
     ["model_provider", "modelProvider"],
     ["model_reasoning_summary", "modelReasoningSummary"],
     ["model_verbosity", "modelVerbosity"],
     ["personality", "personality"],
     ["service_tier", "serviceTier"],
+    ["developer_instructions", "developerInstructions"],
   ] as const) {
     if (typeof selection[source] === "string") {
-      const safe = safeProfileValue(selection[source]);
-      if (safe) (result as Record<string, unknown>)[target] = safe;
+      result[target] = selection[source];
     }
   }
-  return result;
-}
-
-function safeProfileValue(value: string): string | undefined {
-  const normalized = value.trim();
-  if (
-    !normalized ||
-    normalized.length > 128 ||
-    /(?:https?:\/\/|[\\/]\.|token|secret|credential|private[ _-]?key)/i.test(normalized)
-  )
-    return undefined;
-  return normalized;
+  const fields = profileSnapshotFieldsSchema.parse(result);
+  return {
+    ...fields,
+    sha256: createHash("sha256").update(JSON.stringify(fields), "utf8").digest("hex"),
+  };
 }
 
 export function sessionArchiveProfileSnapshot(

@@ -106,12 +106,15 @@ export async function runArchiveCleanupCommand(
 }
 
 export function archiveManifestRows(manifests: readonly SessionArchiveManifest[]) {
-  return manifests.map(({ archiveId, taskId, role, attempt, status, captureStatus }) => ({
-    archiveId,
-    taskId,
-    role,
-    attempt,
-    status,
-    captureStatus,
-  }));
+  return manifests.map(
+    ({ archiveId, taskId, role, attempt, status, captureStatus, completeness }) => ({
+      archiveId,
+      taskId,
+      role,
+      attempt,
+      status,
+      captureStatus,
+      completeness,
+    }),
+  );
 }

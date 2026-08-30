@@ -87,10 +87,10 @@ export function renderArchiveList(
 ): string {
   if (json) return renderJson({ archives: manifests });
   return [
-    "ARCHIVE ID\tTASK ID\tROLE\tATTEMPT\tSTATUS\tCAPTURE",
+    "ARCHIVE ID\tTASK ID\tROLE\tATTEMPT\tSTATUS\tCAPTURE\tCOMPLETENESS",
     ...manifests.map(
       (archive) =>
-        `${archive.archiveId}\t${archive.taskId}\t${archive.role}\t${archive.attempt}\t${archive.status}\t${archive.captureStatus}`,
+        `${archive.archiveId}\t${archive.taskId}\t${archive.role}\t${archive.attempt}\t${archive.status}\t${archive.captureStatus}\t${archive.completeness}`,
     ),
     "",
   ].join("\n");

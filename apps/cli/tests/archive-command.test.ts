@@ -11,9 +11,13 @@ import {
 } from "../src/archive-command.js";
 import type { TaskContract } from "@usine/task-authority";
 
-async function writeArchive(stateDirectory: string, attempt: string): Promise<string> {
+async function writeArchive(
+  stateDirectory: string,
+  attempt: string,
+  maxArchives?: number,
+): Promise<string> {
   const writer = new SessionArchiveWriter(
-    { stateDirectory },
+    { stateDirectory, ...(maxArchives === undefined ? {} : { maxArchives }) },
     {
       taskId: "cli-archive-task",
       role: "implementer",
@@ -79,6 +83,32 @@ describe("Session Archive CLI", () => {
       expect(JSON.parse(String(stdout.mock.calls[0]?.[0]))).toEqual({
         removedArchiveIds: [second],
       });
+    } finally {
+      stdout.mockRestore();
+      process.exitCode = undefined;
+    }
+  });
+
+  test("reports a pruned archive through manifest and explicit export", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-cli-archive-pruned-"));
+    const first = await writeArchive(stateDirectory, "1", 1);
+    await writeArchive(stateDirectory, "2", 1);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      await runArchiveManifestCommand({ archiveId: first, json: true }, stateDirectory);
+      expect(JSON.parse(String(stdout.mock.calls[0]?.[0]))).toMatchObject({
+        archiveId: first,
+        captureStatus: "pruned",
+        completeness: "partial",
+      });
+
+      stdout.mockClear();
+      await runArchiveExportCommand(first, stateDirectory);
+      expect(JSON.parse(String(stdout.mock.calls[0]?.[0]))).toMatchObject({
+        archiveId: first,
+        captureStatus: "pruned",
+      });
+      expect(String(stdout.mock.calls[0]?.[0])).not.toContain("sensitive prompt bytes");
     } finally {
       stdout.mockRestore();
       process.exitCode = undefined;

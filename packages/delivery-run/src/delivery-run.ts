@@ -3,6 +3,7 @@ import type {
   CodingSessionObservation,
   ImplementerOutput,
   RolePolicy,
+  SessionArchiveCaptureStatus,
   SessionObservation,
   SessionRequest,
 } from "@usine/coding-session";
@@ -76,7 +77,7 @@ interface DeliveryRunSession {
         failureClass?: SessionObservation<ImplementerOutput>["failureClass"];
         usage?: { inputTokens?: number; outputTokens?: number } | null;
         archiveId?: string;
-        archiveStatus?: "stored" | "truncated" | "failed";
+        archiveStatus?: SessionArchiveCaptureStatus;
       }
   >;
 }

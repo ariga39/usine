@@ -8,7 +8,7 @@ const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
 const outcome = Schema.Literals(["succeeded", "failed", "cancelled", "blocked"]);
-const archiveStatus = Schema.Literals(["stored", "truncated", "failed"]);
+const archiveStatus = Schema.Literals(["stored", "truncated", "failed", "pruned"]);
 const archiveReference = Schema.Struct({
   archiveId: safeObservationId,
   status: archiveStatus,

@@ -290,7 +290,7 @@ node apps/cli/dist/cli.mjs archive cleanup --archive-id "<ARCHIVE_ID>"
 node apps/cli/dist/cli.mjs archive cleanup --task-id "<TASK_ID>"
 ```
 
-Malformed, traversal, absolute, missing, corrupt, symlink, and pruned IDs fail rather than selecting another path. Cleanup reports the exact archive IDs removed.
+Malformed, traversal, absolute, missing, corrupt, and symlink IDs fail rather than selecting another path. A valid pruned ID returns its bounded metadata tombstone with `captureStatus: "pruned"` from manifest or export. Cleanup reports the exact archive IDs removed.
 
 ### Transient wait and subscribe
 

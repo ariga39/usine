@@ -1,7 +1,7 @@
 import { access, chmod, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,6 +33,7 @@ import {
   readSessionArchiveManifest,
   listSessionArchives,
   reviewerOutputSchema,
+  type SessionArchive,
   type CodexProfileResolver,
 } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
@@ -57,6 +58,11 @@ const syntheticProfileResolver: CodexProfileResolver = async (profile) => {
       })
     : selection;
 };
+
+function completeArchive(archive: SessionArchive) {
+  if (!("items" in archive)) throw new Error("expected a complete archive");
+  return archive;
+}
 
 function sdkTurn(finalResponse: string, usage: RunResult["usage"] = null): RunResult {
   return { items: [], finalResponse, usage };
@@ -148,6 +154,7 @@ async function fakeAppServerEnvironment(
   environment: NodeJS.ProcessEnv;
   stateDirectory: string;
   protocolLogPath: string;
+  runtimePath: string;
   close: () => Promise<void>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "usine-app-server-"));
@@ -158,6 +165,7 @@ async function fakeAppServerEnvironment(
   await mkdir(bin, { recursive: true });
   await mkdir(codexHome, { recursive: true });
   const protocolLogPath = join(codexHome, "protocol.log");
+  const runtimePath = resolve(tmpdir(), "usine-app-server-runtime-path");
   await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
   await writeFile(protocolLogPath, "");
   await writeFile(
@@ -194,7 +202,7 @@ const emitTurn = () => {
     ? JSON.stringify({ invalid: true })
     : JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
-  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", arguments: { issue: 285, workspace: "/private/secret-workspace" }, result: { content: [{ type: "text", text: "app-server tool output" }] }, status: "completed" } } });
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", arguments: { issue: 285, workspace: ${JSON.stringify(runtimePath)} }, result: { content: [{ type: "text", text: ${JSON.stringify("app-server tool output " + runtimePath)} }] }, status: "completed" } } });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: output } } });
   send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
@@ -259,6 +267,7 @@ setInterval(() => undefined, 1_000);
     },
     stateDirectory,
     protocolLogPath,
+    runtimePath,
     close: async () => undefined,
   };
 }
@@ -908,7 +917,9 @@ describe("Coding Session", () => {
     ]);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
     const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
-    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    const archive = completeArchive(
+      await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+    );
     expect(archive).toMatchObject({
       schemaVersion: 1,
       role: "reviewer",
@@ -923,6 +934,14 @@ describe("Coding Session", () => {
       }),
       normalizedOutput: { sha, verdict: "approved", summary: "app-server", findings: [] },
       usage: { inputTokens: 7, outputTokens: 9 },
+      completeness: "complete",
+      profile: {
+        name: "reviewer-profile",
+        model: "fixture-model",
+        modelReasoningEffort: "minimal",
+        developerInstructions: "Fixture reviewer instructions",
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
     });
     expect(archive.items.map((item) => item.type)).toEqual([
       "commandExecution",
@@ -932,11 +951,13 @@ describe("Coding Session", () => {
     expect(archive.items).toContainEqual(
       expect.objectContaining({
         type: "mcpToolCall",
-        arguments: { issue: 285 },
-        output: { content: [{ type: "text", text: "app-server tool output" }] },
+        arguments: { issue: 285, workspace: fixture.runtimePath },
+        output: {
+          content: [{ type: "text", text: `app-server tool output ${fixture.runtimePath}` }],
+        },
       }),
     );
-    expect(JSON.stringify(archive)).not.toContain("secret-workspace");
+    expect(JSON.stringify(archive)).toContain(fixture.runtimePath);
   });
 
   test("interrupts an app-server turn and truthfully reaps the exact owned process", async () => {
@@ -969,12 +990,15 @@ describe("Coding Session", () => {
     controller.abort();
     await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
     const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
-    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    const archive = completeArchive(
+      await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+    );
     expect(archive).toMatchObject({
       status: "cancelled",
       adapter: "app-server",
       phase: "turn",
       sessionId: "thread-fixture",
+      completeness: "partial",
     });
     const protocol = (await readFile(fixture.protocolLogPath, "utf8")).trim().split("\n");
     expect(protocol).toEqual([
@@ -1016,12 +1040,15 @@ describe("Coding Session", () => {
       failureCode: "role_output_schema_invalid",
     });
     const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
-    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    const archive = completeArchive(
+      await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+    );
     expect(archive).toMatchObject({
       status: "failed",
       adapter: "app-server",
       rawFinalResponse: JSON.stringify({ invalid: true }),
       normalizedOutput: { invalid: true },
+      completeness: "complete",
     });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
@@ -1053,6 +1080,13 @@ describe("Coding Session", () => {
     const protocolLog = (await readFile(fixture.protocolLogPath, "utf8")).trim();
     const protocol = protocolLog === "" ? [] : protocolLog.split("\n");
     expect(protocol).not.toContain("turn/interrupt");
+    const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+    await expect(
+      readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+    ).resolves.toMatchObject({
+      status: "cancelled",
+      completeness: "partial",
+    });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
 
@@ -1077,6 +1111,12 @@ describe("Coding Session", () => {
         execution: reviewerExecution,
       });
       expect(observation).toMatchObject({ status: "failed", output: null });
+      const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+      await expect(
+        readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+      ).resolves.toMatchObject({
+        completeness: "partial",
+      });
       await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
         [],
       );
@@ -1134,6 +1174,12 @@ describe("Coding Session", () => {
       failureClass: "network",
     });
     expect(JSON.stringify(observation)).not.toContain("should-not-escape");
+    const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+    await expect(
+      readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
+    ).resolves.toMatchObject({
+      completeness: "partial",
+    });
   });
 
   test("fails closed on an app-server identity mismatch and does not retry", async () => {
@@ -2182,14 +2228,29 @@ describe("Coding Session", () => {
 
   test("persists a bounded sensitive archive behind an opaque session reference", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-"));
+    const runtimePath = resolve(stateDirectory, "runtime-evidence");
+    const completedCommand = {
+      type: "command_execution",
+      id: "command-1",
+      command: `cat ${runtimePath}`,
+      aggregated_output: `command output ${runtimePath}`,
+      exit_code: 0,
+      status: "completed",
+    } as unknown as ThreadItem;
+    const completedFileChange = {
+      type: "file_change",
+      id: "file-1",
+      changes: [{ path: runtimePath, diff: `diff ${runtimePath}` }],
+      status: "completed",
+    } as unknown as ThreadItem;
     const completedTool = {
       type: "mcp_tool_call",
       id: "tool-1",
       server: "github_read?token=host-secret",
       tool: "github_issue_get",
-      arguments: { issue: 285 },
+      arguments: { issue: 285, path: runtimePath },
       result: {
-        content: [{ type: "text", text: "tool output" }],
+        content: [{ type: "text", text: `tool output ${runtimePath}` }],
         structured_content: undefined,
       },
       status: "completed",
@@ -2207,7 +2268,7 @@ describe("Coding Session", () => {
             }),
           "opaque-thread",
           undefined,
-          [completedTool],
+          [completedCommand, completedFileChange, completedTool],
         ),
       {
         environment: { CI: "true" },
@@ -2218,7 +2279,7 @@ describe("Coding Session", () => {
 
     const observation = await session.run({
       role: "implementer",
-      workspace: "/private/secret-workspace",
+      workspace: runtimePath,
       contract,
       prompt: "sensitive prompt",
       profile: "implementer-profile",
@@ -2234,7 +2295,9 @@ describe("Coding Session", () => {
       archiveId: expect.stringMatching(/^archive_[0-9a-f-]+$/),
     });
     expect(JSON.stringify(observation)).not.toContain("sensitive prompt");
-    const archive = await readSessionArchive(stateDirectory, observation.archiveId!);
+    const archive = completeArchive(
+      await readSessionArchive(stateDirectory, observation.archiveId!),
+    );
     expect(archive).toMatchObject({
       schemaVersion: 1,
       taskId: "session-test",
@@ -2246,17 +2309,25 @@ describe("Coding Session", () => {
       usage: { inputTokens: 12, outputTokens: 7 },
       sessionId: "opaque-thread",
       status: "completed",
+      completeness: "complete",
+      profile: {
+        name: "implementer-profile",
+        model: "implementer-model",
+        modelReasoningEffort: "low",
+        developerInstructions: "Implementer role instruction: implement the frozen task contract.",
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
     });
     expect(archive.items).toContainEqual(
       expect.objectContaining({
         type: "mcp_tool_call",
         id: "tool-1",
-        arguments: { issue: 285 },
-        output: { content: [{ type: "text", text: "tool output" }] },
+        arguments: { issue: 285, path: runtimePath },
+        output: { content: [{ type: "text", text: `tool output ${runtimePath}` }] },
       }),
     );
     expect(JSON.stringify(archive)).not.toContain("host-secret");
-    expect(JSON.stringify(archive)).not.toContain("private/secret-workspace");
+    expect(JSON.stringify(archive)).toContain(runtimePath);
 
     await expect(
       readSessionArchiveManifest(stateDirectory, observation.archiveId!),
@@ -2341,9 +2412,12 @@ describe("Coding Session", () => {
 
       expect(observation.archiveId).toMatch(/^archive_[0-9a-f-]+$/);
       expect(observation.archiveStatus).toBe("stored");
-      const archive = await readSessionArchive(stateDirectory, observation.archiveId!);
+      const archive = completeArchive(
+        await readSessionArchive(stateDirectory, observation.archiveId!),
+      );
       expect(archive.status).toBe(mode === "cancellation" ? "cancelled" : "failed");
       expect(archive.prompt).toBe("outcome prompt");
+      expect(archive.completeness).toBe(mode === "schema-invalid" ? "complete" : "partial");
       if (mode === "schema-invalid") expect(archive.rawFinalResponse).toBe("not an output");
     },
   );
