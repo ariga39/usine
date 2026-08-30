@@ -8,6 +8,7 @@ import {
   validateCodexProfile,
   type RolePolicy,
   type RoleOutputTransform,
+  type SessionArchiveOptions,
 } from "@usine/coding-session";
 import {
   githubReadToolNames,
@@ -40,6 +41,7 @@ export interface RuntimePolicy {
   workerEnvironment: NodeJS.ProcessEnv;
   appServerProfiles: readonly string[];
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
+  sessionArchive: SessionArchiveOptions;
 }
 
 export interface GithubReadPolicy {
@@ -103,6 +105,7 @@ export function runtimePolicyFromEnvironment(
   const githubRead = githubReadPolicyFromEnvironment(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
   const roleOutputTransform = roleOutputTransformFromEnvironment(environment);
+  const sessionArchive = sessionArchiveOptionsFromEnvironment(environment, stateDirectory);
   return {
     stateDirectory,
     roles,
@@ -112,7 +115,38 @@ export function runtimePolicyFromEnvironment(
     workerEnvironment,
     appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
+    sessionArchive,
   };
+}
+
+export function sessionArchiveOptionsFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  stateDirectory: string,
+): SessionArchiveOptions {
+  return {
+    stateDirectory,
+    maxArchiveBytes: finitePositiveEnvironmentLimit(
+      environment.USINE_SESSION_ARCHIVE_MAX_BYTES,
+      "USINE_SESSION_ARCHIVE_MAX_BYTES",
+    ),
+    maxArchives: finitePositiveEnvironmentLimit(
+      environment.USINE_SESSION_ARCHIVE_MAX_COUNT,
+      "USINE_SESSION_ARCHIVE_MAX_COUNT",
+    ),
+  };
+}
+
+function finitePositiveEnvironmentLimit(
+  value: string | undefined,
+  name: string,
+): number | undefined {
+  const configured = value?.trim();
+  if (!configured) return undefined;
+  if (!/^\d+$/.test(configured)) throw new Error(`${name} must be a positive finite integer`);
+  const limit = Number(configured);
+  if (!Number.isSafeInteger(limit) || limit < 1)
+    throw new Error(`${name} must be a positive finite integer`);
+  return limit;
 }
 
 export function githubReadPolicyFromEnvironment(

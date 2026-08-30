@@ -249,6 +249,8 @@ describe("Delivery Run durable phase recovery", () => {
               summary: "completed",
               failure: null,
               usage: { inputTokens: 12, outputTokens: 7 },
+              archiveId: "archive_00000000-0000-0000-0000-000000000001",
+              archiveStatus: "stored" as const,
             };
           },
         },
@@ -276,6 +278,10 @@ describe("Delivery Run durable phase recovery", () => {
                 findings: [],
               },
               usage: { inputTokens: 5, outputTokens: 3 },
+              archive: {
+                archiveId: "archive_00000000-0000-0000-0000-000000000002",
+                status: "stored" as const,
+              },
             };
           },
         },
@@ -299,6 +305,18 @@ describe("Delivery Run durable phase recovery", () => {
       "coding_session_started",
       "coding_mcp_tool_completed",
       "coding_session_completed",
+    ]);
+    expect(
+      fake
+        .getObservations()
+        .map(({ data }) => (data.type === "coding_session_completed" ? data.archive : undefined)),
+    ).toEqual([
+      undefined,
+      undefined,
+      { archiveId: "archive_00000000-0000-0000-0000-000000000001", status: "stored" },
+      undefined,
+      undefined,
+      { archiveId: "archive_00000000-0000-0000-0000-000000000002", status: "stored" },
     ]);
     expect(
       fake

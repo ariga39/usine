@@ -34,6 +34,7 @@ export interface ReviewAttemptObservation {
   review: ReviewVerdict;
   usage: SessionUsage | null;
   interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
+  archive?: { archiveId: string; status: "stored" | "truncated" | "failed" };
 }
 
 interface QualityGateWorkspace {
@@ -47,6 +48,8 @@ interface QualityGateSession {
         phase?: SessionObservation<ReviewerOutput>["phase"];
         failureClass?: SessionObservation<ReviewerOutput>["failureClass"];
         usage?: SessionUsage | null;
+        archiveId?: string;
+        archiveStatus?: "stored" | "truncated" | "failed";
       }
   >;
 }
@@ -176,6 +179,9 @@ export class QualityGate {
                   },
                 }
               : {}),
+            ...(observation.archiveId && observation.archiveStatus
+              ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+              : {}),
           };
         if (observation.output.sha !== sha)
           return {
@@ -186,8 +192,17 @@ export class QualityGate {
               findings: [],
             },
             usage: observation.usage ?? null,
+            ...(observation.archiveId && observation.archiveStatus
+              ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+              : {}),
           };
-        return { review: observation.output, usage: observation.usage ?? null };
+        return {
+          review: observation.output,
+          usage: observation.usage ?? null,
+          ...(observation.archiveId && observation.archiveStatus
+            ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+            : {}),
+        };
       },
     );
   }

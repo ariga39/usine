@@ -39,6 +39,15 @@ export USINE_SERVER_HOST="127.0.0.1"
 export USINE_SERVER_PORT="8787"
 ```
 
+Session Archives use the same state root but a separate `session-archives` directory. Each archive is bounded to 5 MiB by default and retention keeps at most 100 archives. Hosts may lower either finite limit with:
+
+```sh
+export USINE_SESSION_ARCHIVE_MAX_BYTES="<POSITIVE_BYTE_LIMIT>"
+export USINE_SESSION_ARCHIVE_MAX_COUNT="<POSITIVE_ARCHIVE_COUNT>"
+```
+
+Truncation, write failure, and pruning are reported as archive status/warnings and do not change the role or Task result. Workers do not receive the state root.
+
 Clients derive their URL from `USINE_SERVER_HOST` and `USINE_SERVER_PORT`. Set `USINE_SERVER_URL` instead when the client must use a different loopback URL:
 
 ```sh
@@ -256,6 +265,32 @@ node apps/cli/dist/cli.mjs task watch --after 0 --timeout 60000 "<TASK_ID>" --js
 Human-readable output is the default for resource reads; add `--json` for the stable machine-readable projection. `server health` returns `status` and `revision`. `server snapshot` includes the server, registered Repository resources, Task list items, and coding-session resources. `task get` returns the Task state, exact-SHA evidence projections, delivery, blocker classification, waiting/retry flags, writer identity, and evidence counters without private policy facts.
 
 `task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. It has no live-event cursor to resume: start with `task history` or `task watch --after <LAST_SEQUENCE>` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get` and `task watch` are the canonical commands.
+
+### Session Archive operations
+
+Session Archive content is sensitive: it can contain the authorized prompt, provider tool arguments/output, raw response, and normalized output. Normal Task resources, snapshots, logs, and history expose at most an opaque archive ID and capture status. Archive content is never returned by the loopback HTTP API.
+
+Use the host-local CLI against the configured state root. Listing and manifest inspection are metadata-only:
+
+```sh
+node apps/cli/dist/cli.mjs archive list "<TASK_ID>" --json
+node apps/cli/dist/cli.mjs archive manifest "<ARCHIVE_ID>" --json
+```
+
+Export requires an explicit, validated archive ID and writes only the selected archive to stdout. Treat the output as sensitive and redirect it to a host-private destination:
+
+```sh
+node apps/cli/dist/cli.mjs archive export "<ARCHIVE_ID>" > "<PRIVATE_ARCHIVE_EXPORT>"
+```
+
+Remove one exact archive or all archives for one Task:
+
+```sh
+node apps/cli/dist/cli.mjs archive cleanup --archive-id "<ARCHIVE_ID>"
+node apps/cli/dist/cli.mjs archive cleanup --task-id "<TASK_ID>"
+```
+
+Malformed, traversal, absolute, missing, corrupt, symlink, and pruned IDs fail rather than selecting another path. Cleanup reports the exact archive IDs removed.
 
 ### Transient wait and subscribe
 

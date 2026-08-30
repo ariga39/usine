@@ -39,7 +39,11 @@ import {
 } from "@usine/forge-delivery";
 import { QualityGate } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
-import type { RuntimePolicy } from "./runtime-policy.js";
+import {
+  sessionArchiveOptionsFromEnvironment,
+  stateDirectoryFromEnvironment,
+  type RuntimePolicy,
+} from "./runtime-policy.js";
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 
 export {
@@ -49,15 +53,30 @@ export {
   ForgeProfileResolutionError,
   type ForgeProfileErrorCode,
   stateDirectoryFromEnvironment,
+  sessionArchiveOptionsFromEnvironment,
   type RuntimePolicy,
   type GithubReadPolicy,
 } from "./runtime-policy.js";
 export type { TaskExecutionInput } from "@usine/task-authority";
 export * from "./http-api.js";
+export {
+  cleanupSessionArchives,
+  exportSessionArchive,
+  listSessionArchives,
+  readSessionArchive,
+  readSessionArchiveManifest,
+  SessionArchiveError,
+  type SessionArchive,
+  type SessionArchiveCleanupSelection,
+  type SessionArchiveManifest,
+} from "@usine/coding-session";
 
 export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): CodingSessionCleanup {
+  const stateDirectory = stateDirectoryFromEnvironment(environment);
   return new CodexCodingSession(undefined, {
     environment,
+    executionStateDirectory: stateDirectory,
+    sessionArchive: sessionArchiveOptionsFromEnvironment(environment, stateDirectory),
     appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
   });
 }
@@ -489,6 +508,7 @@ async function executeWithServices(options: {
     executionStateDirectory: policy.stateDirectory,
     appServerProfiles: policy.appServerProfiles,
     roleOutputTransform: policy.roleOutputTransform,
+    sessionArchive: policy.sessionArchive,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {
       const readPolicy = policy.githubRead;
       const role: GithubReadRole = request.role;

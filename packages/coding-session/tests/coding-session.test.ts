@@ -29,6 +29,9 @@ import {
   implementerOutputSchema,
   codexExecutionIdentityPath,
   removeCodexExecutionIdentity,
+  readSessionArchive,
+  readSessionArchiveManifest,
+  listSessionArchives,
   reviewerOutputSchema,
   type CodexProfileResolver,
 } from "@usine/coding-session";
@@ -191,7 +194,7 @@ const emitTurn = () => {
     ? JSON.stringify({ invalid: true })
     : JSON.stringify({ sha: "${sha}", verdict: "approved", summary: "app-server", findings: [] });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
-  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", status: "completed" } } });
+  send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", arguments: { issue: 285, workspace: "/private/secret-workspace" }, result: { content: [{ type: "text", text: "app-server tool output" }] }, status: "completed" } } });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: output } } });
   send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
@@ -904,6 +907,36 @@ describe("Coding Session", () => {
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    expect(archive).toMatchObject({
+      schemaVersion: 1,
+      role: "reviewer",
+      attempt: "1-a",
+      adapter: "app-server",
+      sessionId: "thread-fixture",
+      rawFinalResponse: JSON.stringify({
+        sha,
+        verdict: "approved",
+        summary: "app-server",
+        findings: [],
+      }),
+      normalizedOutput: { sha, verdict: "approved", summary: "app-server", findings: [] },
+      usage: { inputTokens: 7, outputTokens: 9 },
+    });
+    expect(archive.items.map((item) => item.type)).toEqual([
+      "commandExecution",
+      "mcpToolCall",
+      "agentMessage",
+    ]);
+    expect(archive.items).toContainEqual(
+      expect.objectContaining({
+        type: "mcpToolCall",
+        arguments: { issue: 285 },
+        output: { content: [{ type: "text", text: "app-server tool output" }] },
+      }),
+    );
+    expect(JSON.stringify(archive)).not.toContain("secret-workspace");
   });
 
   test("interrupts an app-server turn and truthfully reaps the exact owned process", async () => {
@@ -935,6 +968,14 @@ describe("Coding Session", () => {
     await started.promise;
     controller.abort();
     await expect(pending).resolves.toMatchObject({ status: "cancelled", output: null });
+    const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    expect(archive).toMatchObject({
+      status: "cancelled",
+      adapter: "app-server",
+      phase: "turn",
+      sessionId: "thread-fixture",
+    });
     const protocol = (await readFile(fixture.protocolLogPath, "utf8")).trim().split("\n");
     expect(protocol).toEqual([
       "initialize",
@@ -973,6 +1014,14 @@ describe("Coding Session", () => {
       status: "failed",
       output: null,
       failureCode: "role_output_schema_invalid",
+    });
+    const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
+    const archive = await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId);
+    expect(archive).toMatchObject({
+      status: "failed",
+      adapter: "app-server",
+      rawFinalResponse: JSON.stringify({ invalid: true }),
+      normalizedOutput: { invalid: true },
     });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
   });
@@ -2130,4 +2179,172 @@ describe("Coding Session", () => {
     });
     expect(JSON.stringify(observation)).not.toContain(secretDetail);
   });
+
+  test("persists a bounded sensitive archive behind an opaque session reference", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-"));
+    const completedTool = {
+      type: "mcp_tool_call",
+      id: "tool-1",
+      server: "github_read?token=host-secret",
+      tool: "github_issue_get",
+      arguments: { issue: 285 },
+      result: {
+        content: [{ type: "text", text: "tool output" }],
+        structured_content: undefined,
+      },
+      status: "completed",
+    } satisfies ThreadItem;
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () =>
+            sdkTurn(JSON.stringify({ status: "proposed", summary: "done" }), {
+              input_tokens: 12,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 7,
+              reasoning_output_tokens: 0,
+            }),
+          "opaque-thread",
+          undefined,
+          [completedTool],
+        ),
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
+      },
+    );
+
+    const observation = await session.run({
+      role: "implementer",
+      workspace: "/private/secret-workspace",
+      contract,
+      prompt: "sensitive prompt",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      archiveStatus: "stored",
+      archiveId: expect.stringMatching(/^archive_[0-9a-f-]+$/),
+    });
+    expect(JSON.stringify(observation)).not.toContain("sensitive prompt");
+    const archive = await readSessionArchive(stateDirectory, observation.archiveId!);
+    expect(archive).toMatchObject({
+      schemaVersion: 1,
+      taskId: "session-test",
+      role: "implementer",
+      attempt: "1",
+      prompt: "sensitive prompt",
+      rawFinalResponse: JSON.stringify({ status: "proposed", summary: "done" }),
+      normalizedOutput: { status: "proposed", summary: "done" },
+      usage: { inputTokens: 12, outputTokens: 7 },
+      sessionId: "opaque-thread",
+      status: "completed",
+    });
+    expect(archive.items).toContainEqual(
+      expect.objectContaining({
+        type: "mcp_tool_call",
+        id: "tool-1",
+        arguments: { issue: 285 },
+        output: { content: [{ type: "text", text: "tool output" }] },
+      }),
+    );
+    expect(JSON.stringify(archive)).not.toContain("host-secret");
+    expect(JSON.stringify(archive)).not.toContain("private/secret-workspace");
+
+    await expect(
+      readSessionArchiveManifest(stateDirectory, observation.archiveId!),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        archiveId: observation.archiveId,
+        taskId: "session-test",
+        role: "implementer",
+        status: "completed",
+      }),
+    );
+    await expect(listSessionArchives(stateDirectory, "session-test")).resolves.toHaveLength(1);
+  });
+
+  test("keeps the role result unchanged when archive persistence fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-session-archive-write-failure-"));
+    const stateDirectory = join(root, "not-a-directory");
+    await writeFile(stateDirectory, "occupied");
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "ok" })),
+          "thread-write-failure",
+        ),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        sessionArchive: { stateDirectory },
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "implementer",
+        workspace: ".",
+        contract,
+        prompt: "work",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        execution: implementerExecution,
+      }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      output: { status: "proposed", summary: "ok" },
+      archiveStatus: "failed",
+    });
+  });
+
+  test.each(["provider failure", "cancellation", "schema-invalid"] as const)(
+    "leaves a retrievable archive after %s",
+    async (mode) => {
+      const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-outcome-"));
+      const session = new CodexCodingSession(
+        mode === "provider failure"
+          ? async () => {
+              throw new Error("network connection refused");
+            }
+          : async () =>
+              testClient(async () => sdkTurn(mode === "schema-invalid" ? "not an output" : "{}")),
+        {
+          environment: { CI: "true" },
+          executionStateDirectory: stateDirectory,
+          profileResolver: syntheticProfileResolver,
+        },
+      );
+      const controller = new AbortController();
+      if (mode === "cancellation") controller.abort();
+      const observation = await session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "outcome prompt",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+        signal: controller.signal,
+      });
+
+      expect(observation.archiveId).toMatch(/^archive_[0-9a-f-]+$/);
+      expect(observation.archiveStatus).toBe("stored");
+      const archive = await readSessionArchive(stateDirectory, observation.archiveId!);
+      expect(archive.status).toBe(mode === "cancellation" ? "cancelled" : "failed");
+      expect(archive.prompt).toBe("outcome prompt");
+      if (mode === "schema-invalid") expect(archive.rawFinalResponse).toBe("not an output");
+    },
+  );
 });

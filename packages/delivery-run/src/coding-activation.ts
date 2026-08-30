@@ -120,6 +120,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "cancelled",
       sessionId,
+      ...archiveReference(observation),
     });
     throw new Error("task execution cancelled");
   }
@@ -142,6 +143,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: observation.status === "cancelled" ? "cancelled" : "failed",
       sessionId,
+      ...archiveReference(observation),
     });
     return {
       status: "failed",
@@ -162,6 +164,7 @@ async function runCodingAttempt(
       activation: reservation.activation,
       outcome: "blocked",
       sessionId,
+      ...archiveReference(observation),
     });
     return {
       status: "failed",
@@ -176,6 +179,7 @@ async function runCodingAttempt(
     activation: reservation.activation,
     outcome: "succeeded",
     sessionId,
+    ...archiveReference(observation),
   });
   try {
     const candidate = await services.workspace.freeze(workspace, previousSha, input.contract);
@@ -197,6 +201,15 @@ async function runCodingAttempt(
       retryable: false,
     };
   }
+}
+
+function archiveReference(observation: {
+  archiveId?: string;
+  archiveStatus?: "stored" | "truncated" | "failed";
+}): { archive?: { archiveId: string; status: "stored" | "truncated" | "failed" } } {
+  return observation.archiveId && observation.archiveStatus
+    ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+    : {};
 }
 
 export async function activateImplementer(

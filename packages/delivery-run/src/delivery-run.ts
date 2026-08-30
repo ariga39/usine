@@ -75,6 +75,8 @@ interface DeliveryRunSession {
         phase?: SessionObservation<ImplementerOutput>["phase"];
         failureClass?: SessionObservation<ImplementerOutput>["failureClass"];
         usage?: { inputTokens?: number; outputTokens?: number } | null;
+        archiveId?: string;
+        archiveStatus?: "stored" | "truncated" | "failed";
       }
   >;
 }
@@ -181,6 +183,7 @@ export async function executeDeliveryRun(
         Math.max(1, result.evidence.reviewCycles + 1),
       );
       let review: ReviewVerdict;
+      let reviewArchive: ReviewAttemptObservation["archive"];
       const reviewObservationCounter = { value: 0 };
       const reviewSessionId = `review-session:${cycle}:${input.reviewer?.role ?? "reviewer"}`;
       await emitObservation(services, result.taskId, {
@@ -211,6 +214,7 @@ export async function executeDeliveryRun(
               sessionObservation,
             ),
         );
+        reviewArchive = observation.archive;
         if (observation.interruption)
           await emitCodingInterruption(
             services,
@@ -248,6 +252,7 @@ export async function executeDeliveryRun(
           activation: result.candidateFence,
           outcome: review.verdict === "inconclusive" ? "failed" : "succeeded",
           sessionId: reviewSessionId,
+          ...(reviewArchive ? { archive: reviewArchive } : {}),
         },
       });
       result = await services.authority.recordReview(

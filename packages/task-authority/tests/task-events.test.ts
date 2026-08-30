@@ -266,6 +266,10 @@ describe("Task event stream", () => {
           activation: 1,
           sessionId,
           outcome: "succeeded",
+          archive: {
+            archiveId: "archive_00000000-0000-0000-0000-000000000001",
+            status: "stored",
+          },
         },
       },
     ];
@@ -297,6 +301,16 @@ describe("Task event stream", () => {
     expect(events.find((event) => event.data.type === "candidate_frozen")).toMatchObject({
       data: { type: "candidate_frozen", sha: candidate.candidateSha, fence: 1 },
     });
+    const completed = events.find((event) => event.data.type === "coding_session_completed");
+    expect(completed).toMatchObject({
+      data: {
+        archive: {
+          archiveId: "archive_00000000-0000-0000-0000-000000000001",
+          status: "stored",
+        },
+      },
+    });
+    expect(JSON.stringify(completed)).not.toContain("prompt");
     expect(candidate.state).toBe("candidate");
     expect(terminal.state).toBe("blocked");
   });

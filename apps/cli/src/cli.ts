@@ -4,16 +4,19 @@ import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import { Effect } from "effect";
 import { CliError, Command } from "effect/unstable/cli";
 import { reportCommandFailure, usageFailure } from "./cli-failure.js";
+import { archiveCommand } from "./archive-command.js";
 import { compatibilityRepositoryCommands, repositoryCommand } from "./repository-command.js";
 import { serverCommand } from "./server-command.js";
 import { compatibilityTaskCommands, taskCommand } from "./task-command.js";
 import { serverUrlFromEnvironment } from "./server-client.js";
+import { stateDirectoryFromEnvironment } from "@usine/runtime";
 
 export function createCliCommand(environment: NodeJS.ProcessEnv = process.env) {
   const serverUrl = serverUrlFromEnvironment(environment);
   return Command.make("usine").pipe(
     Command.withSubcommands([
       serverCommand(environment, serverUrl),
+      archiveCommand(stateDirectoryFromEnvironment(environment)),
       repositoryCommand(serverUrl),
       taskCommand(serverUrl),
       ...compatibilityRepositoryCommands(serverUrl),
