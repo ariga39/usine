@@ -217,6 +217,7 @@ export interface SessionObservation<T = unknown> {
     | null;
   archiveId?: string;
   archiveStatus?: SessionArchiveCaptureStatus;
+  archiveCompleteness?: "complete" | "partial";
   archiveWarnings?: string[];
   /** The requested profile survives even when profile resolution fails. */
   requestedProfile?: string;
@@ -359,6 +360,7 @@ export class CodexCodingSession {
       effectiveProfile: observation.effectiveProfile ?? unavailableEffectiveProfile(),
       archiveId: archiveResult.archiveId,
       archiveStatus: archiveResult.archiveStatus,
+      archiveCompleteness: archiveResult.completeness,
       archiveWarnings: archiveResult.warnings,
     };
   }

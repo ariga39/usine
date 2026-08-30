@@ -226,9 +226,24 @@ async function runCodingAttempt(
 function archiveReference(observation: {
   archiveId?: string;
   archiveStatus?: SessionArchiveCaptureStatus;
-}): { archive?: { archiveId: string; status: SessionArchiveCaptureStatus } } {
+  archiveCompleteness?: "complete" | "partial";
+}): {
+  archive?: {
+    archiveId: string;
+    status: SessionArchiveCaptureStatus;
+    completeness?: "complete" | "partial";
+  };
+} {
   return observation.archiveId && observation.archiveStatus
-    ? { archive: { archiveId: observation.archiveId, status: observation.archiveStatus } }
+    ? {
+        archive: {
+          archiveId: observation.archiveId,
+          status: observation.archiveStatus,
+          ...(observation.archiveCompleteness
+            ? { completeness: observation.archiveCompleteness }
+            : {}),
+        },
+      }
     : {};
 }
 

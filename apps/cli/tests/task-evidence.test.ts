@@ -44,6 +44,46 @@ describe("task evidence", () => {
     });
   });
 
+  test("preserves archive completeness and does not infer it from legacy capture status", () => {
+    const taskId = "archive-completeness-task";
+    const task = { taskId, state: "admitted", candidateSha: null } as TaskResource;
+    const event = (sequence: number, archive: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `archive-completeness-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: sequence,
+          outcome: "succeeded",
+          sessionId: `coding-session:${sequence}:implementer`,
+          archive,
+        },
+      });
+
+    const evidence = deriveTaskEvidence(task, [
+      event(1, {
+        archiveId: "archive_partial",
+        status: "stored",
+        completeness: "partial",
+      }),
+      event(2, {
+        archiveId: "archive_failed",
+        status: "failed",
+        completeness: "complete",
+      }),
+      event(3, { archiveId: "archive_legacy", status: "stored" }),
+    ]);
+
+    expect(evidence.roleRuns.implementer.map((run) => run.archive)).toEqual([
+      { archiveId: "archive_partial", status: "partial" },
+      { archiveId: "archive_failed", status: "unavailable" },
+      { archiveId: "archive_legacy", status: "unavailable" },
+    ]);
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);

@@ -252,15 +252,19 @@ function effortObservation(data: RoleRunEvent) {
   }
 }
 
-function archiveEvidence(archive: { archiveId: string; status: "stored" | "truncated" | "failed" | "pruned" }) {
+function archiveEvidence(archive: {
+  archiveId: string;
+  status: "stored" | "truncated" | "failed" | "pruned";
+  completeness?: "complete" | "partial";
+}) {
+  if (archive.status === "failed")
+    return { archiveId: archive.archiveId, status: "unavailable" as const };
+  if (archive.status === "stored" && archive.completeness === undefined)
+    return { archiveId: archive.archiveId, status: "unavailable" as const };
   return {
     archiveId: archive.archiveId,
     status:
-      archive.status === "stored"
-        ? ("complete" as const)
-        : archive.status === "failed"
-          ? ("unavailable" as const)
-          : ("partial" as const),
+      archive.completeness === "complete" ? ("complete" as const) : ("partial" as const),
   };
 }
 

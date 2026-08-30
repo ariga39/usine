@@ -12,9 +12,11 @@ const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 const role = Schema.Literals(["implementer", "reviewer", "coordinator"]);
 const outcome = Schema.Literals(["succeeded", "failed", "cancelled", "blocked"]);
 const archiveStatus = Schema.Literals(["stored", "truncated", "failed", "pruned"]);
+const archiveCompleteness = Schema.Literals(["complete", "partial"]);
 const archiveReference = Schema.Struct({
   archiveId: safeObservationId,
   status: archiveStatus,
+  completeness: Schema.optional(archiveCompleteness),
 });
 const effectiveProfile = Schema.Struct({
   profileName: Schema.NullOr(safeObservationId),

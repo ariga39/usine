@@ -79,6 +79,7 @@ interface DeliveryRunSession {
         usage?: { inputTokens?: number; outputTokens?: number } | null;
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
+        archiveCompleteness?: "complete" | "partial";
         requestedProfile?: string;
         effectiveProfile?: SessionObservation<ImplementerOutput>["effectiveProfile"];
       }
