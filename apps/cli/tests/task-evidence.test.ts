@@ -220,6 +220,79 @@ describe("task evidence", () => {
     });
   });
 
+  test("consumes completion enrichment after interruption without counting later effort", () => {
+    const taskId = "interrupted-evidence-task";
+    const event = (sequence: number, occurredAtEpochMs: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `interrupted-${sequence}`,
+        occurredAtEpochMs,
+        data,
+      });
+    const evidence = deriveTaskEvidence(
+      { taskId, state: "blocked", candidateSha: null } as TaskResource,
+      [
+        event(1, 1_000, {
+          type: "coding_session_started",
+          role: "implementer",
+          activation: 1,
+          requestedProfile: "writer-profile",
+          sessionId: "coding-session:1:implementer",
+        }),
+        event(2, 1_200, {
+          type: "coding_turn_started",
+          role: "implementer",
+          activation: 1,
+          turn: 1,
+          sessionId: "coding-session:1:implementer",
+        }),
+        event(3, 1_300, {
+          type: "coding_session_interrupted",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          phase: "turn",
+          failureClass: "network",
+        }),
+        event(4, 1_600, {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "failed",
+          sessionId: "coding-session:1:implementer",
+          requestedProfile: "writer-profile",
+          usage: { inputTokens: 8, outputTokens: 2 },
+          archive: {
+            archiveId: "archive_interrupted",
+            status: "failed",
+            completeness: "partial",
+          },
+        }),
+        event(5, 1_900, {
+          type: "coding_tool_completed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          outcomeId: "interrupted:tool:after",
+          tool: "shell",
+          outcome: "succeeded",
+        }),
+      ],
+    );
+
+    expect(evidence.roleRuns.implementer[0]).toMatchObject({
+      requestedProfile: "writer-profile",
+      usage: { inputTokens: 8, outputTokens: 2 },
+      archive: { archiveId: "archive_interrupted", status: "unavailable" },
+      outcome: { status: "failed" },
+      effort: {
+        elapsedMs: 600,
+        counts: { turns: 1, tools: 0, mcpTools: 0 },
+      },
+    });
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);

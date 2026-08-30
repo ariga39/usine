@@ -127,6 +127,7 @@ export function deriveTaskEvidence(
       mutableRoleRun(data.role, data.activation, data.sessionId, explicitReviewCycle);
     if (explicitReviewCycle !== undefined) run.reviewCycle = explicitReviewCycle;
     if (run.terminalObserved) continue;
+    if (run.interruptedAtEpochMs !== null && data.type !== "coding_session_completed") continue;
     if (data.type === "coding_session_started") {
       run.sessionStartedAtEpochMs = Math.min(
         run.sessionStartedAtEpochMs ?? event.occurredAtEpochMs,
@@ -145,8 +146,8 @@ export function deriveTaskEvidence(
       run.effort.phase = data.phase;
       run.effort.failureClass = data.failureClass;
       run.outcome.status = data.failureClass === "cancellation" ? "cancelled" : "failed";
+      run.interruptedAtEpochMs = event.occurredAtEpochMs;
       run.terminalAtEpochMs = event.occurredAtEpochMs;
-      run.terminalObserved = true;
     } else {
       run.effort.observations.push(effortObservation(data));
       if (data.type === "coding_turn_started") run.effort.counts.turns += 1;
@@ -196,6 +197,7 @@ interface MutableRoleRun {
   sessionId: string;
   sessionStartedAtEpochMs: number | null;
   terminalAtEpochMs: number | null;
+  interruptedAtEpochMs: number | null;
   terminalObserved: boolean;
   requestedProfile: string | null;
   effectiveProfile: EffectiveRoleProfile;
@@ -222,6 +224,7 @@ function mutableRoleRun(
     sessionId,
     sessionStartedAtEpochMs: null,
     terminalAtEpochMs: null,
+    interruptedAtEpochMs: null,
     terminalObserved: false,
     requestedProfile: null,
     effectiveProfile: unavailableEffectiveProfile(),
