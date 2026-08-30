@@ -9,11 +9,13 @@ import {
   listTasks,
   retryTask,
   submitTask,
+  taskEvidence,
   taskEvents,
   taskStatus,
 } from "./server-client.js";
 import { CliFailure, notFoundFailure, runCommand } from "./cli-failure.js";
 import { boundedLimitFlag, jsonFlag, naturalFlag } from "./cli-parameters.js";
+import { renderTaskEvidence } from "./task-evidence.js";
 import {
   renderEvent,
   renderJson,
@@ -24,6 +26,11 @@ import {
 
 export interface TaskListOptions {
   readonly limit: number;
+  readonly json: boolean;
+}
+
+export interface TaskEvidenceOptions {
+  readonly taskId: string;
   readonly json: boolean;
 }
 
@@ -87,13 +94,24 @@ export function taskCommand(serverUrl: string) {
     (options) => Effect.promise(() => runTaskHistoryCommand(options, serverUrl)),
   );
 
+  const evidence = Command.make(
+    "evidence",
+    {
+      taskId: Argument.string("task-id"),
+      json: jsonFlag(),
+    },
+    (options) => Effect.promise(() => runTaskEvidenceCommand(options, serverUrl)),
+  );
+
   const retry = Command.make(
     "retry",
     { taskId: Argument.string("task-id"), json: jsonFlag() },
     (options) => Effect.promise(() => runTaskRetryCommand(options, serverUrl)),
   );
 
-  return Command.make("task").pipe(Command.withSubcommands([list, get, watch, history, retry]));
+  return Command.make("task").pipe(
+    Command.withSubcommands([list, get, watch, history, evidence, retry]),
+  );
 }
 
 export function compatibilityTaskCommands(serverUrl: string) {
@@ -153,6 +171,17 @@ export async function runTaskHistoryCommand(
   return runCommand("task_history_failed", async () => {
     const page = await taskEvents(serverUrl, options.taskId, options.after, options.limit);
     process.stdout.write(renderTaskEvents(page, options.after, options.json));
+  });
+}
+
+export async function runTaskEvidenceCommand(
+  options: TaskEvidenceOptions,
+  serverUrl: string,
+): Promise<void> {
+  return runCommand("task_evidence_failed", async () => {
+    const evidence = await taskEvidence(serverUrl, options.taskId);
+    if (!evidence) throw notFoundFailure("task", "taskId", options.taskId);
+    process.stdout.write(renderTaskEvidence(evidence, options.json));
   });
 }
 

@@ -15,6 +15,7 @@ export {
   type OpenAICompatibleRoleOutputTransformConfig,
   type SandboxMode,
   type SessionObservation,
+  type EffectiveSessionProfile,
   type CodingSessionObservation,
   type SessionRequest,
   type SessionRole,

@@ -253,8 +253,19 @@ describe("Delivery Run durable phase recovery", () => {
               summary: "completed",
               failure: null,
               usage: { inputTokens: 12, outputTokens: 7 },
+              requestedProfile: "implementer-profile",
+              effectiveProfile: {
+                profileName: "implementer-profile",
+                configSha256: "1".repeat(64),
+                adapter: "sdk" as const,
+                model: "gpt-5.4",
+                modelProvider: "openai",
+                reasoningEffort: "low" as const,
+                developerInstructionsSha256: "2".repeat(64),
+              },
               archiveId: "archive_00000000-0000-0000-0000-000000000001",
               archiveStatus: "stored" as const,
+              archiveCompleteness: "complete" as const,
             };
           },
         },
@@ -282,9 +293,20 @@ describe("Delivery Run durable phase recovery", () => {
                 findings: [],
               },
               usage: { inputTokens: 5, outputTokens: 3 },
+              requestedProfile: "reviewer-profile",
+              effectiveProfile: {
+                profileName: "reviewer-profile",
+                configSha256: "3".repeat(64),
+                adapter: "app-server" as const,
+                model: "gpt-5.4",
+                modelProvider: "openai",
+                reasoningEffort: "high" as const,
+                developerInstructionsSha256: "4".repeat(64),
+              },
               archive: {
                 archiveId: "archive_00000000-0000-0000-0000-000000000002",
                 status: "stored" as const,
+                completeness: "partial" as const,
               },
             };
           },
@@ -321,14 +343,56 @@ describe("Delivery Run durable phase recovery", () => {
     expect(
       fake
         .getObservations()
-        .map(({ data }) => (data.type === "coding_session_completed" ? data.archive : undefined)),
+        .filter(({ data }) => data.type === "coding_session_completed")
+        .map(({ data }) => data),
     ).toEqual([
-      undefined,
-      undefined,
-      { archiveId: "archive_00000000-0000-0000-0000-000000000001", status: "stored" },
-      undefined,
-      undefined,
-      { archiveId: "archive_00000000-0000-0000-0000-000000000002", status: "stored" },
+      {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "coding-session:1:implementer",
+        requestedProfile: "implementer-profile",
+        effectiveProfile: {
+          profileName: "implementer-profile",
+          configSha256: "1".repeat(64),
+          adapter: "sdk",
+          model: "gpt-5.4",
+          modelProvider: "openai",
+          reasoningEffort: "low",
+          developerInstructionsSha256: "2".repeat(64),
+        },
+        usage: { inputTokens: 12, outputTokens: 7 },
+        archive: {
+          archiveId: "archive_00000000-0000-0000-0000-000000000001",
+          status: "stored",
+          completeness: "complete",
+        },
+      },
+      {
+        type: "coding_session_completed",
+        role: "reviewer",
+        activation: 0,
+        reviewCycle: 1,
+        outcome: "succeeded",
+        sessionId: expect.stringMatching(/^review-session:1:[0-9a-f-]{36}$/),
+        requestedProfile: "reviewer-profile",
+        effectiveProfile: {
+          profileName: "reviewer-profile",
+          configSha256: "3".repeat(64),
+          adapter: "app-server",
+          model: "gpt-5.4",
+          modelProvider: "openai",
+          reasoningEffort: "high",
+          developerInstructionsSha256: "4".repeat(64),
+        },
+        usage: { inputTokens: 5, outputTokens: 3 },
+        archive: {
+          archiveId: "archive_00000000-0000-0000-0000-000000000002",
+          status: "stored",
+          completeness: "partial",
+        },
+      },
     ]);
     expect(
       fake
@@ -338,13 +402,127 @@ describe("Delivery Run durable phase recovery", () => {
       "coding-session:1:implementer",
       null,
       null,
-      "review-session:1:reviewer",
+      expect.stringMatching(/^review-session:1:[0-9a-f-]{36}$/),
       null,
       null,
     ]);
     expect(JSON.stringify(fake.getObservations())).not.toMatch(
-      /prompt|stdout|stderr|profile|token/i,
+      /provider-thread|provider-session|sensitive prompt|runtime-evidence|private instruction|https?:\/\/|raw-payload/i,
     );
+  });
+
+  test("keeps reviewer invocations separate across checked-state restart", async () => {
+    const id = `review-restart-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("checked", id));
+    const firstController = new AbortController();
+    let reviews = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not restart");
+        },
+        reviewWithObservation: async (_contract, candidateSha, _check, _cycle, onObservation) => {
+          reviews += 1;
+          await onObservation?.({ type: "turn_started", turn: 1 });
+          if (reviews === 1) {
+            firstController.abort();
+            throw new Error("server restart interrupted reviewer");
+          }
+          return {
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved after restart",
+              findings: [],
+            },
+            usage: null,
+          };
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          effect: "github" as const,
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "review-restart",
+        }),
+      },
+    );
+
+    await expect(
+      executeDeliveryRun(
+        {
+          contract: contract(id),
+          contractHash: "review-restart-hash",
+          repositoryIdentity: `recovery/${id}`,
+          deadlineEpochMs: Date.now() + 60_000,
+          implementer,
+          reviewer: { ...implementer, role: "reviewer", sandbox: "read-only" },
+          signal: firstController.signal,
+        },
+        services,
+      ),
+    ).rejects.toThrow("server restart interrupted reviewer");
+
+    const recovered = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "review-restart-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+        reviewer: { ...implementer, role: "reviewer", sandbox: "read-only" },
+      },
+      services,
+    );
+
+    const reviewerStarts = fake
+      .getObservations()
+      .filter(({ data }) => data.type === "coding_session_started");
+    const reviewerCompletions = fake
+      .getObservations()
+      .filter(({ data }) => data.type === "coding_session_completed");
+    expect(recovered.state).toBe("reviewed_pr");
+    expect(reviewerStarts).toHaveLength(2);
+    expect(reviewerCompletions).toHaveLength(2);
+    expect(new Set(reviewerStarts.map(({ eventId }) => eventId)).size).toBe(2);
+    expect(new Set(reviewerCompletions.map(({ eventId }) => eventId)).size).toBe(2);
+    expect(
+      new Set(
+        reviewerStarts.map(({ data }) =>
+          data.type === "coding_session_started" ? data.sessionId : null,
+        ),
+      ).size,
+    ).toBe(2);
+    expect(
+      new Set(
+        reviewerCompletions.map(({ data }) =>
+          data.type === "coding_session_completed" ? data.sessionId : null,
+        ),
+      ).size,
+    ).toBe(2);
+    expect(
+      [...reviewerStarts, ...reviewerCompletions].every(
+        ({ data }) => "activation" in data && data.activation === 0,
+      ),
+    ).toBe(true);
+    expect(
+      reviewerStarts.map(({ data }) =>
+        data.type === "coding_session_started" ? data.reviewCycle : null,
+      ),
+    ).toEqual([1, 1]);
+    expect(
+      reviewerCompletions.map(({ data }) =>
+        data.type === "coding_session_completed" ? data.outcome : null,
+      ),
+    ).toEqual(["cancelled", "succeeded"]);
+    expect(
+      reviewerCompletions.every(
+        ({ data }) => data.type !== "coding_session_completed" || data.reviewCycle === 1,
+      ),
+    ).toBe(true);
   });
 
   test("waits on only an implementer turn network interruption", async () => {

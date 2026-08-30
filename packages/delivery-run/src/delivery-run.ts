@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FrozenCandidate, WriterWorkspace } from "@usine/candidate-workspace";
 import type {
   CodingSessionObservation,
@@ -78,6 +79,9 @@ interface DeliveryRunSession {
         usage?: { inputTokens?: number; outputTokens?: number } | null;
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
+        archiveCompleteness?: "complete" | "partial";
+        requestedProfile?: string;
+        effectiveProfile?: SessionObservation<ImplementerOutput>["effectiveProfile"];
       }
   >;
 }
@@ -185,16 +189,24 @@ export async function executeDeliveryRun(
       );
       let review: ReviewVerdict;
       let reviewArchive: ReviewAttemptObservation["archive"];
+      let reviewRequestedProfile: string | undefined;
+      let reviewEffectiveProfile: ReviewAttemptObservation["effectiveProfile"];
+      let reviewUsage: ReviewAttemptObservation["usage"] = null;
       const reviewObservationCounter = { value: 0 };
-      const reviewSessionId = `review-session:${cycle}:${input.reviewer?.role ?? "reviewer"}`;
+      const reviewInvocationId = randomUUID();
+      const reviewSessionId = `review-session:${cycle}:${reviewInvocationId}`;
+      const reviewEventPrefix = `review:${cycle}:${reviewInvocationId}`;
+      const reviewActivation = 0;
       await emitObservation(services, result.taskId, {
-        eventId: `review:${cycle}:session-started`,
+        eventId: `${reviewEventPrefix}:session-started`,
         occurredAtEpochMs: Date.now(),
         data: {
           type: "coding_session_started",
           role: input.reviewer?.role ?? "reviewer",
-          activation: result.candidateFence,
+          activation: reviewActivation,
+          reviewCycle: cycle,
           sessionId: reviewSessionId,
+          requestedProfile: input.reviewer?.profile,
         },
       });
       try {
@@ -208,22 +220,25 @@ export async function executeDeliveryRun(
               services,
               result.taskId,
               input.reviewer?.role ?? "reviewer",
-              result.candidateFence!,
+              reviewActivation,
               reviewSessionId,
-              `review:${cycle}`,
+              reviewEventPrefix,
               reviewObservationCounter,
               sessionObservation,
             ),
         );
         reviewArchive = observation.archive;
+        reviewRequestedProfile = observation.requestedProfile;
+        reviewEffectiveProfile = observation.effectiveProfile;
+        reviewUsage = observation.usage;
         if (observation.interruption)
           await emitCodingInterruption(
             services,
             result.taskId,
             input.reviewer?.role ?? "reviewer",
-            result.candidateFence,
+            reviewActivation,
             reviewSessionId,
-            `review:${cycle}`,
+            reviewEventPrefix,
             reviewObservationCounter,
             observation.interruption,
           );
@@ -231,28 +246,35 @@ export async function executeDeliveryRun(
         throwIfAborted(input.signal);
       } catch (error) {
         await emitObservation(services, result.taskId, {
-          eventId: `review:${cycle}:session-completed`,
+          eventId: `${reviewEventPrefix}:session-completed`,
           occurredAtEpochMs: Date.now(),
           data: {
             type: "coding_session_completed",
             role: input.reviewer?.role ?? "reviewer",
-            activation: result.candidateFence,
+            activation: reviewActivation,
+            reviewCycle: cycle,
             outcome: input.signal?.aborted ? "cancelled" : "failed",
             sessionId: reviewSessionId,
+            requestedProfile: input.reviewer?.profile,
+            usage: null,
           },
         });
         if (input.signal?.aborted) throw error;
         return blockTask(services, result, error instanceof Error ? error.message : String(error));
       }
       await emitObservation(services, result.taskId, {
-        eventId: `review:${cycle}:session-completed`,
+        eventId: `${reviewEventPrefix}:session-completed`,
         occurredAtEpochMs: Date.now(),
         data: {
           type: "coding_session_completed",
           role: input.reviewer?.role ?? "reviewer",
-          activation: result.candidateFence,
+          activation: reviewActivation,
+          reviewCycle: cycle,
           outcome: review.verdict === "inconclusive" ? "failed" : "succeeded",
           sessionId: reviewSessionId,
+          requestedProfile: reviewRequestedProfile ?? input.reviewer?.profile,
+          ...(reviewEffectiveProfile ? { effectiveProfile: reviewEffectiveProfile } : {}),
+          usage: reviewUsage,
           ...(reviewArchive ? { archive: reviewArchive } : {}),
         },
       });

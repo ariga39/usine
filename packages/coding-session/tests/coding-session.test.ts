@@ -36,7 +36,7 @@ import {
   type SessionArchive,
   type CodexProfileResolver,
 } from "@usine/coding-session";
-import type { TaskContract } from "@usine/task-authority";
+import { decodeTaskObservationEventInput, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 
 const sha = "a".repeat(40);
@@ -673,7 +673,6 @@ describe("Coding Session", () => {
       }),
     ).resolves.toMatchObject({
       status: "completed",
-      sessionId: "sdk-thread",
       output: { status: "proposed", summary: "writer-profile" },
     });
     await expect(
@@ -690,9 +689,79 @@ describe("Coding Session", () => {
       }),
     ).resolves.toMatchObject({
       status: "completed",
-      sessionId: "thread-fixture",
       output: { verdict: "approved", summary: "app-server" },
     });
+  });
+
+  test("maps unsafe effective model and provider identities to null before Task observation", async () => {
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "safe" })),
+          "thread",
+        ),
+      {
+        environment: { CI: "true" },
+        profileResolver: async () =>
+          Object.assign(
+            {
+              model: "https://private.example/v1/model",
+              modelReasoningEffort: "low" as const,
+            },
+            { config: { model_provider: "private.example" } },
+          ),
+      },
+    );
+
+    const observation = await session.run({
+      role: "implementer",
+      workspace: "fixtures/writer",
+      contract,
+      prompt: "work",
+      profile: "writer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+    });
+
+    expect(observation.effectiveProfile).toMatchObject({ model: null, modelProvider: null });
+    expect(() =>
+      decodeTaskObservationEventInput({
+        eventId: "unsafe-profile-observation",
+        occurredAtEpochMs: 1,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "succeeded",
+          sessionId: "coding-session:1:implementer",
+          requestedProfile: observation.requestedProfile,
+          effectiveProfile: {
+            ...observation.effectiveProfile,
+            model: "https://private.example/v1/model",
+            modelProvider: "private.example",
+          },
+          usage: observation.usage,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeTaskObservationEventInput({
+        eventId: "safe-profile-observation",
+        occurredAtEpochMs: 1,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "succeeded",
+          sessionId: "coding-session:1:implementer",
+          requestedProfile: observation.requestedProfile,
+          effectiveProfile: observation.effectiveProfile,
+          usage: observation.usage,
+        },
+      }),
+    ).not.toThrow();
   });
 
   test("applies synthetic role model selection at both adapter boundaries", async () => {
@@ -899,7 +968,6 @@ describe("Coding Session", () => {
     const observation = await pending;
     expect(observation).toMatchObject({
       status: "completed",
-      sessionId: "thread-fixture",
       output: { verdict: "approved", summary: "app-server" },
       usage: { inputTokens: 7, outputTokens: 9 },
     });
@@ -1554,7 +1622,6 @@ describe("Coding Session", () => {
     });
     expect(observation).toMatchObject({
       status: "completed",
-      sessionId: "opaque-thread",
       output: { status: "proposed" },
       usage: { inputTokens: 12, outputTokens: 7 },
     });
@@ -2294,6 +2361,7 @@ describe("Coding Session", () => {
       archiveStatus: "stored",
       archiveId: expect.stringMatching(/^archive_[0-9a-f-]+$/),
     });
+    expect("sessionId" in observation).toBe(false);
     expect(JSON.stringify(observation)).not.toContain("sensitive prompt");
     const archive = completeArchive(
       await readSessionArchive(stateDirectory, observation.archiveId!),

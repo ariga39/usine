@@ -294,6 +294,7 @@ export class SessionArchiveWriter {
   }): Promise<{
     archiveId: string;
     archiveStatus: SessionArchiveCaptureStatus;
+    completeness: "complete" | "partial";
     warnings: string[];
   }> {
     this.record.status = input.status;
@@ -308,6 +309,7 @@ export class SessionArchiveWriter {
     return {
       archiveId: this.archiveId,
       archiveStatus: this.writeFailure ? "failed" : this.record.captureStatus,
+      completeness: this.record.completeness,
       warnings: [...this.warnings],
     };
   }
