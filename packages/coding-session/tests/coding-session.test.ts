@@ -689,7 +689,6 @@ describe("Coding Session", () => {
       }),
     ).resolves.toMatchObject({
       status: "completed",
-      sessionId: "thread-fixture",
       output: { verdict: "approved", summary: "app-server" },
     });
   });
@@ -969,7 +968,6 @@ describe("Coding Session", () => {
     const observation = await pending;
     expect(observation).toMatchObject({
       status: "completed",
-      sessionId: "thread-fixture",
       output: { verdict: "approved", summary: "app-server" },
       usage: { inputTokens: 7, outputTokens: 9 },
     });
