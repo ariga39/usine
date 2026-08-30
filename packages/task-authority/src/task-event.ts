@@ -5,7 +5,7 @@ const safeObservationId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
 );
 const safeEvidenceValue = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:/+ -]{0,255}$/),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
 );
 const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));

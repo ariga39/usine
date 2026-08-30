@@ -424,8 +424,8 @@ export class CodexCodingSession {
           profileName,
           configSha256: snapshot.sha256,
           adapter: null,
-          model: snapshot.model ?? null,
-          modelProvider: snapshot.modelProvider ?? null,
+          model: safeEvidenceIdentity(snapshot.model),
+          modelProvider: safeEvidenceIdentity(snapshot.modelProvider),
           reasoningEffort: snapshot.modelReasoningEffort ?? null,
           developerInstructionsSha256: snapshot.developerInstructions
             ? hashText(snapshot.developerInstructions)
@@ -762,6 +762,12 @@ function usageFrom(
 
 function hashText(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function safeEvidenceIdentity(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
+    ? value
+    : null;
 }
 
 function unavailableEffectiveProfile(): EffectiveSessionProfile {
