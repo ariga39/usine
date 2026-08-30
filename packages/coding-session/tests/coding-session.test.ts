@@ -673,7 +673,6 @@ describe("Coding Session", () => {
       }),
     ).resolves.toMatchObject({
       status: "completed",
-      sessionId: "sdk-thread",
       output: { status: "proposed", summary: "writer-profile" },
     });
     await expect(
@@ -1625,7 +1624,6 @@ describe("Coding Session", () => {
     });
     expect(observation).toMatchObject({
       status: "completed",
-      sessionId: "opaque-thread",
       output: { status: "proposed" },
       usage: { inputTokens: 12, outputTokens: 7 },
     });

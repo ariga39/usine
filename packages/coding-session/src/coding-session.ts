@@ -765,9 +765,9 @@ function hashText(value: string): string {
 }
 
 function safeEvidenceIdentity(value: unknown): string | null {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
-    ? value
-    : null;
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return null;
+  const labels = value.split(".");
+  return labels.length > 1 && /^[A-Za-z]+$/.test(labels.at(-1)!) ? null : value;
 }
 
 function unavailableEffectiveProfile(): EffectiveSessionProfile {

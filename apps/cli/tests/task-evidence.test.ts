@@ -295,6 +295,71 @@ describe("task evidence", () => {
     });
   });
 
+  test("preserves the requested profile through pre-resolution failure and completion recovery", () => {
+    const taskId = "profile-resolution-failure-task";
+    const event = (sequence: number, occurredAtEpochMs: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `profile-resolution-${sequence}`,
+        occurredAtEpochMs,
+        data,
+      });
+    const evidence = deriveTaskEvidence(
+      { taskId, state: "blocked", candidateSha: null } as TaskResource,
+      [
+        event(1, 1_000, {
+          type: "coding_session_started",
+          role: "reviewer",
+          activation: 1,
+          reviewCycle: 1,
+          requestedProfile: "reviewer-profile",
+          sessionId: "review-session:1:reviewer",
+        }),
+        event(2, 1_100, {
+          type: "coding_session_interrupted",
+          role: "reviewer",
+          activation: 1,
+          sessionId: "review-session:1:reviewer",
+          phase: "startup",
+          failureClass: "configuration",
+        }),
+        event(3, 1_200, {
+          type: "coding_session_completed",
+          role: "reviewer",
+          activation: 1,
+          reviewCycle: 1,
+          outcome: "failed",
+          sessionId: "review-session:1:reviewer",
+          requestedProfile: "reviewer-profile",
+          usage: null,
+          archive: {
+            archiveId: "archive_profile_failure",
+            status: "failed",
+            completeness: "partial",
+          },
+        }),
+      ],
+    );
+
+    expect(evidence.roleRuns.reviewer[0]).toMatchObject({
+      requestedProfile: "reviewer-profile",
+      effectiveProfile: {
+        profileName: null,
+        configSha256: null,
+        adapter: null,
+        model: null,
+        modelProvider: null,
+        reasoningEffort: null,
+        developerInstructionsSha256: null,
+      },
+      usage: null,
+      archive: { archiveId: "archive_profile_failure", status: "unavailable" },
+      outcome: { status: "failed", taskRelation: "not_observed" },
+      effort: { elapsedMs: 200, counts: { turns: 0, tools: 0, mcpTools: 0 } },
+    });
+  });
+
   test("joins successful Role Runs to current Task facts across a repaired Candidate", () => {
     const taskId = "repair-join-task";
     const staleSha = "f".repeat(40);

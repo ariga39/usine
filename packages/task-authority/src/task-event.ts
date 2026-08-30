@@ -5,7 +5,9 @@ const safeObservationId = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/),
 );
 const safeEvidenceValue = Schema.String.check(
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  Schema.makeFilter((value) =>
+    isSafeEvidenceIdentity(value) ? undefined : "must be a bounded non-hostname identity",
+  ),
 );
 const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
@@ -31,6 +33,13 @@ const usage = Schema.Struct({
   inputTokens: Schema.optional(Schema.Natural),
   outputTokens: Schema.optional(Schema.Natural),
 });
+
+function isSafeEvidenceIdentity(value: string): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return false;
+  const labels = value.split(".");
+  return labels.length < 2 || !/^[A-Za-z]+$/.test(labels.at(-1)!);
+}
+
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
 const codingSessionFailureClass = Schema.Literals([
