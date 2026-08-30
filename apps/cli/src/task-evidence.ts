@@ -56,6 +56,7 @@ export interface RoleRunEvidence {
     readonly taskRelation:
       | "accepted_exact_sha"
       | "different_sha"
+      | "not_yet_accepted"
       | "not_observed"
       | "unavailable";
   };
@@ -266,12 +267,25 @@ function archiveEvidence(archive: { archiveId: string; status: "stored" | "trunc
 function relationToTask(candidateSha: string | null, task: TaskResource): RoleRunEvidence["outcome"]["taskRelation"] {
   if (!candidateSha) return "not_observed";
   if (!task.candidateSha) return "unavailable";
-  return candidateSha === task.candidateSha ? "accepted_exact_sha" : "different_sha";
+  if (candidateSha !== task.candidateSha) return "different_sha";
+  return taskHasAcceptedOutcome(task) ? "accepted_exact_sha" : "not_yet_accepted";
 }
 
 function taskRelation(task: TaskResource): TaskEvidence["task"]["relation"] {
-  if (!task.candidateSha) return task.state === "blocked" ? "blocked" : "not_yet_accepted";
-  return "accepted_exact_sha";
+  if (task.state === "blocked") return "blocked";
+  return taskHasAcceptedOutcome(task) ? "accepted_exact_sha" : "not_yet_accepted";
+}
+
+function taskHasAcceptedOutcome(task: TaskResource): boolean {
+  const candidateSha = task.candidateSha;
+  return (
+    (task.state === "reviewed" || task.state === "reviewed_pr" || task.state === "merged") &&
+    candidateSha !== null &&
+    task.check?.sha === candidateSha &&
+    task.check.status === "passed" &&
+    task.review?.sha === candidateSha &&
+    task.review.verdict === "approved"
+  );
 }
 
 function unavailableEffectiveProfile(): EffectiveRoleProfile {

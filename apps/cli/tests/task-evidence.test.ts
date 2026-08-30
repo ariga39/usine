@@ -3,6 +3,47 @@ import { deriveTaskEvidence, renderTaskEvidence, type TaskEvidence } from "../sr
 import { decodeTaskEvent, type TaskEvent, type TaskResource } from "@usine/task-authority";
 
 describe("task evidence", () => {
+  test("does not treat a matching Candidate SHA as an accepted outcome", () => {
+    const taskId = "candidate-only-task";
+    const sha = "b".repeat(40);
+    const task = {
+      taskId,
+      state: "candidate",
+      candidateSha: sha,
+    } as TaskResource;
+    const event = (sequence: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `candidate-only-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data,
+      });
+
+    const evidence = deriveTaskEvidence(task, [
+      event(1, {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+      }),
+      event(2, {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "coding-session:1:implementer",
+      }),
+      event(3, { type: "candidate_frozen", sha, fence: 1 }),
+    ]);
+
+    expect(evidence.task.relation).toBe("not_yet_accepted");
+    expect(evidence.roleRuns.implementer[0]?.outcome).toMatchObject({
+      candidateSha: sha,
+      taskRelation: "not_yet_accepted",
+    });
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);
@@ -18,6 +59,7 @@ describe("task evidence", () => {
       taskId,
       state: "reviewed_pr",
       candidateSha: sha,
+      check: { sha, status: "passed", exitCode: 0 },
       review: { sha, verdict: "approved", classification: "approved", findingCount: 0 },
     } as TaskResource;
     const evidence = deriveTaskEvidence(task, [
