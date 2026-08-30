@@ -420,5 +420,8 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
       : input.type === "coding_session_completed"
         ? new Set(["reviewCycle", "requestedProfile", "effectiveProfile", "usage", "archive"])
         : new Set<string>();
-  assertExactKeys(input, expected.filter((key) => !optional.has(key) || actual.includes(key)));
+  assertExactKeys(
+    input,
+    expected.filter((key) => !optional.has(key) || actual.includes(key)),
+  );
 }

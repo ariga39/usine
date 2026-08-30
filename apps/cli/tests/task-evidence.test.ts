@@ -293,6 +293,84 @@ describe("task evidence", () => {
     });
   });
 
+  test("joins successful Role Runs to current Task facts across a repaired Candidate", () => {
+    const taskId = "repair-join-task";
+    const staleSha = "f".repeat(40);
+    const acceptedSha = "0".repeat(40);
+    const task = {
+      taskId,
+      state: "reviewed_pr",
+      candidateSha: acceptedSha,
+      candidateFence: 2,
+      check: { sha: acceptedSha, status: "passed", exitCode: 0 },
+      review: {
+        sha: acceptedSha,
+        verdict: "approved",
+        classification: "approved",
+        findingCount: 1,
+      },
+      delivery: {
+        sha: acceptedSha,
+        effect: "github",
+        prNumber: 42,
+        url: "https://github.com/example/repository/pull/42",
+        attestationId: "attestation-42",
+        merge: null,
+      },
+      evidence: { changesRequestedBatches: 1 },
+    } as TaskResource;
+    const event = (sequence: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `repair-join-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data,
+      });
+    const sessionEvents = (activation: number, sequence: number) => [
+      event(sequence, {
+        type: "coding_session_started",
+        role: "implementer",
+        activation,
+        sessionId: `coding-session:${activation}:implementer`,
+      }),
+      event(sequence + 1, {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation,
+        outcome: "succeeded",
+        sessionId: `coding-session:${activation}:implementer`,
+      }),
+    ];
+
+    const evidence = deriveTaskEvidence(task, [
+      ...sessionEvents(1, 1),
+      event(3, { type: "candidate_frozen", sha: staleSha, fence: 1 }),
+      ...sessionEvents(2, 4),
+      event(6, { type: "candidate_frozen", sha: acceptedSha, fence: 2 }),
+    ]);
+
+    expect(evidence.roleRuns.implementer.map((run) => run.outcome)).toEqual([
+      { status: "succeeded", candidateSha: staleSha, taskRelation: "different_sha" },
+      { status: "succeeded", candidateSha: acceptedSha, taskRelation: "accepted_exact_sha" },
+    ]);
+    expect(evidence.task).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: acceptedSha,
+      candidateFence: 2,
+      check: { sha: acceptedSha, status: "passed", exitCode: 0 },
+      review: { sha: acceptedSha, verdict: "approved", findingCount: 1 },
+      repairBatches: 1,
+      delivery: { sha: acceptedSha, prNumber: 42 },
+    });
+    const rendered = renderTaskEvidence(evidence, false);
+    expect(rendered).toContain(`Task candidate: ${acceptedSha} fence=2`);
+    expect(rendered).toContain(`Task check: passed ${acceptedSha} exit=0`);
+    expect(rendered).toContain(`Task review: approved ${acceptedSha} findings=1`);
+    expect(rendered).toContain("Task repair batches: 1");
+    expect(rendered).toContain(`Task delivery: github ${acceptedSha} pr=42 merged=false`);
+  });
+
   test("projects old optional session fields as unknown or unavailable and binds role runs to the exact SHA", () => {
     const taskId = "history-evidence-task";
     const sha = "a".repeat(40);
@@ -410,10 +488,10 @@ describe("task evidence", () => {
               reasoningEffort: "low",
               developerInstructionsSha256: "2".repeat(64),
             },
-      effort: {
-        elapsedMs: 0,
-        counts: { turns: 0, tools: 0, mcpTools: 0 },
-        phase: "output",
+            effort: {
+              elapsedMs: 0,
+              counts: { turns: 0, tools: 0, mcpTools: 0 },
+              phase: "output",
               failureClass: null,
               observations: [{ type: "turn_completed", turn: 1, outcome: "succeeded" }],
             },

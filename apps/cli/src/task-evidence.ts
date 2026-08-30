@@ -75,6 +75,15 @@ export interface TaskEvidence {
   readonly task: {
     readonly state: TaskResource["state"];
     readonly candidateSha: string | null;
+    readonly candidateFence: number | null;
+    readonly check: TaskResource["check"];
+    readonly review: TaskResource["review"];
+    readonly repairBatches: number | null;
+    readonly delivery: {
+      readonly sha: string;
+      readonly prNumber: number;
+      readonly merged: boolean;
+    } | null;
     readonly relation:
       | "accepted_exact_sha"
       | "not_yet_accepted"
@@ -83,13 +92,10 @@ export interface TaskEvidence {
   };
 }
 
-export function deriveTaskEvidence(
-  task: TaskResource,
-  events: readonly TaskEvent[],
-): TaskEvidence {
-  const uniqueEvents = [...new Map(events.map((event) => [event.eventId, event])).values()].toSorted(
-    (left, right) => left.sequence - right.sequence,
-  );
+export function deriveTaskEvidence(task: TaskResource, events: readonly TaskEvent[]): TaskEvidence {
+  const uniqueEvents = [
+    ...new Map(events.map((event) => [event.eventId, event])).values(),
+  ].toSorted((left, right) => left.sequence - right.sequence);
   const runs = new Map<string, MutableRoleRun>();
   const candidateByActivation = new Map<number, string>();
   const reviewByCycle = new Map<number, string>();
@@ -162,8 +168,8 @@ export function deriveTaskEvidence(
   for (const run of runs.values()) {
     const candidateSha =
       run.role === "implementer"
-        ? candidateByActivation.get(run.activation ?? -1) ?? null
-        : reviewByCycle.get(run.reviewCycle ?? -1) ?? null;
+        ? (candidateByActivation.get(run.activation ?? -1) ?? null)
+        : (reviewByCycle.get(run.reviewCycle ?? -1) ?? null);
     run.outcome.candidateSha = candidateSha;
     run.outcome.taskRelation = relationToTask(candidateSha, task);
     run.effort.elapsedMs =
@@ -183,12 +189,21 @@ export function deriveTaskEvidence(
     task: {
       state: task.state,
       candidateSha: task.candidateSha,
+      candidateFence: task.candidateFence,
+      check: task.check,
+      review: task.review,
+      repairBatches: task.evidence?.changesRequestedBatches ?? null,
+      delivery: task.delivery
+        ? {
+            sha: task.delivery.sha,
+            prNumber: task.delivery.prNumber,
+            merged: task.delivery.merge?.observedState === "merged",
+          }
+        : null,
       relation: taskRelation(task),
     },
   };
 }
-
-export const taskEvidenceFrom = deriveTaskEvidence;
 
 interface MutableRoleRun {
   role: EvidenceRole;
@@ -246,9 +261,7 @@ function toPublicRoleRun(run: MutableRoleRun): RoleRunEvidence {
   return publicRun;
 }
 
-function isRoleRunEvent(
-  data: TaskEvent["data"],
-): data is RoleRunEvent {
+function isRoleRunEvent(data: TaskEvent["data"]): data is RoleRunEvent {
   return (
     (data.type === "coding_session_started" ||
       data.type === "coding_thread_started" ||
@@ -304,12 +317,14 @@ function archiveEvidence(archive: {
     return { archiveId: archive.archiveId, status: "unavailable" as const };
   return {
     archiveId: archive.archiveId,
-    status:
-      archive.completeness === "complete" ? ("complete" as const) : ("partial" as const),
+    status: archive.completeness === "complete" ? ("complete" as const) : ("partial" as const),
   };
 }
 
-function relationToTask(candidateSha: string | null, task: TaskResource): RoleRunEvidence["outcome"]["taskRelation"] {
+function relationToTask(
+  candidateSha: string | null,
+  task: TaskResource,
+): RoleRunEvidence["outcome"]["taskRelation"] {
   if (!candidateSha) return "not_observed";
   if (!task.candidateSha) return "unavailable";
   if (candidateSha !== task.candidateSha) return "different_sha";
@@ -356,6 +371,11 @@ export function renderTaskEvidence(evidence: TaskEvidence, json: boolean): strin
   return [
     `Task ${evidence.taskId} evidence: ${evidence.task.state}`,
     `Task outcome: ${evidence.task.relation} (${evidence.task.candidateSha ?? "unavailable"})`,
+    `Task candidate: ${evidence.task.candidateSha ?? "unavailable"} fence=${evidence.task.candidateFence ?? "unavailable"}`,
+    `Task check: ${evidence.task.check ? `${evidence.task.check.status} ${evidence.task.check.sha} exit=${evidence.task.check.exitCode}` : "unavailable"}`,
+    `Task review: ${evidence.task.review ? `${evidence.task.review.verdict} ${evidence.task.review.sha} findings=${evidence.task.review.findingCount}` : "unavailable"}`,
+    `Task repair batches: ${evidence.task.repairBatches ?? "unavailable"}`,
+    `Task delivery: ${evidence.task.delivery ? `github ${evidence.task.delivery.sha} pr=${evidence.task.delivery.prNumber} merged=${evidence.task.delivery.merged}` : "unavailable"}`,
     "IMPLEMENTER ROLE RUNS",
     ...evidence.roleRuns.implementer.map(renderRoleRun),
     "REVIEWER ROLE RUNS",

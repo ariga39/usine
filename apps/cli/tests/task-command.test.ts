@@ -41,6 +41,66 @@ function event(taskId: string, sequence: number, data: TaskEvent["data"]): TaskE
 }
 
 describe("task evidence command", () => {
+  test("rereads current Task facts after draining history", async () => {
+    const taskId = "refresh-evidence-task";
+    const sha = "f".repeat(40);
+    const initialTask = {
+      ...task(taskId, sha),
+      state: "candidate",
+      check: null,
+      review: null,
+      delivery: null,
+    } satisfies TaskResource;
+    const currentTask = task(taskId, sha);
+    const history = [
+      event(taskId, 1, {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:1:implementer",
+      }),
+    ];
+    let taskReads = 0;
+    const originalFetch = globalThis.fetch;
+    const output: string[] = [];
+    const originalWrite = process.stdout.write;
+    globalThis.fetch = async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.endsWith(`/v1/tasks/${taskId}`)) {
+        taskReads += 1;
+        return new Response(JSON.stringify(taskReads === 1 ? initialTask : currentTask), {
+          status: 200,
+        });
+      }
+      if (url.pathname.endsWith(`/v1/tasks/${taskId}/events`))
+        return new Response(JSON.stringify({ taskId, events: history, nextSequence: 1 }), {
+          status: 200,
+        });
+      return new Response("not found", { status: 404 });
+    };
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await runTaskEvidenceCommand({ taskId, json: true }, "http://server.test");
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.stdout.write = originalWrite;
+    }
+
+    const evidence = JSON.parse(output.join("")) as {
+      task: { relation: string; state: string; check: unknown; review: unknown };
+    };
+    expect(taskReads).toBe(2);
+    expect(evidence.task).toMatchObject({
+      relation: "accepted_exact_sha",
+      state: "reviewed_pr",
+      check: { sha, status: "passed" },
+      review: { sha, verdict: "approved" },
+    });
+  });
+
   test("drains overlapping history pages into one report using current Task facts", async () => {
     const taskId = "paginated-evidence-task";
     const sha = "e".repeat(40);

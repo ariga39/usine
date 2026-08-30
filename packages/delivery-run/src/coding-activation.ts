@@ -9,11 +9,7 @@ import {
   originalTaskContract,
 } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
-import {
-  blockTask,
-  emitCodingInterruption,
-  emitCodingObservation,
-} from "./delivery-progress.js";
+import { blockTask, emitCodingInterruption, emitCodingObservation } from "./delivery-progress.js";
 
 function implementerPrompt(
   input: DeliveryRunInput,

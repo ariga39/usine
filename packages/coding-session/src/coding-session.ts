@@ -416,9 +416,9 @@ export class CodexCodingSession {
           await this.profileResolver(profileName, request.environment ?? this.options.environment),
         );
         const snapshot = sessionArchiveProfileSnapshot(profileName, {
-            ...profileSelection,
-            ...profileSelection.config,
-          });
+          ...profileSelection,
+          ...profileSelection.config,
+        });
         archive?.setProfile(snapshot);
         effectiveProfile = {
           profileName,

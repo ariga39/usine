@@ -191,7 +191,9 @@ export async function taskEvidence(
     afterSequence = nextSequence;
     if (page.events.length < limit) break;
   }
-  return deriveTaskEvidence(task, events);
+  const currentTask = await taskStatus(serverUrl, taskId);
+  if (!currentTask) return null;
+  return deriveTaskEvidence(currentTask, events);
 }
 
 export type EventScope = ApiEventScope;

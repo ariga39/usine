@@ -260,15 +260,16 @@ node apps/cli/dist/cli.mjs task list --json
 node apps/cli/dist/cli.mjs task get "<TASK_ID>" --json
 node apps/cli/dist/cli.mjs task history --after 0 --limit 200 "<TASK_ID>" --json
 node apps/cli/dist/cli.mjs task watch --after 0 --timeout 60000 "<TASK_ID>" --json
+node apps/cli/dist/cli.mjs task evidence "<TASK_ID>" --json
 ```
 
 Human-readable output is the default for resource reads; add `--json` for the stable machine-readable projection. `server health` returns `status` and `revision`. `server snapshot` includes the server, registered Repository resources, Task list items, and coding-session resources. `task get` returns the Task state, exact-SHA evidence projections, delivery, blocker classification, waiting/retry flags, writer identity, and evidence counters without private policy facts.
 
-`task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. It has no live-event cursor to resume: start with `task history` or `task watch --after <LAST_SEQUENCE>` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get` and `task watch` are the canonical commands.
+`task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. `task evidence` drains paginated history, rereads the current Task, and reports separate implementer/reviewer Role Runs joined to the current bounded Candidate, check, review, repair, and delivery facts. It has no live-event cursor to resume: start with `task history`, `task watch --after <LAST_SEQUENCE>`, or `task evidence` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get`, `task watch`, and `task evidence` are the canonical Task reads.
 
 ### Session Archive operations
 
-Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, and history expose at most an opaque archive ID and capture status. Archive content is never returned by the loopback HTTP API.
+Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.
 
 Use the host-local CLI against the configured state root. Listing and manifest inspection are metadata-only:
 
