@@ -659,10 +659,7 @@ export async function cleanupSessionArchives(
   return { removedArchiveIds: ids };
 }
 
-export const listArchivesForTask = listSessionArchives;
-export const getArchiveManifest = readSessionArchiveManifest;
 export const exportSessionArchive = readSessionArchive;
-export const cleanupArchives = cleanupSessionArchives;
 
 function archivePath(stateDirectory: string, archiveId: string): string {
   return join(sessionArchiveDirectory(stateDirectory), `${archivePathName(archiveId)}.json`);

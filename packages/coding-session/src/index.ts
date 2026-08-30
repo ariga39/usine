@@ -51,8 +51,6 @@ export {
 export {
   cleanupSessionArchives,
   exportSessionArchive,
-  getArchiveManifest,
-  listArchivesForTask,
   listSessionArchives,
   readSessionArchive,
   readSessionArchiveManifest,

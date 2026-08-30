@@ -5,7 +5,6 @@ import {
   exportSessionArchive,
   listSessionArchives,
   readSessionArchiveManifest,
-  type SessionArchiveManifest,
 } from "@usine/runtime";
 import { runCommand } from "./cli-failure.js";
 import { boundedLimitFlag, jsonFlag } from "./cli-parameters.js";
@@ -103,18 +102,4 @@ export async function runArchiveCleanupCommand(
     const result = await cleanupSessionArchives(stateDirectory, { archiveId, taskId });
     process.stdout.write(renderJson(result));
   });
-}
-
-export function archiveManifestRows(manifests: readonly SessionArchiveManifest[]) {
-  return manifests.map(
-    ({ archiveId, taskId, role, attempt, status, captureStatus, completeness }) => ({
-      archiveId,
-      taskId,
-      role,
-      attempt,
-      status,
-      captureStatus,
-      completeness,
-    }),
-  );
 }

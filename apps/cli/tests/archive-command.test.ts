@@ -1,42 +1,92 @@
-import { mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vite-plus/test";
-import { SessionArchiveWriter } from "../../../packages/coding-session/src/session-archive.js";
 import {
   runArchiveCleanupCommand,
   runArchiveExportCommand,
   runArchiveListCommand,
   runArchiveManifestCommand,
 } from "../src/archive-command.js";
-import type { TaskContract } from "@usine/task-authority";
 
 async function writeArchive(
   stateDirectory: string,
   attempt: string,
-  maxArchives?: number,
+  captureStatus: "stored" | "pruned" = "stored",
 ): Promise<string> {
-  const writer = new SessionArchiveWriter(
-    { stateDirectory, ...(maxArchives === undefined ? {} : { maxArchives }) },
-    {
-      taskId: "cli-archive-task",
-      role: "implementer",
-      attempt,
-      contract: { id: "cli-archive-task" } as TaskContract,
-      prompt: "sensitive prompt bytes",
-    },
-  );
-  await writer.begin();
-  return (
-    await writer.finish({
-      status: "completed",
-      sessionId: "thread-cli",
-      usage: null,
-      failure: null,
-      phase: "output",
-      failureClass: null,
-    })
-  ).archiveId;
+  const archiveId = `archive_00000000-0000-0000-0000-00000000000${attempt}`;
+  const directory = join(stateDirectory, "session-archives");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const fields = { name: "cli-profile" };
+  const profile = {
+    ...fields,
+    sha256: createHash("sha256").update(JSON.stringify(fields), "utf8").digest("hex"),
+  };
+  const archive =
+    captureStatus === "pruned"
+      ? {
+          schemaVersion: 1 as const,
+          archiveId,
+          taskId: "cli-archive-task",
+          role: "implementer" as const,
+          attempt,
+          createdAtEpochMs: 1,
+          updatedAtEpochMs: 2,
+          status: "completed" as const,
+          captureStatus,
+          completeness: "partial" as const,
+          sessionId: "thread-cli",
+          adapter: "sdk" as const,
+          phase: "output" as const,
+          failureClass: null,
+          byteLength: 0,
+          truncated: false as const,
+          warnings: ["archive_pruned"],
+        }
+      : {
+          schemaVersion: 1 as const,
+          archiveId,
+          taskId: "cli-archive-task",
+          role: "implementer" as const,
+          attempt,
+          createdAtEpochMs: 1,
+          updatedAtEpochMs: 2,
+          status: "completed" as const,
+          captureStatus,
+          completeness: "complete" as const,
+          sessionId: "thread-cli",
+          adapter: "sdk" as const,
+          phase: "output" as const,
+          failureClass: null,
+          failure: null,
+          prompt: "sensitive prompt bytes",
+          contract: {
+            id: "cli-archive-task",
+            authorization: { delivery: true },
+            delivery: { branch: "agent/cli", issue: 285 },
+          },
+          profile,
+          items: [],
+          rawFinalResponse: null,
+          normalizedOutput: null,
+          usage: null,
+          byteLength: 0,
+          truncated: false,
+          warnings: [],
+        };
+  for (;;) {
+    const bytes = JSON.stringify(archive);
+    const byteLength = Buffer.byteLength(bytes);
+    if (archive.byteLength === byteLength) {
+      await writeFile(join(directory, `${archiveId}.json`), bytes, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      return archiveId;
+    }
+    archive.byteLength = byteLength;
+  }
 }
 
 describe("Session Archive CLI", () => {
@@ -91,8 +141,8 @@ describe("Session Archive CLI", () => {
 
   test("reports a pruned archive through manifest and explicit export", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-cli-archive-pruned-"));
-    const first = await writeArchive(stateDirectory, "1", 1);
-    await writeArchive(stateDirectory, "2", 1);
+    const first = await writeArchive(stateDirectory, "1", "pruned");
+    await writeArchive(stateDirectory, "2");
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     try {
       await runArchiveManifestCommand({ archiveId: first, json: true }, stateDirectory);
