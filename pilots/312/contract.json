@@ -1,0 +1,35 @@
+{
+  "id": "issue-294-reviewer-pilot-rerun-312",
+  "repositoryId": "usine-production-pilot-312",
+  "baseSha": "a87c05b2ea839e0d3e580935ba8dbe28e4d158e0",
+  "instructions": "Issue #294 owns the observable behavior. Delivery Run and Quality Gate keep one provider-neutral Coding Session facade while the Codex SDK and Codex App Server are peer internal adapters. Common profile, deadline, MCP, output, observation, archive, failure, and cleanup policy runs once. Adapters own only provider-native lifecycle and typed provider-neutral conversion. Existing caller behavior and profiles remain intact, and tests can substitute bounded adapters without creating a public plugin API. The owner may inspect or selectively reapply prior unaccepted Candidate 9df17dfd7ec0be41d823a9e10f70bb07852daba4 as implementation evidence, but must produce a fresh Candidate based on the contract base and satisfy the complete outcome independently.",
+  "acceptance": [
+    "Delivery Run and Quality Gate use one provider-neutral Coding Session facade, with the Codex SDK and Codex App Server as peer internal adapters rather than provider-specific caller branches.",
+    "Profile, deadline, MCP, output, observation, archive, failure, and cleanup policies are owned and applied once; each adapter owns only provider-native lifecycle and typed conversion to provider-neutral values.",
+    "Existing caller behavior and profiles remain intact, and tests can substitute bounded adapters through internal seams without creating a public plugin API."
+  ],
+  "nonGoals": [
+    "No OpenCode2 implementation.",
+    "No public plugin API.",
+    "No Task fact migration.",
+    "No provider-specific caller branches.",
+    "No treating the prior unaccepted Candidate as an accepted base or accepted outcome.",
+    "No merge authority.",
+    "No weakening of exact-SHA, fresh-reviewer, or credential-separation boundaries."
+  ],
+  "budget": {
+    "maxImplementerActivations": 2,
+    "maxReviewCycles": 2,
+    "maxElapsedMs": 3600000
+  },
+  "authorization": {
+    "source": "https://github.com/ariga39/usine/issues/294",
+    "delivery": true
+  },
+  "delivery": {
+    "branch": "agent/294-codex-adapter-seam-rerun-312",
+    "issue": 294,
+    "title": "Deliver the Issue #294 Codex adapter seam",
+    "body": "Authorize the Issue #294 provider-neutral Coding Session adapter outcome through the fresh build-first reviewer-profile pilot. Delivery is authorized; merge authority is not."
+  }
+}
