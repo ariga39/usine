@@ -194,17 +194,29 @@ export async function readReviewerEvaluationPlan(
       "plan is bound to a different Usine source checkout commit",
     );
 
-  const registration = await readRegistration(plan, absolutePlanPath);
+  const registrationPath = resolveCaseFile(
+    repositoryRoot,
+    resolve(dirname(absolutePlanPath), plan.registrationPath),
+    "Repository registration",
+  );
+  const registration = await readRegistration(registrationPath);
   await validateRegistration(plan, registration, repositoryRoot);
   const reportPath = resolveCaseFile(repositoryRoot, plan.reportPath, "report");
-  if (reportPath === absolutePlanPath)
-    throw new ReviewerEvaluationValidationError("report path must not replace the plan");
+  const protectedPaths = new Set([absolutePlanPath, registrationPath]);
+  if (protectedPaths.has(reportPath))
+    throw new ReviewerEvaluationValidationError(
+      "report path must not replace the plan or Repository registration",
+    );
 
   const cases: ReviewerEvaluationCaseInput[] = [];
   for (const item of plan.cases) {
     const contractPath = resolveCaseFile(repositoryRoot, item.contractPath, "Task Contract");
     const checkPath = resolveCaseFile(repositoryRoot, item.checkPath, "check evidence");
     const labelPath = resolveCaseFile(repositoryRoot, item.labelPath, "external label");
+    if ([contractPath, checkPath, labelPath].includes(reportPath))
+      throw new ReviewerEvaluationValidationError(
+        `${item.id}:${item.repetition}: report path collides with case evidence`,
+      );
     for (const path of [contractPath, checkPath, labelPath]) {
       await requireCommittedFile(repositoryRoot, path, "case input");
     }
@@ -219,7 +231,11 @@ export async function readReviewerEvaluationPlan(
       );
     validateContractRepository(contract, registration, item.id);
     const candidateSha = await validateCandidate(repositoryRoot, plan.baseSha, item);
-    const check = parseCheck(await readUtf8(checkPath, "check evidence"));
+    const resolvedContract = resolveTaskContract(contract, registration);
+    const check = parseCheck(
+      await readUtf8(checkPath, "check evidence"),
+      resolvedContract.projectCheck.command,
+    );
     if (check.status !== "passed" || check.sha !== candidateSha)
       throw new ReviewerEvaluationValidationError(
         `${item.id}:${item.repetition}: check evidence must be passing for the exact Candidate SHA`,
@@ -227,7 +243,7 @@ export async function readReviewerEvaluationPlan(
     const label = parseLabel(await readUtf8(labelPath, "external label"));
     cases.push({
       case: item,
-      contract: resolveTaskContract(contract, registration),
+      contract: resolvedContract,
       candidateSha,
       check,
       label,
@@ -335,10 +351,15 @@ export function compareReviewerProfileEvaluation(
     expectedProfiles?.candidate,
   );
   const reasons = [...new Set([...baseline.reasons, ...candidate.reasons])].toSorted();
+  const bothPassed = baseline.correctness === "passed" && candidate.correctness === "passed";
+  if (
+    bothPassed &&
+    (!hasCompleteMetrics(baseline.metrics) || !hasCompleteMetrics(candidate.metrics))
+  )
+    reasons.push("comparison:missing_metrics");
   const recommendationReasons = reasons.filter(
     (reason) => !reason.endsWith(":protected_false_approval"),
   );
-  const bothPassed = baseline.correctness === "passed" && candidate.correctness === "passed";
   const comparable = bothPassed && reasons.length === 0;
   const comparison = comparable
     ? {
@@ -435,9 +456,14 @@ function profileReport(
       correctness = "unknown";
     if (run.inconclusiveReason) reasons.push(`${run.caseId}:${run.inconclusiveReason}`);
     if (run.hardRegression) reasons.push(`${run.caseId}:protected_false_approval`);
+    const archiveReason = archiveEvidenceReason(run.archive);
+    if (archiveReason) {
+      if (correctness !== "failed") correctness = "unknown";
+      reasons.push(`${run.caseId}:${archiveReason}`);
+    }
     if (expected && !matchesExpectedProfile(run, profile, expected)) {
       if (correctness !== "failed") correctness = "unknown";
-      reasons.push(`${run.caseId}:reviewer_profile_drift`);
+      reasons.push(`${run.caseId}:${profileEvidenceReason(run)}`);
     }
   }
   if (runs.length === 0) {
@@ -445,6 +471,14 @@ function profileReport(
     reasons.push(`${profile}:missing_runs`);
   }
   return { profile, correctness, metrics: aggregateMetrics(runs), reasons };
+}
+
+function profileEvidenceReason(
+  run: ReviewerEvaluationRunReport,
+): "reviewer_profile_missing" | "reviewer_profile_drift" {
+  return run.requestedProfile === null || run.effectiveProfile === null
+    ? "reviewer_profile_missing"
+    : "reviewer_profile_drift";
 }
 
 function matchesExpectedProfile(
@@ -513,8 +547,12 @@ function runReport(
   const verdict = observation?.review.verdict ?? null;
   const actualSha = observation?.review.sha ?? null;
   const correct = actualSha === item.candidateSha && verdict === item.label.verdict;
+  const archiveReason = archiveEvidenceReason(observation?.archive ?? null);
   const incomplete =
-    observation === null || verdict === "inconclusive" || actualSha !== item.candidateSha;
+    observation === null ||
+    verdict === "inconclusive" ||
+    actualSha !== item.candidateSha ||
+    archiveReason !== null;
   const hardRegression =
     !incomplete &&
     item.label.protected &&
@@ -528,7 +566,7 @@ function runReport(
         ? "inconclusive_verdict"
         : observation === null
           ? "review_evidence_unavailable"
-          : null;
+          : archiveReason;
   return {
     caseId: item.case.id,
     repetition: item.case.repetition,
@@ -551,6 +589,16 @@ function runReport(
     archive: observation?.archive ?? null,
     inconclusiveReason,
   };
+}
+
+function archiveEvidenceReason(
+  archive: ReviewerEvaluationRunReport["archive"],
+): "reviewer_archive_missing" | "reviewer_archive_failed" | "reviewer_archive_partial" | null {
+  if (archive === null) return "reviewer_archive_missing";
+  if (archive.status === "failed" || archive.status === "pruned") return "reviewer_archive_failed";
+  if (archive.status === "truncated") return "reviewer_archive_partial";
+  if (archive.completeness !== "complete") return "reviewer_archive_partial";
+  return null;
 }
 
 function sum(values: readonly (number | null)[]): number | null {
@@ -596,6 +644,10 @@ function unknownMetrics(): ReviewerEvaluationMetricSet {
     outputTokens: null,
     toolFailures: null,
   };
+}
+
+function hasCompleteMetrics(metrics: ReviewerEvaluationMetricSet): boolean {
+  return Object.values(metrics).every((value) => value !== null);
 }
 
 function strictlyLessOrEqual(
@@ -763,7 +815,7 @@ function parseContract(raw: string): TaskContract {
   return parsed.data;
 }
 
-function parseCheck(raw: string): CheckResult {
+function parseCheck(raw: string, projectCheckCommand: string): CheckResult {
   let input: unknown;
   try {
     input = JSON.parse(raw);
@@ -786,9 +838,13 @@ function parseCheck(raw: string): CheckResult {
   if (
     !exactSha.test(input.sha) ||
     input.status !== "passed" ||
-    !Number.isSafeInteger(input.exitCode)
+    !Number.isSafeInteger(input.exitCode) ||
+    input.exitCode !== 0 ||
+    input.command !== projectCheckCommand
   )
-    throw new ReviewerEvaluationValidationError("check evidence identity or status is invalid");
+    throw new ReviewerEvaluationValidationError(
+      "check evidence identity, status, exit code, or project command is invalid",
+    );
   return {
     sha: input.sha,
     status: "passed",
@@ -964,18 +1020,10 @@ async function validateCandidate(
   return item.candidateSha;
 }
 
-async function readRegistration(
-  plan: ReviewerEvaluationPlan,
-  planPath: string,
-): Promise<RepositorySnapshot> {
+async function readRegistration(registrationPath: string): Promise<RepositorySnapshot> {
   try {
     return repositoryRegistrationSchema.parse(
-      JSON.parse(
-        await readUtf8(
-          resolve(dirname(planPath), plan.registrationPath),
-          "Repository registration",
-        ),
-      ),
+      JSON.parse(await readUtf8(registrationPath, "Repository registration")),
     );
   } catch {
     throw new ReviewerEvaluationValidationError("Repository registration is unreadable or invalid");

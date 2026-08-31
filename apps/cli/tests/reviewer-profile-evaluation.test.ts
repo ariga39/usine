@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { join, resolve } from "node:path";
 import { dirname } from "node:path";
@@ -164,6 +164,11 @@ function observation(
       reasoningEffort: null,
       developerInstructionsSha256: null,
     },
+    archive: {
+      archiveId: "archive_00000000-0000-0000-0000-000000000001",
+      status: "stored",
+      completeness: "complete",
+    },
   };
 }
 
@@ -199,6 +204,81 @@ describe("reviewer profile evaluation public path", () => {
     expect(providerCalls).toBe(0);
     expect(process.exitCode).toBe(7);
     process.exitCode = 0;
+  });
+
+  test("rejects report path collisions before provider execution", async () => {
+    const value = await fixture();
+    const plan = JSON.parse(await readFile(value.planPath, "utf8")) as {
+      reportPath: string;
+    };
+    plan.reportPath = "check.json";
+    await writeFile(value.planPath, JSON.stringify(plan));
+    await execFile("git", ["add", value.planPath], { cwd: value.root });
+    await execFile("git", ["commit", "-m", "invalid report collision"], { cwd: value.root });
+    let providerCalls = 0;
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      {
+        review: async () => {
+          providerCalls += 1;
+          throw new Error("must not run");
+        },
+      },
+    );
+    expect(providerCalls).toBe(0);
+    expect(process.exitCode).toBe(7);
+    process.exitCode = 0;
+  });
+
+  test("resolves a nested plan registration path inside the evaluation Repository", async () => {
+    const value = await fixture();
+    const plan = JSON.parse(await readFile(value.planPath, "utf8")) as {
+      registrationPath: string;
+    };
+    const nestedDirectory = join(value.root, "evaluations/reviewer");
+    const nestedPlanPath = join(nestedDirectory, "plan.json");
+    plan.registrationPath = "../../repository.json";
+    await mkdir(nestedDirectory, { recursive: true });
+    await writeFile(nestedPlanPath, JSON.stringify(plan));
+    await unlink(value.planPath);
+    await execFile("git", ["add", "-A"], { cwd: value.root });
+    await execFile("git", ["commit", "-m", "move evaluation plan"], { cwd: value.root });
+    const loaded = await readReviewerEvaluationPlan(nestedPlanPath, value.environment);
+    expect(loaded.registration.path).toBe(value.root);
+    process.exitCode = 0;
+  });
+
+  test("rejects inconsistent passing check evidence before provider execution", async () => {
+    for (const change of [{ exitCode: 1 }, { command: "unrelated-check" }]) {
+      const value = await fixture();
+      const check = JSON.parse(await readFile(join(value.root, "check.json"), "utf8")) as {
+        command: string;
+        exitCode: number;
+      };
+      Object.assign(check, change);
+      await writeFile(join(value.root, "check.json"), JSON.stringify(check));
+      await execFile("git", ["add", "check.json"], { cwd: value.root });
+      await execFile("git", ["commit", "-m", "invalid check evidence"], { cwd: value.root });
+      let providerCalls = 0;
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      process.exitCode = 0;
+    }
   });
 
   test("runs both profiles serially over identical cases and makes a correctness-first report", async () => {
@@ -269,6 +349,89 @@ describe("reviewer profile evaluation public path", () => {
     expect(report.candidate.metrics.falseApprovals).toBe(1);
     expect(report.candidate.runs[1]!.hardRegression).toBe(true);
     expect(report.candidate.runs[1]!.expected.reference).toBe("external-case-defective");
+    process.exitCode = 0;
+  });
+
+  test("makes missing, drifted, and incomplete role evidence inconclusive", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const services: ReviewerEvaluationServices = {
+      review: async (input) => {
+        const result = observation(
+          input,
+          "approved",
+          loaded.profileSelections.baseline.configSha256!,
+        );
+        if (input.profile === "baseline-reviewer")
+          return { ...result, effectiveProfile: undefined, archive: undefined };
+        return {
+          ...result,
+          effectiveProfile: { ...result.effectiveProfile!, model: "drifted-model" },
+          archive: {
+            archiveId: "archive_00000000-0000-0000-0000-000000000002",
+            status: "truncated",
+            completeness: "complete",
+          },
+        };
+      },
+    };
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    const report = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    ) as {
+      recommendation: string;
+      inconclusiveReasons: string[];
+      baseline: { runs: Array<{ observed: { verdict: string } }> };
+    };
+    expect(report.recommendation).toBe("inconclusive");
+    expect(report.inconclusiveReasons).toEqual(
+      expect.arrayContaining([
+        "approved:reviewer_profile_missing",
+        "approved:reviewer_archive_missing",
+        "approved:reviewer_profile_drift",
+        "approved:reviewer_archive_partial",
+      ]),
+    );
+    expect(report.baseline.runs[0]!.observed.verdict).toBe("approved");
+    process.exitCode = 0;
+  });
+
+  test("makes missing comparison metrics inconclusive with a reason", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const services: ReviewerEvaluationServices = {
+      review: async (input) => {
+        const selection =
+          input.profile === "baseline-reviewer"
+            ? loaded.profileSelections.baseline
+            : loaded.profileSelections.candidate;
+        const verdict = input.contract.id === "defective" ? "changes_requested" : "approved";
+        return { ...observation(input, verdict, selection.configSha256!), usage: null };
+      },
+    };
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    const report = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    ) as {
+      recommendation: string;
+      inconclusiveReasons: string[];
+      comparison: { baseline: { inputTokens: number | null } };
+    };
+    expect(report.recommendation).toBe("inconclusive");
+    expect(report.inconclusiveReasons).toContain("comparison:missing_metrics");
+    expect(report.comparison.baseline.inputTokens).toBeNull();
     process.exitCode = 0;
   });
 });
