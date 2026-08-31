@@ -26,6 +26,7 @@ import {
   retryTask,
   taskEvidence,
   taskStatus,
+  ServerClientError,
 } from "./server-client.js";
 import { jsonFlag } from "./cli-parameters.js";
 
@@ -369,8 +370,10 @@ export async function executeProfileEvaluation(
   const existingTasks = await preflightExistingTasks(loaded, serverUrl, services);
   let registrationChanged = false;
   let inFlightTask: { taskId: string; deadlineEpochMs: number } | undefined;
+  let cleanupError: unknown;
   let primaryError: unknown;
   let failed = false;
+  let evaluationCompleted = false;
   let contractIndex = 0;
   try {
     for (const pair of plan.pairs) {
@@ -388,12 +391,65 @@ export async function executeProfileEvaluation(
             implementerProfile: profile,
             reviewerProfile: plan.reviewerProfile,
           };
-          await services.registerRepository(serverUrl, evaluationRegistration);
-          registrationChanged = true;
-          task = await services.submitTask(serverUrl, {
-            contractPath: resolve(loaded.repositoryRoot, contractPath),
-            repositoryId: plan.repositoryId,
-          });
+          try {
+            await services.registerRepository(serverUrl, evaluationRegistration);
+            registrationChanged = true;
+          } catch (error) {
+            if (registrationMutationMayHaveCommitted(error)) registrationChanged = true;
+            throw error;
+          }
+          try {
+            task = await services.submitTask(serverUrl, {
+              contractPath: resolve(loaded.repositoryRoot, contractPath),
+              repositoryId: plan.repositoryId,
+            });
+          } catch (error) {
+            let observed: import("@usine/task-authority").TaskResource | null;
+            try {
+              observed = await services.taskStatus(serverUrl, contract.id);
+            } catch (observationError) {
+              cleanupError = new ProfileEvaluationCleanupError(
+                `Task ${contract.id} admission could not be resolved safely; Repository restoration was not attempted`,
+                {
+                  cause: new AggregateError([error, observationError], "Task admission ambiguous"),
+                },
+              );
+              throw new AggregateError(
+                [error, observationError],
+                `Task ${contract.id} admission could not be resolved`,
+              );
+            }
+            if (observed) {
+              try {
+                await validateExistingTask(
+                  observed,
+                  contract,
+                  resolve(loaded.repositoryRoot, contractPath),
+                  loaded.registration,
+                );
+              } catch (observationError) {
+                cleanupError = new ProfileEvaluationCleanupError(
+                  `Task ${contract.id} admission identity could not be validated safely; Repository restoration was not attempted`,
+                  {
+                    cause: new AggregateError(
+                      [error, observationError],
+                      "Task admission ambiguous",
+                    ),
+                  },
+                );
+                throw new AggregateError(
+                  [error, observationError],
+                  `Task ${contract.id} admission identity could not be validated`,
+                );
+              }
+              if (!isTerminalState(observed.state))
+                inFlightTask = {
+                  taskId: observed.taskId,
+                  deadlineEpochMs: observed.deadlineEpochMs,
+                };
+            }
+            throw error;
+          }
         }
         if (!isTerminalState(task.state))
           inFlightTask = { taskId: task.taskId, deadlineEpochMs: task.deadlineEpochMs };
@@ -419,11 +475,11 @@ export async function executeProfileEvaluation(
         });
       }
     }
+    evaluationCompleted = true;
   } catch (error) {
     failed = true;
     primaryError = error;
   }
-  let cleanupError: unknown;
   if (failed && inFlightTask)
     try {
       await waitForTerminalTask(inFlightTask, serverUrl, services);
@@ -432,13 +488,14 @@ export async function executeProfileEvaluation(
       cleanupError = error;
     }
   let restorationError: unknown;
-  if (registrationChanged && cleanupError === undefined)
+  if ((registrationChanged || evaluationCompleted) && cleanupError === undefined)
     try {
       await services.registerRepository(serverUrl, originalRegistration);
     } catch (error) {
       restorationError = error;
     }
   if (failed && (cleanupError !== undefined || restorationError !== undefined)) {
+    const primaryMessage = primaryError instanceof Error ? `: ${primaryError.message}` : "";
     const cause = new AggregateError(
       [
         primaryError,
@@ -446,8 +503,8 @@ export async function executeProfileEvaluation(
         ...(restorationError === undefined ? [] : [restorationError]),
       ],
       cleanupError === undefined
-        ? "evaluation and Repository restoration failed"
-        : "evaluation cleanup failed before Repository restoration",
+        ? `evaluation and Repository restoration failed${primaryMessage}`
+        : `evaluation cleanup failed before Repository restoration${primaryMessage}`,
     );
     if (cleanupError !== undefined)
       throw new ProfileEvaluationCleanupError(cause.message, { cause });
@@ -641,6 +698,18 @@ function withProfileEvaluationSignals<A>(action: (signal: AbortSignal) => Promis
     cleanup();
     return Promise.reject(error);
   }
+}
+
+function registrationMutationMayHaveCommitted(error: unknown): boolean {
+  if (
+    error instanceof ServerClientError &&
+    (error.kind === "validation" || error.kind === "not_found")
+  )
+    return false;
+  return !(
+    error instanceof Error &&
+    error.message === "cannot switch repository profiles while a Task is active"
+  );
 }
 
 async function preflightExistingTasks(

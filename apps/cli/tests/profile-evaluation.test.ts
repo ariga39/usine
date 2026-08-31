@@ -1097,7 +1097,7 @@ describe("profile evaluate plan boundary", () => {
     expect(registrations).toEqual([]);
   });
 
-  test("reuses completed Tasks without changing the registration", async () => {
+  test("reuses completed Tasks and reasserts only the prior registration", async () => {
     const value = await fixture();
     const registrations: string[] = [];
     const submissions: string[] = [];
@@ -1139,7 +1139,7 @@ describe("profile evaluate plan boundary", () => {
       value.environment,
       services,
     );
-    expect(registrations).toEqual([]);
+    expect(registrations).toEqual(["prior-profile"]);
     expect(submissions).toEqual([]);
     process.exitCode = 0;
   });
@@ -1232,6 +1232,129 @@ describe("profile evaluate plan boundary", () => {
     await expect(
       executeProfileEvaluation(loaded, "http://server.test", undefined, services),
     ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+    expect(registrations).toEqual(["baseline-profile"]);
+  });
+
+  test("restores after an ambiguous registration response", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    let registerCalls = 0;
+    let submitCalls = 0;
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registerCalls += 1;
+        registrations.push(registration.implementerProfile);
+        if (registerCalls === 1) throw new Error("registration response lost");
+        return {
+          id: "evaluation",
+          revision: registerCalls,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async () => null,
+      submitTask: async () => {
+        submitCalls += 1;
+        throw new Error("submission must not begin");
+      },
+      followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async () => minimalAcceptedEvidence("unused-task"),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("registration response lost");
+    expect(submitCalls).toBe(0);
+    expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
+  });
+
+  test("resolves a lost submit response as no admission before restoring", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    let taskStatusCalls = 0;
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async () => {
+        taskStatusCalls += 1;
+        return null;
+      },
+      submitTask: async () => {
+        throw new Error("submission response lost");
+      },
+      followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async () => minimalAcceptedEvidence("unused-task"),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("submission response lost");
+    expect(taskStatusCalls).toBe(3);
+    expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
+  });
+
+  test("refuses restoration when a lost submit response has unsafe Task identity", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    let taskStatusCalls = 0;
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async () => {
+        taskStatusCalls += 1;
+        return taskStatusCalls <= 2 ? null : terminalTaskForEvaluation("other-task");
+      },
+      submitTask: async () => {
+        throw new Error("submission response lost");
+      },
+      followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async () => minimalAcceptedEvidence("unused-task"),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("admission identity could not be validated");
     expect(registrations).toEqual(["baseline-profile"]);
   });
 
@@ -1455,6 +1578,83 @@ describe("profile evaluate plan boundary", () => {
       ).rejects.toThrow("observation failed");
       expect(guardRejected).toBe(true);
       expect(launches).toBe(1);
+      await expect(readServerTaskStatus(server.url, "baseline-task")).resolves.toMatchObject({
+        state: "blocked",
+      });
+      await expect(inspectRuntimeRepository(stateDirectory, "evaluation")).resolves.toMatchObject({
+        implementerProfile: "prior-profile",
+        reviewerProfile: "fixed-reviewer",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("restores after a real admitted Task loses its submit response", async () => {
+    const value = await fixture(false, 5_000);
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-profile-evaluation-submit-loss-"));
+    const serverEnvironment = {
+      ...value.environment,
+      USINE_STATE_DIR: stateDirectory,
+      USINE_FORGE_PROFILE_EVALUATION_APP_SLUG: "test-app",
+      USINE_FORGE_PROFILE_EVALUATION_TEST_TOKEN: "test-token",
+      USINE_FORGE_PROFILE_EVALUATION_API_URL: "http://127.0.0.1:9",
+      USINE_FORGE_PROFILE_EVALUATION_REPOSITORY: "example/evaluation",
+    };
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((complete) => {
+      startedResolve = complete;
+    });
+    let launches = 0;
+    const restoreStates: Array<TaskResource["state"] | "missing"> = [];
+    const server = await startUsineServer({
+      environment: serverEnvironment,
+      execute: async ({ authority, contract, result }) => {
+        launches += 1;
+        const reserved = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        startedResolve?.();
+        await new Promise<void>((complete) => setTimeout(complete, 25));
+        return authority.block(
+          { taskId: result.taskId, revision: reserved.result.revision },
+          "submit response loss test",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await registerRuntimeRepository(stateDirectory, loaded.registration);
+      const services = {
+        inspectRepository: inspectServerRepository,
+        registerRepository: async (
+          url: string,
+          registration: Parameters<typeof registerServerRepository>[1],
+        ) => {
+          if (registration.implementerProfile === "prior-profile") {
+            const current = await readServerTaskStatus(url, "baseline-task");
+            restoreStates.push(current?.state ?? "missing");
+          }
+          return registerServerRepository(url, registration);
+        },
+        submitTask: async (url: string, submission: Parameters<typeof submitServerTask>[1]) => {
+          await submitServerTask(url, submission);
+          await started;
+          throw new Error("submission response lost");
+        },
+        taskStatus: readServerTaskStatus,
+        followTask: followServerTask,
+        retryTask: retryServerTask,
+        taskEvidence: readServerTaskEvidence,
+      };
+      await expect(
+        executeProfileEvaluation(loaded, server.url, undefined, services),
+      ).rejects.toThrow("submission response lost");
+      expect(launches).toBe(1);
+      expect(restoreStates).toEqual(["blocked"]);
       await expect(readServerTaskStatus(server.url, "baseline-task")).resolves.toMatchObject({
         state: "blocked",
       });
