@@ -267,6 +267,48 @@ Human-readable output is the default for resource reads; add `--json` for the st
 
 `task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. `task evidence` drains paginated history, rereads the current Task, and reports separate implementer/reviewer Role Runs joined to the current bounded Candidate, check, review, repair, and delivery facts. It has no live-event cursor to resume: start with `task history`, `task watch --after <LAST_SEQUENCE>`, or `task evidence` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get`, `task watch`, and `task evidence` are the canonical Task reads.
 
+### Controlled implementer-profile evaluation
+
+The operator can run one committed, bounded paired evaluation through the CLI:
+
+```sh
+node apps/cli/dist/cli.mjs profile evaluate "<EVALUATION_PLAN>" --subject-role implementer --json
+```
+
+The committed plan uses exactly this schemaVersion 1 shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "evaluation-plan",
+  "repositoryId": "evaluation",
+  "baseSha": "<40-CHARACTER_BASE_SHA>",
+  "subjectRole": "implementer",
+  "changedFactor": "model_stack",
+  "baselineProfile": "baseline-profile",
+  "candidateProfile": "candidate-profile",
+  "reviewerProfile": "fixed-reviewer",
+  "maxTasks": 2,
+  "usineBuild": "<40-CHARACTER_USINE_COMMIT_SHA>",
+  "reportPath": "reports/evaluation-report.json",
+  "registrationPath": "repository.json",
+  "pairs": [
+    {
+      "id": "case-one",
+      "repetition": 1,
+      "baselineContractPath": "baseline.json",
+      "candidateContractPath": "candidate.json"
+    }
+  ]
+}
+```
+
+`changedFactor` is exactly one of `model_stack`, `reasoning`, or `developer_instructions`. `model_stack` covers the model, provider, provider-map, and catalog configuration used to serve it; the adapter remains fixed. Every pair must keep its base SHA, Task semantics, budgets, project-check registration, and non-merge authority fixed. `usineBuild` must equal the exact commit observed in the Usine source checkout by the invoking CLI. It identifies the source revision used for this check; it does not attest to a separately bundled artifact or server build. `reportPath` is a Repository-relative output path and is written as deterministic JSON after a successful run. `registrationPath` identifies the complete prior host-side registration to restore; keep that file out of committed or GitHub-facing content when it contains host paths.
+
+The command validates the complete plan, committed unchanged inputs, profile configurations, and existing Task identities before its first registration mutation or submission. It switches only the implementer profile, runs baseline then candidate serially, reuses completed Task IDs, waits for admitted Tasks, and restores the prior registration after success, failure, cancellation, or interruption to the extent the existing registration boundary permits. A Task with an active writer prevents profile switching.
+
+The report uses only public `task evidence` facts. A passing exact-SHA project check and fresh approved review are required before effort can affect the result; drift, missing evidence, failed checks, interruptions, and unavailable usage remain explicit and produce an `inconclusive` recommendation. Session Archive content is never scoring input.
+
 ### Session Archive operations
 
 Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.

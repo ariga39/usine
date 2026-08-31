@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -77,10 +78,13 @@ export interface CodexProfileSelection {
   model: string;
   modelReasoningEffort?: ModelReasoningEffort;
   developerInstructions?: string;
+  config?: Readonly<Record<string, unknown>>;
+  configSha256?: string;
 }
 
-interface ResolvedCodexProfile extends CodexProfileSelection {
+interface ResolvedCodexProfile extends Omit<CodexProfileSelection, "config" | "configSha256"> {
   config: CodexConfig;
+  configSha256: string;
 }
 
 export type CodexProfileResolver = (
@@ -125,19 +129,20 @@ export const resolveCodexProfile: CodexProfileResolver = async (
   const config = Object.fromEntries(
     Object.entries(supportedConfig.data).filter(([key]) => PROFILE_CONFIG_KEYS.has(key)),
   ) as CodexConfig;
-  return {
+  const selection = {
     model: profileConfig.data.model,
     modelReasoningEffort: profileConfig.data.model_reasoning_effort,
     developerInstructions: profileConfig.data.developer_instructions,
     config,
   };
+  return withProfileChecksum(selection);
 };
 
 export function normalizeCodexProfileSelection(
   profile: string,
-  selection: unknown,
+  selectionInput: unknown,
 ): ResolvedCodexProfile {
-  const parsed = profileSelectionSchema.safeParse(selection);
+  const parsed = profileSelectionSchema.safeParse(selectionInput);
   if (!parsed.success)
     throw new CodexProfileSelectionError(
       profile,
@@ -160,7 +165,7 @@ export function normalizeCodexProfileSelection(
       ([key]) => PROFILE_CONFIG_KEYS.has(key) && key !== "developer_instructions",
     ),
   ) as CodexConfig;
-  return {
+  const selection = {
     model: parsed.data.model,
     modelReasoningEffort: parsed.data.modelReasoningEffort,
     developerInstructions: parsed.data.developerInstructions,
@@ -175,6 +180,44 @@ export function normalizeCodexProfileSelection(
         : {}),
     },
   };
+  return withProfileChecksum(selection);
+}
+
+function withProfileChecksum(
+  selection: Omit<ResolvedCodexProfile, "configSha256">,
+): ResolvedCodexProfile {
+  return {
+    ...selection,
+    configSha256: resolvedProfileConfigSha256(selection),
+  };
+}
+
+function resolvedProfileConfigSha256(
+  selection: Omit<ResolvedCodexProfile, "configSha256">,
+): string {
+  const config = selection.config;
+  const supported = {
+    model: selection.model,
+    model_reasoning_effort: selection.modelReasoningEffort ?? null,
+    developer_instructions: selection.developerInstructions ?? null,
+    model_catalog_json: config.model_catalog_json ?? null,
+    model_provider: config.model_provider ?? null,
+    model_providers: config.model_providers ?? null,
+    model_reasoning_summary: config.model_reasoning_summary ?? null,
+    model_verbosity: config.model_verbosity ?? null,
+    personality: config.personality ?? null,
+    service_tier: config.service_tier ?? null,
+  };
+  return createHash("sha256").update(stableJson(supported), "utf8").digest("hex");
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+    .join(",")}}`;
 }
 
 export function codexAdapterConfig(

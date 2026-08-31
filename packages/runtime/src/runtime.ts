@@ -57,6 +57,7 @@ export {
   type RuntimePolicy,
   type GithubReadPolicy,
 } from "./runtime-policy.js";
+export { resolveCodexProfile, validateCodexProfile } from "@usine/coding-session";
 export type { TaskExecutionInput } from "@usine/task-authority";
 export * from "./http-api.js";
 export {

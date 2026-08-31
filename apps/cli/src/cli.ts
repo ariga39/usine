@@ -10,6 +10,7 @@ import { serverCommand } from "./server-command.js";
 import { compatibilityTaskCommands, taskCommand } from "./task-command.js";
 import { serverUrlFromEnvironment } from "./server-client.js";
 import { stateDirectoryFromEnvironment } from "@usine/runtime";
+import { profileCommand } from "./profile-evaluation.js";
 
 export function createCliCommand(environment: NodeJS.ProcessEnv = process.env) {
   const serverUrl = serverUrlFromEnvironment(environment);
@@ -19,6 +20,7 @@ export function createCliCommand(environment: NodeJS.ProcessEnv = process.env) {
       archiveCommand(stateDirectoryFromEnvironment(environment)),
       repositoryCommand(serverUrl),
       taskCommand(serverUrl),
+      profileCommand(serverUrl, environment),
       ...compatibilityRepositoryCommands(serverUrl),
       ...compatibilityTaskCommands(serverUrl),
     ]),

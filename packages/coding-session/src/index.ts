@@ -27,6 +27,7 @@ export type {
 } from "./coding-session-interruption.js";
 export {
   CodexProfileSelectionError,
+  resolveCodexProfile,
   validateCodexProfile,
   type CodexProfileResolver,
   type CodexProfileSelection,

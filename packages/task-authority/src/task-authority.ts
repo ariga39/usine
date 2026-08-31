@@ -104,6 +104,21 @@ export class TaskAuthority {
       });
       const snapshot = snapshotFromRegistration(input);
       if (existing) {
+        const repositoryIdentities = new Set([
+          `${existing.owner}/${existing.name}`.toLowerCase(),
+          `${input.owner}/${input.name}`.toLowerCase(),
+        ]);
+        for (const repositoryIdentity of repositoryIdentities) {
+          const lease = await database.query.repositoryLeases.findFirst({
+            where: eq(repositoryLeases.repositoryIdentity, repositoryIdentity),
+          });
+          if (
+            lease &&
+            (existing.implementerProfile !== input.implementerProfile ||
+              existing.reviewerProfile !== input.reviewerProfile)
+          )
+            throw new Error("cannot switch repository profiles while a Task is active");
+        }
         await database
           .update(repositories)
           .set({
