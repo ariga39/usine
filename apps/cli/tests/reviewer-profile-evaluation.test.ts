@@ -101,6 +101,7 @@ async function fixture() {
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     }),
   );
+  await writeFile(join(root, ".gitignore"), "repository.json\n");
   const planPath = join(root, "reviewer-evaluation-plan.json");
   await writeFile(
     planPath,
@@ -199,6 +200,101 @@ function withCurrentArchive(
 }
 
 describe("reviewer profile evaluation public path", () => {
+  test("accepts an ignored uncommitted regular registration before provider execution", async () => {
+    const value = await fixture();
+    expect(await git(value.root, "check-ignore", "repository.json")).toBe("repository.json");
+    await expect(
+      git(value.root, "ls-files", "--error-unmatch", "repository.json"),
+    ).rejects.toThrow();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    let providerCalls = 0;
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      {
+        review: async (input) => {
+          providerCalls += 1;
+          expect(input.repository.path).toBe(value.root);
+          return observation(input, "approved", loaded.profileSelections.baseline.configSha256!);
+        },
+      },
+    );
+    expect(providerCalls).toBe(4);
+    const report = await readFile(join(value.root, "reports/reviewer-report.json"), "utf8");
+    expect(report).not.toContain(value.root);
+    for (const field of [
+      '"path"',
+      '"owner"',
+      '"projectCheck"',
+      '"gitAuthor"',
+      '"implementerProfile"',
+      '"reviewerProfile"',
+      '"forgeProfile"',
+      '"githubReadProfile"',
+    ])
+      expect(report).not.toContain(field);
+    process.exitCode = 0;
+  });
+
+  test("rejects a symlinked or non-regular registration before provider execution", async () => {
+    for (const kind of ["symlink", "directory"] as const) {
+      const value = await fixture();
+      const registrationPath = join(value.root, "repository.json");
+      if (kind === "symlink") {
+        const outside = join(value.root, "external-repository.json");
+        await writeFile(outside, await readFile(registrationPath));
+        await unlink(registrationPath);
+        await symlink(outside, registrationPath);
+      } else {
+        await unlink(registrationPath);
+        await mkdir(registrationPath);
+      }
+      let providerCalls = 0;
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      process.exitCode = 0;
+    }
+  });
+
+  test("rejects a report hardlink collision with the host-private registration", async () => {
+    const value = await fixture();
+    await mkdir(join(value.root, "reports"), { recursive: true });
+    await link(
+      join(value.root, "repository.json"),
+      join(value.root, "reports/reviewer-report.json"),
+    );
+    let providerCalls = 0;
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      {
+        review: async () => {
+          providerCalls += 1;
+          throw new Error("must not run");
+        },
+      },
+    );
+    expect(providerCalls).toBe(0);
+    expect(process.exitCode).toBe(7);
+    process.exitCode = 0;
+  });
+
   test("validates immutable case evidence before provider execution", async () => {
     const value = await fixture();
     const plan = JSON.parse(await readFile(value.planPath, "utf8")) as {

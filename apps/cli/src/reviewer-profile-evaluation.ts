@@ -229,14 +229,7 @@ export async function readReviewerEvaluationPlan(
     resolve(dirname(absolutePlanPath), plan.registrationPath),
     "Repository registration",
   );
-  const registration = await readRegistration(
-    await readCommittedUtf8(
-      repositoryRoot,
-      registrationPath,
-      "Repository registration",
-      evaluationHead,
-    ),
-  );
+  const registration = await readRegistration(repositoryRoot, registrationPath);
   await validateRegistration(plan, registration, repositoryRoot);
   const reportPath = resolveCaseFile(repositoryRoot, plan.reportPath, "report");
   const protectedPaths = new Set([absolutePlanPath, registrationPath]);
@@ -1203,9 +1196,16 @@ async function validateCandidate(
   return item.candidateSha;
 }
 
-async function readRegistration(raw: string): Promise<RepositorySnapshot> {
+async function readRegistration(repositoryRoot: string, path: string): Promise<RepositorySnapshot> {
   try {
-    return repositoryRegistrationSchema.parse(JSON.parse(raw));
+    await assertSafeFilePath(repositoryRoot, path, "Repository registration");
+  } catch {
+    throw new ReviewerEvaluationValidationError(
+      "Repository registration must be a regular non-symlink file",
+    );
+  }
+  try {
+    return repositoryRegistrationSchema.parse(JSON.parse(await readFile(path, "utf8")));
   } catch {
     throw new ReviewerEvaluationValidationError("Repository registration is unreadable or invalid");
   }
