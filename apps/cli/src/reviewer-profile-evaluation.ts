@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,9 +14,12 @@ import {
 } from "@usine/task-authority";
 import {
   reviewCandidateWithProfile,
+  readSessionArchiveManifest,
   resolveCodexProfile,
+  stateDirectoryFromEnvironment,
   type ReviewerQualityGateInput,
   type ReviewAttemptObservation,
+  type SessionArchiveManifest,
 } from "@usine/runtime";
 import { runCommand } from "./cli-failure.js";
 
@@ -27,6 +30,7 @@ const execFile = promisify(execFileCallback);
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 export type ReviewerEvaluationChangedFactor =
@@ -147,12 +151,34 @@ export interface ReviewerEvaluationReviewInput {
   readonly onObservation?: ReviewerQualityGateInput["onObservation"];
 }
 
+export interface ReviewerEvaluationArchiveManifest {
+  readonly archiveId: string;
+  readonly taskId: string;
+  readonly role: "implementer" | "reviewer";
+  readonly captureStatus: "stored" | "truncated" | "failed" | "pruned";
+  readonly completeness: "complete" | "partial";
+}
+
 export interface ReviewerEvaluationServices {
   review(input: ReviewerEvaluationReviewInput): Promise<ReviewAttemptObservation>;
+  readonly readArchiveManifest?: (
+    archiveId: string,
+    environment: NodeJS.ProcessEnv,
+    expectedTaskId: string,
+  ) => Promise<ReviewerEvaluationArchiveManifest | null>;
 }
 
 const defaultServices: ReviewerEvaluationServices = {
   review: reviewCandidateWithProfile,
+  readArchiveManifest: async (archiveId, environment, _expectedTaskId) => {
+    try {
+      return toReviewerArchiveManifest(
+        await readSessionArchiveManifest(stateDirectoryFromEnvironment(environment), archiveId),
+      );
+    } catch {
+      return null;
+    }
+  },
 };
 
 export class ReviewerEvaluationValidationError extends Error {
@@ -173,19 +199,23 @@ export async function readReviewerEvaluationPlan(
   cases: readonly ReviewerEvaluationCaseInput[];
   registration: RepositorySnapshot;
   repositoryRoot: string;
+  protectedPaths: readonly string[];
   profileSelections: {
     readonly baseline: Awaited<ReturnType<typeof resolveReviewerProfile>>;
     readonly candidate: Awaited<ReturnType<typeof resolveReviewerProfile>>;
   };
 }> {
-  const absolutePlanPath = await realpath(resolve(planPath)).catch(() => {
-    throw new ReviewerEvaluationValidationError("reviewer evaluation plan is unreadable");
-  });
-  const plan = normalizePlan(parseJson(await readUtf8(absolutePlanPath, "evaluation plan")));
+  const requestedPlanPath = resolve(planPath);
+  const repositoryRoot = await repositoryRootFor(requestedPlanPath);
+  const evaluationHead = await readHeadCommit(repositoryRoot);
+  const absolutePlanPath = requestedPlanPath;
+  const plan = normalizePlan(
+    parseJson(
+      await readCommittedUtf8(repositoryRoot, absolutePlanPath, "evaluation plan", evaluationHead),
+    ),
+  );
   validatePlanShape(plan);
-  const repositoryRoot = await repositoryRootFor(absolutePlanPath);
-  await requireCommittedFile(repositoryRoot, absolutePlanPath, "evaluation plan");
-  if (!(await isAncestor(repositoryRoot, plan.baseSha)))
+  if (!(await isAncestor(repositoryRoot, plan.baseSha, evaluationHead)))
     throw new ReviewerEvaluationValidationError(
       "plan baseSha is not an ancestor of the evaluation Repository",
     );
@@ -199,7 +229,14 @@ export async function readReviewerEvaluationPlan(
     resolve(dirname(absolutePlanPath), plan.registrationPath),
     "Repository registration",
   );
-  const registration = await readRegistration(registrationPath);
+  const registration = await readRegistration(
+    await readCommittedUtf8(
+      repositoryRoot,
+      registrationPath,
+      "Repository registration",
+      evaluationHead,
+    ),
+  );
   await validateRegistration(plan, registration, repositoryRoot);
   const reportPath = resolveCaseFile(repositoryRoot, plan.reportPath, "report");
   const protectedPaths = new Set([absolutePlanPath, registrationPath]);
@@ -213,14 +250,16 @@ export async function readReviewerEvaluationPlan(
     const contractPath = resolveCaseFile(repositoryRoot, item.contractPath, "Task Contract");
     const checkPath = resolveCaseFile(repositoryRoot, item.checkPath, "check evidence");
     const labelPath = resolveCaseFile(repositoryRoot, item.labelPath, "external label");
+    protectedPaths.add(contractPath);
+    protectedPaths.add(checkPath);
+    protectedPaths.add(labelPath);
     if ([contractPath, checkPath, labelPath].includes(reportPath))
       throw new ReviewerEvaluationValidationError(
         `${item.id}:${item.repetition}: report path collides with case evidence`,
       );
-    for (const path of [contractPath, checkPath, labelPath]) {
-      await requireCommittedFile(repositoryRoot, path, "case input");
-    }
-    const contract = parseContract(await readUtf8(contractPath, "Task Contract"));
+    const contract = parseContract(
+      await readCommittedUtf8(repositoryRoot, contractPath, "Task Contract", evaluationHead),
+    );
     if (contract.repositoryId !== plan.repositoryId || contract.baseSha !== plan.baseSha)
       throw new ReviewerEvaluationValidationError(
         `${item.id}:${item.repetition}: Task Contract identity drifts from the plan`,
@@ -233,14 +272,16 @@ export async function readReviewerEvaluationPlan(
     const candidateSha = await validateCandidate(repositoryRoot, plan.baseSha, item);
     const resolvedContract = resolveTaskContract(contract, registration);
     const check = parseCheck(
-      await readUtf8(checkPath, "check evidence"),
+      await readCommittedUtf8(repositoryRoot, checkPath, "check evidence", evaluationHead),
       resolvedContract.projectCheck.command,
     );
     if (check.status !== "passed" || check.sha !== candidateSha)
       throw new ReviewerEvaluationValidationError(
         `${item.id}:${item.repetition}: check evidence must be passing for the exact Candidate SHA`,
       );
-    const label = parseLabel(await readUtf8(labelPath, "external label"));
+    const label = parseLabel(
+      await readCommittedUtf8(repositoryRoot, labelPath, "external label", evaluationHead),
+    );
     cases.push({
       case: item,
       contract: resolvedContract,
@@ -250,12 +291,22 @@ export async function readReviewerEvaluationPlan(
     });
   }
 
+  await validateReportPath(repositoryRoot, reportPath, protectedPaths);
+
   const profileSelections = {
     baseline: await resolveReviewerProfile(plan.baselineProfile, environment),
     candidate: await resolveReviewerProfile(plan.candidateProfile, environment),
   };
+  await requireHeadCommit(repositoryRoot, evaluationHead);
   validateProfileFactor(plan, profileSelections.baseline, profileSelections.candidate);
-  return { plan, cases, registration, repositoryRoot, profileSelections };
+  return {
+    plan,
+    cases,
+    registration,
+    repositoryRoot,
+    protectedPaths: [...protectedPaths],
+    profileSelections,
+  };
 }
 
 export async function runReviewerProfileEvaluateCommand(
@@ -273,8 +324,7 @@ export async function runReviewerProfileEvaluateCommand(
     );
     const reportJson = `${JSON.stringify(report)}\n`;
     const path = resolve(loaded.repositoryRoot, loaded.plan.reportPath);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, reportJson, "utf8");
+    await writeEvaluationReport(path, reportJson, loaded.repositoryRoot, loaded.protectedPaths);
     process.stdout.write(options.json ? reportJson : renderReport(report));
   });
 }
@@ -326,10 +376,46 @@ export async function executeReviewerProfileEvaluation(
       );
     }
   }
+  await revalidateArchiveEvidence(loaded, environment, reports, services);
   return compareReviewerProfileEvaluation(loaded.plan, reports, {
     baseline: expectedProfile(loaded.profileSelections.baseline),
     candidate: expectedProfile(loaded.profileSelections.candidate),
   });
+}
+
+async function revalidateArchiveEvidence(
+  loaded: Awaited<ReturnType<typeof readReviewerEvaluationPlan>>,
+  environment: NodeJS.ProcessEnv,
+  reports: Record<"baseline" | "candidate", ReviewerEvaluationRunReport[]>,
+  services: ReviewerEvaluationServices,
+): Promise<void> {
+  const readManifest = services.readArchiveManifest ?? defaultServices.readArchiveManifest!;
+  for (const side of ["baseline", "candidate"] as const) {
+    for (const [index, run] of reports[side].entries()) {
+      const archiveId = run.archive?.archiveId;
+      if (!archiveId) continue;
+      const item = loaded.cases[index];
+      if (!item) continue;
+      let manifest: ReviewerEvaluationArchiveManifest | null = null;
+      try {
+        manifest = await readManifest(archiveId, environment, item.contract.id);
+      } catch {
+        manifest = null;
+      }
+      const currentArchive =
+        manifest &&
+        manifest.archiveId === archiveId &&
+        manifest.taskId === item.contract.id &&
+        manifest.role === "reviewer"
+          ? {
+              archiveId: manifest.archiveId,
+              status: manifest.captureStatus,
+              completeness: manifest.completeness,
+            }
+          : null;
+      reports[side][index] = withArchiveEvidence(run, currentArchive);
+    }
+  }
 }
 
 export function compareReviewerProfileEvaluation(
@@ -554,7 +640,7 @@ function runReport(
     actualSha !== item.candidateSha ||
     archiveReason !== null;
   const hardRegression =
-    !incomplete &&
+    actualSha === item.candidateSha &&
     item.label.protected &&
     verdict === "approved" &&
     item.label.verdict !== "approved";
@@ -584,10 +670,107 @@ function runReport(
     inputTokens: observation?.usage?.inputTokens ?? null,
     outputTokens: observation?.usage?.outputTokens ?? null,
     toolFailures: observation === null ? null : observedToolFailures,
-    requestedProfile: observation?.requestedProfile ?? null,
-    effectiveProfile: observation?.effectiveProfile ?? null,
-    archive: observation?.archive ?? null,
+    requestedProfile: safeProfileIdentity(observation?.requestedProfile),
+    effectiveProfile: observation?.effectiveProfile
+      ? sanitizeEffectiveProfile(observation.effectiveProfile)
+      : null,
+    archive: sanitizeArchiveEvidence(observation?.archive),
     inconclusiveReason,
+  };
+}
+
+function withArchiveEvidence(
+  run: ReviewerEvaluationRunReport,
+  archive: ReviewerEvaluationRunReport["archive"],
+): ReviewerEvaluationRunReport {
+  const archiveReason = archiveEvidenceReason(archive);
+  const priorReason = run.inconclusiveReason?.startsWith("reviewer_archive_")
+    ? null
+    : run.inconclusiveReason;
+  const incomplete =
+    priorReason !== null ||
+    run.observed.verdict === "inconclusive" ||
+    run.observed.sha !== run.candidateSha ||
+    archiveReason !== null;
+  const correct =
+    run.observed.sha === run.candidateSha && run.observed.verdict === run.expected.verdict;
+  return {
+    ...run,
+    archive,
+    correctness: incomplete ? "inconclusive" : correct ? "correct" : "incorrect",
+    hardRegression:
+      run.observed.sha === run.candidateSha &&
+      run.expected.protected &&
+      run.observed.verdict === "approved" &&
+      run.expected.verdict !== "approved",
+    inconclusiveReason: priorReason ?? archiveReason,
+  };
+}
+
+function toReviewerArchiveManifest(
+  manifest: SessionArchiveManifest,
+): ReviewerEvaluationArchiveManifest {
+  return {
+    archiveId: manifest.archiveId,
+    taskId: manifest.taskId,
+    role: manifest.role,
+    captureStatus: manifest.captureStatus,
+    completeness: manifest.completeness,
+  };
+}
+
+function sanitizeEffectiveProfile(profile: EffectiveSessionProfile): EffectiveSessionProfile {
+  return {
+    profileName: safeProfileIdentity(profile.profileName),
+    configSha256: safeSha256(profile.configSha256),
+    adapter: profile.adapter === "sdk" || profile.adapter === "app-server" ? profile.adapter : null,
+    model: safeExperimentalIdentity(profile.model),
+    modelProvider: safeExperimentalIdentity(profile.modelProvider),
+    reasoningEffort: safeReasoningEffort(profile.reasoningEffort),
+    developerInstructionsSha256: safeSha256(profile.developerInstructionsSha256),
+  };
+}
+
+function safeProfileIdentity(value: string | null | undefined): string | null {
+  return typeof value === "string" && identifier.test(value) ? value : null;
+}
+
+function safeExperimentalIdentity(value: string | null): string | null {
+  return typeof value === "string" && identifier.test(value) ? value : null;
+}
+
+function safeSha256(value: string | null): string | null {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+
+function safeReasoningEffort(
+  value: EffectiveSessionProfile["reasoningEffort"],
+): EffectiveSessionProfile["reasoningEffort"] {
+  return value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+    ? value
+    : null;
+}
+
+function sanitizeArchiveEvidence(
+  archive: ReviewAttemptObservation["archive"] | null | undefined,
+): ReviewerEvaluationRunReport["archive"] {
+  if (archive === null || archive === undefined || !archiveIdPattern.test(archive.archiveId))
+    return null;
+  if (!["stored", "truncated", "failed", "pruned"].includes(archive.status)) return null;
+  if (
+    archive.completeness !== undefined &&
+    archive.completeness !== "complete" &&
+    archive.completeness !== "partial"
+  )
+    return null;
+  return {
+    archiveId: archive.archiveId,
+    status: archive.status,
+    ...(archive.completeness ? { completeness: archive.completeness } : {}),
   };
 }
 
@@ -1020,11 +1203,9 @@ async function validateCandidate(
   return item.candidateSha;
 }
 
-async function readRegistration(registrationPath: string): Promise<RepositorySnapshot> {
+async function readRegistration(raw: string): Promise<RepositorySnapshot> {
   try {
-    return repositoryRegistrationSchema.parse(
-      JSON.parse(await readUtf8(registrationPath, "Repository registration")),
-    );
+    return repositoryRegistrationSchema.parse(JSON.parse(raw));
   } catch {
     throw new ReviewerEvaluationValidationError("Repository registration is unreadable or invalid");
   }
@@ -1037,7 +1218,8 @@ async function validateRegistration(
 ): Promise<void> {
   if (
     registration.id !== plan.repositoryId ||
-    (await realpath(registration.path).catch(() => registration.path)) !== repositoryRoot
+    (await realpath(registration.path).catch(() => registration.path)) !==
+      (await realpath(repositoryRoot).catch(() => repositoryRoot))
   )
     throw new ReviewerEvaluationValidationError(
       "evaluation Repository registration does not match the plan",
@@ -1046,17 +1228,42 @@ async function validateRegistration(
 
 async function repositoryRootFor(path: string): Promise<string> {
   try {
-    return (
+    const gitRoot = (
       await execFile("git", ["-C", dirname(path), "rev-parse", "--show-toplevel"])
     ).stdout.trim();
+    const realDirectory = await realpath(dirname(path));
+    return resolve(dirname(path), relative(realDirectory, gitRoot));
   } catch {
     throw new ReviewerEvaluationValidationError("evaluation plan is not inside a Git Repository");
   }
 }
 
-async function isAncestor(repositoryRoot: string, sha: string): Promise<boolean> {
+async function readHeadCommit(repositoryRoot: string): Promise<string> {
   try {
-    await execFile("git", ["-C", repositoryRoot, "merge-base", "--is-ancestor", sha, "HEAD"]);
+    const head = (
+      await execFile("git", ["-C", repositoryRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+    ).stdout.trim();
+    if (!exactSha.test(head)) throw new Error("invalid HEAD");
+    return head;
+  } catch {
+    throw new ReviewerEvaluationValidationError("evaluation Repository HEAD is unavailable");
+  }
+}
+
+async function requireHeadCommit(repositoryRoot: string, expectedHead: string): Promise<void> {
+  if ((await readHeadCommit(repositoryRoot)) !== expectedHead)
+    throw new ReviewerEvaluationValidationError(
+      "evaluation Repository HEAD changed during validation",
+    );
+}
+
+async function isAncestor(
+  repositoryRoot: string,
+  sha: string,
+  descendant = "HEAD",
+): Promise<boolean> {
+  try {
+    await execFile("git", ["-C", repositoryRoot, "merge-base", "--is-ancestor", sha, descendant]);
     return true;
   } catch {
     return false;
@@ -1073,25 +1280,138 @@ async function readUsineSourceCommit(): Promise<string> {
   }
 }
 
-async function requireCommittedFile(
+async function readCommittedUtf8(
   repositoryRoot: string,
   path: string,
   label: string,
-): Promise<void> {
+  expectedHead: string,
+): Promise<string> {
   const relativePath = relative(repositoryRoot, path);
   try {
+    await assertSafeFilePath(repositoryRoot, path, label);
     const tracked = await execFile("git", [
       "-C",
       repositoryRoot,
       "ls-files",
+      "--stage",
       "--error-unmatch",
       "--",
       relativePath,
     ]);
-    if (tracked.stdout.trim() !== relativePath) throw new Error("file is not tracked");
-    await execFile("git", ["-C", repositoryRoot, "diff", "--quiet", "HEAD", "--", relativePath]);
+    const entry = /^(\d{6}) [0-9a-f]+ \d\t([\s\S]+)$/.exec(tracked.stdout.trim());
+    if (!(entry && ["100644", "100755"].includes(entry[1]!) && entry[2] === relativePath))
+      throw new Error("file is not a tracked regular file");
+    const headBlob = await gitBlobAt(repositoryRoot, expectedHead, relativePath);
+    const bytes = await readFile(path);
+    const actualBlob = createHash("sha1")
+      .update(`blob ${bytes.length}\0`, "utf8")
+      .update(bytes)
+      .digest("hex");
+    if (headBlob !== actualBlob) throw new Error("file is not bound to the evaluation HEAD");
+    await execFile("git", [
+      "-C",
+      repositoryRoot,
+      "diff",
+      "--quiet",
+      expectedHead,
+      "--",
+      relativePath,
+    ]);
+    return bytes.toString("utf8");
   } catch {
-    throw new ReviewerEvaluationValidationError(`${label} must be committed and unchanged`);
+    throw new ReviewerEvaluationValidationError(label + " must be committed and unchanged");
+  }
+}
+
+async function gitBlobAt(
+  repositoryRoot: string,
+  commit: string,
+  relativePath: string,
+): Promise<string> {
+  return (
+    await execFile("git", ["-C", repositoryRoot, "rev-parse", `${commit}:${relativePath}`])
+  ).stdout.trim();
+}
+
+async function assertSafeFilePath(
+  repositoryRoot: string,
+  path: string,
+  label: string,
+): Promise<void> {
+  const pathRelative = relative(repositoryRoot, path);
+  if (pathRelative === "" || pathRelative.startsWith("..") || isAbsolute(pathRelative))
+    throw new ReviewerEvaluationValidationError(
+      `${label} must be inside the evaluation Repository`,
+    );
+  let rootEntry;
+  try {
+    rootEntry = await lstat(repositoryRoot);
+  } catch {
+    throw new ReviewerEvaluationValidationError(label + " has an unsafe Repository root");
+  }
+  if (rootEntry.isSymbolicLink())
+    throw new ReviewerEvaluationValidationError(label + " must not use symbolic links");
+  if (!rootEntry.isDirectory())
+    throw new ReviewerEvaluationValidationError(label + " has a non-directory Repository root");
+  let current = repositoryRoot;
+  for (const component of pathRelative.split("/")) {
+    current = join(current, component);
+    let entry;
+    try {
+      entry = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new ReviewerEvaluationValidationError(`${label} is unsafe`);
+    }
+    if (entry.isSymbolicLink())
+      throw new ReviewerEvaluationValidationError(`${label} must not use symbolic links`);
+    if (current !== path && !entry.isDirectory())
+      throw new ReviewerEvaluationValidationError(`${label} has a non-directory ancestor`);
+    if (current === path && !entry.isFile())
+      throw new ReviewerEvaluationValidationError(`${label} must be a regular file`);
+  }
+}
+
+async function validateReportPath(
+  repositoryRoot: string,
+  reportPath: string,
+  protectedPaths: Iterable<string> = [],
+): Promise<void> {
+  await assertSafeFilePath(repositoryRoot, reportPath, "report");
+  let reportStat;
+  try {
+    reportStat = await lstat(reportPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new ReviewerEvaluationValidationError("report path is unsafe");
+  }
+  for (const protectedPath of protectedPaths) {
+    try {
+      const protectedStat = await lstat(protectedPath);
+      if (reportStat.dev === protectedStat.dev && reportStat.ino === protectedStat.ino)
+        throw new ReviewerEvaluationValidationError("report path must not replace protected input");
+    } catch (error) {
+      if (error instanceof ReviewerEvaluationValidationError) throw error;
+      throw new ReviewerEvaluationValidationError("protected input is unavailable");
+    }
+  }
+}
+
+async function writeEvaluationReport(
+  path: string,
+  report: string,
+  repositoryRoot: string,
+  protectedPaths: readonly string[],
+): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await validateReportPath(repositoryRoot, path, protectedPaths);
+  const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, report, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await validateReportPath(repositoryRoot, path, protectedPaths);
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
   }
 }
 
@@ -1106,14 +1426,6 @@ function resolveCaseFile(root: string, path: string, label: string): string {
       `${label} must be inside the evaluation Repository`,
     );
   return resolved;
-}
-
-async function readUtf8(path: string, label: string): Promise<string> {
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    throw new ReviewerEvaluationValidationError(`${label} is unreadable`);
-  }
 }
 
 function parseJson(raw: string): unknown {
