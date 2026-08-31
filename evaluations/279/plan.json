@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "issue-279-luna-reasoning",
+  "repositoryId": "usine-279-evaluation",
+  "baseSha": "99b18d80c0fdd7119e98d9fd32832a91b9e456c8",
+  "subjectRole": "implementer",
+  "changedFactor": "reasoning",
+  "baselineProfile": "usine-implementer",
+  "candidateProfile": "usine-implementer-medium",
+  "reviewerProfile": "usine-reviewer",
+  "maxTasks": 4,
+  "usineBuild": "99b18d80c0fdd7119e98d9fd32832a91b9e456c8",
+  "reportPath": "evaluations/279/report.json",
+  "registrationPath": "../../.tasks/279-registration.json",
+  "pairs": [
+    {
+      "id": "sanitized-profile-identity",
+      "repetition": 1,
+      "baselineContractPath": "evaluations/279/contracts/r1-baseline.json",
+      "candidateContractPath": "evaluations/279/contracts/r1-candidate.json"
+    },
+    {
+      "id": "sanitized-profile-identity",
+      "repetition": 2,
+      "baselineContractPath": "evaluations/279/contracts/r2-baseline.json",
+      "candidateContractPath": "evaluations/279/contracts/r2-candidate.json"
+    }
+  ]
+}
