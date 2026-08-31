@@ -1,0 +1,477 @@
+{
+  "schemaVersion": 1,
+  "planId": "issue-279-luna-reasoning",
+  "repositoryId": "usine-279-evaluation",
+  "subjectRole": "implementer",
+  "changedFactor": "reasoning",
+  "usineBuild": "99b18d80c0fdd7119e98d9fd32832a91b9e456c8",
+  "reportPath": "evaluations/279/report.json",
+  "baseline": {
+    "profile": "usine-implementer",
+    "tasks": [
+      {
+        "id": "sanitized-profile-identity:1:baseline",
+        "pairId": "sanitized-profile-identity",
+        "repetition": 1,
+        "taskId": "eval-279-r1-baseline",
+        "evidence": {
+          "schemaVersion": 1,
+          "taskId": "eval-279-r1-baseline",
+          "roleRuns": {
+            "implementer": [
+              {
+                "role": "implementer",
+                "activation": 1,
+                "reviewCycle": null,
+                "sessionStartedAtEpochMs": 1788143972677,
+                "terminalAtEpochMs": 1788144440910,
+                "interruptedAtEpochMs": null,
+                "terminalObserved": true,
+                "requestedProfile": "usine-implementer",
+                "effectiveProfile": {
+                  "profileName": "usine-implementer",
+                  "configSha256": "1cb32ad64ee22eef40aa3bc51148860fba784df9f1011d088145a3848db75172",
+                  "adapter": "sdk",
+                  "model": "gpt-5.6-luna",
+                  "modelProvider": null,
+                  "reasoningEffort": "high",
+                  "developerInstructionsSha256": null
+                },
+                "effort": {
+                  "elapsedMs": 468233,
+                  "counts": { "turns": 1, "tools": 30, "mcpTools": 0 },
+                  "phase": "output",
+                  "failureClass": null,
+                  "observations": [
+                    {
+                      "type": "mcp_unavailable",
+                      "tool": "github_read_implementer",
+                      "outcome": "unavailable"
+                    },
+                    { "type": "thread_started" },
+                    { "type": "turn_started", "turn": 1 },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "turn_completed", "turn": 1, "outcome": "succeeded" }
+                  ]
+                },
+                "usage": { "inputTokens": 2735786, "outputTokens": 18345 },
+                "archive": {
+                  "archiveId": "archive_cf802638-0329-4c16-a604-a66d1280b42a",
+                  "status": "complete"
+                },
+                "outcome": {
+                  "status": "succeeded",
+                  "candidateSha": "b98388f7a4ccdf28d30dbe794dd58f99d042ece5",
+                  "taskRelation": "not_yet_accepted"
+                }
+              }
+            ],
+            "reviewer": []
+          },
+          "task": {
+            "state": "blocked",
+            "candidateSha": "b98388f7a4ccdf28d30dbe794dd58f99d042ece5",
+            "candidateFence": 1,
+            "check": {
+              "sha": "b98388f7a4ccdf28d30dbe794dd58f99d042ece5",
+              "status": "failed",
+              "exitCode": 1
+            },
+            "review": null,
+            "repairBatches": 0,
+            "delivery": null,
+            "relation": "blocked"
+          }
+        }
+      },
+      {
+        "id": "sanitized-profile-identity:2:baseline",
+        "pairId": "sanitized-profile-identity",
+        "repetition": 2,
+        "taskId": "eval-279-r2-baseline",
+        "evidence": {
+          "schemaVersion": 1,
+          "taskId": "eval-279-r2-baseline",
+          "roleRuns": {
+            "implementer": [
+              {
+                "role": "implementer",
+                "activation": 1,
+                "reviewCycle": null,
+                "sessionStartedAtEpochMs": 1788144724606,
+                "terminalAtEpochMs": 1788145180107,
+                "interruptedAtEpochMs": null,
+                "terminalObserved": true,
+                "requestedProfile": "usine-implementer",
+                "effectiveProfile": {
+                  "profileName": "usine-implementer",
+                  "configSha256": "1cb32ad64ee22eef40aa3bc51148860fba784df9f1011d088145a3848db75172",
+                  "adapter": "sdk",
+                  "model": "gpt-5.6-luna",
+                  "modelProvider": null,
+                  "reasoningEffort": "high",
+                  "developerInstructionsSha256": null
+                },
+                "effort": {
+                  "elapsedMs": 455501,
+                  "counts": { "turns": 1, "tools": 32, "mcpTools": 0 },
+                  "phase": "output",
+                  "failureClass": null,
+                  "observations": [
+                    {
+                      "type": "mcp_unavailable",
+                      "tool": "github_read_implementer",
+                      "outcome": "unavailable"
+                    },
+                    { "type": "thread_started" },
+                    { "type": "turn_started", "turn": 1 },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "turn_completed", "turn": 1, "outcome": "succeeded" }
+                  ]
+                },
+                "usage": { "inputTokens": 2696055, "outputTokens": 17029 },
+                "archive": {
+                  "archiveId": "archive_4a79cabf-a418-45de-bae4-fd77c86e1185",
+                  "status": "complete"
+                },
+                "outcome": {
+                  "status": "succeeded",
+                  "candidateSha": "7a4872b680f7db4a392093559633170ab8428fd6",
+                  "taskRelation": "not_yet_accepted"
+                }
+              }
+            ],
+            "reviewer": []
+          },
+          "task": {
+            "state": "blocked",
+            "candidateSha": "7a4872b680f7db4a392093559633170ab8428fd6",
+            "candidateFence": 1,
+            "check": {
+              "sha": "7a4872b680f7db4a392093559633170ab8428fd6",
+              "status": "failed",
+              "exitCode": 1
+            },
+            "review": null,
+            "repairBatches": 0,
+            "delivery": null,
+            "relation": "blocked"
+          }
+        }
+      }
+    ],
+    "correctness": "failed",
+    "metrics": {
+      "implementerActivations": 2,
+      "repairBatches": 0,
+      "interruptions": 0,
+      "elapsedMs": 923734,
+      "inputTokens": 5431841,
+      "outputTokens": 35374,
+      "toolFailures": 9
+    }
+  },
+  "candidate": {
+    "profile": "usine-implementer-medium",
+    "tasks": [
+      {
+        "id": "sanitized-profile-identity:1:candidate",
+        "pairId": "sanitized-profile-identity",
+        "repetition": 1,
+        "taskId": "eval-279-r1-candidate",
+        "evidence": {
+          "schemaVersion": 1,
+          "taskId": "eval-279-r1-candidate",
+          "roleRuns": {
+            "implementer": [
+              {
+                "role": "implementer",
+                "activation": 1,
+                "reviewCycle": null,
+                "sessionStartedAtEpochMs": 1788144446796,
+                "terminalAtEpochMs": 1788144718992,
+                "interruptedAtEpochMs": null,
+                "terminalObserved": true,
+                "requestedProfile": "usine-implementer-medium",
+                "effectiveProfile": {
+                  "profileName": "usine-implementer-medium",
+                  "configSha256": "009d58551b76ea11d1ef728a7e6f1d80be17665ae044b1f2c2003bfb31ba4e1e",
+                  "adapter": "sdk",
+                  "model": "gpt-5.6-luna",
+                  "modelProvider": null,
+                  "reasoningEffort": "medium",
+                  "developerInstructionsSha256": null
+                },
+                "effort": {
+                  "elapsedMs": 272196,
+                  "counts": { "turns": 1, "tools": 23, "mcpTools": 0 },
+                  "phase": "output",
+                  "failureClass": null,
+                  "observations": [
+                    {
+                      "type": "mcp_unavailable",
+                      "tool": "github_read_implementer",
+                      "outcome": "unavailable"
+                    },
+                    { "type": "thread_started" },
+                    { "type": "turn_started", "turn": 1 },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "turn_completed", "turn": 1, "outcome": "succeeded" }
+                  ]
+                },
+                "usage": { "inputTokens": 1174322, "outputTokens": 9600 },
+                "archive": {
+                  "archiveId": "archive_a0fa53fd-44fc-46b9-92e8-3b1501e9de8b",
+                  "status": "complete"
+                },
+                "outcome": {
+                  "status": "succeeded",
+                  "candidateSha": "b31146f3ef0907d8b571dc836debdda0c12dd1c7",
+                  "taskRelation": "not_yet_accepted"
+                }
+              }
+            ],
+            "reviewer": []
+          },
+          "task": {
+            "state": "blocked",
+            "candidateSha": "b31146f3ef0907d8b571dc836debdda0c12dd1c7",
+            "candidateFence": 1,
+            "check": {
+              "sha": "b31146f3ef0907d8b571dc836debdda0c12dd1c7",
+              "status": "failed",
+              "exitCode": 1
+            },
+            "review": null,
+            "repairBatches": 0,
+            "delivery": null,
+            "relation": "blocked"
+          }
+        }
+      },
+      {
+        "id": "sanitized-profile-identity:2:candidate",
+        "pairId": "sanitized-profile-identity",
+        "repetition": 2,
+        "taskId": "eval-279-r2-candidate",
+        "evidence": {
+          "schemaVersion": 1,
+          "taskId": "eval-279-r2-candidate",
+          "roleRuns": {
+            "implementer": [
+              {
+                "role": "implementer",
+                "activation": 1,
+                "reviewCycle": null,
+                "sessionStartedAtEpochMs": 1788145186075,
+                "terminalAtEpochMs": 1788145490944,
+                "interruptedAtEpochMs": null,
+                "terminalObserved": true,
+                "requestedProfile": "usine-implementer-medium",
+                "effectiveProfile": {
+                  "profileName": "usine-implementer-medium",
+                  "configSha256": "009d58551b76ea11d1ef728a7e6f1d80be17665ae044b1f2c2003bfb31ba4e1e",
+                  "adapter": "sdk",
+                  "model": "gpt-5.6-luna",
+                  "modelProvider": null,
+                  "reasoningEffort": "medium",
+                  "developerInstructionsSha256": null
+                },
+                "effort": {
+                  "elapsedMs": 304869,
+                  "counts": { "turns": 1, "tools": 21, "mcpTools": 0 },
+                  "phase": "output",
+                  "failureClass": null,
+                  "observations": [
+                    {
+                      "type": "mcp_unavailable",
+                      "tool": "github_read_implementer",
+                      "outcome": "unavailable"
+                    },
+                    { "type": "thread_started" },
+                    { "type": "turn_started", "turn": 1 },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "failed" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "shell", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "tool_completed", "tool": "apply_patch", "outcome": "succeeded" },
+                    { "type": "turn_completed", "turn": 1, "outcome": "succeeded" }
+                  ]
+                },
+                "usage": { "inputTokens": 1573552, "outputTokens": 10073 },
+                "archive": {
+                  "archiveId": "archive_373934c0-0ad8-4795-8f69-2af913dcd869",
+                  "status": "complete"
+                },
+                "outcome": {
+                  "status": "succeeded",
+                  "candidateSha": "fbf4679dcdd1fb20bff6bb1438586bcf6932234d",
+                  "taskRelation": "not_yet_accepted"
+                }
+              }
+            ],
+            "reviewer": []
+          },
+          "task": {
+            "state": "blocked",
+            "candidateSha": "fbf4679dcdd1fb20bff6bb1438586bcf6932234d",
+            "candidateFence": 1,
+            "check": {
+              "sha": "fbf4679dcdd1fb20bff6bb1438586bcf6932234d",
+              "status": "failed",
+              "exitCode": 1
+            },
+            "review": null,
+            "repairBatches": 0,
+            "delivery": null,
+            "relation": "blocked"
+          }
+        }
+      }
+    ],
+    "correctness": "failed",
+    "metrics": {
+      "implementerActivations": 2,
+      "repairBatches": 0,
+      "interruptions": 0,
+      "elapsedMs": 577065,
+      "inputTokens": 2747874,
+      "outputTokens": 19673,
+      "toolFailures": 3
+    }
+  },
+  "comparison": {
+    "baseline": {
+      "implementerActivations": null,
+      "repairBatches": null,
+      "interruptions": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    },
+    "candidate": {
+      "implementerActivations": null,
+      "repairBatches": null,
+      "interruptions": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    },
+    "delta": {
+      "implementerActivations": null,
+      "repairBatches": null,
+      "interruptions": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    }
+  },
+  "recommendation": "inconclusive",
+  "inconclusiveReasons": [
+    "eval-279-r1-baseline:hard_correctness_gate",
+    "eval-279-r1-candidate:hard_correctness_gate",
+    "eval-279-r2-baseline:hard_correctness_gate",
+    "eval-279-r2-candidate:hard_correctness_gate"
+  ]
+}
