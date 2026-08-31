@@ -1,0 +1,6 @@
+{
+  "verdict": "approved",
+  "rationale": "The clean Candidate is externally expected approved by PR #307 exact-SHA correctness/security plus design/ownership approvals.",
+  "reference": "https://github.com/ariga39/usine/pull/307 exact-SHA correctness/security plus design/ownership approvals",
+  "protected": false
+}

@@ -1,0 +1,387 @@
+{
+  "schemaVersion": 1,
+  "planId": "issue-308-reviewer-reasoning",
+  "repositoryId": "usine-308-evaluation",
+  "subjectRole": "reviewer",
+  "changedFactor": "reasoning",
+  "usineBuild": "950c92a9afab3a387464b0db8ccea77892fb1977",
+  "reportPath": "evaluations/308/report.json",
+  "baseline": {
+    "profile": "usine-reviewer",
+    "correctness": "passed",
+    "metrics": {
+      "correctVerdicts": 4,
+      "falseApprovals": 0,
+      "falseChangesRequested": 0,
+      "inconclusive": 0,
+      "elapsedMs": 895793,
+      "inputTokens": 1812216,
+      "outputTokens": 19343,
+      "toolFailures": 7
+    },
+    "runs": [
+      {
+        "caseId": "clean-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer",
+        "candidateSha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by PR #307 exact-SHA correctness/security plus design/ownership approvals.",
+          "reference": "https://github.com/ariga39/usine/pull/307 exact-SHA correctness/security plus design/ownership approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+          "verdict": "approved",
+          "findingCount": 0
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 245674,
+        "inputTokens": 623820,
+        "outputTokens": 4882,
+        "toolFailures": 2,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_4b44e6a5-5dcc-43ce-baa1-38a0ec789f76",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "clean-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer",
+        "candidateSha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by PR #307 exact-SHA correctness/security plus design/ownership approvals.",
+          "reference": "https://github.com/ariga39/usine/pull/307 exact-SHA correctness/security plus design/ownership approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+          "verdict": "approved",
+          "findingCount": 0
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 267350,
+        "inputTokens": 566858,
+        "outputTokens": 5939,
+        "toolFailures": 2,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_c02cd4b4-58b1-4368-94e3-73c2a8cf3906",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer",
+        "candidateSha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate still forces host-private reviewer registration through committed evidence; Issue #306 and PR #307 fixed this outcome.",
+          "reference": "https://github.com/ariga39/usine/issues/306 and https://github.com/ariga39/usine/pull/307",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+          "verdict": "changes_requested",
+          "findingCount": 1
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 181593,
+        "inputTokens": 358054,
+        "outputTokens": 4076,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_e42aaa86-8635-48b4-b045-7ab806297490",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer",
+        "candidateSha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate still forces host-private reviewer registration through committed evidence; Issue #306 and PR #307 fixed this outcome.",
+          "reference": "https://github.com/ariga39/usine/issues/306 and https://github.com/ariga39/usine/pull/307",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+          "verdict": "changes_requested",
+          "findingCount": 1
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 201176,
+        "inputTokens": 263484,
+        "outputTokens": 4446,
+        "toolFailures": 2,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_e0343c22-b819-47b4-aa98-9a51557c2dcd",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      }
+    ]
+  },
+  "candidate": {
+    "profile": "usine-reviewer-medium",
+    "correctness": "passed",
+    "metrics": {
+      "correctVerdicts": 4,
+      "falseApprovals": 0,
+      "falseChangesRequested": 0,
+      "inconclusive": 0,
+      "elapsedMs": 703366,
+      "inputTokens": 1465620,
+      "outputTokens": 15244,
+      "toolFailures": 2
+    },
+    "runs": [
+      {
+        "caseId": "clean-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by PR #307 exact-SHA correctness/security plus design/ownership approvals.",
+          "reference": "https://github.com/ariga39/usine/pull/307 exact-SHA correctness/security plus design/ownership approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+          "verdict": "approved",
+          "findingCount": 0
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 204275,
+        "inputTokens": 472875,
+        "outputTokens": 4303,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_783a4ff1-5a77-4700-a46b-4b4ceaaa7dd2",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "clean-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by PR #307 exact-SHA correctness/security plus design/ownership approvals.",
+          "reference": "https://github.com/ariga39/usine/pull/307 exact-SHA correctness/security plus design/ownership approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "8c09caf62174c0ea01c7cc93bbaf8be473d39a43",
+          "verdict": "approved",
+          "findingCount": 0
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 223173,
+        "inputTokens": 651342,
+        "outputTokens": 4679,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_81359452-c6ad-4db4-84bc-9add8d7b4b38",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate still forces host-private reviewer registration through committed evidence; Issue #306 and PR #307 fixed this outcome.",
+          "reference": "https://github.com/ariga39/usine/issues/306 and https://github.com/ariga39/usine/pull/307",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+          "verdict": "changes_requested",
+          "findingCount": 1
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 171140,
+        "inputTokens": 170424,
+        "outputTokens": 3993,
+        "toolFailures": 0,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_18f3d920-5106-4850-8e83-aad676ab4032",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate still forces host-private reviewer registration through committed evidence; Issue #306 and PR #307 fixed this outcome.",
+          "reference": "https://github.com/ariga39/usine/issues/306 and https://github.com/ariga39/usine/pull/307",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+          "verdict": "changes_requested",
+          "findingCount": 1
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 104778,
+        "inputTokens": 170979,
+        "outputTokens": 2269,
+        "toolFailures": 0,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_20e996c8-67a5-4b4c-8753-213bed87d5b5",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      }
+    ]
+  },
+  "comparison": {
+    "baseline": {
+      "correctVerdicts": 4,
+      "falseApprovals": 0,
+      "falseChangesRequested": 0,
+      "inconclusive": 0,
+      "elapsedMs": 895793,
+      "inputTokens": 1812216,
+      "outputTokens": 19343,
+      "toolFailures": 7
+    },
+    "candidate": {
+      "correctVerdicts": 4,
+      "falseApprovals": 0,
+      "falseChangesRequested": 0,
+      "inconclusive": 0,
+      "elapsedMs": 703366,
+      "inputTokens": 1465620,
+      "outputTokens": 15244,
+      "toolFailures": 2
+    },
+    "delta": {
+      "correctVerdicts": 0,
+      "falseApprovals": 0,
+      "falseChangesRequested": 0,
+      "inconclusive": 0,
+      "elapsedMs": -192427,
+      "inputTokens": -346596,
+      "outputTokens": -4099,
+      "toolFailures": -5
+    }
+  },
+  "recommendation": "candidate",
+  "inconclusiveReasons": []
+}
