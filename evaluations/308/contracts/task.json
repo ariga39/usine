@@ -1,0 +1,31 @@
+{
+  "id": "eval-308-reviewer-registration",
+  "repositoryId": "usine-308-evaluation",
+  "baseSha": "9ef4c933c1637443078add2162e88fca06f36e6c",
+  "instructions": "Review the Issue #306 reviewer-registration outcome on the supplied exact Candidate and passing check evidence. In a fresh read-only exact-SHA checkout, verify that reviewer evaluation keeps the Repository registration host-private while retaining committed evaluation evidence validation and safe report handling. Return an explicit verdict: approve only when the outcome is correct and free of material regressions; otherwise request changes with concise findings.",
+  "acceptance": [
+    "Reviewer evaluation resolves a regular ignored host-private Repository registration without requiring that registration to be committed evaluation evidence.",
+    "The plan, Task Contract, exact Candidate check evidence, and external labels remain committed unchanged inputs, and report output remains confined to the evaluation Repository.",
+    "Symlinked or non-regular registration and unsafe report paths are rejected before reviewer execution, while the supplied exact Candidate and check SHA remain bound."
+  ],
+  "nonGoals": [
+    "No production model, provider, profile, or review-policy change.",
+    "No delivery or merge is executed; authorization.delivery is true only because the Task Contract schema requires it.",
+    "No committed registration, host path, credential, endpoint, provider configuration, transcript, or Session Archive content is evaluation evidence."
+  ],
+  "budget": {
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1,
+    "maxElapsedMs": 900000
+  },
+  "authorization": {
+    "source": "https://github.com/ariga39/usine/issues/306",
+    "delivery": true
+  },
+  "delivery": {
+    "branch": "agent/308-reviewer-evaluation-proof",
+    "issue": 306,
+    "title": "Evaluate the corrected reviewer-registration outcome",
+    "body": "Evaluation-only reviewer comparison for the exact Candidates and labels committed by Issue #308."
+  }
+}
