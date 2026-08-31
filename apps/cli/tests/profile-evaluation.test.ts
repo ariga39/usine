@@ -1144,6 +1144,112 @@ describe("profile evaluate plan boundary", () => {
     process.exitCode = 0;
   });
 
+  test("restores after a reused Task evidence failure", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    const submissions: string[] = [];
+    let evidenceCalls = 0;
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async (_url: string, taskId: string) => {
+        const contractPath = taskId === "baseline-task" ? "baseline.json" : "candidate.json";
+        const contractHash = await sha256(await readFile(join(value.root, contractPath)));
+        return terminalTaskForEvaluation(taskId, contractHash);
+      },
+      submitTask: async (_url: string, submission: { contractPath: string }) => {
+        submissions.push(submission.contractPath);
+        return terminalTaskForEvaluation("unused-task");
+      },
+      followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async (_url: string, taskId: string) => {
+        evidenceCalls += 1;
+        if (evidenceCalls === 2) throw new Error("reused evidence failed");
+        return minimalAcceptedEvidence(taskId);
+      },
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("reused evidence failed");
+    expect(registrations).toEqual(["prior-profile"]);
+    expect(submissions).toEqual([]);
+  });
+
+  test("restores after a reused Task follow failure and terminal cleanup", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const baselineHash = await sha256(await readFile(join(value.root, "baseline.json")));
+    const candidateHash = await sha256(await readFile(join(value.root, "candidate.json")));
+    const registrations: string[] = [];
+    const submissions: string[] = [];
+    const baselineActive = admittedTaskForEvaluation(
+      "baseline-task",
+      Date.now() + 60_000,
+      baselineHash,
+    );
+    const baselineTerminal = terminalTaskForEvaluation("baseline-task", baselineHash);
+    const candidateTerminal = terminalTaskForEvaluation("candidate-task", candidateHash);
+    let baselineStatusCalls = 0;
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async (_url: string, taskId: string) => {
+        if (taskId === "baseline-task") {
+          baselineStatusCalls += 1;
+          return baselineStatusCalls === 1 ? baselineActive : baselineTerminal;
+        }
+        return candidateTerminal;
+      },
+      submitTask: async (_url: string, submission: { contractPath: string }) => {
+        submissions.push(submission.contractPath);
+        return terminalTaskForEvaluation("unused-task");
+      },
+      followTask: async () => {
+        throw new Error("reused follow failed");
+      },
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async (_url: string, taskId: string) => minimalAcceptedEvidence(taskId),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("reused follow failed");
+    expect(registrations).toEqual(["prior-profile"]);
+    expect(submissions).toEqual([]);
+    expect(baselineStatusCalls).toBe(2);
+  });
+
   test("passes the operator signal through the public profile command and removes listeners", async () => {
     const value = await fixture();
     const registrations: string[] = [];
@@ -1207,7 +1313,7 @@ describe("profile evaluate plan boundary", () => {
     process.exitCode = 0;
   });
 
-  test("does not restore when the atomic profile-switch guard rejects", async () => {
+  test("reasserts the prior registration when the profile-switch guard rejects", async () => {
     const value = await fixture();
     const registrations: string[] = [];
     const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
@@ -1221,7 +1327,15 @@ describe("profile evaluate plan boundary", () => {
       }),
       registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
         registrations.push(registration.implementerProfile);
-        throw new Error("cannot switch repository profiles while a Task is active");
+        if (registration.implementerProfile !== "prior-profile")
+          throw new Error("cannot switch repository profiles while a Task is active");
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
       },
       taskStatus: async () => null,
       submitTask: async () => terminalTaskForEvaluation("baseline-task"),
@@ -1232,7 +1346,7 @@ describe("profile evaluate plan boundary", () => {
     await expect(
       executeProfileEvaluation(loaded, "http://server.test", undefined, services),
     ).rejects.toThrow("cannot switch repository profiles while a Task is active");
-    expect(registrations).toEqual(["baseline-profile"]);
+    expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
   });
 
   test("restores after an ambiguous registration response", async () => {
@@ -1804,9 +1918,13 @@ function terminalTaskForEvaluation(taskId: string, contractHash = "a".repeat(64)
   };
 }
 
-function admittedTaskForEvaluation(taskId: string, deadlineEpochMs: number): TaskResource {
+function admittedTaskForEvaluation(
+  taskId: string,
+  deadlineEpochMs: number,
+  contractHash = "a".repeat(64),
+): TaskResource {
   return {
-    ...terminalTaskForEvaluation(taskId),
+    ...terminalTaskForEvaluation(taskId, contractHash),
     deadlineEpochMs,
     state: "admitted",
     candidateSha: null,

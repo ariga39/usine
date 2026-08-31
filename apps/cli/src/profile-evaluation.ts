@@ -26,7 +26,6 @@ import {
   retryTask,
   taskEvidence,
   taskStatus,
-  ServerClientError,
 } from "./server-client.js";
 import { jsonFlag } from "./cli-parameters.js";
 
@@ -368,12 +367,10 @@ export async function executeProfileEvaluation(
   };
   throwIfAborted(signal);
   const existingTasks = await preflightExistingTasks(loaded, serverUrl, services);
-  let registrationChanged = false;
   let inFlightTask: { taskId: string; deadlineEpochMs: number } | undefined;
   let cleanupError: unknown;
   let primaryError: unknown;
   let failed = false;
-  let evaluationCompleted = false;
   let contractIndex = 0;
   try {
     for (const pair of plan.pairs) {
@@ -391,13 +388,7 @@ export async function executeProfileEvaluation(
             implementerProfile: profile,
             reviewerProfile: plan.reviewerProfile,
           };
-          try {
-            await services.registerRepository(serverUrl, evaluationRegistration);
-            registrationChanged = true;
-          } catch (error) {
-            if (registrationMutationMayHaveCommitted(error)) registrationChanged = true;
-            throw error;
-          }
+          await services.registerRepository(serverUrl, evaluationRegistration);
           try {
             task = await services.submitTask(serverUrl, {
               contractPath: resolve(loaded.repositoryRoot, contractPath),
@@ -475,7 +466,6 @@ export async function executeProfileEvaluation(
         });
       }
     }
-    evaluationCompleted = true;
   } catch (error) {
     failed = true;
     primaryError = error;
@@ -488,7 +478,7 @@ export async function executeProfileEvaluation(
       cleanupError = error;
     }
   let restorationError: unknown;
-  if ((registrationChanged || evaluationCompleted) && cleanupError === undefined)
+  if (cleanupError === undefined)
     try {
       await services.registerRepository(serverUrl, originalRegistration);
     } catch (error) {
@@ -698,18 +688,6 @@ function withProfileEvaluationSignals<A>(action: (signal: AbortSignal) => Promis
     cleanup();
     return Promise.reject(error);
   }
-}
-
-function registrationMutationMayHaveCommitted(error: unknown): boolean {
-  if (
-    error instanceof ServerClientError &&
-    (error.kind === "validation" || error.kind === "not_found")
-  )
-    return false;
-  return !(
-    error instanceof Error &&
-    error.message === "cannot switch repository profiles while a Task is active"
-  );
 }
 
 async function preflightExistingTasks(
