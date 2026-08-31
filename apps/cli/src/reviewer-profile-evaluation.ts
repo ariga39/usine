@@ -594,7 +594,7 @@ function runReport(
 function archiveEvidenceReason(
   archive: ReviewerEvaluationRunReport["archive"],
 ): "reviewer_archive_missing" | "reviewer_archive_failed" | "reviewer_archive_partial" | null {
-  if (archive === null) return "reviewer_archive_missing";
+  if (archive == null) return "reviewer_archive_missing";
   if (archive.status === "failed" || archive.status === "pruned") return "reviewer_archive_failed";
   if (archive.status === "truncated") return "reviewer_archive_partial";
   if (archive.completeness !== "complete") return "reviewer_archive_partial";
