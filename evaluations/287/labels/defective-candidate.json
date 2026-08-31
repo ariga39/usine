@@ -1,0 +1,6 @@
+{
+  "verdict": "changes_requested",
+  "rationale": "The protected defective Candidate is externally expected changes_requested because strict typecheck found four TS18048 errors later fixed by the clean Candidate.",
+  "reference": "PR #302 final evidence",
+  "protected": true
+}

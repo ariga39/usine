@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "issue-287-reviewer-reasoning",
+  "repositoryId": "usine-287-evaluation",
+  "baseSha": "d648945570ceaaff700cf8bb1d3a1d0d5e5e8e37",
+  "subjectRole": "reviewer",
+  "changedFactor": "reasoning",
+  "baselineProfile": "usine-reviewer",
+  "candidateProfile": "usine-reviewer-medium",
+  "maxRuns": 8,
+  "usineBuild": "d9539a94d658402b60bd3394f87f9087cdfd59f9",
+  "reportPath": "evaluations/287/report.json",
+  "registrationPath": "../../.tasks/287-registration.json",
+  "cases": [
+    {
+      "id": "clean-candidate",
+      "repetition": 1,
+      "contractPath": "evaluations/287/contracts/task.json",
+      "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+      "checkPath": "evaluations/287/checks/clean-candidate.json",
+      "labelPath": "evaluations/287/labels/clean-candidate.json"
+    },
+    {
+      "id": "clean-candidate",
+      "repetition": 2,
+      "contractPath": "evaluations/287/contracts/task.json",
+      "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+      "checkPath": "evaluations/287/checks/clean-candidate.json",
+      "labelPath": "evaluations/287/labels/clean-candidate.json"
+    },
+    {
+      "id": "defective-candidate",
+      "repetition": 1,
+      "contractPath": "evaluations/287/contracts/task.json",
+      "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+      "checkPath": "evaluations/287/checks/defective-candidate.json",
+      "labelPath": "evaluations/287/labels/defective-candidate.json"
+    },
+    {
+      "id": "defective-candidate",
+      "repetition": 2,
+      "contractPath": "evaluations/287/contracts/task.json",
+      "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+      "checkPath": "evaluations/287/checks/defective-candidate.json",
+      "labelPath": "evaluations/287/labels/defective-candidate.json"
+    }
+  ]
+}

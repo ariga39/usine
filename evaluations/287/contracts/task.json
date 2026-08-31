@@ -1,0 +1,31 @@
+{
+  "id": "eval-287-reviewer-profile",
+  "repositoryId": "usine-287-evaluation",
+  "baseSha": "d648945570ceaaff700cf8bb1d3a1d0d5e5e8e37",
+  "instructions": "Evaluate the Issue #286 reviewer-profile evaluation outcome on the supplied exact Candidate and passing check evidence. Review the authorized change in a fresh read-only exact-SHA checkout and return an explicit verdict: approve only when the controlled reviewer-profile comparison is correct and free of material regressions; otherwise request changes with concise findings.",
+  "acceptance": [
+    "The controlled reviewer-profile evaluation compares two named reviewer profiles over the same frozen, externally labelled Candidate cases.",
+    "Reviewer results are bound to the supplied exact Candidate SHA and passing project-check evidence, with an explicit approved or changes_requested verdict.",
+    "Public evidence preserves profile attribution while keeping Session Archive content, credentials, endpoints, host paths, and transcripts private."
+  ],
+  "nonGoals": [
+    "No production model or provider change.",
+    "No new Task, Repository, delivery, merge, or Session Archive authority.",
+    "The evaluator must not execute delivery or merge; authorization.delivery is true only because the Task Contract schema requires it."
+  ],
+  "budget": {
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1,
+    "maxElapsedMs": 900000
+  },
+  "authorization": {
+    "source": "https://github.com/ariga39/usine/issues/287",
+    "delivery": true
+  },
+  "delivery": {
+    "branch": "agent/287-reviewer-evaluation-proof",
+    "issue": 287,
+    "title": "Evaluate the Issue 286 reviewer profile outcome",
+    "body": "Evaluation-only reviewer-profile comparison for the exact Candidates and labels committed by Issue 287."
+  }
+}
