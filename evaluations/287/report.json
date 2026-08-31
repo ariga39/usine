@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 1,
+  "planId": "issue-287-reviewer-reasoning",
+  "repositoryId": "usine-287-evaluation",
+  "subjectRole": "reviewer",
+  "changedFactor": "reasoning",
+  "usineBuild": "d9539a94d658402b60bd3394f87f9087cdfd59f9",
+  "reportPath": "evaluations/287/report.json",
+  "baseline": {
+    "profile": "usine-reviewer",
+    "correctness": "failed",
+    "metrics": {
+      "correctVerdicts": null,
+      "falseApprovals": null,
+      "falseChangesRequested": null,
+      "inconclusive": 1,
+      "elapsedMs": 1907150,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": 6
+    },
+    "runs": [
+      {
+        "caseId": "clean-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer",
+        "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by the PR #302 exact-SHA approvals.",
+          "reference": "PR #302 exact-SHA approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+          "verdict": "changes_requested",
+          "findingCount": 3
+        },
+        "correctness": "incorrect",
+        "hardRegression": false,
+        "elapsedMs": 576864,
+        "inputTokens": 1860058,
+        "outputTokens": 15139,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_49da4824-560d-4f7f-bc5d-84ca968e36f2",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "clean-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer",
+        "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by the PR #302 exact-SHA approvals.",
+          "reference": "PR #302 exact-SHA approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+          "verdict": "changes_requested",
+          "findingCount": 1
+        },
+        "correctness": "incorrect",
+        "hardRegression": false,
+        "elapsedMs": 500161,
+        "inputTokens": 1798191,
+        "outputTokens": 14540,
+        "toolFailures": 3,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_5c323da8-8e98-4e4b-a729-9112f1c09c31",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer",
+        "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate is externally expected changes_requested because strict typecheck found four TS18048 errors later fixed by the clean Candidate.",
+          "reference": "PR #302 final evidence",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+          "verdict": "inconclusive",
+          "findingCount": 0
+        },
+        "correctness": "inconclusive",
+        "hardRegression": false,
+        "elapsedMs": 358062,
+        "inputTokens": null,
+        "outputTokens": null,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_c6fbeb84-faec-4a0c-9d9e-919b87a4c440",
+          "status": "stored",
+          "completeness": "partial"
+        },
+        "inconclusiveReason": "inconclusive_verdict"
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer",
+        "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate is externally expected changes_requested because strict typecheck found four TS18048 errors later fixed by the clean Candidate.",
+          "reference": "PR #302 final evidence",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+          "verdict": "changes_requested",
+          "findingCount": 3
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 472063,
+        "inputTokens": 1629211,
+        "outputTokens": 11887,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer",
+          "configSha256": "7549de1c437421814c17672cba1a4b5d5e4e90ce15326ff73446c1b9194d150f",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "high",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_a416ea67-5073-4a69-a8e6-f3450f60bb97",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      }
+    ]
+  },
+  "candidate": {
+    "profile": "usine-reviewer-medium",
+    "correctness": "failed",
+    "metrics": {
+      "correctVerdicts": null,
+      "falseApprovals": null,
+      "falseChangesRequested": null,
+      "inconclusive": 1,
+      "elapsedMs": 529817,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": 1
+    },
+    "runs": [
+      {
+        "caseId": "clean-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by the PR #302 exact-SHA approvals.",
+          "reference": "PR #302 exact-SHA approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+          "verdict": "changes_requested",
+          "findingCount": 2
+        },
+        "correctness": "incorrect",
+        "hardRegression": false,
+        "elapsedMs": 204744,
+        "inputTokens": 322685,
+        "outputTokens": 7164,
+        "toolFailures": 0,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_f4e059be-670f-4a76-8cc2-867c4391dd62",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "clean-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+        "expected": {
+          "verdict": "approved",
+          "rationale": "The clean Candidate is externally expected approved by the PR #302 exact-SHA approvals.",
+          "reference": "PR #302 exact-SHA approvals",
+          "protected": false
+        },
+        "observed": {
+          "sha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+          "verdict": "inconclusive",
+          "findingCount": 0
+        },
+        "correctness": "inconclusive",
+        "hardRegression": false,
+        "elapsedMs": 5389,
+        "inputTokens": null,
+        "outputTokens": null,
+        "toolFailures": 0,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_1b87ab3c-25bc-478f-bb50-8df51b01943e",
+          "status": "stored",
+          "completeness": "partial"
+        },
+        "inconclusiveReason": "inconclusive_verdict"
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 1,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate is externally expected changes_requested because strict typecheck found four TS18048 errors later fixed by the clean Candidate.",
+          "reference": "PR #302 final evidence",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+          "verdict": "changes_requested",
+          "findingCount": 2
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 184433,
+        "inputTokens": 370719,
+        "outputTokens": 4918,
+        "toolFailures": 1,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_d7f84e18-4bc9-4d55-9527-2ba4698e94e4",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      },
+      {
+        "caseId": "defective-candidate",
+        "repetition": 2,
+        "profile": "usine-reviewer-medium",
+        "candidateSha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+        "expected": {
+          "verdict": "changes_requested",
+          "rationale": "The protected defective Candidate is externally expected changes_requested because strict typecheck found four TS18048 errors later fixed by the clean Candidate.",
+          "reference": "PR #302 final evidence",
+          "protected": true
+        },
+        "observed": {
+          "sha": "9c80e6847e865fe2bd8995d4cb632889edda5840",
+          "verdict": "changes_requested",
+          "findingCount": 2
+        },
+        "correctness": "correct",
+        "hardRegression": false,
+        "elapsedMs": 135251,
+        "inputTokens": 267337,
+        "outputTokens": 3361,
+        "toolFailures": 0,
+        "requestedProfile": "usine-reviewer-medium",
+        "effectiveProfile": {
+          "profileName": "usine-reviewer-medium",
+          "configSha256": "d1fd59f2ef94b186502adb769e86009d9bf72522699b87a529cd09cb2aa8c5ed",
+          "adapter": "sdk",
+          "model": "gpt-5.6-sol",
+          "modelProvider": null,
+          "reasoningEffort": "medium",
+          "developerInstructionsSha256": null
+        },
+        "archive": {
+          "archiveId": "archive_fec14021-5b89-491a-8e88-f9674e99917f",
+          "status": "stored",
+          "completeness": "complete"
+        },
+        "inconclusiveReason": null
+      }
+    ]
+  },
+  "comparison": {
+    "baseline": {
+      "correctVerdicts": null,
+      "falseApprovals": null,
+      "falseChangesRequested": null,
+      "inconclusive": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    },
+    "candidate": {
+      "correctVerdicts": null,
+      "falseApprovals": null,
+      "falseChangesRequested": null,
+      "inconclusive": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    },
+    "delta": {
+      "correctVerdicts": null,
+      "falseApprovals": null,
+      "falseChangesRequested": null,
+      "inconclusive": null,
+      "elapsedMs": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "toolFailures": null
+    }
+  },
+  "recommendation": "inconclusive",
+  "inconclusiveReasons": [
+    "clean-candidate:inconclusive_verdict",
+    "clean-candidate:reviewer_archive_partial",
+    "defective-candidate:inconclusive_verdict",
+    "defective-candidate:reviewer_archive_partial"
+  ]
+}

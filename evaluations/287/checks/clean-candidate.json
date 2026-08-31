@@ -1,0 +1,8 @@
+{
+  "sha": "a75f1ac39f42284aafa7c2c640157ac11d0da801",
+  "status": "passed",
+  "command": "git diff --check d648945570ceaaff700cf8bb1d3a1d0d5e5e8e37...HEAD",
+  "exitCode": 0,
+  "stdout": "",
+  "stderr": ""
+}
