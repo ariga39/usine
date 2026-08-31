@@ -1,0 +1,29 @@
+{
+  "id": "eval-279-r1-candidate",
+  "repositoryId": "usine-279-evaluation",
+  "baseSha": "99b18d80c0fdd7119e98d9fd32832a91b9e456c8",
+  "instructions": "Update implementer-profile evaluation so expected model and model-provider identifiers use the same public-safe identity projection as Role Run evidence. Add focused coverage showing that matching URL-like identifiers do not create spurious profile drift while the full configuration digest remains binding. Keep report and Session Archive data boundaries unchanged.",
+  "acceptance": [
+    "Expected and effective model/provider identities use the same public-safe projection.",
+    "A focused evaluator test proves a matching withheld identifier does not create spurious profile drift.",
+    "The full configuration digest still binds the exact effective profile and no hidden provider value enters the report."
+  ],
+  "nonGoals": [
+    "No evidence schema, server endpoint, Task state, compatibility branch, archive exposure, or production profile change."
+  ],
+  "budget": {
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1,
+    "maxElapsedMs": 900000
+  },
+  "authorization": {
+    "source": "https://github.com/ariga39/usine/issues/298",
+    "delivery": true
+  },
+  "delivery": {
+    "branch": "agent/279-eval-r1-candidate",
+    "issue": 298,
+    "title": "Align expected profile identity sanitization",
+    "body": "Evaluation-only non-merge implementation for the controlled #279 profile comparison."
+  }
+}
