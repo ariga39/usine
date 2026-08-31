@@ -1,6 +1,6 @@
 {
   "id": "issue-294-reviewer-pilot-rerun-312",
-  "repositoryId": "usine-production-pilot-312",
+  "repositoryId": "usine-production-pilot-310",
   "baseSha": "a87c05b2ea839e0d3e580935ba8dbe28e4d158e0",
   "instructions": "Issue #294 owns the observable behavior. Delivery Run and Quality Gate keep one provider-neutral Coding Session facade while the Codex SDK and Codex App Server are peer internal adapters. Common profile, deadline, MCP, output, observation, archive, failure, and cleanup policy runs once. Adapters own only provider-native lifecycle and typed provider-neutral conversion. Existing caller behavior and profiles remain intact, and tests can substitute bounded adapters without creating a public plugin API. The owner may inspect or selectively reapply prior unaccepted Candidate 9df17dfd7ec0be41d823a9e10f70bb07852daba4 as implementation evidence, but must produce a fresh Candidate based on the contract base and satisfy the complete outcome independently.",
   "acceptance": [
