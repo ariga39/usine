@@ -309,6 +309,45 @@ The command validates the complete plan, committed unchanged inputs, profile con
 
 The report uses only public `task evidence` facts. A passing exact-SHA project check and fresh approved review are required before effort can affect the result; drift, missing evidence, failed checks, interruptions, and unavailable usage remain explicit and produce an `inconclusive` recommendation. Session Archive content is never scoring input.
 
+### Controlled reviewer-profile evaluation
+
+The operator can compare two named reviewer profiles over frozen externally labelled Candidate cases:
+
+```sh
+node apps/cli/dist/cli.mjs profile evaluate "<EVALUATION_PLAN>" --subject-role reviewer --json
+```
+
+The committed plan uses this schemaVersion 1 shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "reviewer-evaluation-plan",
+  "repositoryId": "evaluation",
+  "baseSha": "<40-CHARACTER_BASE_SHA>",
+  "subjectRole": "reviewer",
+  "changedFactor": "model_stack",
+  "baselineProfile": "baseline-reviewer",
+  "candidateProfile": "candidate-reviewer",
+  "maxRuns": 2,
+  "usineBuild": "<40-CHARACTER_USINE_COMMIT_SHA>",
+  "reportPath": "reports/reviewer-evaluation-report.json",
+  "registrationPath": "repository.json",
+  "cases": [
+    {
+      "id": "case-one",
+      "repetition": 1,
+      "contractPath": "case-contract.json",
+      "candidateSha": "<40-CHARACTER_CANDIDATE_SHA>",
+      "checkPath": "case-check.json",
+      "labelPath": "case-label.json"
+    }
+  ]
+}
+```
+
+Each case names committed unchanged Task Contract, exact-SHA check evidence for the registered project-check command, and an external expected verdict with rationale and reference. Both profiles run serially through the existing Quality Gate over the same Candidate cases; correctness, including protected-case false approvals, is evaluated before elapsed time, tokens, and bounded tool failures. No Task, Repository, delivery, or merge authority is created. The local report retains bounded experimental effective profile/model identity and Session Archive metadata for attribution, never archive content. Credentials, endpoints, host paths, and transcript content remain private. `registrationPath` is resolved relative to the plan file and must remain inside the evaluation Repository. It identifies a host-local registration file that need not be committed because it may contain the host path; its contents must stay out of committed or GitHub-facing material.
+
 ### Session Archive operations
 
 Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.

@@ -22,12 +22,14 @@ import {
   isTerminalState,
   isWaitingState,
 } from "@usine/task-authority";
-import { CandidateWorkspace } from "@usine/candidate-workspace";
+import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
   CodexCodingSession,
   codexAppServerProfilesFromEnvironment,
+  explicitWorkerEnvironment,
   type CodingSessionCleanup,
   type CodingSessionMcpServerResolution,
+  type CodingSessionObservation,
 } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunInput } from "@usine/delivery-run";
 import {
@@ -37,7 +39,7 @@ import {
   type GithubReadMcpHttpHandle,
   type GithubReadRole,
 } from "@usine/forge-delivery";
-import { QualityGate } from "@usine/quality-gate";
+import { QualityGate, type ReviewAttemptObservation } from "@usine/quality-gate";
 import { verifyCommittedContract } from "./verify-committed-contract.js";
 import {
   sessionArchiveOptionsFromEnvironment,
@@ -59,6 +61,7 @@ export {
 } from "./runtime-policy.js";
 export { resolveCodexProfile, validateCodexProfile } from "@usine/coding-session";
 export type { TaskExecutionInput } from "@usine/task-authority";
+export type { ReviewAttemptObservation } from "@usine/quality-gate";
 export * from "./http-api.js";
 export {
   cleanupSessionArchives,
@@ -80,6 +83,53 @@ export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): Codi
     sessionArchive: sessionArchiveOptionsFromEnvironment(environment, stateDirectory),
     appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
   });
+}
+
+export interface ReviewerQualityGateInput {
+  readonly contract: ResolvedTaskContract;
+  readonly candidateSha: string;
+  readonly check: import("@usine/task-authority").CheckResult;
+  readonly profile: string;
+  readonly repository: RepositorySnapshot;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly deadlineEpochMs: number;
+  readonly cycle: number;
+  readonly signal?: AbortSignal;
+  readonly onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
+}
+
+export async function reviewCandidateWithProfile(
+  input: ReviewerQualityGateInput,
+): Promise<ReviewAttemptObservation> {
+  const stateDirectory = stateDirectoryFromEnvironment(input.environment);
+  const workspace = new CandidateWorkspace({
+    repository: input.repository.path,
+    stateDirectory,
+    deadlineEpochMs: input.deadlineEpochMs,
+    credentialFreeGit: credentialFreeGitEnvironment(input.environment),
+    gitAuthor: input.repository.gitAuthor,
+    signal: input.signal,
+  });
+  const session = new CodexCodingSession(undefined, {
+    environment: explicitWorkerEnvironment(input.environment),
+    executionStateDirectory: stateDirectory,
+    appServerProfiles: codexAppServerProfilesFromEnvironment(input.environment),
+    sessionArchive: sessionArchiveOptionsFromEnvironment(input.environment, stateDirectory),
+  });
+  return new QualityGate({
+    workspace,
+    session,
+    reviewer: { role: "reviewer", profile: input.profile, sandbox: "read-only" },
+    environment: explicitWorkerEnvironment(input.environment),
+    deadlineEpochMs: input.deadlineEpochMs,
+    signal: input.signal,
+  }).reviewWithObservation(
+    input.contract,
+    input.candidateSha,
+    input.check,
+    input.cycle,
+    input.onObservation,
+  );
 }
 
 export async function registerRepository(

@@ -28,6 +28,10 @@ import {
   taskStatus,
 } from "./server-client.js";
 import { jsonFlag } from "./cli-parameters.js";
+import {
+  runReviewerProfileEvaluateCommand,
+  type ReviewerEvaluationServices,
+} from "./reviewer-profile-evaluation.js";
 
 const execFile = promisify(execFileCallback);
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -280,6 +284,7 @@ export function profileCommand(
   serverUrl: string,
   environment: NodeJS.ProcessEnv = process.env,
   services: ProfileEvaluationServices = defaultServices,
+  reviewerServices?: ReviewerEvaluationServices,
 ) {
   const evaluate = Command.make(
     "evaluate",
@@ -301,6 +306,7 @@ export function profileCommand(
             serverUrl,
             environment,
             services,
+            reviewerServices,
           ),
         ),
       ),
@@ -313,8 +319,17 @@ export async function runProfileEvaluateCommand(
   serverUrl: string,
   environment: NodeJS.ProcessEnv = process.env,
   services: ProfileEvaluationServices = defaultServices,
+  reviewerServices?: ReviewerEvaluationServices,
 ): Promise<void> {
   return runCommand("profile_evaluate_failed", async () => {
+    if (options.subjectRole === "reviewer") {
+      await runReviewerProfileEvaluateCommand(
+        { planPath: options.planPath, json: options.json, signal: options.signal },
+        environment,
+        reviewerServices,
+      );
+      return;
+    }
     if (options.subjectRole !== "implementer")
       throw new CliFailure("invalid_evaluation_subject_role", "validation", {
         subjectRole: options.subjectRole,
