@@ -4,22 +4,62 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
-import { describe, expect, test } from "vite-plus/test";
+import { Effect, FileSystem, Layer, Path, Stdio, Terminal } from "effect";
+import { Command } from "effect/unstable/cli";
+import { ChildProcessSpawner } from "effect/unstable/process";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   compareProfileEvaluation,
   executeProfileEvaluation,
   readProfileEvaluationPlan,
   runProfileEvaluateCommand,
+  profileCommand,
+  type ProfileEvaluationServices,
   ProfileEvaluationRestorationError,
 } from "../src/profile-evaluation.js";
 import type { RoleRunEvidence, TaskEvidence } from "../src/task-evidence.js";
 import type { RepositoryResource, TaskResource } from "@usine/task-authority";
+import {
+  inspectRepository as inspectServerRepository,
+  registerRepository as registerServerRepository,
+  submitTask as submitServerTask,
+  taskEvidence as readServerTaskEvidence,
+  taskStatus as readServerTaskStatus,
+  followTask as followServerTask,
+  retryTask as retryServerTask,
+  type FollowOptions,
+} from "../src/server-client.js";
+import {
+  inspectRepository as inspectRuntimeRepository,
+  registerRepository as registerRuntimeRepository,
+  startUsineServer,
+} from "@usine/runtime";
+
+const cliTestLayer = Layer.mergeAll(
+  FileSystem.layerNoop({}),
+  Path.layer,
+  Stdio.layerTest({}),
+  Layer.succeed(
+    Terminal.Terminal,
+    Terminal.make({
+      columns: Effect.succeed(80),
+      rows: Effect.succeed(24),
+      readInput: Effect.die("unused"),
+      readLine: Effect.die("unused"),
+      display: () => Effect.void,
+    }),
+  ),
+  Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make(() => Effect.die("unused")),
+  ),
+);
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execa("git", args, { cwd })).stdout.trim();
 }
 
-async function fixture(pairDrift = false) {
+async function fixture(pairDrift = false, maxElapsedMs = 60_000) {
   const root = await mkdtemp(join(tmpdir(), "usine-profile-evaluation-"));
   await execa("git", ["init", "--initial-branch=main"], { cwd: root });
   await execa("git", ["config", "user.name", "Test"], { cwd: root });
@@ -35,7 +75,7 @@ async function fixture(pairDrift = false) {
     instructions,
     acceptance: ["The bounded evaluation outcome is observable."],
     nonGoals: ["No merge is authorized."],
-    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs },
     authorization: {
       source: `https://github.com/example/evaluation/issues/${issue}`,
       delivery: true,
@@ -907,6 +947,7 @@ describe("profile evaluate plan boundary", () => {
         throw new Error("submit failed");
       },
       followTask: async () => terminalTask("baseline-task"),
+      retryTask: async () => terminalTask("baseline-task"),
       taskEvidence: async (_url: string, taskId: string) => evidence(taskId),
     };
     await runProfileEvaluateCommand(
@@ -952,6 +993,7 @@ describe("profile evaluate plan boundary", () => {
         );
       },
       followTask: async (_url: string, taskId: string) => terminalTaskForEvaluation(taskId),
+      retryTask: async (_url: string, taskId: string) => terminalTaskForEvaluation(taskId),
       taskEvidence: async (_url: string, taskId: string) => minimalAcceptedEvidence(taskId),
     };
     const output: string[] = [];
@@ -1004,6 +1046,7 @@ describe("profile evaluate plan boundary", () => {
         taskId === "candidate-task" ? terminalTaskForEvaluation(taskId) : null,
       submitTask: async () => terminalTaskForEvaluation("baseline-task"),
       followTask: async () => terminalTaskForEvaluation("baseline-task"),
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => minimalAcceptedEvidence("candidate-task"),
     };
     await runProfileEvaluateCommand(
@@ -1014,6 +1057,44 @@ describe("profile evaluate plan boundary", () => {
     );
     expect(registrations).toEqual([]);
     process.exitCode = 0;
+  });
+
+  test("rejects a later existing waiting Task before any evaluation mutation", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    const candidateHash = await sha256(await readFile(join(value.root, "candidate.json")));
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: 1,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async (_url: string, taskId: string) =>
+        taskId === "candidate-task" ? waitingTaskForEvaluation(taskId, candidateHash) : null,
+      submitTask: async () => {
+        throw new Error("submission must not begin");
+      },
+      followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
+      taskEvidence: async () => minimalAcceptedEvidence("unused-task"),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("existing Task is waiting");
+    expect(registrations).toEqual([]);
   });
 
   test("reuses completed Tasks without changing the registration", async () => {
@@ -1049,6 +1130,7 @@ describe("profile evaluate plan boundary", () => {
         return terminalTaskForEvaluation("unused-task");
       },
       followTask: async () => terminalTaskForEvaluation("unused-task"),
+      retryTask: async () => terminalTaskForEvaluation("unused-task"),
       taskEvidence: async (_url: string, taskId: string) => minimalAcceptedEvidence(taskId),
     };
     await runProfileEvaluateCommand(
@@ -1059,6 +1141,69 @@ describe("profile evaluate plan boundary", () => {
     );
     expect(registrations).toEqual([]);
     expect(submissions).toEqual([]);
+    process.exitCode = 0;
+  });
+
+  test("passes the operator signal through the public profile command and removes listeners", async () => {
+    const value = await fixture();
+    const registrations: string[] = [];
+    let signalSeen: AbortSignal | undefined;
+    const services: ProfileEvaluationServices = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async () => null,
+      submitTask: async () => ({
+        ...terminalTaskForEvaluation("baseline-task"),
+        state: "admitted" as const,
+      }),
+      followTask: async (_url: string, taskId: string, options?: FollowOptions) => {
+        signalSeen = options?.signal;
+        return new Promise<TaskResource>((complete) => {
+          options?.signal?.addEventListener(
+            "abort",
+            () => complete(terminalTaskForEvaluation(taskId)),
+            { once: true },
+          );
+          process.emit("SIGINT");
+        });
+      },
+      retryTask: async (_url: string, taskId: string) => terminalTaskForEvaluation(taskId),
+      taskEvidence: async (_url: string, taskId: string) => minimalAcceptedEvidence(taskId),
+    };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const before = {
+      sigint: process.listenerCount("SIGINT"),
+      sigterm: process.listenerCount("SIGTERM"),
+    };
+    try {
+      await Effect.runPromise(
+        Command.runWith(profileCommand("http://server.test", value.environment, services), {
+          version: "test",
+          renderErrors: false,
+        })(["evaluate", value.planPath, "--json"]).pipe(Effect.provide(cliTestLayer)),
+      );
+    } finally {
+      stdout.mockRestore();
+    }
+    expect(signalSeen?.aborted).toBe(true);
+    expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
+    expect(process.listenerCount("SIGINT")).toBe(before.sigint);
+    expect(process.listenerCount("SIGTERM")).toBe(before.sigterm);
     process.exitCode = 0;
   });
 
@@ -1081,6 +1226,7 @@ describe("profile evaluate plan boundary", () => {
       taskStatus: async () => null,
       submitTask: async () => terminalTaskForEvaluation("baseline-task"),
       followTask: async () => terminalTaskForEvaluation("baseline-task"),
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => minimalAcceptedEvidence("baseline-task"),
     };
     await expect(
@@ -1115,6 +1261,7 @@ describe("profile evaluate plan boundary", () => {
       taskStatus: async () => null,
       submitTask: async () => terminalTaskForEvaluation("baseline-task"),
       followTask: async () => terminalTaskForEvaluation("baseline-task"),
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => {
         controller.abort();
         return minimalAcceptedEvidence("baseline-task");
@@ -1139,6 +1286,7 @@ describe("profile evaluate plan boundary", () => {
     const value = await fixture();
     const controller = new AbortController();
     const registrations: string[] = [];
+    let followAttempted = false;
     const services = {
       inspectRepository: async (): Promise<RepositoryResource> => ({
         id: "evaluation",
@@ -1158,15 +1306,18 @@ describe("profile evaluate plan boundary", () => {
           baseBranch: "main",
         };
       },
-      taskStatus: async () => null,
+      taskStatus: async (_url: string, taskId: string) =>
+        followAttempted ? terminalTaskForEvaluation(taskId) : null,
       submitTask: async () => ({
         ...terminalTaskForEvaluation("baseline-task"),
         state: "admitted" as const,
       }),
       followTask: async () => {
+        followAttempted = true;
         controller.abort();
         throw new Error("task follow cancelled");
       },
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => minimalAcceptedEvidence("baseline-task"),
     };
     await runProfileEvaluateCommand(
@@ -1182,6 +1333,198 @@ describe("profile evaluate plan boundary", () => {
     );
     expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
     process.exitCode = 0;
+  });
+
+  test("accepts a terminal status raced with cleanup follow timeout", async () => {
+    const value = await fixture();
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const registrations: string[] = [];
+    let statusCalls = 0;
+    let followCalls = 0;
+    const active = admittedTaskForEvaluation("baseline-task", Date.now() + 60_000);
+    const services = {
+      inspectRepository: async (): Promise<RepositoryResource> => ({
+        id: "evaluation",
+        revision: 1,
+        owner: "example",
+        name: "evaluation",
+        baseBranch: "main",
+      }),
+      registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
+        registrations.push(registration.implementerProfile);
+        return {
+          id: "evaluation",
+          revision: registrations.length,
+          owner: "example",
+          name: "evaluation",
+          baseBranch: "main",
+        };
+      },
+      taskStatus: async () => {
+        statusCalls += 1;
+        return statusCalls <= 2
+          ? null
+          : statusCalls === 3
+            ? active
+            : terminalTaskForEvaluation("baseline-task");
+      },
+      submitTask: async () => active,
+      followTask: async () => {
+        followCalls += 1;
+        if (followCalls === 1) return active;
+        throw new Error("cleanup follow reached its deadline");
+      },
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
+      taskEvidence: async () => minimalAcceptedEvidence("baseline-task"),
+    };
+    await expect(
+      executeProfileEvaluation(loaded, "http://server.test", undefined, services),
+    ).rejects.toThrow("Task baseline-task did not reach a durable stopping state");
+    expect(followCalls).toBe(2);
+    expect(statusCalls).toBe(4);
+    expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
+  });
+
+  test("waits for an active real Task to release its lease before restoring", async () => {
+    const value = await fixture(false, 5_000);
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-profile-evaluation-server-"));
+    const serverEnvironment = {
+      ...value.environment,
+      USINE_STATE_DIR: stateDirectory,
+      USINE_FORGE_PROFILE_EVALUATION_APP_SLUG: "test-app",
+      USINE_FORGE_PROFILE_EVALUATION_TEST_TOKEN: "test-token",
+      USINE_FORGE_PROFILE_EVALUATION_API_URL: "http://127.0.0.1:9",
+      USINE_FORGE_PROFILE_EVALUATION_REPOSITORY: "example/evaluation",
+    };
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((complete) => {
+      startedResolve = complete;
+    });
+    let guardRejected = false;
+    let launches = 0;
+    const server = await startUsineServer({
+      environment: serverEnvironment,
+      execute: async ({ authority, contract, result }) => {
+        launches += 1;
+        const reserved = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        startedResolve?.();
+        try {
+          await registerRuntimeRepository(stateDirectory, {
+            ...loaded.registration,
+            implementerProfile: "raced-profile",
+          });
+        } catch (error) {
+          guardRejected =
+            error instanceof Error &&
+            error.message === "cannot switch repository profiles while a Task is active";
+        }
+        await new Promise<void>((complete) => setTimeout(complete, 25));
+        return authority.block(
+          { taskId: result.taskId, revision: reserved.result.revision },
+          "observation cleanup test",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await registerRuntimeRepository(stateDirectory, loaded.registration);
+      let firstObservation = true;
+      const services = {
+        inspectRepository: inspectServerRepository,
+        registerRepository: registerServerRepository,
+        submitTask: submitServerTask,
+        taskStatus: readServerTaskStatus,
+        followTask: async (url: string, taskId: string, options: FollowOptions = {}) => {
+          if (firstObservation) {
+            firstObservation = false;
+            await started;
+            throw new Error("observation failed");
+          }
+          return followServerTask(url, taskId, options);
+        },
+        retryTask: retryServerTask,
+        taskEvidence: readServerTaskEvidence,
+      };
+      await expect(
+        executeProfileEvaluation(loaded, server.url, undefined, services),
+      ).rejects.toThrow("observation failed");
+      expect(guardRejected).toBe(true);
+      expect(launches).toBe(1);
+      await expect(readServerTaskStatus(server.url, "baseline-task")).resolves.toMatchObject({
+        state: "blocked",
+      });
+      await expect(inspectRuntimeRepository(stateDirectory, "evaluation")).resolves.toMatchObject({
+        implementerProfile: "prior-profile",
+        reviewerProfile: "fixed-reviewer",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("expires a real waiting Task through the existing retry path without relaunching it", async () => {
+    const value = await fixture(false, 500);
+    const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-profile-evaluation-waiting-"));
+    const serverEnvironment = {
+      ...value.environment,
+      USINE_STATE_DIR: stateDirectory,
+      USINE_FORGE_PROFILE_EVALUATION_APP_SLUG: "test-app",
+      USINE_FORGE_PROFILE_EVALUATION_TEST_TOKEN: "test-token",
+      USINE_FORGE_PROFILE_EVALUATION_API_URL: "http://127.0.0.1:9",
+      USINE_FORGE_PROFILE_EVALUATION_REPOSITORY: "example/evaluation",
+    };
+    let launches = 0;
+    const server = await startUsineServer({
+      environment: serverEnvironment,
+      execute: async ({ authority, contract, result }) => {
+        launches += 1;
+        const reserved = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        return authority.recordWaiting(
+          { taskId: result.taskId, revision: reserved.result.revision },
+          {
+            reason: "network_interruption",
+            resumeState: "admitted",
+            activation: reserved.activation,
+          },
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await registerRuntimeRepository(stateDirectory, loaded.registration);
+      const services = {
+        inspectRepository: inspectServerRepository,
+        registerRepository: registerServerRepository,
+        submitTask: submitServerTask,
+        taskStatus: readServerTaskStatus,
+        followTask: followServerTask,
+        retryTask: retryServerTask,
+        taskEvidence: readServerTaskEvidence,
+      };
+      await expect(
+        executeProfileEvaluation(loaded, server.url, undefined, services),
+      ).rejects.toThrow("waiting for an explicit retry");
+      expect(launches).toBe(1);
+      await expect(readServerTaskStatus(server.url, "baseline-task")).resolves.toMatchObject({
+        state: "blocked",
+      });
+      await expect(inspectRuntimeRepository(stateDirectory, "evaluation")).resolves.toMatchObject({
+        implementerProfile: "prior-profile",
+        reviewerProfile: "fixed-reviewer",
+      });
+    } finally {
+      await server.close();
+    }
   });
 
   test("keeps the primary failure observable when restoration also fails", async () => {
@@ -1213,6 +1556,7 @@ describe("profile evaluate plan boundary", () => {
         throw new Error("submit failed");
       },
       followTask: async () => terminalTaskForEvaluation("baseline-task"),
+      retryTask: async () => terminalTaskForEvaluation("baseline-task"),
       taskEvidence: async () => minimalAcceptedEvidence("baseline-task"),
     };
     await expect(
@@ -1257,6 +1601,32 @@ function terminalTaskForEvaluation(taskId: string, contractHash = "a".repeat(64)
       changesRequestedBatches: 0,
       restartRecoveries: 0,
     },
+  };
+}
+
+function admittedTaskForEvaluation(taskId: string, deadlineEpochMs: number): TaskResource {
+  return {
+    ...terminalTaskForEvaluation(taskId),
+    deadlineEpochMs,
+    state: "admitted",
+    candidateSha: null,
+    candidateFence: null,
+    check: null,
+    review: null,
+    activeActivation: null,
+  };
+}
+
+function waitingTaskForEvaluation(taskId: string, contractHash = "a".repeat(64)): TaskResource {
+  return {
+    ...terminalTaskForEvaluation(taskId, contractHash),
+    state: "waiting",
+    candidateSha: null,
+    candidateFence: null,
+    check: null,
+    review: null,
+    waiting: { reason: "network_interruption" },
+    retryable: true,
   };
 }
 

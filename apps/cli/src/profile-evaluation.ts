@@ -23,6 +23,7 @@ import {
   inspectRepository,
   registerRepository,
   submitTask,
+  retryTask,
   taskEvidence,
   taskStatus,
 } from "./server-client.js";
@@ -118,6 +119,7 @@ export interface ProfileEvaluationServices {
   readonly submitTask: typeof submitTask;
   readonly taskStatus: typeof taskStatus;
   readonly followTask: typeof followTask;
+  readonly retryTask: typeof retryTask;
   readonly taskEvidence: typeof taskEvidence;
 }
 
@@ -127,6 +129,7 @@ const defaultServices: ProfileEvaluationServices = {
   submitTask,
   taskStatus,
   followTask,
+  retryTask,
   taskEvidence,
 };
 
@@ -147,6 +150,16 @@ export class ProfileEvaluationRestorationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "ProfileEvaluationRestorationError";
+  }
+}
+
+export class ProfileEvaluationCleanupError extends Error {
+  readonly code = "evaluation_task_cleanup_failed";
+  readonly kind = "server" as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ProfileEvaluationCleanupError";
   }
 }
 
@@ -263,7 +276,11 @@ export async function readProfileEvaluationPlan(
   return { plan, contracts, registration, repositoryRoot, profileSelections };
 }
 
-export function profileCommand(serverUrl: string, environment: NodeJS.ProcessEnv = process.env) {
+export function profileCommand(
+  serverUrl: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  services: ProfileEvaluationServices = defaultServices,
+) {
   const evaluate = Command.make(
     "evaluate",
     {
@@ -273,10 +290,18 @@ export function profileCommand(serverUrl: string, environment: NodeJS.ProcessEnv
     },
     (options) =>
       Effect.promise(() =>
-        runProfileEvaluateCommand(
-          { planPath: options.planPath, subjectRole: options.subjectRole, json: options.json },
-          serverUrl,
-          environment,
+        withProfileEvaluationSignals((signal) =>
+          runProfileEvaluateCommand(
+            {
+              planPath: options.planPath,
+              subjectRole: options.subjectRole,
+              json: options.json,
+              signal,
+            },
+            serverUrl,
+            environment,
+            services,
+          ),
         ),
       ),
   );
@@ -343,6 +368,7 @@ export async function executeProfileEvaluation(
   throwIfAborted(signal);
   const existingTasks = await preflightExistingTasks(loaded, serverUrl, services);
   let registrationChanged = false;
+  let inFlightTask: { taskId: string; deadlineEpochMs: number } | undefined;
   let primaryError: unknown;
   let failed = false;
   let contractIndex = 0;
@@ -369,6 +395,8 @@ export async function executeProfileEvaluation(
             repositoryId: plan.repositoryId,
           });
         }
+        if (!isTerminalState(task.state))
+          inFlightTask = { taskId: task.taskId, deadlineEpochMs: task.deadlineEpochMs };
         if (!isTerminalState(task.state) && !isWaitingState(task.state))
           task = await services.followTask(serverUrl, task.taskId, {
             timeoutMs: contract.budget.maxElapsedMs,
@@ -378,6 +406,7 @@ export async function executeProfileEvaluation(
           throw new Error(`Task ${task.taskId} did not reach a durable stopping state`);
         if (task.state === "waiting")
           throw new Error(`Task ${task.taskId} is waiting for an explicit retry`);
+        inFlightTask = undefined;
         const evidence = await services.taskEvidence(serverUrl, task.taskId);
         if (!evidence) throw new Error(`Task evidence is unavailable for ${task.taskId}`);
         throwIfAborted(signal);
@@ -394,18 +423,34 @@ export async function executeProfileEvaluation(
     failed = true;
     primaryError = error;
   }
+  let cleanupError: unknown;
+  if (failed && inFlightTask)
+    try {
+      await waitForTerminalTask(inFlightTask, serverUrl, services);
+      inFlightTask = undefined;
+    } catch (error) {
+      cleanupError = error;
+    }
   let restorationError: unknown;
-  if (registrationChanged)
+  if (registrationChanged && cleanupError === undefined)
     try {
       await services.registerRepository(serverUrl, originalRegistration);
     } catch (error) {
       restorationError = error;
     }
-  if (failed && restorationError !== undefined) {
+  if (failed && (cleanupError !== undefined || restorationError !== undefined)) {
     const cause = new AggregateError(
-      [primaryError, restorationError],
-      "evaluation and Repository restoration failed",
+      [
+        primaryError,
+        ...(cleanupError === undefined ? [] : [cleanupError]),
+        ...(restorationError === undefined ? [] : [restorationError]),
+      ],
+      cleanupError === undefined
+        ? "evaluation and Repository restoration failed"
+        : "evaluation cleanup failed before Repository restoration",
     );
+    if (cleanupError !== undefined)
+      throw new ProfileEvaluationCleanupError(cause.message, { cause });
     throw new ProfileEvaluationRestorationError(cause.message, { cause });
   }
   if (failed) throw primaryError;
@@ -421,6 +466,181 @@ export async function executeProfileEvaluation(
     candidate: expectedEvidenceProfile(loaded.profileSelections.candidate),
     reviewer: expectedEvidenceProfile(loaded.profileSelections.reviewer),
   });
+}
+
+async function waitForTerminalTask(
+  task: { taskId: string; deadlineEpochMs: number },
+  serverUrl: string,
+  services: ProfileEvaluationServices,
+): Promise<void> {
+  while (true) {
+    let current = await cleanupTaskStatus(task, serverUrl, services, "during cleanup");
+    if (isTerminalState(current.state)) return;
+    if (isWaitingState(current.state)) return await expireWaitingTask(task, serverUrl, services);
+    const remainingMs = task.deadlineEpochMs - Date.now();
+    if (remainingMs <= 0)
+      return await rereadAtCleanupDeadline(task, serverUrl, services, undefined);
+    try {
+      current = await services.followTask(serverUrl, task.taskId, {
+        timeoutMs: Math.min(remainingMs, Math.max(0, current.deadlineEpochMs - Date.now())),
+      });
+    } catch (error) {
+      let reread: import("@usine/task-authority").TaskResource;
+      try {
+        reread = await cleanupTaskStatus(
+          task,
+          serverUrl,
+          services,
+          "after cleanup observation failed",
+        );
+      } catch (statusError) {
+        throw new ProfileEvaluationCleanupError(
+          `Task ${task.taskId} could not be rechecked after cleanup observation failed; Repository restoration was not attempted`,
+          { cause: new AggregateError([error, statusError], "cleanup observation failed") },
+        );
+      }
+      if (isTerminalState(reread.state)) return;
+      if (isWaitingState(reread.state)) return await expireWaitingTask(task, serverUrl, services);
+      if (Date.now() >= task.deadlineEpochMs)
+        throw new ProfileEvaluationCleanupError(
+          `Task ${task.taskId} did not reach a terminal state at its cleanup deadline; Repository restoration was not attempted`,
+          { cause: error },
+        );
+      await waitForCleanupInterval(task.deadlineEpochMs);
+      continue;
+    }
+    if (isTerminalState(current.state)) return;
+    if (isWaitingState(current.state)) return await expireWaitingTask(task, serverUrl, services);
+    if (Date.now() >= task.deadlineEpochMs)
+      return await rereadAtCleanupDeadline(task, serverUrl, services, undefined);
+    await waitForCleanupInterval(task.deadlineEpochMs);
+  }
+}
+
+async function rereadAtCleanupDeadline(
+  task: { taskId: string; deadlineEpochMs: number },
+  serverUrl: string,
+  services: ProfileEvaluationServices,
+  followError: unknown,
+): Promise<void> {
+  let current: import("@usine/task-authority").TaskResource;
+  try {
+    current = await cleanupTaskStatus(task, serverUrl, services, "at its cleanup deadline");
+  } catch (error) {
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} could not be rechecked at its cleanup deadline; Repository restoration was not attempted`,
+      {
+        cause:
+          followError === undefined
+            ? error
+            : new AggregateError([followError, error], "cleanup observation failed"),
+      },
+    );
+  }
+  if (isTerminalState(current.state)) return;
+  if (isWaitingState(current.state)) return await expireWaitingTask(task, serverUrl, services);
+  throw new ProfileEvaluationCleanupError(
+    `Task ${task.taskId} did not reach a terminal state at its cleanup deadline; Repository restoration was not attempted`,
+    { cause: followError },
+  );
+}
+
+async function cleanupTaskStatus(
+  task: { taskId: string },
+  serverUrl: string,
+  services: ProfileEvaluationServices,
+  point: string,
+): Promise<import("@usine/task-authority").TaskResource> {
+  try {
+    const current = await services.taskStatus(serverUrl, task.taskId);
+    if (current) return current;
+  } catch (error) {
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} could not be observed ${point}; Repository restoration was not attempted`,
+      { cause: error },
+    );
+  }
+  throw new ProfileEvaluationCleanupError(
+    `Task ${task.taskId} disappeared ${point}; Repository restoration was not attempted`,
+  );
+}
+
+async function waitForCleanupInterval(deadlineEpochMs: number): Promise<void> {
+  await new Promise<void>((complete) =>
+    setTimeout(complete, Math.min(100, Math.max(0, deadlineEpochMs - Date.now()))),
+  );
+}
+
+async function expireWaitingTask(
+  task: { taskId: string; deadlineEpochMs: number },
+  serverUrl: string,
+  services: ProfileEvaluationServices,
+): Promise<void> {
+  await waitUntilDeadline(task.deadlineEpochMs);
+  let waiting: import("@usine/task-authority").TaskResource | null;
+  try {
+    waiting = await services.taskStatus(serverUrl, task.taskId);
+  } catch (error) {
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} could not be rechecked at its waiting deadline; Repository restoration was not attempted`,
+      { cause: error },
+    );
+  }
+  if (!waiting)
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} disappeared at its waiting deadline; Repository restoration was not attempted`,
+    );
+  if (isTerminalState(waiting.state)) return;
+  if (!isWaitingState(waiting.state))
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} changed to nonterminal state ${waiting.state} at its waiting deadline; Repository restoration was not attempted`,
+    );
+  let expired: import("@usine/task-authority").TaskResource;
+  try {
+    expired = await services.retryTask(serverUrl, task.taskId);
+  } catch (error) {
+    const latest = await services.taskStatus(serverUrl, task.taskId).catch(() => null);
+    if (latest && isTerminalState(latest.state)) return;
+    throw new ProfileEvaluationCleanupError(
+      `Task ${task.taskId} could not be expired through its existing retry path; Repository restoration was not attempted`,
+      { cause: error },
+    );
+  }
+  if (isTerminalState(expired.state)) return;
+  throw new ProfileEvaluationCleanupError(
+    `Task ${task.taskId} did not become terminal when its waiting deadline expired; Repository restoration was not attempted`,
+  );
+}
+
+async function waitUntilDeadline(deadlineEpochMs: number): Promise<void> {
+  while (true) {
+    const remainingMs = deadlineEpochMs - Date.now();
+    if (remainingMs <= 0) return;
+    await new Promise<void>((complete) => setTimeout(complete, Math.min(remainingMs, 60_000)));
+  }
+}
+
+function withProfileEvaluationSignals<A>(action: (signal: AbortSignal) => Promise<A>): Promise<A> {
+  const controller = new AbortController();
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  };
+  const onSignal = (): void => {
+    cleanup();
+    controller.abort();
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    return action(controller.signal).finally(cleanup);
+  } catch (error) {
+    cleanup();
+    return Promise.reject(error);
+  }
 }
 
 async function preflightExistingTasks(
@@ -444,6 +664,10 @@ async function preflightExistingTasks(
           resolve(loaded.repositoryRoot, contractPath),
           loaded.registration,
         );
+        if (isWaitingState(task.state))
+          throw new ProfileEvaluationValidationError(
+            `${contract.id}: existing Task is waiting; explicit retry is required before evaluation`,
+          );
         tasks.set(contract.id, task);
       }
     }
