@@ -161,11 +161,11 @@ export interface ReviewerEvaluationArchiveManifest {
 
 export interface ReviewerEvaluationServices {
   review(input: ReviewerEvaluationReviewInput): Promise<ReviewAttemptObservation>;
-  readArchiveManifest?(
+  readonly readArchiveManifest?: (
     archiveId: string,
     environment: NodeJS.ProcessEnv,
     expectedTaskId: string,
-  ): Promise<ReviewerEvaluationArchiveManifest | null>;
+  ) => Promise<ReviewerEvaluationArchiveManifest | null>;
 }
 
 const defaultServices: ReviewerEvaluationServices = {

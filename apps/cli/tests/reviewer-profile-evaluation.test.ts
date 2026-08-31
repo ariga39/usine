@@ -622,10 +622,12 @@ describe("reviewer profile evaluation public path", () => {
   test("treats a missing current archive manifest as inconclusive", async () => {
     const value = await fixture();
     const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
-    const services = withCurrentArchive(async (input) =>
-      observation(input, "approved", loaded.profileSelections.baseline.configSha256!),
-    );
-    services.readArchiveManifest = async () => null;
+    const services = {
+      ...withCurrentArchive(async (input) =>
+        observation(input, "approved", loaded.profileSelections.baseline.configSha256!),
+      ),
+      readArchiveManifest: async () => null,
+    };
     await runProfileEvaluateCommand(
       { planPath: value.planPath, subjectRole: "reviewer", json: true },
       "http://server.test",
