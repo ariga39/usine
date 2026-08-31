@@ -685,6 +685,77 @@ describe("profile evaluate plan boundary", () => {
     expect(report(failedBaseline, acceptedCandidate).recommendation).toBe("candidate");
   });
 
+  test("does not require a reviewer after a failed project check", () => {
+    const plan = {
+      schemaVersion: 1 as const,
+      id: "failed-check-plan",
+      repositoryId: "evaluation",
+      baseSha: "a".repeat(40),
+      subjectRole: "implementer" as const,
+      changedFactor: "model_stack" as const,
+      baselineProfile: "baseline-profile",
+      candidateProfile: "candidate-profile",
+      reviewerProfile: "fixed-reviewer",
+      maxTasks: 2,
+      usineBuild: "a".repeat(40),
+      reportPath: "report.json",
+      registrationPath: "repository.json",
+      pairs: [],
+    };
+    const acceptedBaseline = evaluationEvidence("baseline-profile", "baseline-task", [1]);
+    const acceptedCandidate = evaluationEvidence("candidate-profile", "candidate-task", [1]);
+    const failedCheck = {
+      ...acceptedCandidate,
+      roleRuns: { ...acceptedCandidate.roleRuns, reviewer: [] },
+      task: {
+        ...acceptedCandidate.task,
+        state: "blocked" as const,
+        relation: "blocked" as const,
+        check: { sha: "b".repeat(40), status: "failed" as const, exitCode: 1 },
+        review: null,
+      },
+    };
+    const report = (baselineEvidence: TaskEvidence, candidateEvidence: TaskEvidence) =>
+      compareProfileEvaluation(plan, {
+        baseline: [
+          {
+            id: "baseline",
+            pairId: "case",
+            repetition: 1,
+            taskId: baselineEvidence.taskId,
+            evidence: baselineEvidence,
+          },
+        ],
+        candidate: [
+          {
+            id: "candidate",
+            pairId: "case",
+            repetition: 1,
+            taskId: candidateEvidence.taskId,
+            evidence: candidateEvidence,
+          },
+        ],
+      });
+
+    expect(report(acceptedBaseline, failedCheck).recommendation).toBe("baseline");
+    expect(
+      report(
+        {
+          ...acceptedBaseline,
+          roleRuns: { ...acceptedBaseline.roleRuns, reviewer: [] },
+          task: {
+            ...acceptedBaseline.task,
+            state: "blocked" as const,
+            relation: "blocked" as const,
+            check: { sha: "b".repeat(40), status: "failed" as const, exitCode: 1 },
+            review: null,
+          },
+        },
+        acceptedCandidate,
+      ).recommendation,
+    ).toBe("candidate");
+  });
+
   test("binds evidence to the expected full profile checksum", () => {
     const plan = {
       schemaVersion: 1 as const,

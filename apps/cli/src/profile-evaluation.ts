@@ -582,7 +582,7 @@ function profileReport(
         );
       }
     }
-    if (evidence.roleRuns.reviewer.length === 0) {
+    if (reviewerEvidenceRequired(evidence) && evidence.roleRuns.reviewer.length === 0) {
       if (correctness !== "failed") correctness = "unknown";
       reasons.push(`${task.taskId}:reviewer_profile_unknown`);
     }
@@ -592,6 +592,16 @@ function profileReport(
     reasons.push(`${profile}:missing_tasks`);
   }
   return { profile, correctness, metrics: aggregateMetrics(tasks), reasons };
+}
+
+function reviewerEvidenceRequired(evidence: EvaluationTaskReport["evidence"]): boolean {
+  return (
+    evidence.task.check?.status === "passed" ||
+    evidence.task.review !== null ||
+    evidence.task.state === "reviewed" ||
+    evidence.task.state === "reviewed_pr" ||
+    evidence.task.state === "merged"
+  );
 }
 
 interface ExpectedEvidenceProfile {
