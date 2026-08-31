@@ -736,9 +736,7 @@ function safeProfileIdentity(value: string | null | undefined): string | null {
 }
 
 function safeExperimentalIdentity(value: string | null): string | null {
-  if (typeof value !== "string" || !identifier.test(value)) return null;
-  const labels = value.split(".");
-  return labels.length > 1 && /^[A-Za-z]+$/.test(labels.at(-1)!) ? null : value;
+  return typeof value === "string" && identifier.test(value) ? value : null;
 }
 
 function safeSha256(value: string | null): string | null {
@@ -1345,6 +1343,16 @@ async function assertSafeFilePath(
     throw new ReviewerEvaluationValidationError(
       `${label} must be inside the evaluation Repository`,
     );
+  let rootEntry;
+  try {
+    rootEntry = await lstat(repositoryRoot);
+  } catch {
+    throw new ReviewerEvaluationValidationError(label + " has an unsafe Repository root");
+  }
+  if (rootEntry.isSymbolicLink())
+    throw new ReviewerEvaluationValidationError(label + " must not use symbolic links");
+  if (!rootEntry.isDirectory())
+    throw new ReviewerEvaluationValidationError(label + " has a non-directory Repository root");
   let current = repositoryRoot;
   for (const component of pathRelative.split("/")) {
     current = join(current, component);

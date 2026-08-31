@@ -486,6 +486,73 @@ describe("reviewer profile evaluation public path", () => {
     process.exitCode = 0;
   });
 
+  test("retains bounded dotted model and provider identities", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const services = withCurrentArchive(async (input) => {
+      const result = observation(
+        input,
+        "approved",
+        loaded.profileSelections.baseline.configSha256!,
+      );
+      return {
+        ...result,
+        effectiveProfile: {
+          ...result.effectiveProfile!,
+          model: "vendor.model",
+          modelProvider: "vendor.provider",
+        },
+      };
+    });
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    const report = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    ) as {
+      baseline: {
+        runs: Array<{
+          effectiveProfile: { model: string | null; modelProvider: string | null } | null;
+        }>;
+      };
+    };
+    expect(report.baseline.runs[0]!.effectiveProfile).toMatchObject({
+      model: "vendor.model",
+      modelProvider: "vendor.provider",
+    });
+    process.exitCode = 0;
+  });
+
+  test("rejects a plan reached through a symlinked evaluation Repository root", async () => {
+    const value = await fixture();
+    const linkedRoot = join(value.root, "evaluation-root-link");
+    await symlink(value.root, linkedRoot);
+    let providerCalls = 0;
+    await runProfileEvaluateCommand(
+      {
+        planPath: join(linkedRoot, "reviewer-evaluation-plan.json"),
+        subjectRole: "reviewer",
+        json: true,
+      },
+      "http://server.test",
+      value.environment,
+      undefined,
+      {
+        review: async () => {
+          providerCalls += 1;
+          throw new Error("must not run");
+        },
+      },
+    );
+    expect(providerCalls).toBe(0);
+    expect(process.exitCode).toBe(7);
+    process.exitCode = 0;
+  });
+
   test("makes missing, drifted, and incomplete role evidence inconclusive", async () => {
     const value = await fixture();
     const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
