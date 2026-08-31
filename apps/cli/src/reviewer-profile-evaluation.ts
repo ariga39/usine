@@ -1,0 +1,1098 @@
+import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import {
+  resolveTaskContract,
+  repositoryRegistrationSchema,
+  taskContractSchema,
+  type RepositorySnapshot,
+  type ReviewVerdict,
+  type TaskContract,
+} from "@usine/task-authority";
+import {
+  reviewCandidateWithProfile,
+  resolveCodexProfile,
+  type ReviewerQualityGateInput,
+  type ReviewAttemptObservation,
+} from "@usine/runtime";
+import { runCommand } from "./cli-failure.js";
+
+type EffectiveSessionProfile = NonNullable<ReviewAttemptObservation["effectiveProfile"]>;
+type CheckResult = ReviewerQualityGateInput["check"];
+
+const execFile = promisify(execFileCallback);
+const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const exactSha = /^[0-9a-f]{40}$/;
+const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+export type ReviewerEvaluationChangedFactor =
+  | "model_stack"
+  | "reasoning"
+  | "developer_instructions";
+
+export interface ReviewerEvaluationCase {
+  readonly id: string;
+  readonly repetition: number;
+  readonly contractPath: string;
+  readonly candidateSha: string;
+  readonly checkPath: string;
+  readonly labelPath: string;
+}
+
+export interface ReviewerEvaluationPlan {
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly repositoryId: string;
+  readonly baseSha: string;
+  readonly subjectRole: "reviewer";
+  readonly changedFactor: ReviewerEvaluationChangedFactor;
+  readonly baselineProfile: string;
+  readonly candidateProfile: string;
+  readonly maxRuns: number;
+  readonly usineBuild: string;
+  readonly reportPath: string;
+  readonly registrationPath: string;
+  readonly cases: readonly ReviewerEvaluationCase[];
+}
+
+export interface ReviewerEvaluationLabel {
+  readonly verdict: "approved" | "changes_requested";
+  readonly rationale: string;
+  readonly reference: string;
+  readonly protected: boolean;
+}
+
+export interface ReviewerEvaluationCaseInput {
+  readonly case: ReviewerEvaluationCase;
+  readonly contract: ReviewerQualityGateInput["contract"];
+  readonly candidateSha: string;
+  readonly check: ReviewerQualityGateInput["check"];
+  readonly label: ReviewerEvaluationLabel;
+}
+
+export interface ReviewerEvaluationRunReport {
+  readonly caseId: string;
+  readonly repetition: number;
+  readonly profile: string;
+  readonly candidateSha: string;
+  readonly expected: ReviewerEvaluationLabel;
+  readonly observed: {
+    readonly sha: string | null;
+    readonly verdict: ReviewVerdict["verdict"] | null;
+    readonly findingCount: number | null;
+  };
+  readonly correctness: "correct" | "incorrect" | "inconclusive";
+  readonly hardRegression: boolean;
+  readonly elapsedMs: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly toolFailures: number | null;
+  readonly requestedProfile: string | null;
+  readonly effectiveProfile: EffectiveSessionProfile | null;
+  readonly archive: ReviewAttemptObservation["archive"] | null;
+  readonly inconclusiveReason: string | null;
+}
+
+export interface ReviewerEvaluationMetricSet {
+  readonly correctVerdicts: number | null;
+  readonly falseApprovals: number | null;
+  readonly falseChangesRequested: number | null;
+  readonly inconclusive: number | null;
+  readonly elapsedMs: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly toolFailures: number | null;
+}
+
+export interface ReviewerEvaluationProfileReport {
+  readonly profile: string;
+  readonly correctness: "passed" | "failed" | "unknown";
+  readonly metrics: ReviewerEvaluationMetricSet;
+  readonly runs: readonly ReviewerEvaluationRunReport[];
+}
+
+export interface ReviewerEvaluationReport {
+  readonly schemaVersion: 1;
+  readonly planId: string;
+  readonly repositoryId: string;
+  readonly subjectRole: "reviewer";
+  readonly changedFactor: ReviewerEvaluationChangedFactor;
+  readonly usineBuild: string;
+  readonly reportPath: string;
+  readonly baseline: ReviewerEvaluationProfileReport;
+  readonly candidate: ReviewerEvaluationProfileReport;
+  readonly comparison: {
+    readonly baseline: ReviewerEvaluationMetricSet;
+    readonly candidate: ReviewerEvaluationMetricSet;
+    readonly delta: ReviewerEvaluationMetricSet;
+  };
+  readonly recommendation: "baseline" | "candidate" | "inconclusive";
+  readonly inconclusiveReasons: readonly string[];
+}
+
+export interface ReviewerEvaluationReviewInput {
+  readonly contract: ReviewerQualityGateInput["contract"];
+  readonly candidateSha: string;
+  readonly check: ReviewerQualityGateInput["check"];
+  readonly profile: string;
+  readonly repository: ReviewerQualityGateInput["repository"];
+  readonly environment: NodeJS.ProcessEnv;
+  readonly deadlineEpochMs: number;
+  readonly cycle: number;
+  readonly signal?: AbortSignal;
+  readonly onObservation?: ReviewerQualityGateInput["onObservation"];
+}
+
+export interface ReviewerEvaluationServices {
+  review(input: ReviewerEvaluationReviewInput): Promise<ReviewAttemptObservation>;
+}
+
+const defaultServices: ReviewerEvaluationServices = {
+  review: reviewCandidateWithProfile,
+};
+
+export class ReviewerEvaluationValidationError extends Error {
+  readonly code = "invalid_reviewer_evaluation_plan";
+  readonly kind = "validation" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewerEvaluationValidationError";
+  }
+}
+
+export async function readReviewerEvaluationPlan(
+  planPath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<{
+  plan: ReviewerEvaluationPlan;
+  cases: readonly ReviewerEvaluationCaseInput[];
+  registration: RepositorySnapshot;
+  repositoryRoot: string;
+  profileSelections: {
+    readonly baseline: Awaited<ReturnType<typeof resolveReviewerProfile>>;
+    readonly candidate: Awaited<ReturnType<typeof resolveReviewerProfile>>;
+  };
+}> {
+  const absolutePlanPath = await realpath(resolve(planPath)).catch(() => {
+    throw new ReviewerEvaluationValidationError("reviewer evaluation plan is unreadable");
+  });
+  const plan = normalizePlan(parseJson(await readUtf8(absolutePlanPath, "evaluation plan")));
+  validatePlanShape(plan);
+  const repositoryRoot = await repositoryRootFor(absolutePlanPath);
+  await requireCommittedFile(repositoryRoot, absolutePlanPath, "evaluation plan");
+  if (!(await isAncestor(repositoryRoot, plan.baseSha)))
+    throw new ReviewerEvaluationValidationError(
+      "plan baseSha is not an ancestor of the evaluation Repository",
+    );
+  if ((await readUsineSourceCommit()) !== plan.usineBuild)
+    throw new ReviewerEvaluationValidationError(
+      "plan is bound to a different Usine source checkout commit",
+    );
+
+  const registration = await readRegistration(plan, absolutePlanPath);
+  await validateRegistration(plan, registration, repositoryRoot);
+  const reportPath = resolveCaseFile(repositoryRoot, plan.reportPath, "report");
+  if (reportPath === absolutePlanPath)
+    throw new ReviewerEvaluationValidationError("report path must not replace the plan");
+
+  const cases: ReviewerEvaluationCaseInput[] = [];
+  for (const item of plan.cases) {
+    const contractPath = resolveCaseFile(repositoryRoot, item.contractPath, "Task Contract");
+    const checkPath = resolveCaseFile(repositoryRoot, item.checkPath, "check evidence");
+    const labelPath = resolveCaseFile(repositoryRoot, item.labelPath, "external label");
+    for (const path of [contractPath, checkPath, labelPath]) {
+      await requireCommittedFile(repositoryRoot, path, "case input");
+    }
+    const contract = parseContract(await readUtf8(contractPath, "Task Contract"));
+    if (contract.repositoryId !== plan.repositoryId || contract.baseSha !== plan.baseSha)
+      throw new ReviewerEvaluationValidationError(
+        `${item.id}:${item.repetition}: Task Contract identity drifts from the plan`,
+      );
+    if (contract.authorization.merge === true)
+      throw new ReviewerEvaluationValidationError(
+        `${item.id}:${item.repetition}: evaluation contract must not grant merge authority`,
+      );
+    validateContractRepository(contract, registration, item.id);
+    const candidateSha = await validateCandidate(repositoryRoot, plan.baseSha, item);
+    const check = parseCheck(await readUtf8(checkPath, "check evidence"));
+    if (check.status !== "passed" || check.sha !== candidateSha)
+      throw new ReviewerEvaluationValidationError(
+        `${item.id}:${item.repetition}: check evidence must be passing for the exact Candidate SHA`,
+      );
+    const label = parseLabel(await readUtf8(labelPath, "external label"));
+    cases.push({
+      case: item,
+      contract: resolveTaskContract(contract, registration),
+      candidateSha,
+      check,
+      label,
+    });
+  }
+
+  const profileSelections = {
+    baseline: await resolveReviewerProfile(plan.baselineProfile, environment),
+    candidate: await resolveReviewerProfile(plan.candidateProfile, environment),
+  };
+  validateProfileFactor(plan, profileSelections.baseline, profileSelections.candidate);
+  return { plan, cases, registration, repositoryRoot, profileSelections };
+}
+
+export async function runReviewerProfileEvaluateCommand(
+  options: { readonly planPath: string; readonly json: boolean; readonly signal?: AbortSignal },
+  environment: NodeJS.ProcessEnv = process.env,
+  services: ReviewerEvaluationServices = defaultServices,
+): Promise<void> {
+  return runCommand("reviewer_profile_evaluate_failed", async () => {
+    const loaded = await readReviewerEvaluationPlan(options.planPath, environment);
+    const report = await executeReviewerProfileEvaluation(
+      loaded,
+      environment,
+      options.signal,
+      services,
+    );
+    const reportJson = `${JSON.stringify(report)}\n`;
+    const path = resolve(loaded.repositoryRoot, loaded.plan.reportPath);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, reportJson, "utf8");
+    process.stdout.write(options.json ? reportJson : renderReport(report));
+  });
+}
+
+export async function executeReviewerProfileEvaluation(
+  loaded: Awaited<ReturnType<typeof readReviewerEvaluationPlan>>,
+  environment: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
+  services: ReviewerEvaluationServices = defaultServices,
+): Promise<ReviewerEvaluationReport> {
+  const reports: Record<"baseline" | "candidate", ReviewerEvaluationRunReport[]> = {
+    baseline: [],
+    candidate: [],
+  };
+  for (const item of loaded.cases) {
+    for (const side of ["baseline", "candidate"] as const) {
+      throwIfAborted(signal);
+      const profile =
+        side === "baseline" ? loaded.plan.baselineProfile : loaded.plan.candidateProfile;
+      const startedAt = Date.now();
+      let observation: ReviewAttemptObservation | null = null;
+      let failure: string | null = null;
+      let toolFailures = 0;
+      try {
+        observation = await services.review({
+          contract: item.contract,
+          candidateSha: item.candidateSha,
+          check: item.check,
+          profile,
+          repository: loaded.registration,
+          environment,
+          deadlineEpochMs: startedAt + item.contract.budget.maxElapsedMs,
+          cycle: item.case.repetition,
+          signal,
+          onObservation: (event) => {
+            if (
+              (event.type === "tool_completed" || event.type === "mcp_tool_completed") &&
+              event.outcome === "failed"
+            )
+              toolFailures += 1;
+          },
+        });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        failure = error instanceof Error ? error.message : "review execution failed";
+      }
+      reports[side].push(
+        runReport(item, profile, observation, failure, Date.now() - startedAt, toolFailures),
+      );
+    }
+  }
+  return compareReviewerProfileEvaluation(loaded.plan, reports, {
+    baseline: expectedProfile(loaded.profileSelections.baseline),
+    candidate: expectedProfile(loaded.profileSelections.candidate),
+  });
+}
+
+export function compareReviewerProfileEvaluation(
+  plan: ReviewerEvaluationPlan,
+  reports: Record<"baseline" | "candidate", ReviewerEvaluationRunReport[]>,
+  expectedProfiles?: {
+    readonly baseline: ExpectedReviewerProfile;
+    readonly candidate: ExpectedReviewerProfile;
+  },
+): ReviewerEvaluationReport {
+  const baseline = profileReport(
+    plan.baselineProfile,
+    reports.baseline,
+    expectedProfiles?.baseline,
+  );
+  const candidate = profileReport(
+    plan.candidateProfile,
+    reports.candidate,
+    expectedProfiles?.candidate,
+  );
+  const reasons = [...new Set([...baseline.reasons, ...candidate.reasons])].toSorted();
+  const recommendationReasons = reasons.filter(
+    (reason) => !reason.endsWith(":protected_false_approval"),
+  );
+  const bothPassed = baseline.correctness === "passed" && candidate.correctness === "passed";
+  const comparable = bothPassed && reasons.length === 0;
+  const comparison = comparable
+    ? {
+        baseline: baseline.metrics,
+        candidate: candidate.metrics,
+        delta: metricDelta(baseline.metrics, candidate.metrics),
+      }
+    : { baseline: unknownMetrics(), candidate: unknownMetrics(), delta: unknownMetrics() };
+  let recommendation: ReviewerEvaluationReport["recommendation"] = "inconclusive";
+  if (
+    recommendationReasons.length === 0 &&
+    baseline.correctness === "passed" &&
+    candidate.correctness === "failed"
+  )
+    recommendation = "baseline";
+  else if (
+    recommendationReasons.length === 0 &&
+    baseline.correctness === "failed" &&
+    candidate.correctness === "passed"
+  )
+    recommendation = "candidate";
+  else if (comparable) {
+    const candidateBetter = strictlyLessOrEqual(candidate.metrics, baseline.metrics);
+    const baselineBetter = strictlyLessOrEqual(baseline.metrics, candidate.metrics);
+    if (candidateBetter && !baselineBetter) recommendation = "candidate";
+    else if (baselineBetter && !candidateBetter) recommendation = "baseline";
+  }
+  return {
+    schemaVersion: 1,
+    planId: plan.id,
+    repositoryId: plan.repositoryId,
+    subjectRole: "reviewer",
+    changedFactor: plan.changedFactor,
+    usineBuild: plan.usineBuild,
+    reportPath: plan.reportPath,
+    baseline: {
+      profile: baseline.profile,
+      correctness: baseline.correctness,
+      metrics: baseline.metrics,
+      runs: reports.baseline,
+    },
+    candidate: {
+      profile: candidate.profile,
+      correctness: candidate.correctness,
+      metrics: candidate.metrics,
+      runs: reports.candidate,
+    },
+    comparison,
+    recommendation,
+    inconclusiveReasons: reasons,
+  };
+}
+
+interface ExpectedReviewerProfile {
+  readonly configSha256: string;
+  readonly model: string;
+  readonly modelProvider: string | null;
+  readonly reasoningEffort: EffectiveSessionProfile["reasoningEffort"];
+  readonly developerInstructionsSha256: string | null;
+  readonly adapter: EffectiveSessionProfile["adapter"];
+}
+
+function expectedProfile(
+  selection: Awaited<ReturnType<typeof resolveReviewerProfile>>,
+): ExpectedReviewerProfile {
+  return {
+    configSha256: selection.configSha256 ?? "",
+    model: selection.model,
+    modelProvider:
+      typeof selection.config?.model_provider === "string" ? selection.config.model_provider : null,
+    reasoningEffort: selection.modelReasoningEffort ?? null,
+    developerInstructionsSha256: selection.developerInstructions
+      ? createHash("sha256").update(selection.developerInstructions, "utf8").digest("hex")
+      : null,
+    adapter: selection.adapter,
+  };
+}
+
+function profileReport(
+  profile: string,
+  runs: readonly ReviewerEvaluationRunReport[],
+  expected?: ExpectedReviewerProfile,
+): {
+  profile: string;
+  correctness: ReviewerEvaluationProfileReport["correctness"];
+  metrics: ReviewerEvaluationMetricSet;
+  reasons: string[];
+} {
+  let correctness: ReviewerEvaluationProfileReport["correctness"] = "passed";
+  const reasons: string[] = [];
+  for (const run of runs) {
+    if (run.correctness === "incorrect") correctness = "failed";
+    else if (run.correctness === "inconclusive" && correctness !== "failed")
+      correctness = "unknown";
+    if (run.inconclusiveReason) reasons.push(`${run.caseId}:${run.inconclusiveReason}`);
+    if (run.hardRegression) reasons.push(`${run.caseId}:protected_false_approval`);
+    if (expected && !matchesExpectedProfile(run, profile, expected)) {
+      if (correctness !== "failed") correctness = "unknown";
+      reasons.push(`${run.caseId}:reviewer_profile_drift`);
+    }
+  }
+  if (runs.length === 0) {
+    correctness = "unknown";
+    reasons.push(`${profile}:missing_runs`);
+  }
+  return { profile, correctness, metrics: aggregateMetrics(runs), reasons };
+}
+
+function matchesExpectedProfile(
+  run: ReviewerEvaluationRunReport,
+  profile: string,
+  expected: ExpectedReviewerProfile,
+): boolean {
+  const effective = run.effectiveProfile;
+  return (
+    run.requestedProfile === profile &&
+    effective !== null &&
+    effective.profileName === profile &&
+    effective.configSha256 === expected.configSha256 &&
+    effective.model === expected.model &&
+    effective.modelProvider === expected.modelProvider &&
+    effective.reasoningEffort === expected.reasoningEffort &&
+    effective.developerInstructionsSha256 === expected.developerInstructionsSha256 &&
+    effective.adapter === expected.adapter
+  );
+}
+
+function aggregateMetrics(
+  runs: readonly ReviewerEvaluationRunReport[],
+): ReviewerEvaluationMetricSet {
+  return {
+    correctVerdicts: sum(
+      runs.map((run) =>
+        run.correctness === "correct" ? 1 : run.correctness === "incorrect" ? 0 : null,
+      ),
+    ),
+    falseApprovals: sum(
+      runs.map((run) =>
+        run.correctness === "inconclusive"
+          ? null
+          : run.observed.verdict === "approved" && run.expected.verdict !== "approved"
+            ? 1
+            : 0,
+      ),
+    ),
+    falseChangesRequested: sum(
+      runs.map((run) =>
+        run.correctness === "inconclusive"
+          ? null
+          : run.observed.verdict === "changes_requested" &&
+              run.expected.verdict !== "changes_requested"
+            ? 1
+            : 0,
+      ),
+    ),
+    inconclusive: sum(runs.map((run) => (run.correctness === "inconclusive" ? 1 : 0))),
+    elapsedMs: sum(runs.map((run) => run.elapsedMs)),
+    inputTokens: sum(runs.map((run) => run.inputTokens)),
+    outputTokens: sum(runs.map((run) => run.outputTokens)),
+    toolFailures: sum(runs.map((run) => run.toolFailures)),
+  };
+}
+
+function runReport(
+  item: ReviewerEvaluationCaseInput,
+  profile: string,
+  observation: ReviewAttemptObservation | null,
+  failure: string | null,
+  elapsedMs: number,
+  observedToolFailures: number,
+): ReviewerEvaluationRunReport {
+  const verdict = observation?.review.verdict ?? null;
+  const actualSha = observation?.review.sha ?? null;
+  const correct = actualSha === item.candidateSha && verdict === item.label.verdict;
+  const incomplete =
+    observation === null || verdict === "inconclusive" || actualSha !== item.candidateSha;
+  const hardRegression =
+    !incomplete &&
+    item.label.protected &&
+    verdict === "approved" &&
+    item.label.verdict !== "approved";
+  const inconclusiveReason = failure
+    ? "provider_failure"
+    : actualSha !== null && actualSha !== item.candidateSha
+      ? "stale_candidate_sha"
+      : verdict === "inconclusive"
+        ? "inconclusive_verdict"
+        : observation === null
+          ? "review_evidence_unavailable"
+          : null;
+  return {
+    caseId: item.case.id,
+    repetition: item.case.repetition,
+    profile,
+    candidateSha: item.candidateSha,
+    expected: item.label,
+    observed: {
+      sha: actualSha,
+      verdict,
+      findingCount: observation?.review.findings.length ?? null,
+    },
+    correctness: incomplete ? "inconclusive" : correct ? "correct" : "incorrect",
+    hardRegression,
+    elapsedMs,
+    inputTokens: observation?.usage?.inputTokens ?? null,
+    outputTokens: observation?.usage?.outputTokens ?? null,
+    toolFailures: observation === null ? null : observedToolFailures,
+    requestedProfile: observation?.requestedProfile ?? null,
+    effectiveProfile: observation?.effectiveProfile ?? null,
+    archive: observation?.archive ?? null,
+    inconclusiveReason,
+  };
+}
+
+function sum(values: readonly (number | null)[]): number | null {
+  let total = 0;
+  for (const value of values) {
+    if (value === null) return null;
+    total += value;
+  }
+  return total;
+}
+
+function metricDelta(
+  baseline: ReviewerEvaluationMetricSet,
+  candidate: ReviewerEvaluationMetricSet,
+): ReviewerEvaluationMetricSet {
+  return {
+    correctVerdicts: difference(baseline.correctVerdicts, candidate.correctVerdicts),
+    falseApprovals: difference(baseline.falseApprovals, candidate.falseApprovals),
+    falseChangesRequested: difference(
+      baseline.falseChangesRequested,
+      candidate.falseChangesRequested,
+    ),
+    inconclusive: difference(baseline.inconclusive, candidate.inconclusive),
+    elapsedMs: difference(baseline.elapsedMs, candidate.elapsedMs),
+    inputTokens: difference(baseline.inputTokens, candidate.inputTokens),
+    outputTokens: difference(baseline.outputTokens, candidate.outputTokens),
+    toolFailures: difference(baseline.toolFailures, candidate.toolFailures),
+  };
+}
+
+function difference(left: number | null, right: number | null): number | null {
+  return left === null || right === null ? null : right - left;
+}
+
+function unknownMetrics(): ReviewerEvaluationMetricSet {
+  return {
+    correctVerdicts: null,
+    falseApprovals: null,
+    falseChangesRequested: null,
+    inconclusive: null,
+    elapsedMs: null,
+    inputTokens: null,
+    outputTokens: null,
+    toolFailures: null,
+  };
+}
+
+function strictlyLessOrEqual(
+  left: ReviewerEvaluationMetricSet,
+  right: ReviewerEvaluationMetricSet,
+): boolean {
+  return (
+    left.correctVerdicts !== null &&
+    right.correctVerdicts !== null &&
+    left.correctVerdicts >= right.correctVerdicts &&
+    left.falseApprovals !== null &&
+    right.falseApprovals !== null &&
+    left.falseApprovals <= right.falseApprovals &&
+    left.falseChangesRequested !== null &&
+    right.falseChangesRequested !== null &&
+    left.falseChangesRequested <= right.falseChangesRequested &&
+    left.inconclusive !== null &&
+    right.inconclusive !== null &&
+    left.inconclusive <= right.inconclusive &&
+    left.elapsedMs !== null &&
+    right.elapsedMs !== null &&
+    left.elapsedMs <= right.elapsedMs &&
+    left.inputTokens !== null &&
+    right.inputTokens !== null &&
+    left.inputTokens <= right.inputTokens &&
+    left.outputTokens !== null &&
+    right.outputTokens !== null &&
+    left.outputTokens <= right.outputTokens &&
+    left.toolFailures !== null &&
+    right.toolFailures !== null &&
+    left.toolFailures <= right.toolFailures
+  );
+}
+
+function validatePlanShape(plan: ReviewerEvaluationPlan): void {
+  if (!identifier.test(plan.id) || !identifier.test(plan.repositoryId))
+    throw new ReviewerEvaluationValidationError("plan identifiers are invalid");
+  if (!exactSha.test(plan.baseSha) || !exactSha.test(plan.usineBuild))
+    throw new ReviewerEvaluationValidationError("plan SHAs must be lowercase 40-character values");
+  if (plan.subjectRole !== "reviewer")
+    throw new ReviewerEvaluationValidationError("subjectRole must be reviewer");
+  if (!profileName.test(plan.baselineProfile) || !profileName.test(plan.candidateProfile))
+    throw new ReviewerEvaluationValidationError("reviewer profile names are invalid");
+  if (plan.baselineProfile === plan.candidateProfile)
+    throw new ReviewerEvaluationValidationError(
+      "baseline and candidate reviewer profiles must differ",
+    );
+  if (!Number.isSafeInteger(plan.maxRuns) || plan.maxRuns < 2 || plan.maxRuns > 200)
+    throw new ReviewerEvaluationValidationError("maxRuns must be between 2 and 200");
+  if (plan.cases.length === 0 || plan.cases.length * 2 > plan.maxRuns)
+    throw new ReviewerEvaluationValidationError("plan exceeds its maximum-run bound");
+  if (
+    plan.reportPath.trim() === "" ||
+    isAbsolute(plan.reportPath) ||
+    plan.registrationPath.trim() === ""
+  )
+    throw new ReviewerEvaluationValidationError(
+      "report and registration paths must be repository-relative",
+    );
+  const identities = new Set<string>();
+  for (const item of plan.cases) {
+    const identity = `${item.id}:${item.repetition}`;
+    if (
+      !identifier.test(item.id) ||
+      !Number.isSafeInteger(item.repetition) ||
+      item.repetition < 1 ||
+      identities.has(identity)
+    )
+      throw new ReviewerEvaluationValidationError("case identities are invalid or duplicated");
+    identities.add(identity);
+    if (!exactSha.test(item.candidateSha))
+      throw new ReviewerEvaluationValidationError(`${identity}: Candidate SHA is invalid`);
+  }
+}
+
+function normalizePlan(input: unknown): ReviewerEvaluationPlan {
+  if (!isRecord(input))
+    throw new ReviewerEvaluationValidationError("evaluation plan must be an object");
+  const allowed = new Set([
+    "schemaVersion",
+    "id",
+    "repositoryId",
+    "baseSha",
+    "subjectRole",
+    "changedFactor",
+    "baselineProfile",
+    "candidateProfile",
+    "maxRuns",
+    "usineBuild",
+    "reportPath",
+    "registrationPath",
+    "cases",
+  ]);
+  if (Object.keys(input).some((key) => !allowed.has(key)))
+    throw new ReviewerEvaluationValidationError("evaluation plan has unexpected fields");
+  if (
+    input.schemaVersion !== 1 ||
+    typeof input.id !== "string" ||
+    typeof input.repositoryId !== "string" ||
+    typeof input.baseSha !== "string" ||
+    input.subjectRole !== "reviewer" ||
+    !isChangedFactor(input.changedFactor) ||
+    typeof input.baselineProfile !== "string" ||
+    typeof input.candidateProfile !== "string" ||
+    typeof input.maxRuns !== "number" ||
+    typeof input.usineBuild !== "string" ||
+    typeof input.reportPath !== "string" ||
+    typeof input.registrationPath !== "string" ||
+    !Array.isArray(input.cases)
+  )
+    throw new ReviewerEvaluationValidationError("evaluation plan has missing or invalid fields");
+  return {
+    schemaVersion: 1,
+    id: input.id,
+    repositoryId: input.repositoryId,
+    baseSha: input.baseSha,
+    subjectRole: "reviewer",
+    changedFactor: input.changedFactor,
+    baselineProfile: input.baselineProfile,
+    candidateProfile: input.candidateProfile,
+    maxRuns: input.maxRuns,
+    usineBuild: input.usineBuild,
+    reportPath: input.reportPath,
+    registrationPath: input.registrationPath,
+    cases: input.cases.map(parseCase),
+  };
+}
+
+function parseCase(input: unknown): ReviewerEvaluationCase {
+  if (
+    !isRecord(input) ||
+    typeof input.id !== "string" ||
+    typeof input.repetition !== "number" ||
+    typeof input.contractPath !== "string" ||
+    typeof input.candidateSha !== "string" ||
+    typeof input.checkPath !== "string" ||
+    typeof input.labelPath !== "string" ||
+    Object.keys(input).some(
+      (key) =>
+        !["id", "repetition", "contractPath", "candidateSha", "checkPath", "labelPath"].includes(
+          key,
+        ),
+    )
+  )
+    throw new ReviewerEvaluationValidationError("reviewer evaluation case is invalid");
+  return {
+    id: input.id,
+    repetition: input.repetition,
+    contractPath: input.contractPath,
+    candidateSha: input.candidateSha,
+    checkPath: input.checkPath,
+    labelPath: input.labelPath,
+  };
+}
+
+function parseContract(raw: string): TaskContract {
+  let input: unknown;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    throw new ReviewerEvaluationValidationError("Task Contract is not JSON");
+  }
+  const parsed = taskContractSchema.safeParse(input);
+  if (!parsed.success) throw new ReviewerEvaluationValidationError("Task Contract is invalid");
+  return parsed.data;
+}
+
+function parseCheck(raw: string): CheckResult {
+  let input: unknown;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    throw new ReviewerEvaluationValidationError("check evidence is not JSON");
+  }
+  if (
+    !isRecord(input) ||
+    typeof input.sha !== "string" ||
+    typeof input.status !== "string" ||
+    typeof input.command !== "string" ||
+    typeof input.exitCode !== "number" ||
+    typeof input.stdout !== "string" ||
+    typeof input.stderr !== "string" ||
+    Object.keys(input).some(
+      (key) => !["sha", "status", "command", "exitCode", "stdout", "stderr"].includes(key),
+    )
+  )
+    throw new ReviewerEvaluationValidationError("check evidence is invalid");
+  if (
+    !exactSha.test(input.sha) ||
+    input.status !== "passed" ||
+    !Number.isSafeInteger(input.exitCode)
+  )
+    throw new ReviewerEvaluationValidationError("check evidence identity or status is invalid");
+  return {
+    sha: input.sha,
+    status: "passed",
+    command: input.command,
+    exitCode: input.exitCode,
+    stdout: input.stdout,
+    stderr: input.stderr,
+  };
+}
+
+function parseLabel(raw: string): ReviewerEvaluationLabel {
+  let input: unknown;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    throw new ReviewerEvaluationValidationError("external label is not JSON");
+  }
+  if (
+    !isRecord(input) ||
+    (input.verdict !== "approved" && input.verdict !== "changes_requested") ||
+    typeof input.rationale !== "string" ||
+    typeof input.reference !== "string" ||
+    (input.protected !== undefined && typeof input.protected !== "boolean") ||
+    Object.keys(input).some(
+      (key) => !["verdict", "rationale", "reference", "protected"].includes(key),
+    )
+  )
+    throw new ReviewerEvaluationValidationError("external label is invalid");
+  if (input.rationale.trim() === "" || input.reference.trim() === "")
+    throw new ReviewerEvaluationValidationError(
+      "external label rationale and reference are required",
+    );
+  return {
+    verdict: input.verdict,
+    rationale: input.rationale,
+    reference: input.reference,
+    protected: input.protected ?? false,
+  };
+}
+
+function isChangedFactor(value: unknown): value is ReviewerEvaluationChangedFactor {
+  return value === "model_stack" || value === "reasoning" || value === "developer_instructions";
+}
+
+async function resolveReviewerProfile(profile: string, environment: NodeJS.ProcessEnv) {
+  try {
+    const selection = await resolveCodexProfile(profile, environment);
+    if (!selection.config) throw new Error("configuration unavailable");
+    return { ...selection, adapter: adapterForProfile(profile, environment) };
+  } catch {
+    throw new ReviewerEvaluationValidationError(
+      `${profile}: resolved profile configuration is unavailable`,
+    );
+  }
+}
+
+function adapterForProfile(profile: string, environment: NodeJS.ProcessEnv): "sdk" | "app-server" {
+  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
+  if (!configured) return "sdk";
+  const profiles = configured.split(",").map((entry) => entry.trim());
+  if (profiles.some((entry) => !profileName.test(entry)))
+    throw new ReviewerEvaluationValidationError("USINE_CODEX_APP_SERVER_PROFILES is invalid");
+  return profiles.includes(profile) ? "app-server" : "sdk";
+}
+
+function validateProfileFactor(
+  plan: ReviewerEvaluationPlan,
+  baseline: Awaited<ReturnType<typeof resolveReviewerProfile>>,
+  candidate: Awaited<ReturnType<typeof resolveReviewerProfile>>,
+): void {
+  const left = profileFields(baseline);
+  const right = profileFields(candidate);
+  const factors = {
+    model_stack: ["model", "modelProvider", "modelProviders", "modelCatalogJson"] as const,
+    reasoning: ["reasoningEffort"] as const,
+    developer_instructions: ["developerInstructions"] as const,
+  }[plan.changedFactor];
+  const all = [
+    "model",
+    "modelProvider",
+    "modelProviders",
+    "modelCatalogJson",
+    "adapter",
+    "reasoningEffort",
+    "developerInstructions",
+    "reasoningSummary",
+    "verbosity",
+    "personality",
+    "serviceTier",
+  ] as const;
+  const differs = (field: (typeof all)[number]) =>
+    stableJson(left[field]) !== stableJson(right[field]);
+  if (!factors.some(differs))
+    throw new ReviewerEvaluationValidationError(
+      `profiles do not differ in changedFactor ${plan.changedFactor}`,
+    );
+  const factorSet = new Set<string>(factors);
+  const unrelated = all.filter((field) => !factorSet.has(field) && differs(field));
+  if (unrelated.length > 0)
+    throw new ReviewerEvaluationValidationError(
+      `profiles differ outside changedFactor ${plan.changedFactor}: ${unrelated.join(",")}`,
+    );
+}
+
+function profileFields(selection: Awaited<ReturnType<typeof resolveReviewerProfile>>) {
+  const config = selection.config;
+  return {
+    model: selection.model,
+    modelProvider: config?.model_provider ?? null,
+    modelProviders: config?.model_providers ?? null,
+    modelCatalogJson: config?.model_catalog_json ?? null,
+    adapter: selection.adapter,
+    reasoningEffort: selection.modelReasoningEffort ?? null,
+    developerInstructions: selection.developerInstructions ?? null,
+    reasoningSummary: config?.model_reasoning_summary ?? null,
+    verbosity: config?.model_verbosity ?? null,
+    personality: config?.personality ?? null,
+    serviceTier: config?.service_tier ?? null,
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value)
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+    .join(",")}}`;
+}
+
+function validateContractRepository(
+  contract: TaskContract,
+  registration: RepositorySnapshot,
+  id: string,
+): void {
+  const url = new URL(contract.authorization.source);
+  const [, owner, name] = url.pathname.split("/");
+  if (
+    owner?.toLowerCase() !== registration.owner.toLowerCase() ||
+    name?.toLowerCase() !== registration.name.toLowerCase()
+  )
+    throw new ReviewerEvaluationValidationError(
+      `${id}: Task Contract authorization Repository drifts from registration`,
+    );
+}
+
+async function validateCandidate(
+  repositoryRoot: string,
+  baseSha: string,
+  item: ReviewerEvaluationCase,
+): Promise<string> {
+  try {
+    await execFile("git", [
+      "-C",
+      repositoryRoot,
+      "cat-file",
+      "-e",
+      `${item.candidateSha}^{commit}`,
+    ]);
+    await execFile("git", [
+      "-C",
+      repositoryRoot,
+      "merge-base",
+      "--is-ancestor",
+      baseSha,
+      item.candidateSha,
+    ]);
+  } catch {
+    throw new ReviewerEvaluationValidationError(
+      `${item.id}:${item.repetition}: Candidate SHA is not a frozen descendant of baseSha`,
+    );
+  }
+  return item.candidateSha;
+}
+
+async function readRegistration(
+  plan: ReviewerEvaluationPlan,
+  planPath: string,
+): Promise<RepositorySnapshot> {
+  try {
+    return repositoryRegistrationSchema.parse(
+      JSON.parse(
+        await readUtf8(
+          resolve(dirname(planPath), plan.registrationPath),
+          "Repository registration",
+        ),
+      ),
+    );
+  } catch {
+    throw new ReviewerEvaluationValidationError("Repository registration is unreadable or invalid");
+  }
+}
+
+async function validateRegistration(
+  plan: ReviewerEvaluationPlan,
+  registration: RepositorySnapshot,
+  repositoryRoot: string,
+): Promise<void> {
+  if (
+    registration.id !== plan.repositoryId ||
+    (await realpath(registration.path).catch(() => registration.path)) !== repositoryRoot
+  )
+    throw new ReviewerEvaluationValidationError(
+      "evaluation Repository registration does not match the plan",
+    );
+}
+
+async function repositoryRootFor(path: string): Promise<string> {
+  try {
+    return (
+      await execFile("git", ["-C", dirname(path), "rev-parse", "--show-toplevel"])
+    ).stdout.trim();
+  } catch {
+    throw new ReviewerEvaluationValidationError("evaluation plan is not inside a Git Repository");
+  }
+}
+
+async function isAncestor(repositoryRoot: string, sha: string): Promise<boolean> {
+  try {
+    await execFile("git", ["-C", repositoryRoot, "merge-base", "--is-ancestor", sha, "HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readUsineSourceCommit(): Promise<string> {
+  try {
+    return (
+      await execFile("git", ["-C", usineSourceRoot, "rev-parse", "--verify", "HEAD^{commit}"])
+    ).stdout.trim();
+  } catch {
+    throw new ReviewerEvaluationValidationError("Usine source checkout commit is unavailable");
+  }
+}
+
+async function requireCommittedFile(
+  repositoryRoot: string,
+  path: string,
+  label: string,
+): Promise<void> {
+  const relativePath = relative(repositoryRoot, path);
+  try {
+    const tracked = await execFile("git", [
+      "-C",
+      repositoryRoot,
+      "ls-files",
+      "--error-unmatch",
+      "--",
+      relativePath,
+    ]);
+    if (tracked.stdout.trim() !== relativePath) throw new Error("file is not tracked");
+    await execFile("git", ["-C", repositoryRoot, "diff", "--quiet", "HEAD", "--", relativePath]);
+  } catch {
+    throw new ReviewerEvaluationValidationError(`${label} must be committed and unchanged`);
+  }
+}
+
+function resolveCaseFile(root: string, path: string, label: string): string {
+  const resolved = resolve(root, path);
+  if (
+    relative(root, resolved).startsWith("..") ||
+    isAbsolute(relative(root, resolved)) ||
+    resolved === root
+  )
+    throw new ReviewerEvaluationValidationError(
+      `${label} must be inside the evaluation Repository`,
+    );
+  return resolved;
+}
+
+async function readUtf8(path: string, label: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    throw new ReviewerEvaluationValidationError(`${label} is unreadable`);
+  }
+}
+
+function parseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new ReviewerEvaluationValidationError("evaluation plan is not JSON");
+  }
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("reviewer profile evaluation cancelled");
+}
+
+function renderReport(report: ReviewerEvaluationReport): string {
+  return [
+    `Reviewer profile evaluation ${report.planId}: ${report.recommendation}`,
+    `Baseline (${report.baseline.profile}): ${report.baseline.correctness}`,
+    `Candidate (${report.candidate.profile}): ${report.candidate.correctness}`,
+    `Comparison: ${JSON.stringify(report.comparison)}`,
+    ...(report.inconclusiveReasons.length > 0
+      ? [`Inconclusive reasons: ${report.inconclusiveReasons.join(", ")}`]
+      : []),
+    "",
+  ].join("\n");
+}
