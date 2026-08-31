@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { join, resolve } from "node:path";
 import { dirname } from "node:path";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vite-plus/test";
 import {
   readReviewerEvaluationPlan,
+  type ReviewerEvaluationArchiveManifest,
   type ReviewerEvaluationReviewInput,
   type ReviewerEvaluationServices,
 } from "../src/reviewer-profile-evaluation.js";
@@ -172,6 +173,31 @@ function observation(
   };
 }
 
+function currentArchiveManifest(
+  taskId: string,
+  patch: Partial<ReviewerEvaluationArchiveManifest> = {},
+): ReviewerEvaluationArchiveManifest {
+  return {
+    archiveId: "archive_00000000-0000-0000-0000-000000000001",
+    taskId,
+    role: "reviewer",
+    captureStatus: "stored",
+    completeness: "complete",
+    ...patch,
+  };
+}
+
+function withCurrentArchive(
+  review: ReviewerEvaluationServices["review"],
+  patch: Partial<ReviewerEvaluationArchiveManifest> = {},
+): ReviewerEvaluationServices {
+  return {
+    review,
+    readArchiveManifest: async (archiveId, _environment, expectedTaskId) =>
+      currentArchiveManifest(expectedTaskId, { archiveId, ...patch }),
+  };
+}
+
 describe("reviewer profile evaluation public path", () => {
   test("validates immutable case evidence before provider execution", async () => {
     const value = await fixture();
@@ -233,6 +259,116 @@ describe("reviewer profile evaluation public path", () => {
     process.exitCode = 0;
   });
 
+  test("rejects symlink, non-regular, and mutable case inputs before provider execution", async () => {
+    const changes: Array<(value: Awaited<ReturnType<typeof fixture>>) => Promise<void>> = [
+      async (value) => {
+        const target = join(value.root, "external-check.json");
+        await writeFile(target, await readFile(join(value.root, "check.json")));
+        await unlink(join(value.root, "check.json"));
+        await symlink(target, join(value.root, "check.json"));
+        await execFile("git", ["add", "-A"], { cwd: value.root });
+        await execFile("git", ["commit", "-m", "invalid input path"], { cwd: value.root });
+      },
+      async (value) => {
+        await unlink(join(value.root, "check.json"));
+        await mkdir(join(value.root, "check.json"));
+        await execFile("git", ["add", "-A"], { cwd: value.root });
+        await execFile("git", ["commit", "-m", "invalid input path"], { cwd: value.root });
+      },
+      async (value) => {
+        await writeFile(join(value.root, "check.json"), "{}\n");
+      },
+    ];
+    for (const change of changes) {
+      const value = await fixture();
+      await change(value);
+      let providerCalls = 0;
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      process.exitCode = 0;
+    }
+  });
+
+  test("rejects a symlinked report path or ancestor before provider execution and write", async () => {
+    for (const kind of ["ancestor", "report", "hardlink"] as const) {
+      const value = await fixture();
+      const outside = join(value.root, "..", `reviewer-report-${kind}`);
+      await mkdir(outside, { recursive: true });
+      if (kind === "ancestor") {
+        await symlink(outside, join(value.root, "reports"));
+      } else if (kind === "report") {
+        await mkdir(join(value.root, "reports"), { recursive: true });
+        await symlink(
+          join(outside, "report.json"),
+          join(value.root, "reports/reviewer-report.json"),
+        );
+      } else {
+        await mkdir(join(value.root, "reports"), { recursive: true });
+        await link(value.planPath, join(value.root, "reports/reviewer-report.json"));
+      }
+      let providerCalls = 0;
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      process.exitCode = 0;
+    }
+  });
+
+  test("does not follow a report symlink swapped in after provider execution", async () => {
+    const value = await fixture();
+    const outside = join(value.root, "..", "reviewer-report-swapped");
+    await mkdir(outside, { recursive: true });
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    let providerCalls = 0;
+    const services: ReviewerEvaluationServices = {
+      review: async (input) => {
+        providerCalls += 1;
+        await mkdir(join(value.root, "reports"), { recursive: true });
+        await symlink(
+          join(outside, "report.json"),
+          join(value.root, "reports/reviewer-report.json"),
+        );
+        return observation(input, "approved", loaded.profileSelections.baseline.configSha256!);
+      },
+    };
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    expect(providerCalls).toBe(4);
+    await expect(readFile(join(outside, "report.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(process.exitCode).toBe(7);
+    process.exitCode = 0;
+  });
+
   test("resolves a nested plan registration path inside the evaluation Repository", async () => {
     const value = await fixture();
     const plan = JSON.parse(await readFile(value.planPath, "utf8")) as {
@@ -290,27 +426,25 @@ describe("reviewer profile evaluation public path", () => {
       candidateSha: string;
       checkSha: string;
     }> = [];
-    const services: ReviewerEvaluationServices = {
-      review: async (input) => {
-        calls.push({
-          profile: input.profile,
-          caseId: input.contract.id,
-          candidateSha: input.candidateSha,
-          checkSha: input.check.sha,
-        });
-        const verdict =
-          input.profile === "candidate-reviewer" && input.contract.id === "defective"
-            ? "approved"
-            : input.contract.id === "defective"
-              ? "changes_requested"
-              : "approved";
-        const selection =
-          input.profile === "baseline-reviewer"
-            ? loaded.profileSelections.baseline
-            : loaded.profileSelections.candidate;
-        return observation(input, verdict, selection.configSha256!);
-      },
-    };
+    const services = withCurrentArchive(async (input) => {
+      calls.push({
+        profile: input.profile,
+        caseId: input.contract.id,
+        candidateSha: input.candidateSha,
+        checkSha: input.check.sha,
+      });
+      const verdict =
+        input.profile === "candidate-reviewer" && input.contract.id === "defective"
+          ? "approved"
+          : input.contract.id === "defective"
+            ? "changes_requested"
+            : "approved";
+      const selection =
+        input.profile === "baseline-reviewer"
+          ? loaded.profileSelections.baseline
+          : loaded.profileSelections.candidate;
+      return observation(input, verdict, selection.configSha256!);
+    });
     await runProfileEvaluateCommand(
       { planPath: value.planPath, subjectRole: "reviewer", json: true },
       "http://server.test",
@@ -355,8 +489,8 @@ describe("reviewer profile evaluation public path", () => {
   test("makes missing, drifted, and incomplete role evidence inconclusive", async () => {
     const value = await fixture();
     const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
-    const services: ReviewerEvaluationServices = {
-      review: async (input) => {
+    const services = withCurrentArchive(
+      async (input) => {
         const result = observation(
           input,
           "approved",
@@ -374,7 +508,8 @@ describe("reviewer profile evaluation public path", () => {
           },
         };
       },
-    };
+      { captureStatus: "truncated" },
+    );
     await runProfileEvaluateCommand(
       { planPath: value.planPath, subjectRole: "reviewer", json: true },
       "http://server.test",
@@ -405,16 +540,14 @@ describe("reviewer profile evaluation public path", () => {
   test("makes missing comparison metrics inconclusive with a reason", async () => {
     const value = await fixture();
     const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
-    const services: ReviewerEvaluationServices = {
-      review: async (input) => {
-        const selection =
-          input.profile === "baseline-reviewer"
-            ? loaded.profileSelections.baseline
-            : loaded.profileSelections.candidate;
-        const verdict = input.contract.id === "defective" ? "changes_requested" : "approved";
-        return { ...observation(input, verdict, selection.configSha256!), usage: null };
-      },
-    };
+    const services = withCurrentArchive(async (input) => {
+      const selection =
+        input.profile === "baseline-reviewer"
+          ? loaded.profileSelections.baseline
+          : loaded.profileSelections.candidate;
+      const verdict = input.contract.id === "defective" ? "changes_requested" : "approved";
+      return { ...observation(input, verdict, selection.configSha256!), usage: null };
+    });
     await runProfileEvaluateCommand(
       { planPath: value.planPath, subjectRole: "reviewer", json: true },
       "http://server.test",
@@ -432,6 +565,79 @@ describe("reviewer profile evaluation public path", () => {
     expect(report.recommendation).toBe("inconclusive");
     expect(report.inconclusiveReasons).toContain("comparison:missing_metrics");
     expect(report.comparison.baseline.inputTokens).toBeNull();
+    process.exitCode = 0;
+  });
+
+  test("replaces stale archive observations after all runs and preserves protected false approvals", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const services = withCurrentArchive(
+      async (input) => {
+        const selection =
+          input.profile === "baseline-reviewer"
+            ? loaded.profileSelections.baseline
+            : loaded.profileSelections.candidate;
+        const verdict =
+          input.contract.id === "defective" && input.profile === "candidate-reviewer"
+            ? "approved"
+            : input.contract.id === "defective"
+              ? "changes_requested"
+              : "approved";
+        return observation(input, verdict, selection.configSha256!);
+      },
+      { captureStatus: "pruned", completeness: "partial" },
+    );
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    const report = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    ) as {
+      recommendation: string;
+      inconclusiveReasons: string[];
+      candidate: {
+        runs: Array<{
+          archive: { archiveId: string; status: string; completeness: string } | null;
+          hardRegression: boolean;
+          correctness: string;
+        }>;
+      };
+    };
+    expect(report.recommendation).toBe("inconclusive");
+    expect(report.inconclusiveReasons).toContain("defective:reviewer_archive_failed");
+    expect(report.candidate.runs[1]!.archive).toEqual({
+      archiveId: "archive_00000000-0000-0000-0000-000000000001",
+      status: "pruned",
+      completeness: "partial",
+    });
+    expect(report.candidate.runs[1]!.correctness).toBe("inconclusive");
+    expect(report.candidate.runs[1]!.hardRegression).toBe(true);
+    process.exitCode = 0;
+  });
+
+  test("treats a missing current archive manifest as inconclusive", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const services = withCurrentArchive(async (input) =>
+      observation(input, "approved", loaded.profileSelections.baseline.configSha256!),
+    );
+    services.readArchiveManifest = async () => null;
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      services,
+    );
+    const report = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    ) as { recommendation: string; inconclusiveReasons: string[] };
+    expect(report.recommendation).toBe("inconclusive");
+    expect(report.inconclusiveReasons).toContain("approved:reviewer_archive_missing");
     process.exitCode = 0;
   });
 });
