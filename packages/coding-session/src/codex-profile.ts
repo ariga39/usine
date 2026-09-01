@@ -5,6 +5,10 @@ import { join } from "node:path";
 import type { CodexOptions, ModelReasoningEffort } from "@openai/codex-sdk";
 import { Toml } from "effect/unstable/encoding";
 import { z } from "zod";
+import {
+  providerNeutralJsonValue,
+  type CodingSessionAdapterProfile,
+} from "./coding-session-adapter.js";
 
 type CodexConfig = NonNullable<CodexOptions["config"]>;
 
@@ -220,18 +224,28 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
-export function codexAdapterConfig(
+export function codingSessionAdapterProfile(
   selection: ResolvedCodexProfile,
-  mcpConfig: CodexConfig = {},
-): CodexConfig {
-  return {
-    ...selection.config,
+): CodingSessionAdapterProfile {
+  const config = selection.config;
+  const modelProviders = providerNeutralJsonValue(config.model_providers);
+  const profile: CodingSessionAdapterProfile = {
     model: selection.model,
-    ...(selection.modelReasoningEffort
-      ? { model_reasoning_effort: selection.modelReasoningEffort }
+    ...(selection.modelReasoningEffort ? { reasoningEffort: selection.modelReasoningEffort } : {}),
+    ...(selection.developerInstructions
+      ? { developerInstructions: selection.developerInstructions }
       : {}),
-    approval_policy: "never",
-    mcp_servers: {},
-    ...mcpConfig,
+    ...(typeof config.model_catalog_json === "string"
+      ? { modelCatalogJson: config.model_catalog_json }
+      : {}),
+    ...(typeof config.model_provider === "string" ? { modelProvider: config.model_provider } : {}),
+    ...(modelProviders !== undefined ? { modelProviders } : {}),
+    ...(typeof config.model_reasoning_summary === "string"
+      ? { reasoningSummary: config.model_reasoning_summary }
+      : {}),
+    ...(typeof config.model_verbosity === "string" ? { verbosity: config.model_verbosity } : {}),
+    ...(typeof config.personality === "string" ? { personality: config.personality } : {}),
+    ...(typeof config.service_tier === "string" ? { serviceTier: config.service_tier } : {}),
   };
+  return profile;
 }

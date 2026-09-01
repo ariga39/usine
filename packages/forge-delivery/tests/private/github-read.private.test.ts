@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 import {
   CodexCodingSession,
-  codexMcpConfig,
   explicitWorkerEnvironment,
   implementerOutputSchema,
 } from "@usine/coding-session";
@@ -71,7 +70,6 @@ describe.skipIf(!enabled)("private GitHub read characterization", () => {
     const observations: unknown[] = [];
     try {
       expect(prompt).not.toContain(token);
-      expect(JSON.stringify(codexMcpConfig(mcpServer))).not.toContain(token);
       expect(JSON.stringify(explicitWorkerEnvironment(environment))).not.toContain(token);
       const observation = await new CodexCodingSession(undefined, {
         environment,

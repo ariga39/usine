@@ -1,28 +1,25 @@
 import { createHash } from "node:crypto";
-import {
-  Codex,
-  type CodexOptions,
-  type RunResult,
-  type Thread,
-  type ThreadItem,
-  type ThreadOptions,
-  type TurnOptions,
-  type ModelReasoningEffort,
-} from "@openai/codex-sdk";
+import { Codex, type ModelReasoningEffort } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
 import { Effect } from "effect";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import {
-  createCodexLauncher,
   executionLifecycle,
   listExecutionTaskIds,
   reapCodexExecution,
   type ExecutionReference,
 } from "./codex-execution.js";
-import { isAppServerCancellation, runCodexAppServer } from "./codex-app-server.js";
-import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
+import { CodexAppServerAdapter } from "./codex-app-server.js";
+import {
+  type CodingSessionAdapter,
+  type CodingSessionAdapterRequest,
+  type ProviderNeutralCompletedEvidence,
+  type ProviderNeutralUsage,
+} from "./coding-session-adapter.js";
+import { CodexSdkAdapter } from "./codex-sdk-adapter.js";
+import { normalizeCodingSessionMcpServer, safeObservationLabel } from "./coding-session-policy.js";
 import {
   classifyAdapterFailure,
   CodingSessionInterruption,
@@ -30,7 +27,7 @@ import {
   type CodingSessionPhase,
 } from "./coding-session-interruption.js";
 import {
-  codexAdapterConfig,
+  codingSessionAdapterProfile,
   CodexProfileSelectionError,
   normalizeCodexProfileSelection,
   resolveCodexProfile,
@@ -235,13 +232,10 @@ export interface CodingSessionCleanup {
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
 
-interface ProviderTurnResult {
-  finalResponse: string;
-  usage: { input_tokens?: number; output_tokens?: number } | null;
-  sessionId: string | null;
-}
+type AdapterOverrides = Partial<Record<"sdk" | "app-server", CodingSessionAdapter>>;
+const internalAdapterOverrides = new WeakMap<CodexCodingSession, AdapterOverrides>();
 
-function outputFrom(result: ProviderTurnResult): unknown {
+function outputFrom(result: { finalResponse: string }): unknown {
   try {
     return JSON.parse(result.finalResponse) as unknown;
   } catch {
@@ -269,6 +263,8 @@ async function runRoleOutputTransform(
 export class CodexCodingSession {
   private readonly appServerProfiles: ReadonlySet<string>;
   private readonly profileResolver: CodexProfileResolver;
+  private readonly sdkAdapter: CodingSessionAdapter;
+  private readonly appServerAdapter: CodingSessionAdapter;
 
   constructor(
     private readonly clientFactory?: CodingSessionClientFactory,
@@ -276,6 +272,8 @@ export class CodexCodingSession {
   ) {
     this.appServerProfiles = new Set(options.appServerProfiles ?? []);
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
+    this.sdkAdapter = new CodexSdkAdapter();
+    this.appServerAdapter = new CodexAppServerAdapter();
   }
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
@@ -439,6 +437,11 @@ export class CodexCodingSession {
         );
       }
       let effectiveRequest = request;
+      let adapterMcpServer: CodingSessionAdapterRequest["mcpServer"];
+      const onObservation = request.onObservation
+        ? (observation: CodingSessionObservation) =>
+            request.onObservation?.(sanitizeSessionObservation(observation))
+        : undefined;
       if (!request.mcpServer && this.options.mcpServerFactory) {
         let resolution: CodingSessionMcpServerResolution;
         try {
@@ -447,7 +450,7 @@ export class CodexCodingSession {
           resolution = { serverName: "github_read", status: "unavailable", reason: "unavailable" };
         }
         if (resolution.status === "unavailable") {
-          await request.onObservation?.({
+          await onObservation?.({
             type: "mcp_unavailable",
             server: safeObservationLabel(resolution.serverName),
             reason: resolution.reason ?? "unavailable",
@@ -455,68 +458,51 @@ export class CodexCodingSession {
         } else if (resolution.server) {
           effectiveRequest = { ...request, mcpServer: resolution.server };
         } else {
-          await request.onObservation?.({
+          await onObservation?.({
             type: "mcp_unavailable",
             server: safeObservationLabel(resolution.serverName),
             reason: "unavailable",
           });
         }
       }
-      let result: ProviderTurnResult;
-      if (this.appServerProfiles.has(profileName)) {
-        effectiveProfile = { ...effectiveProfile, adapter: "app-server" };
-        archive?.setAdapter("app-server");
-        if (!this.options.executionStateDirectory)
-          throw new Error("app-server execution state directory is unavailable");
-        const environment = effectiveRequest.environment ?? this.options.environment;
-        result = await runCodexAppServer({
-          request: { ...effectiveRequest, profile: profileName, signal: abortSignal },
-          environment: explicitWorkerEnvironment(environment),
-          executionStateDirectory: this.options.executionStateDirectory,
-          profileSelection,
-          onItemCompleted: (item) => archive?.addCompletedItem(item),
-          onSessionId: (sessionId) => archive?.setSessionId(sessionId),
-          onPhase: (nextPhase) => archive?.setPhase(nextPhase),
-          onUsage: (usage) => archive?.setUsage(usageFrom(usage)),
-        });
-      } else {
-        effectiveProfile = { ...effectiveProfile, adapter: "sdk" };
-        archive?.setAdapter("sdk");
-        let client: Codex;
-        try {
-          client = await this.createClient(effectiveRequest, profileSelection);
-        } catch (error) {
-          throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
-        }
-        const threadOptions: ThreadOptions = {
-          sandboxMode: effectiveRequest.sandbox,
-          workingDirectory: effectiveRequest.workspace,
-          model: profileSelection.model,
-          modelReasoningEffort: profileSelection.modelReasoningEffort,
-          approvalPolicy: "never",
-        };
-        let thread: Thread;
-        try {
-          thread = client.startThread(threadOptions);
-          archive?.setSessionId(thread.id);
-        } catch (error) {
-          throw new CodingSessionInterruption("thread", classifyAdapterFailure(error));
-        }
-        phase = "turn";
-        archive?.setPhase("turn");
-        const turnOptions: TurnOptions = {
-          signal: abortSignal,
-          outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
-        };
-        const sdkResult = await runStreamedTurn(
-          thread,
-          effectiveRequest.prompt,
-          turnOptions,
-          effectiveRequest.onObservation,
-          (item) => archive?.addCompletedItem(item),
-        );
-        result = { ...sdkResult, sessionId: thread.id };
-      }
+      if (effectiveRequest.mcpServer)
+        adapterMcpServer = normalizeCodingSessionMcpServer(effectiveRequest.mcpServer);
+      const clientFactory = this.clientFactory;
+      const adapterOverrides = internalAdapterOverrides.get(this);
+      const adapter = this.appServerProfiles.has(profileName)
+        ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
+        : (adapterOverrides?.sdk ??
+          (clientFactory
+            ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
+            : this.sdkAdapter));
+      effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
+      archive?.setAdapter(adapter.name);
+      const result = await adapter.run({
+        workspace: effectiveRequest.workspace,
+        prompt: effectiveRequest.prompt,
+        sandbox: effectiveRequest.sandbox,
+        approvalPolicy: "never",
+        profile: codingSessionAdapterProfile(profileSelection),
+        mcpServer: adapterMcpServer,
+        outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
+        environment: explicitWorkerEnvironment(
+          effectiveRequest.environment ?? this.options.environment,
+        ),
+        executionStateDirectory: this.options.executionStateDirectory,
+        execution: effectiveRequest.execution,
+        signal: abortSignal,
+        onObservation,
+        onItemCompleted: async (item) => {
+          archive?.addCompletedItem(item);
+          await emitCompletedEvidenceObservation(item, onObservation);
+        },
+        onSessionId: (sessionId) => archive?.setSessionId(sessionId),
+        onPhase: (nextPhase) => {
+          phase = nextPhase;
+          archive?.setPhase(nextPhase);
+        },
+        onUsage: (usage) => archive?.setUsage(usageFrom(usage)),
+      });
       phase = "output";
       archive?.setPhase("output");
       archive?.setSessionId(result.sessionId);
@@ -606,7 +592,7 @@ export class CodexCodingSession {
       };
     } catch (error) {
       const deadlineExpired = deadlineSignal.aborted;
-      const cancelled = request.signal?.aborted || isAppServerCancellation(error);
+      const cancelled = request.signal?.aborted;
       const typedInterruption = error instanceof CodingSessionInterruption ? error : undefined;
       const interruption = deadlineExpired
         ? new CodingSessionInterruption(typedInterruption?.phase ?? phase, "timeout")
@@ -632,131 +618,66 @@ export class CodexCodingSession {
       };
     }
   }
-
-  private async createClient(
-    request: SessionRequest,
-    profileSelection: ResolvedCodexProfile,
-  ): Promise<Codex> {
-    if (this.clientFactory) return this.clientFactory(request);
-    const options: CodexOptions = {
-      env: explicitWorkerEnvironment(request.environment ?? this.options.environment),
-      config: codexAdapterConfig(
-        profileSelection,
-        request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
-      ),
-    };
-    if (!this.options.executionStateDirectory) return new Codex(options);
-    const launcher = await createCodexLauncher(
-      this.options.executionStateDirectory,
-      request.workspace,
-      request.execution,
-    );
-    return new Codex({
-      ...options,
-      codexPathOverride: launcher.launcherPath,
-      env: {
-        ...options.env,
-        USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODEX_WORKSPACE: request.workspace,
-      },
-    });
-  }
 }
 
-async function runStreamedTurn(
-  thread: Thread,
-  prompt: string,
-  options: TurnOptions,
-  onObservation?: SessionRequest["onObservation"],
-  onItemCompleted?: (item: ThreadItem) => void,
-): Promise<RunResult> {
-  try {
-    const streamed = await thread.runStreamed(prompt, options);
-    const items: ThreadItem[] = [];
-    let finalResponse = "";
-    let usage: RunResult["usage"] = null;
-    let turn = 0;
-    for await (const event of streamed.events) {
-      switch (event.type) {
-        case "thread.started":
-          await onObservation?.({ type: "thread_started" });
-          break;
-        case "turn.started":
-          turn += 1;
-          await onObservation?.({ type: "turn_started", turn });
-          break;
-        case "item.completed":
-          items.push(event.item);
-          onItemCompleted?.(event.item);
-          if (event.item.type === "agent_message") finalResponse = event.item.text;
-          await emitCompletedItem(event.item, onObservation);
-          break;
-        case "item.updated":
-          if (event.item.type === "agent_message") finalResponse = event.item.text;
-          break;
-        case "turn.completed":
-          usage = event.usage;
-          await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
-          break;
-        case "turn.failed":
-          await onObservation?.({ type: "turn_completed", turn, outcome: "failed" });
-          throw new Error("coding turn failed");
-        case "error":
-          throw new Error("coding session stream failed");
-        case "item.started":
-          break;
-      }
-    }
-    return { items, finalResponse, usage };
-  } catch (error) {
-    if (error instanceof CodingSessionInterruption) throw error;
-    throw new CodingSessionInterruption("turn", classifyAdapterFailure(error));
-  }
-}
-
-async function emitCompletedItem(
-  item: ThreadItem,
-  onObservation?: SessionRequest["onObservation"],
+async function emitCompletedEvidenceObservation(
+  evidence: ProviderNeutralCompletedEvidence,
+  onObservation: SessionRequest["onObservation"],
 ): Promise<void> {
-  switch (item.type) {
+  const outcome = evidence.status === "completed" ? "succeeded" : "failed";
+  switch (evidence.type) {
     case "command_execution":
-      await onObservation?.({
-        type: "tool_completed",
-        tool: "shell",
-        outcome: item.status === "completed" ? "succeeded" : "failed",
-      });
+      await onObservation?.({ type: "tool_completed", tool: "shell", outcome });
       break;
     case "file_change":
-      await onObservation?.({
-        type: "tool_completed",
-        tool: "apply_patch",
-        outcome: item.status === "completed" ? "succeeded" : "failed",
-      });
+      await onObservation?.({ type: "tool_completed", tool: "apply_patch", outcome });
       break;
     case "mcp_tool_call":
       await onObservation?.({
         type: "mcp_tool_completed",
-        server: safeObservationLabel(item.server),
-        tool: safeObservationLabel(item.tool),
-        outcome: item.status === "completed" ? "succeeded" : "failed",
+        server: evidence.server,
+        tool: evidence.tool,
+        outcome,
       });
       break;
     case "web_search":
-      await onObservation?.({ type: "tool_completed", tool: "search", outcome: "succeeded" });
+      await onObservation?.({ type: "tool_completed", tool: "search", outcome });
       break;
-    default:
+    case "agent_message":
+    case "reasoning":
+    case "other":
       break;
   }
 }
 
-function usageFrom(
-  usage: { input_tokens?: number; output_tokens?: number } | null | undefined,
-): SessionObservation["usage"] {
+function sanitizeSessionObservation(
+  observation: CodingSessionObservation,
+): CodingSessionObservation {
+  if (observation.type !== "mcp_tool_completed") return observation;
+  return {
+    ...observation,
+    server: safeObservationLabel(observation.server),
+    tool: safeObservationLabel(observation.tool),
+  };
+}
+
+/** Source-internal adapter substitution for bounded package tests. */
+export function createCodexCodingSessionForTesting(
+  clientFactory: CodingSessionClientFactory | undefined,
+  options: CodingSessionOptions,
+  adapters: AdapterOverrides,
+): CodexCodingSession {
+  const session = new CodexCodingSession(clientFactory, options);
+  internalAdapterOverrides.set(session, adapters);
+  return session;
+}
+
+function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObservation["usage"] {
   return usage == null
     ? null
     : {
-        inputTokens: usage.input_tokens,
-        outputTokens: usage.output_tokens,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
       };
 }
 

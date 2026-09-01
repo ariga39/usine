@@ -1,9 +1,10 @@
-import type { CodexOptions } from "@openai/codex-sdk";
 import type { CodingSessionMcpServer } from "./coding-session.js";
 
-type CodexConfig = NonNullable<CodexOptions["config"]>;
+import type { CodingSessionAdapterMcpServer } from "./coding-session-adapter.js";
 
-export function codexMcpConfig(server: CodingSessionMcpServer): CodexConfig {
+export function normalizeCodingSessionMcpServer(
+  server: CodingSessionMcpServer,
+): CodingSessionAdapterMcpServer {
   const name = server.name.trim();
   const url = new URL(server.url);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name))
@@ -21,19 +22,8 @@ export function codexMcpConfig(server: CodingSessionMcpServer): CodexConfig {
   )
     throw new Error("MCP server timeouts must be positive finite numbers");
   return {
-    approval_policy: "never",
-    mcp_servers: {
-      [name]: {
-        url: server.url,
-        enabled_tools: [...server.enabledTools],
-        tools: Object.fromEntries(
-          server.enabledTools.map((tool) => [tool, { approval_mode: "approve" }]),
-        ),
-        startup_timeout_sec: server.startupTimeoutMs / 1_000,
-        tool_timeout_sec: server.toolTimeoutMs / 1_000,
-        required: server.required,
-      },
-    },
+    ...server,
+    name,
   };
 }
 
