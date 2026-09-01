@@ -813,7 +813,9 @@ describe("OpenCode2 bounded adapter", () => {
         environment: testFixture.environment,
         executionStateDirectory: testFixture.stateDirectory,
         sessionArchive: { stateDirectory: testFixture.stateDirectory },
-        openCode2Profiles: ["reviewer-profile"],
+        adapterSelectionEnvironment: {
+          USINE_OPENCODE2_PROFILES: "reviewer-profile",
+        },
         profileResolver: async () =>
           normalizeCodexProfileSelection("reviewer-profile", {
             model: "fixture-model",
@@ -868,7 +870,9 @@ describe("OpenCode2 bounded adapter", () => {
       environment: { PATH: join(testFixture.stateDirectory, "no-opencode") },
       executionStateDirectory: testFixture.stateDirectory,
       sessionArchive: { stateDirectory: testFixture.stateDirectory },
-      openCode2Profiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_OPENCODE2_PROFILES: "reviewer-profile",
+      },
       profileResolver: async () =>
         normalizeCodexProfileSelection("reviewer-profile", {
           model: "fixture-model",
