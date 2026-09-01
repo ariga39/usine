@@ -3,7 +3,8 @@ import type { TaskEvent, TaskResource } from "@usine/task-authority";
 export type EvidenceRole = "implementer" | "reviewer";
 export type EvidenceOutcomeStatus = "succeeded" | "failed" | "cancelled" | "blocked" | "unknown";
 export type EvidenceArchiveStatus = "complete" | "partial" | "unavailable";
-export type EvidenceAdapter = "sdk" | "app-server" | null;
+type CompletedSessionEvent = Extract<TaskEvent["data"], { type: "coding_session_completed" }>;
+export type EvidenceAdapter = NonNullable<CompletedSessionEvent["effectiveProfile"]>["adapter"];
 export type EvidenceReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | null;
 
 export interface EffectiveRoleProfile {

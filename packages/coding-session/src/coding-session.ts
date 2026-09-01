@@ -5,13 +5,10 @@ import { generateText, Output } from "ai";
 import { Effect } from "effect";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
-import {
-  executionLifecycle,
-  listExecutionTaskIds,
-  reapCodexExecution,
-  type ExecutionReference,
-} from "./codex-execution.js";
+import { executionLifecycle, listExecutionTaskIds, reapOwnedExecution } from "./codex-execution.js";
+import type { ExecutionReference } from "./coding-session-types.js";
 import { CodexAppServerAdapter } from "./codex-app-server.js";
+import { OpenCode2Adapter } from "./opencode2-adapter.js";
 import {
   type CodingSessionAdapter,
   type CodingSessionAdapterRequest,
@@ -86,7 +83,7 @@ export type SandboxMode = "workspace-write" | "read-only";
 export interface EffectiveSessionProfile {
   profileName: string | null;
   configSha256: string | null;
-  adapter: "sdk" | "app-server" | null;
+  adapter: "sdk" | "app-server" | "opencode2" | null;
   model: string | null;
   modelProvider: string | null;
   reasoningEffort: ModelReasoningEffort | null;
@@ -192,6 +189,8 @@ export interface CodingSessionOptions {
   executionStateDirectory?: string;
   sessionArchive?: SessionArchiveOptions;
   appServerProfiles?: readonly string[];
+  /** Source-composed static selection for the bounded OpenCode2 adapter. */
+  openCode2Profiles?: readonly string[];
   profileResolver?: CodexProfileResolver;
   roleOutputTransform?: RoleOutputTransform;
   mcpServerFactory?: CodingSessionMcpServerFactory;
@@ -232,7 +231,7 @@ export interface CodingSessionCleanup {
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
 
-type AdapterOverrides = Partial<Record<"sdk" | "app-server", CodingSessionAdapter>>;
+type AdapterOverrides = Partial<Record<"sdk" | "app-server" | "opencode2", CodingSessionAdapter>>;
 const internalAdapterOverrides = new WeakMap<CodexCodingSession, AdapterOverrides>();
 
 function outputFrom(result: { finalResponse: string }): unknown {
@@ -262,18 +261,22 @@ async function runRoleOutputTransform(
 
 export class CodexCodingSession {
   private readonly appServerProfiles: ReadonlySet<string>;
+  private readonly openCode2Profiles: ReadonlySet<string>;
   private readonly profileResolver: CodexProfileResolver;
   private readonly sdkAdapter: CodingSessionAdapter;
   private readonly appServerAdapter: CodingSessionAdapter;
+  private readonly openCode2Adapter: CodingSessionAdapter;
 
   constructor(
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
   ) {
     this.appServerProfiles = new Set(options.appServerProfiles ?? []);
+    this.openCode2Profiles = new Set(options.openCode2Profiles ?? []);
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
     this.sdkAdapter = new CodexSdkAdapter();
     this.appServerAdapter = new CodexAppServerAdapter();
+    this.openCode2Adapter = new OpenCode2Adapter();
   }
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
@@ -287,7 +290,7 @@ export class CodexCodingSession {
           () =>
             executionStateDirectory
               ? Effect.tryPromise({
-                  try: () => reapCodexExecution(executionStateDirectory, execution),
+                  try: () => reapOwnedExecution(executionStateDirectory, execution),
                   catch: identityError,
                 }).pipe(Effect.asVoid)
               : Effect.void,
@@ -469,12 +472,14 @@ export class CodexCodingSession {
         adapterMcpServer = normalizeCodingSessionMcpServer(effectiveRequest.mcpServer);
       const clientFactory = this.clientFactory;
       const adapterOverrides = internalAdapterOverrides.get(this);
-      const adapter = this.appServerProfiles.has(profileName)
-        ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
-        : (adapterOverrides?.sdk ??
-          (clientFactory
-            ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
-            : this.sdkAdapter));
+      const adapter = this.openCode2Profiles.has(profileName)
+        ? (adapterOverrides?.opencode2 ?? this.openCode2Adapter)
+        : this.appServerProfiles.has(profileName)
+          ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
+          : (adapterOverrides?.sdk ??
+            (clientFactory
+              ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
+              : this.sdkAdapter));
       effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);
       const result = await adapter.run({

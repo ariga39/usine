@@ -24,7 +24,7 @@ const archiveReference = Schema.Struct({
 const effectiveProfile = Schema.Struct({
   profileName: Schema.NullOr(safeProfileName),
   configSha256: Schema.NullOr(exactHash),
-  adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server"])),
+  adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server", "opencode2"])),
   model: Schema.NullOr(safeEvidenceValue),
   modelProvider: Schema.NullOr(safeEvidenceValue),
   reasoningEffort: Schema.NullOr(Schema.Literals(["minimal", "low", "medium", "high", "xhigh"])),

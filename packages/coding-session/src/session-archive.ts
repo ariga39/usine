@@ -64,7 +64,7 @@ export const sessionArchiveSchema = z
     captureStatus: archiveCaptureStatusSchema,
     completeness: z.enum(["complete", "partial"]),
     sessionId: z.string().nullable(),
-    adapter: z.enum(["sdk", "app-server"]).nullable(),
+    adapter: z.enum(["sdk", "app-server", "opencode2"]).nullable(),
     phase: z.enum(["startup", "thread", "turn", "output"]).nullable(),
     failureClass: failureClassSchema,
     failure: z.string().nullable(),
@@ -99,7 +99,7 @@ const sessionArchiveTombstoneSchema = z
     captureStatus: z.literal("pruned"),
     completeness: z.literal("partial"),
     sessionId: z.string().nullable(),
-    adapter: z.enum(["sdk", "app-server"]).nullable(),
+    adapter: z.enum(["sdk", "app-server", "opencode2"]).nullable(),
     phase: z.enum(["startup", "thread", "turn", "output"]).nullable(),
     failureClass: failureClassSchema,
     byteLength: z.number().int().nonnegative(),
@@ -235,7 +235,7 @@ export class SessionArchiveWriter {
     void this.schedulePersist();
   }
 
-  setAdapter(adapter: "sdk" | "app-server"): void {
+  setAdapter(adapter: "sdk" | "app-server" | "opencode2"): void {
     this.record.adapter = adapter;
     void this.schedulePersist();
   }

@@ -551,7 +551,7 @@ describe("task evidence", () => {
             effectiveProfile: {
               profileName: "writer-profile",
               configSha256: "1".repeat(64),
-              adapter: "sdk",
+              adapter: "opencode2",
               model: "writer-model",
               modelProvider: "openai",
               reasoningEffort: "low",
@@ -620,6 +620,7 @@ describe("task evidence", () => {
     expect(JSON.parse(renderTaskEvidence(evidence, true))).toEqual(evidence);
     expect(renderTaskEvidence(evidence, false)).toContain("IMPLEMENTER ROLE RUNS");
     expect(renderTaskEvidence(evidence, false)).toContain("REVIEWER ROLE RUNS");
+    expect(renderTaskEvidence(evidence, false)).toContain("adapter=opencode2");
     expect(renderTaskEvidence(evidence, false)).toContain("accepted_exact_sha");
   });
 });
