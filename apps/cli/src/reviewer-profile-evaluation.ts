@@ -13,7 +13,10 @@ import {
   type TaskContract,
 } from "@usine/task-authority";
 import {
+  codingSessionAdapterForProfile,
+  CodingSessionAdapterConfigurationError,
   reviewCandidateWithProfile,
+  codingSessionAdapterProfilesFromEnvironment,
   readSessionArchiveManifest,
   resolveCodexProfile,
   stateDirectoryFromEnvironment,
@@ -716,7 +719,12 @@ function sanitizeEffectiveProfile(profile: EffectiveSessionProfile): EffectiveSe
   return {
     profileName: safeProfileIdentity(profile.profileName),
     configSha256: safeSha256(profile.configSha256),
-    adapter: profile.adapter === "sdk" || profile.adapter === "app-server" ? profile.adapter : null,
+    adapter:
+      profile.adapter === "sdk" ||
+      profile.adapter === "app-server" ||
+      profile.adapter === "opencode2"
+        ? profile.adapter
+        : null,
     model: safeExperimentalIdentity(profile.model),
     modelProvider: safeExperimentalIdentity(profile.modelProvider),
     reasoningEffort: safeReasoningEffort(profile.reasoningEffort),
@@ -1069,21 +1077,19 @@ async function resolveReviewerProfile(profile: string, environment: NodeJS.Proce
   try {
     const selection = await resolveCodexProfile(profile, environment);
     if (!selection.config) throw new Error("configuration unavailable");
-    return { ...selection, adapter: adapterForProfile(profile, environment) };
-  } catch {
+    return {
+      ...selection,
+      adapter: codingSessionAdapterForProfile(
+        profile,
+        codingSessionAdapterProfilesFromEnvironment(environment),
+      ),
+    };
+  } catch (error) {
+    if (error instanceof CodingSessionAdapterConfigurationError) throw error;
     throw new ReviewerEvaluationValidationError(
       `${profile}: resolved profile configuration is unavailable`,
     );
   }
-}
-
-function adapterForProfile(profile: string, environment: NodeJS.ProcessEnv): "sdk" | "app-server" {
-  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
-  if (!configured) return "sdk";
-  const profiles = configured.split(",").map((entry) => entry.trim());
-  if (profiles.some((entry) => !profileName.test(entry)))
-    throw new ReviewerEvaluationValidationError("USINE_CODEX_APP_SERVER_PROFILES is invalid");
-  return profiles.includes(profile) ? "app-server" : "sdk";
 }
 
 function validateProfileFactor(

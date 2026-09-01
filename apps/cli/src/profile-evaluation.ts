@@ -16,7 +16,13 @@ import {
   type RepositorySnapshot,
   type TaskContract,
 } from "@usine/task-authority";
-import { resolveCodexProfile, validateCodexProfile } from "@usine/runtime";
+import {
+  codingSessionAdapterForProfile,
+  codingSessionAdapterProfilesFromEnvironment,
+  CodingSessionAdapterConfigurationError,
+  resolveCodexProfile,
+  validateCodexProfile,
+} from "@usine/runtime";
 import { CliFailure, runCommand } from "./cli-failure.js";
 import {
   followTask,
@@ -1252,22 +1258,20 @@ async function resolveProfile(profile: string, environment: NodeJS.ProcessEnv) {
       throw new ProfileEvaluationValidationError(
         `${profile}: resolved profile configuration is unavailable`,
       );
-    return { ...selection, adapter: adapterForProfile(profile, environment) };
+    return {
+      ...selection,
+      adapter: codingSessionAdapterForProfile(
+        profile,
+        codingSessionAdapterProfilesFromEnvironment(environment),
+      ),
+    };
   } catch (error) {
+    if (error instanceof CodingSessionAdapterConfigurationError) throw error;
     if (error instanceof ProfileEvaluationValidationError) throw error;
     throw new ProfileEvaluationValidationError(
       `${profile}: resolved profile configuration is unavailable`,
     );
   }
-}
-
-function adapterForProfile(profile: string, environment: NodeJS.ProcessEnv): "sdk" | "app-server" {
-  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
-  if (!configured) return "sdk";
-  const profiles = configured.split(",").map((entry) => entry.trim());
-  if (profiles.some((entry) => !profileName.test(entry)))
-    throw new ProfileEvaluationValidationError("USINE_CODEX_APP_SERVER_PROFILES is invalid");
-  return profiles.includes(profile) ? "app-server" : "sdk";
 }
 
 function validateProfileFactor(
@@ -1316,7 +1320,7 @@ interface ProfileFields {
   readonly modelProvider: unknown;
   readonly modelProviders: unknown;
   readonly modelCatalogJson: unknown;
-  readonly adapter: "sdk" | "app-server";
+  readonly adapter: "sdk" | "app-server" | "opencode2";
   readonly reasoningEffort: unknown;
   readonly developerInstructions: unknown;
   readonly reasoningSummary: unknown;

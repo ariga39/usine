@@ -25,7 +25,7 @@ import {
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
   CodexCodingSession,
-  codexAppServerProfilesFromEnvironment,
+  codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
   type CodingSessionCleanup,
   type CodingSessionMcpServerResolution,
@@ -60,6 +60,14 @@ export {
   type GithubReadPolicy,
 } from "./runtime-policy.js";
 export { resolveCodexProfile, validateCodexProfile } from "@usine/coding-session";
+export {
+  codingSessionAdapterForProfile,
+  codingSessionAdapterProfilesFromEnvironment,
+  CodingSessionAdapterConfigurationError,
+  normalizeCodingSessionAdapterProfiles,
+  type CodingSessionAdapterName,
+  type CodingSessionAdapterProfiles,
+} from "@usine/coding-session";
 export type { TaskExecutionInput } from "@usine/task-authority";
 export type { ReviewAttemptObservation } from "@usine/quality-gate";
 export * from "./http-api.js";
@@ -78,10 +86,10 @@ export {
 export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): CodingSessionCleanup {
   const stateDirectory = stateDirectoryFromEnvironment(environment);
   return new CodexCodingSession(undefined, {
-    environment,
+    environment: explicitWorkerEnvironment(environment),
+    adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(environment),
     executionStateDirectory: stateDirectory,
     sessionArchive: sessionArchiveOptionsFromEnvironment(environment, stateDirectory),
-    appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
   });
 }
 
@@ -112,8 +120,8 @@ export async function reviewCandidateWithProfile(
   });
   const session = new CodexCodingSession(undefined, {
     environment: explicitWorkerEnvironment(input.environment),
+    adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(input.environment),
     executionStateDirectory: stateDirectory,
-    appServerProfiles: codexAppServerProfilesFromEnvironment(input.environment),
     sessionArchive: sessionArchiveOptionsFromEnvironment(input.environment, stateDirectory),
   });
   return new QualityGate({
@@ -556,8 +564,8 @@ async function executeWithServices(options: {
   });
   const session = new CodexCodingSession(undefined, {
     environment: policy.workerEnvironment,
+    adapterSelectionEnvironment: policy.adapterSelectionEnvironment,
     executionStateDirectory: policy.stateDirectory,
-    appServerProfiles: policy.appServerProfiles,
     roleOutputTransform: policy.roleOutputTransform,
     sessionArchive: policy.sessionArchive,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {

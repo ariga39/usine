@@ -2,10 +2,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
+  codingSessionAdapterSelectionEnvironment,
   createOpenAICompatibleRoleOutputTransform,
-  codexAppServerProfilesFromEnvironment,
   explicitWorkerEnvironment,
-  validateCodexProfile,
   type RolePolicy,
   type RoleOutputTransform,
   type SessionArchiveOptions,
@@ -39,7 +38,7 @@ export interface RuntimePolicy {
   githubRead?: GithubReadPolicy;
   roleOutputTransform?: RoleOutputTransform;
   workerEnvironment: NodeJS.ProcessEnv;
-  appServerProfiles: readonly string[];
+  adapterSelectionEnvironment: NodeJS.ProcessEnv;
   credentialFreeGitEnvironment: NodeJS.ProcessEnv;
   sessionArchive: SessionArchiveOptions;
 }
@@ -93,11 +92,11 @@ export function runtimePolicyFromEnvironment(
   const roles = {
     implementer: {
       ...defaultRolePolicies.implementer,
-      profile: validateCodexProfile(repository.implementerProfile),
+      profile: repository.implementerProfile,
     },
     reviewer: {
       ...defaultRolePolicies.reviewer,
-      profile: validateCodexProfile(repository.reviewerProfile),
+      profile: repository.reviewerProfile,
     },
   };
 
@@ -113,7 +112,7 @@ export function runtimePolicyFromEnvironment(
     githubRead,
     roleOutputTransform,
     workerEnvironment,
-    appServerProfiles: codexAppServerProfilesFromEnvironment(environment),
+    adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(environment),
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
     sessionArchive,
   };

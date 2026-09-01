@@ -58,7 +58,7 @@ Do not expose the server beyond the host boundary. The HTTP API is a local coord
 
 ### Codex named profiles
 
-The Repository registration names one `implementerProfile` and one `reviewerProfile`. Each name must be a safe profile name and resolves to `<profile>.config.toml` in `CODEX_HOME`; when `CODEX_HOME` is unset, the Codex default configuration directory is used.
+The Repository registration names one opaque `implementerProfile` and one opaque `reviewerProfile`. Coding Session validates each selected name and resolves `<profile>.config.toml` in `CODEX_HOME`; when `CODEX_HOME` is unset, the Codex default configuration directory is used. The registration does not encode an adapter choice in either name.
 
 Each selected profile must contain a nonblank `model`. The currently supported optional profile fields include `model_reasoning_effort` with one of `minimal`, `low`, `medium`, `high`, or `xhigh`, and a nonblank `developer_instructions`. The adapter also forwards the supported Codex configuration fields `model_catalog_json`, `model_provider`, `model_providers`, `model_reasoning_summary`, `model_verbosity`, `personality`, and `service_tier` when present. Usine still owns the Task Contract, role prompt, output schema, sandbox, approval policy, deadline, and credential boundary.
 
@@ -72,13 +72,14 @@ developer_instructions = "<OPTIONAL_DEVELOPER_INSTRUCTIONS>"
 
 The `developer_instructions` line is optional; remove it when it is not needed. An unreadable, malformed, unsupported, or missing profile is reported as `codex_profile_unusable` before provider execution.
 
-The official Codex SDK adapter is used unless the profile name is listed in the comma-separated `USINE_CODEX_APP_SERVER_PROFILES` variable. Listed profiles use the bounded local Codex App Server adapter; unlisted profiles use the SDK adapter. This is static per named profile and has no fallback, automatic routing, or third provider.
+The official Codex SDK adapter is used unless the profile name is listed in the comma-separated `USINE_CODEX_APP_SERVER_PROFILES` variable or the qualified OpenCode2 adapter is selected by `USINE_OPENCODE2_PROFILES`. A name in the first list uses the bounded local Codex App Server adapter; a name in the second uses OpenCode2; an unlisted name uses the SDK adapter. Names in both lists are rejected at configuration time. Selection is static per named profile and has no fallback, automatic routing, registry, capability negotiation, or general compatibility claim.
 
 ```sh
 export USINE_CODEX_APP_SERVER_PROFILES="<APP_SERVER_PROFILE_NAME>"
+export USINE_OPENCODE2_PROFILES="<OPENCODE2_PROFILE_NAME>"
 ```
 
-Leave the variable unset when all registered profiles should use the SDK adapter. Only list profiles that have been deliberately configured for the app-server path.
+Leave both variables unset when all registered profiles should use the SDK adapter. These selection variables are host-private and are not passed to provider worker processes. Only list profiles deliberately configured for the selected bounded adapter. OpenCode2 additionally requires the qualified macOS Seatbelt host boundary; it has no built-in equivalent to Codex “Approve for me”.
 
 ### Forge GitHub App profile
 
@@ -432,7 +433,7 @@ The CLI writes structured diagnostics to stderr. These exit codes are stable:
 - Connection exit code `5`: keep `server` running, and make `USINE_SERVER_URL` agree with the server host/port settings. The server accepts loopback hosts only.
 - `invalid_repository_registration` or validation exit code `7`: check the strict registration shape, nonblank fields, lowercase kebab-case Forge/read profile names, positive `projectCheck.timeoutMs`, and a resolvable `<AUTHORIZED_REPOSITORY_PATH>`.
 - `invalid_task_contract`: check for extra or missing keys, a lowercase 40-character `baseSha`, an Issue URL whose owner/name and number exactly match `delivery`, non-empty acceptance, valid budgets, and `authorization.delivery: true`. Commit the contract file, leave it unchanged, and ensure `baseSha` is an ancestor of the checkout passed to `submit`.
-- `codex_profile_unusable`: check `CODEX_HOME`, the exact named profile filename, its required `model`, supported optional fields, and whether the profile name was intentionally listed in `USINE_CODEX_APP_SERVER_PROFILES`.
+- `codex_profile_unusable`: check `CODEX_HOME`, the exact named profile filename, its required `model`, supported optional fields, and whether the profile name was intentionally listed in exactly one of `USINE_CODEX_APP_SERVER_PROFILES` or `USINE_OPENCODE2_PROFILES`.
 - A Forge `unauthorized`, `malformed`, or `repository_mismatch` error: derive the environment prefix from the registration's lowercase kebab-case `forgeProfile` by uppercasing it and replacing hyphens with underscores. Check the App slug, nonblank App ID, positive installation ID, readable private-key path, and exact owner/name binding.
 - A configured read profile is unavailable: check its separate App credentials, exact `USINE_GITHUB_READ_PROFILE_<PROFILE>_REPOSITORY` binding, and comma-separated role tool names. Read access is optional; it cannot replace the Task Contract's authority.
 - The normalizer is rejected as incomplete: set `USINE_ROLE_OUTPUT_API_KEY`, `USINE_ROLE_OUTPUT_API_URL`, and `USINE_ROLE_OUTPUT_MODEL` together, or unset all three.

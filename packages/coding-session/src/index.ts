@@ -1,6 +1,5 @@
 export {
   CodexCodingSession,
-  codexAppServerProfilesFromEnvironment,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
   type CodingSessionCleanup,
@@ -20,6 +19,15 @@ export {
   type SessionRequest,
   type SessionRole,
 } from "./coding-session.js";
+export {
+  codingSessionAdapterForProfile,
+  CodingSessionAdapterConfigurationError,
+  codingSessionAdapterProfilesFromEnvironment,
+  codingSessionAdapterSelectionEnvironment,
+  normalizeCodingSessionAdapterProfiles,
+  type CodingSessionAdapterName,
+  type CodingSessionAdapterProfiles,
+} from "./coding-session-config.js";
 export type {
   CodingSessionFailureClass,
   CodingSessionPhase,

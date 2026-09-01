@@ -17,9 +17,10 @@ import {
 import { describe, expect, test, vi } from "vite-plus/test";
 import {
   CodexCodingSession,
+  codingSessionAdapterForProfile,
+  codingSessionAdapterProfilesFromEnvironment,
   type CodingSessionMcpServer,
   type CodingSessionObservation,
-  codexAppServerProfilesFromEnvironment,
   createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
   discoverOwnedExecutions,
@@ -51,6 +52,7 @@ const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
 const implementerExecution = { taskId: contract.id, role: "implementer" as const, attempt: "1" };
 const reviewerExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-a" };
+const opencodeExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-b" };
 const syntheticProfileResolver: CodexProfileResolver = async (profile) => {
   const selection = {
     model: profile === "reviewer-profile" ? "reviewer-model" : "implementer-model",
@@ -957,17 +959,34 @@ describe("Coding Session", () => {
     expect(turnOptions.every((options) => options.outputSchema !== undefined)).toBe(true);
   });
 
-  test("normalizes the static app-server profile selection from host environment", () => {
-    expect(
-      codexAppServerProfilesFromEnvironment({
-        USINE_CODEX_APP_SERVER_PROFILES: " reviewer-profile,writer-profile,reviewer-profile ",
-      }),
-    ).toEqual(["reviewer-profile", "writer-profile"]);
+  test("selects one static adapter per profile and rejects overlapping selections", () => {
+    const profiles = codingSessionAdapterProfilesFromEnvironment({
+      USINE_CODEX_APP_SERVER_PROFILES: " app-server-profile,shared-profile ",
+      USINE_OPENCODE2_PROFILES: " opencode-profile ",
+    });
+    expect(profiles).toEqual({
+      appServerProfiles: ["app-server-profile", "shared-profile"],
+      openCode2Profiles: ["opencode-profile"],
+    });
+    expect(codingSessionAdapterForProfile("sdk-profile", profiles)).toBe("sdk");
+    expect(codingSessionAdapterForProfile("app-server-profile", profiles)).toBe("app-server");
+    expect(codingSessionAdapterForProfile("opencode-profile", profiles)).toBe("opencode2");
     expect(() =>
-      codexAppServerProfilesFromEnvironment({
-        USINE_CODEX_APP_SERVER_PROFILES: "reviewer profile",
+      codingSessionAdapterProfilesFromEnvironment({
+        USINE_CODEX_APP_SERVER_PROFILES: "shared-profile",
+        USINE_OPENCODE2_PROFILES: "shared-profile",
       }),
-    ).toThrow("Codex profile is unusable");
+    ).toThrow("assigned to both codex-app-server and opencode2");
+    expect(
+      () =>
+        new CodexCodingSession(undefined, {
+          environment: { CI: "true" },
+          adapterProfiles: {
+            appServerProfiles: ["shared-profile"],
+            openCode2Profiles: ["shared-profile"],
+          },
+        }),
+    ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
   test("executes an app-server reviewer through the shared typed lifecycle and reaps its process", async () => {
@@ -1636,6 +1655,8 @@ describe("Coding Session", () => {
       PATH: "/portable/bin",
       LANG: "C",
       CODEX_HOME: "codex-home-sentinel",
+      USINE_CODEX_APP_SERVER_PROFILES: "host-private-app-server",
+      USINE_OPENCODE2_PROFILES: "host-private-opencode2",
     });
     expect(env).toEqual({
       CI: "true",
@@ -2608,7 +2629,7 @@ describe("Coding Session", () => {
     const calls: Array<
       Pick<
         CodingSessionAdapterRequest,
-        "profile" | "mcpServer" | "sandbox" | "outputSchema" | "signal"
+        "profile" | "mcpServer" | "sandbox" | "outputSchema" | "signal" | "environment"
       >
     > = [];
     const observations: CodingSessionObservation[] = [];
@@ -2621,6 +2642,7 @@ describe("Coding Session", () => {
           sandbox: context.sandbox,
           outputSchema: context.outputSchema,
           signal: context.signal,
+          environment: context.environment,
         });
         await context.onObservation?.({ type: "thread_started" });
         await context.onObservation?.({ type: "turn_started", turn: 1 });
@@ -2649,12 +2671,19 @@ describe("Coding Session", () => {
     const session = createCodexCodingSessionForTesting(
       undefined,
       {
-        environment: { CI: "true" },
+        environment: {
+          CI: "true",
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+          USINE_OPENCODE2_PROFILES: "opencode-profile",
+        },
         executionStateDirectory: stateDirectory,
-        appServerProfiles: ["reviewer-profile"],
         profileResolver: syntheticProfileResolver,
       },
-      { sdk: makeAdapter("sdk"), "app-server": makeAdapter("app-server") },
+      {
+        sdk: makeAdapter("sdk"),
+        "app-server": makeAdapter("app-server"),
+        opencode2: makeAdapter("opencode2"),
+      },
     );
 
     await expect(
@@ -2697,6 +2726,22 @@ describe("Coding Session", () => {
         },
       }),
     ).resolves.toMatchObject({ status: "completed", output: { verdict: "approved" } });
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "review with OpenCode2",
+        profile: "opencode-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: opencodeExecution,
+        onObservation: (observation) => {
+          observations.push(observation);
+        },
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: { verdict: "approved" } });
 
     expect(calls.map(({ profile, sandbox }) => ({ profile, sandbox }))).toEqual([
       {
@@ -2716,6 +2761,15 @@ describe("Coding Session", () => {
         },
         sandbox: "read-only",
       },
+      {
+        profile: {
+          model: "implementer-model",
+          reasoningEffort: "low",
+          developerInstructions:
+            "Implementer role instruction: implement the frozen task contract.",
+        },
+        sandbox: "read-only",
+      },
     ]);
     expect(calls[0]?.mcpServer).toEqual({
       name: "github_read",
@@ -2726,6 +2780,7 @@ describe("Coding Session", () => {
       required: true,
     });
     expect(calls[1]?.mcpServer).toBeUndefined();
+    expect(calls[2]?.mcpServer).toBeUndefined();
     expect(JSON.stringify(calls)).not.toContain("approval_policy");
     expect(JSON.stringify(calls)).not.toContain("mcp_servers");
     expect(JSON.stringify(calls)).not.toContain("model_reasoning_effort");
@@ -2733,9 +2788,26 @@ describe("Coding Session", () => {
     expect(calls.map(({ outputSchema }) => outputSchema)).toEqual([
       expect.objectContaining({ type: "object" }),
       expect.objectContaining({ type: "object" }),
+      expect.objectContaining({ type: "object" }),
     ]);
     expect(calls.every(({ signal }) => signal instanceof AbortSignal)).toBe(true);
+    expect(calls.every(({ environment }) => environment.CI === "true")).toBe(true);
+    expect(
+      calls.every(
+        ({ environment }) =>
+          environment.USINE_CODEX_APP_SERVER_PROFILES === undefined &&
+          environment.USINE_OPENCODE2_PROFILES === undefined,
+      ),
+    ).toBe(true);
     expect(observations).toEqual([
+      { type: "thread_started" },
+      { type: "turn_started", turn: 1 },
+      {
+        type: "mcp_tool_completed",
+        server: "github_read",
+        tool: "github_issue_get",
+        outcome: "succeeded",
+      },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       {
@@ -2754,9 +2826,11 @@ describe("Coding Session", () => {
       },
     ]);
     const archives = await listSessionArchives(stateDirectory, contract.id);
-    expect(archives).toHaveLength(2);
+    expect(archives).toHaveLength(3);
+    const archiveAdapters = new Set<string>();
     for (const manifest of archives) {
       const archive = completeArchive(await readSessionArchive(stateDirectory, manifest.archiveId));
+      archiveAdapters.add(archive.adapter ?? "");
       expect(archive.items).toEqual([
         expect.objectContaining({ type: "mcp_tool_call", server: "github_read" }),
       ]);
@@ -2764,6 +2838,7 @@ describe("Coding Session", () => {
       expect(JSON.stringify(archive)).not.toContain("commandExecution");
       expect(JSON.stringify(archive)).not.toContain("mcpToolCall");
     }
+    expect(archiveAdapters).toEqual(new Set(["sdk", "app-server", "opencode2"]));
   });
 
   test.each(["provider failure", "cancellation", "schema-invalid"] as const)(

@@ -203,7 +203,7 @@ export function publicBlockerFromText(blocker: string): PublicBlockerDiagnostic 
         ? "invalid_phase"
         : normalized.includes("missing") && normalized.includes("evidence")
           ? "missing_evidence"
-          : normalized.includes("provider")
+          : normalized.includes("provider") || normalized.includes("coding session")
             ? "provider_failure"
             : normalized.includes("project check") || normalized.includes("check failure")
               ? "project_check_failure"
