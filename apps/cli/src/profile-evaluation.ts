@@ -38,15 +38,20 @@ import {
   runReviewerProfileEvaluateCommand,
   type ReviewerEvaluationServices,
 } from "./reviewer-profile-evaluation.js";
+import {
+  admitProfilePair,
+  isProfilePairChangedFactor,
+  profilePairFieldSnapshot,
+  type ProfilePairChangedFactor,
+} from "./profile-pair-admission.js";
 
 const execFile = promisify(execFileCallback);
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const changedFactors = ["model_stack", "reasoning", "developer_instructions"] as const;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-export type ProfileEvaluationChangedFactor = (typeof changedFactors)[number];
+export type ProfileEvaluationChangedFactor = ProfilePairChangedFactor;
 
 export interface ProfileEvaluationPair {
   readonly id: string;
@@ -1203,7 +1208,7 @@ function validatePlanShape(plan: ProfileEvaluationPlan): void {
     throw new ProfileEvaluationValidationError("plan identifiers are invalid");
   if (!exactSha.test(plan.baseSha))
     throw new ProfileEvaluationValidationError("plan baseSha must be a lowercase 40-character SHA");
-  if (!isChangedFactor(plan.changedFactor))
+  if (!isProfilePairChangedFactor(plan.changedFactor))
     throw new ProfileEvaluationValidationError("plan changedFactor is invalid");
   if (!exactSha.test(plan.usineBuild))
     throw new ProfileEvaluationValidationError(
@@ -1279,80 +1284,19 @@ function validateProfileFactor(
   baseline: Awaited<ReturnType<typeof resolveProfile>>,
   candidate: Awaited<ReturnType<typeof resolveProfile>>,
 ): void {
-  const baselineFields = profileFields(baseline);
-  const candidateFields = profileFields(candidate);
-  if (plan.baselineProfile === plan.candidateProfile)
-    throw new ProfileEvaluationValidationError("baseline and candidate profiles must be distinct");
-  const factorFields = {
-    model_stack: ["model", "modelProvider", "modelProviders", "modelCatalogJson"] as const,
-    reasoning: ["reasoningEffort"] as const,
-    developer_instructions: ["developerInstructions"] as const,
-  }[plan.changedFactor];
-  const allFields = [
-    "model",
-    "modelProvider",
-    "modelProviders",
-    "modelCatalogJson",
-    "adapter",
-    "reasoningEffort",
-    "developerInstructions",
-    "reasoningSummary",
-    "verbosity",
-    "personality",
-    "serviceTier",
-  ] as const;
-  const differs = (field: (typeof allFields)[number]) =>
-    stableJson(baselineFields[field]) !== stableJson(candidateFields[field]);
-  if (!factorFields.some(differs))
+  const admission = admitProfilePair({
+    changedFactor: plan.changedFactor,
+    baseline: profilePairFieldSnapshot(baseline),
+    candidate: profilePairFieldSnapshot(candidate),
+  });
+  if (admission.accepted) return;
+  if (admission.reason === "unchanged_factor")
     throw new ProfileEvaluationValidationError(
       `baseline and candidate profiles do not differ in changedFactor ${plan.changedFactor}`,
     );
-  const factorFieldSet = new Set<string>(factorFields);
-  const unrelated = allFields.filter((field) => !factorFieldSet.has(field) && differs(field));
-  if (unrelated.length > 0)
-    throw new ProfileEvaluationValidationError(
-      `profiles differ outside changedFactor ${plan.changedFactor}: ${unrelated.join(",")}`,
-    );
-}
-
-interface ProfileFields {
-  readonly model: string;
-  readonly modelProvider: unknown;
-  readonly modelProviders: unknown;
-  readonly modelCatalogJson: unknown;
-  readonly adapter: "sdk" | "app-server" | "opencode2";
-  readonly reasoningEffort: unknown;
-  readonly developerInstructions: unknown;
-  readonly reasoningSummary: unknown;
-  readonly verbosity: unknown;
-  readonly personality: unknown;
-  readonly serviceTier: unknown;
-}
-
-function profileFields(selection: Awaited<ReturnType<typeof resolveProfile>>): ProfileFields {
-  const config = selection.config;
-  return {
-    model: selection.model,
-    modelProvider: config?.model_provider ?? null,
-    modelProviders: config?.model_providers ?? null,
-    modelCatalogJson: config?.model_catalog_json ?? null,
-    adapter: selection.adapter,
-    reasoningEffort: selection.modelReasoningEffort ?? null,
-    developerInstructions: selection.developerInstructions ?? null,
-    reasoningSummary: config?.model_reasoning_summary ?? null,
-    verbosity: config?.model_verbosity ?? null,
-    personality: config?.personality ?? null,
-    serviceTier: config?.service_tier ?? null,
-  };
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  return `{${Object.entries(value)
-    .toSorted(([left], [right]) => left.localeCompare(right))
-    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
-    .join(",")}}`;
+  throw new ProfileEvaluationValidationError(
+    `profiles differ outside changedFactor ${plan.changedFactor}: ${admission.fields.join(",")}`,
+  );
 }
 
 function validatePair(
@@ -1461,7 +1405,7 @@ function normalizePlan(input: unknown): ProfileEvaluationPlan {
     typeof input.repositoryId !== "string" ||
     typeof input.baseSha !== "string" ||
     input.subjectRole !== "implementer" ||
-    !isChangedFactor(input.changedFactor) ||
+    !isProfilePairChangedFactor(input.changedFactor) ||
     typeof input.baselineProfile !== "string" ||
     typeof input.candidateProfile !== "string" ||
     typeof input.reviewerProfile !== "string" ||
@@ -1488,10 +1432,6 @@ function normalizePlan(input: unknown): ProfileEvaluationPlan {
     pairs: input.pairs.map(parsePair),
   };
   return plan;
-}
-
-function isChangedFactor(value: unknown): value is ProfileEvaluationChangedFactor {
-  return value === "model_stack" || value === "reasoning" || value === "developer_instructions";
 }
 
 function parsePair(input: unknown): ProfileEvaluationPair {

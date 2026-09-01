@@ -25,6 +25,12 @@ import {
   type SessionArchiveManifest,
 } from "@usine/runtime";
 import { runCommand } from "./cli-failure.js";
+import {
+  admitProfilePair,
+  isProfilePairChangedFactor,
+  profilePairFieldSnapshot,
+  type ProfilePairChangedFactor,
+} from "./profile-pair-admission.js";
 
 type EffectiveSessionProfile = NonNullable<ReviewAttemptObservation["effectiveProfile"]>;
 type CheckResult = ReviewerQualityGateInput["check"];
@@ -36,10 +42,7 @@ const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-export type ReviewerEvaluationChangedFactor =
-  | "model_stack"
-  | "reasoning"
-  | "developer_instructions";
+export type ReviewerEvaluationChangedFactor = ProfilePairChangedFactor;
 
 export interface ReviewerEvaluationCase {
   readonly id: string;
@@ -933,7 +936,7 @@ function normalizePlan(input: unknown): ReviewerEvaluationPlan {
     typeof input.repositoryId !== "string" ||
     typeof input.baseSha !== "string" ||
     input.subjectRole !== "reviewer" ||
-    !isChangedFactor(input.changedFactor) ||
+    !isProfilePairChangedFactor(input.changedFactor) ||
     typeof input.baselineProfile !== "string" ||
     typeof input.candidateProfile !== "string" ||
     typeof input.maxRuns !== "number" ||
@@ -1069,10 +1072,6 @@ function parseLabel(raw: string): ReviewerEvaluationLabel {
   };
 }
 
-function isChangedFactor(value: unknown): value is ReviewerEvaluationChangedFactor {
-  return value === "model_stack" || value === "reasoning" || value === "developer_instructions";
-}
-
 async function resolveReviewerProfile(profile: string, environment: NodeJS.ProcessEnv) {
   try {
     const selection = await resolveCodexProfile(profile, environment);
@@ -1097,64 +1096,19 @@ function validateProfileFactor(
   baseline: Awaited<ReturnType<typeof resolveReviewerProfile>>,
   candidate: Awaited<ReturnType<typeof resolveReviewerProfile>>,
 ): void {
-  const left = profileFields(baseline);
-  const right = profileFields(candidate);
-  const factors = {
-    model_stack: ["model", "modelProvider", "modelProviders", "modelCatalogJson"] as const,
-    reasoning: ["reasoningEffort"] as const,
-    developer_instructions: ["developerInstructions"] as const,
-  }[plan.changedFactor];
-  const all = [
-    "model",
-    "modelProvider",
-    "modelProviders",
-    "modelCatalogJson",
-    "adapter",
-    "reasoningEffort",
-    "developerInstructions",
-    "reasoningSummary",
-    "verbosity",
-    "personality",
-    "serviceTier",
-  ] as const;
-  const differs = (field: (typeof all)[number]) =>
-    stableJson(left[field]) !== stableJson(right[field]);
-  if (!factors.some(differs))
+  const admission = admitProfilePair({
+    changedFactor: plan.changedFactor,
+    baseline: profilePairFieldSnapshot(baseline),
+    candidate: profilePairFieldSnapshot(candidate),
+  });
+  if (admission.accepted) return;
+  if (admission.reason === "unchanged_factor")
     throw new ReviewerEvaluationValidationError(
       `profiles do not differ in changedFactor ${plan.changedFactor}`,
     );
-  const factorSet = new Set<string>(factors);
-  const unrelated = all.filter((field) => !factorSet.has(field) && differs(field));
-  if (unrelated.length > 0)
-    throw new ReviewerEvaluationValidationError(
-      `profiles differ outside changedFactor ${plan.changedFactor}: ${unrelated.join(",")}`,
-    );
-}
-
-function profileFields(selection: Awaited<ReturnType<typeof resolveReviewerProfile>>) {
-  const config = selection.config;
-  return {
-    model: selection.model,
-    modelProvider: config?.model_provider ?? null,
-    modelProviders: config?.model_providers ?? null,
-    modelCatalogJson: config?.model_catalog_json ?? null,
-    adapter: selection.adapter,
-    reasoningEffort: selection.modelReasoningEffort ?? null,
-    developerInstructions: selection.developerInstructions ?? null,
-    reasoningSummary: config?.model_reasoning_summary ?? null,
-    verbosity: config?.model_verbosity ?? null,
-    personality: config?.personality ?? null,
-    serviceTier: config?.service_tier ?? null,
-  };
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  return `{${Object.entries(value)
-    .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
-    .join(",")}}`;
+  throw new ReviewerEvaluationValidationError(
+    `profiles differ outside changedFactor ${plan.changedFactor}: ${admission.fields.join(",")}`,
+  );
 }
 
 function validateContractRepository(

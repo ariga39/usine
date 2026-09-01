@@ -238,6 +238,56 @@ describe("reviewer profile evaluation public path", () => {
     process.exitCode = 0;
   });
 
+  test("rejects a reviewer profile pair with more than its declared changed factor before provider execution", async () => {
+    const value = await fixture();
+    await writeFile(
+      join(value.root, "codex/baseline-reviewer.config.toml"),
+      'model = "baseline-model"\nmodel_reasoning_effort = "low"\n',
+    );
+    await writeFile(
+      join(value.root, "codex/candidate-reviewer.config.toml"),
+      'model = "candidate-model"\nmodel_reasoning_effort = "high"\n',
+    );
+    const plan = JSON.parse(await readFile(value.planPath, "utf8")) as Record<string, unknown>;
+    plan.changedFactor = "reasoning";
+    await writeFile(value.planPath, JSON.stringify(plan));
+    await execFile("git", ["add", "reviewer-evaluation-plan.json"], { cwd: value.root });
+    await execFile("git", ["commit", "-m", "invalid multi-factor reviewer evaluation shape"], {
+      cwd: value.root,
+    });
+
+    await expect(readReviewerEvaluationPlan(value.planPath, value.environment)).rejects.toThrow(
+      "profiles differ outside changedFactor reasoning: model",
+    );
+
+    let providerCalls = 0;
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      value.environment,
+      undefined,
+      {
+        review: async () => {
+          providerCalls += 1;
+          throw new Error("must not run");
+        },
+      },
+    );
+    expect(providerCalls).toBe(0);
+    expect(process.exitCode).toBe(7);
+    process.exitCode = 0;
+  });
+
+  test("holds the reviewer adapter fixed before the evaluation can contact the provider", async () => {
+    const value = await fixture();
+    await expect(
+      readReviewerEvaluationPlan(value.planPath, {
+        ...value.environment,
+        USINE_CODEX_APP_SERVER_PROFILES: "candidate-reviewer",
+      }),
+    ).rejects.toThrow("profiles differ outside changedFactor model_stack: adapter");
+  });
+
   test("rejects a symlinked or non-regular registration before provider execution", async () => {
     for (const kind of ["symlink", "directory"] as const) {
       const value = await fixture();
