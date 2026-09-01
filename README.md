@@ -8,7 +8,7 @@ The current product path is intentionally bounded:
 
 - one local server and a finite active-Task capacity;
 - one writer lease per registered Repository;
-- Codex implementer and reviewer sessions behind one task-oriented adapter;
+- statically selected Codex SDK, Codex App Server, or qualified source-internal OpenCode2 implementer/reviewer sessions behind one task-oriented adapter;
 - GitHub as the current forge and bounded read surface;
 - explicit Task Contract delivery authority, with merge authority granted only by `authorization.merge: true`;
 - transient live observation plus durable Task-local event history.
