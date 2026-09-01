@@ -232,6 +232,52 @@ function evaluationEvidence(
 }
 
 describe("profile evaluate plan boundary", () => {
+  async function expectMalformedPlan(
+    value: Awaited<ReturnType<typeof fixture>>,
+    mutate: (plan: Record<string, unknown>) => unknown,
+  ): Promise<void> {
+    const plan = JSON.parse(await readFile(value.planPath, "utf8")) as Record<string, unknown>;
+    const malformed = mutate(plan);
+    await writeFile(
+      value.planPath,
+      typeof malformed === "string" ? malformed : JSON.stringify(malformed),
+    );
+    await execa("git", ["add", "evaluation-plan.json"], { cwd: value.root });
+    await execa("git", ["commit", "-m", "invalid evaluation plan structure"], {
+      cwd: value.root,
+    });
+
+    let serverCalls = 0;
+    const unexpectedServerCall = async (): Promise<never> => {
+      serverCalls += 1;
+      throw new Error("unexpected server call");
+    };
+    const services: ProfileEvaluationServices = {
+      inspectRepository: unexpectedServerCall,
+      registerRepository: unexpectedServerCall,
+      submitTask: unexpectedServerCall,
+      taskStatus: unexpectedServerCall,
+      followTask: unexpectedServerCall,
+      retryTask: unexpectedServerCall,
+      taskEvidence: unexpectedServerCall,
+    };
+
+    process.exitCode = 0;
+    try {
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "implementer", json: true },
+        "http://server.test",
+        value.environment,
+        services,
+      );
+      expect(serverCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      await expect(readFile(join(value.root, "reports/evaluation-report.json"))).rejects.toThrow();
+    } finally {
+      process.exitCode = 0;
+    }
+  }
+
   test("accepts a committed pair and resolves all named profiles before execution", async () => {
     const value = await fixture();
     const loaded = await readProfileEvaluationPlan(value.planPath, value.environment);
@@ -241,6 +287,43 @@ describe("profile evaluate plan boundary", () => {
       "baseline-task",
       "candidate-task",
     ]);
+  });
+
+  test("rejects a non-object plan before server effects or report writes", async () => {
+    const value = await fixture();
+    await expectMalformedPlan(value, () => "[]");
+  });
+
+  test("rejects a plan with a missing field before server effects or report writes", async () => {
+    const value = await fixture();
+    await expectMalformedPlan(value, (plan) => {
+      delete plan.changedFactor;
+      return plan;
+    });
+  });
+
+  test("rejects a plan with a mistyped field before server effects or report writes", async () => {
+    const value = await fixture();
+    await expectMalformedPlan(value, (plan) => {
+      plan.maxTasks = "2";
+      return plan;
+    });
+  });
+
+  test("rejects an invalid pair shape before server effects or report writes", async () => {
+    const value = await fixture();
+    await expectMalformedPlan(value, (plan) => {
+      plan.pairs = [null];
+      return plan;
+    });
+  });
+
+  test("rejects an excess plan field before server effects or report writes", async () => {
+    const value = await fixture();
+    await expectMalformedPlan(value, (plan) => {
+      plan.unexpected = true;
+      return plan;
+    });
   });
 
   test("rejects unshipped aliases before contacting the server", async () => {
