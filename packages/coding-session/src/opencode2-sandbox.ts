@@ -1,9 +1,12 @@
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { access, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, normalize, resolve } from "node:path";
 
 const SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const PROBE_TIMEOUT_MS = 1_000;
+const PROBE_TERMINATION_GRACE_MS = 250;
+const PROBE_REAP_WAIT_MS = 250;
 
 export interface OpenCode2SandboxRequest {
   readonly workspace: string;
@@ -129,6 +132,7 @@ export function sandboxProfile(input: {
     input.role === "implementer" ? `(allow file-write* ${subpath(workspace)})` : "";
   return [
     "(version 1)",
+    "(deny default)",
     '(import "system.sb")',
     "(allow process-exec process-fork process-signal)",
     "(allow network-outbound)",
@@ -143,14 +147,19 @@ export function sandboxProfile(input: {
     .join(" ");
 }
 
-async function runProbe(input: {
-  readonly profile: string;
-  readonly role: "implementer" | "reviewer";
-  readonly workspaceProbe: string;
-  readonly outsidePath: string;
-  readonly privateDirectory: string;
-  readonly signal: AbortSignal;
-}): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
+type ProbeChildFactory = (command: string, args: readonly string[]) => ChildProcess;
+
+export async function runProbe(
+  input: {
+    readonly profile: string;
+    readonly role: "implementer" | "reviewer";
+    readonly workspaceProbe: string;
+    readonly outsidePath: string;
+    readonly privateDirectory: string;
+    readonly signal: AbortSignal;
+  },
+  spawnProbe: ProbeChildFactory = (command, args) => spawn(command, args, { stdio: "ignore" }),
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
   const childCode = `require("node:fs").writeFileSync(${JSON.stringify(input.outsidePath)}, "child")`;
   const shellOutsideCode = `printf shell > ${shellQuote(input.outsidePath)}`;
   const shellWorkspaceCode = `printf shell > ${shellQuote(input.workspaceProbe)}`;
@@ -174,15 +183,21 @@ if (${String(input.role === "implementer")} ? result.shellWorkspaceWrite !== "al
 if (result.externalRead === "allowed" || result.externalWrite === "allowed" || result.shellExternalWrite === "allowed" || result.childExternalWrite === "allowed") process.exit(23);
 if (result.privateWrite !== "allowed") process.exit(24);
 `;
-  const child = spawn(SANDBOX_EXECUTABLE, ["-p", input.profile, process.execPath, "-e", script], {
-    stdio: "ignore",
-  });
+  const child = spawnProbe(SANDBOX_EXECUTABLE, [
+    "-p",
+    input.profile,
+    process.execPath,
+    "-e",
+    script,
+  ]);
   return await new Promise((resolveResult) => {
     let settled = false;
-    const onAbort = () => {
-      child.kill("SIGTERM");
-      finish({ ok: false, reason: "cancellation" });
-    };
+    let terminationReason: "cancellation" | "timeout" | undefined;
+    let childError: string | undefined;
+    let resolveClose!: () => void;
+    const close = new Promise<void>((resolveCloseResult) => {
+      resolveClose = resolveCloseResult;
+    });
     const finish = (
       result: { readonly ok: true } | { readonly ok: false; readonly reason: string },
     ) => {
@@ -192,19 +207,53 @@ if (result.privateWrite !== "allowed") process.exit(24);
       input.signal.removeEventListener("abort", onAbort);
       resolveResult(result);
     };
+    const waitForClose = async (milliseconds: number): Promise<boolean> =>
+      await Promise.race([
+        close.then(() => true),
+        new Promise<boolean>((resolveWait) => setTimeout(() => resolveWait(false), milliseconds)),
+      ]);
+    const terminate = async (reason: "cancellation" | "timeout"): Promise<void> => {
+      if (terminationReason) return;
+      terminationReason = reason;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The close event remains the reaping observation.
+      }
+      if (await waitForClose(PROBE_TERMINATION_GRACE_MS)) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // A concurrently exiting child is handled by the close event below.
+      }
+      if (await waitForClose(PROBE_REAP_WAIT_MS)) return;
+      finish({ ok: false, reason: `${reason}; probe child did not close` });
+    };
+    const onAbort = () => {
+      void terminate("cancellation");
+    };
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish({ ok: false, reason: "timeout" });
+      void terminate("timeout");
     }, PROBE_TIMEOUT_MS);
     input.signal.addEventListener("abort", onAbort, { once: true });
-    child.once("error", (error) => finish({ ok: false, reason: error.message }));
-    child.once("exit", (code, signal) =>
-      finish(
-        code === 0
-          ? { ok: true }
-          : { ok: false, reason: `probe exited ${code ?? "null"}/${signal ?? "null"}` },
-      ),
-    );
+    child.once("error", (error) => {
+      childError = error.message;
+    });
+    child.once("close", (code, signal) => {
+      resolveClose();
+      if (terminationReason) {
+        finish({ ok: false, reason: terminationReason });
+      } else if (childError) {
+        finish({ ok: false, reason: childError });
+      } else {
+        finish(
+          code === 0
+            ? { ok: true }
+            : { ok: false, reason: `probe exited ${code ?? "null"}/${signal ?? "null"}` },
+        );
+      }
+    });
+    if (input.signal.aborted) void terminate("cancellation");
   });
 }
 
@@ -220,15 +269,16 @@ function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
-async function resolveExecutable(pathValue: string | undefined): Promise<string> {
+export async function resolveExecutable(pathValue: string | undefined): Promise<string> {
   const candidates = (pathValue ?? "")
     .split(":")
     .filter(Boolean)
     .map((directory) => join(directory, "opencode"));
   for (const candidate of candidates) {
     try {
-      await access(candidate);
-      return resolve(candidate);
+      const canonical = await realpath(candidate);
+      await access(canonical, constants.X_OK);
+      return canonical;
     } catch {
       // Continue through the explicit worker PATH.
     }

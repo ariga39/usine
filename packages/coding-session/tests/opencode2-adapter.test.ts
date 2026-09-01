@@ -1,5 +1,15 @@
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
@@ -10,9 +20,11 @@ import type { CodingSessionAdapterRequest } from "../src/coding-session-adapter.
 import type { ProviderNeutralCompletedEvidence } from "../src/coding-session-adapter.js";
 import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { executionIdentityPath, discoverOwnedExecutions } from "../src/codex-execution.js";
-import { OpenCode2Adapter } from "../src/opencode2-adapter.js";
+import { OpenCode2Adapter, opencodeConfig } from "../src/opencode2-adapter.js";
 import {
   DarwinOpenCode2Sandbox,
+  resolveExecutable,
+  runProbe,
   sandboxProfile,
   type OpenCode2Sandbox,
 } from "../src/opencode2-sandbox.js";
@@ -295,11 +307,12 @@ function request(
   fixtureEnvironment: Record<string, string>,
   stateDirectory: string,
   signal: AbortSignal,
+  sandbox: "workspace-write" | "read-only" = "read-only",
 ): CodingSessionAdapterRequest {
   return {
     workspace,
     prompt: "fixture prompt",
-    sandbox: "read-only",
+    sandbox,
     approvalPolicy: "never",
     profile: {
       model: "fixture-model",
@@ -320,6 +333,13 @@ function request(
     execution,
     signal,
   };
+}
+
+function editPermission(requestValue: CodingSessionAdapterRequest): unknown {
+  const permission = opencodeConfig(requestValue).permission;
+  if (typeof permission !== "object" || permission === null)
+    throw new Error("expected an OpenCode permission object");
+  return Object.fromEntries(Object.entries(permission)).edit;
 }
 
 async function assertOwnedExecutionGone(testFixture: {
@@ -371,11 +391,98 @@ describe("OpenCode2 bounded adapter", () => {
     const implementer = sandboxProfile({ ...base, role: "implementer" });
     const reviewer = sandboxProfile({ ...base, role: "reviewer" });
 
+    expect(implementer).toContain("(deny default)");
+    expect(reviewer).toContain("(deny default)");
     expect(implementer).toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
     expect(reviewer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
   });
+
+  test("binds OpenCode edit permission to the execution role, not sandbox intent", () => {
+    const testFixtureRequest = request(
+      join("/tmp", "opencode2-workspace"),
+      {},
+      join("/tmp", "opencode2-state"),
+      new AbortController().signal,
+      "workspace-write",
+    );
+
+    expect(editPermission(testFixtureRequest)).toBe("deny");
+    expect(
+      editPermission({
+        ...testFixtureRequest,
+        execution: { ...testFixtureRequest.execution, role: "implementer" },
+      }),
+    ).toBe("allow");
+  });
+
+  test("canonicalizes and verifies the OpenCode executable before launch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-opencode2-executable-"));
+    const target = join(root, "real-opencode");
+    const linkDirectory = join(root, "path");
+    const link = join(linkDirectory, "opencode");
+    await mkdir(linkDirectory, { recursive: true });
+    await writeFile(target, "#!/bin/sh\nexit 0\n");
+    await chmod(target, 0o755);
+    await symlink(target, link);
+    try {
+      await expect(resolveExecutable(linkDirectory)).resolves.toBe(await realpath(target));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["cancellation", "timeout"] as const)(
+    "waits for the probe child to close after %s",
+    async (reason) => {
+      const root = await mkdtemp(join(tmpdir(), "usine-opencode2-probe-"));
+      const marker = join(root, "closed");
+      const controller = new AbortController();
+      let child: ReturnType<typeof spawn> | undefined;
+      let closed = false;
+      try {
+        const probe = runProbe(
+          {
+            profile: "(version 1)",
+            role: "reviewer",
+            workspaceProbe: join(root, "workspace-probe"),
+            outsidePath: join(root, "outside"),
+            privateDirectory: root,
+            signal: controller.signal,
+          },
+          (_command, _args) => {
+            const spawned = spawn(
+              process.execPath,
+              [
+                "-e",
+                `process.on("SIGTERM", () => ${
+                  reason === "cancellation"
+                    ? `setTimeout(() => { require("node:fs").writeFileSync(${JSON.stringify(marker)}, "closed"); process.exit(0); }, 100)`
+                    : "undefined"
+                }); setInterval(() => {}, 1000);`,
+              ],
+              { stdio: "ignore" },
+            );
+            child = spawned;
+            spawned.once("close", () => {
+              closed = true;
+            });
+            if (reason === "cancellation")
+              spawned.once("spawn", () => setTimeout(() => controller.abort(), 100));
+            return spawned;
+          },
+        );
+        const result = await probe;
+        expect(result).toEqual({ ok: false, reason });
+        if (reason === "cancellation") await expect(access(marker)).resolves.toBeUndefined();
+        expect(closed).toBe(true);
+      } finally {
+        if (child?.exitCode === null) child.kill("SIGKILL");
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("runs the real host preflight and never substitutes an unverified boundary", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-opencode2-sandbox-real-"));

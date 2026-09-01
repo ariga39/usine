@@ -454,7 +454,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
   }
 }
 
-function opencodeConfig(context: CodingSessionAdapterRequest): Config {
+export function opencodeConfig(context: CodingSessionAdapterRequest): Config {
   const model = modelName(context.profile);
   const config: Config = {
     model,
@@ -462,7 +462,7 @@ function opencodeConfig(context: CodingSessionAdapterRequest): Config {
     permission: {
       "*": "deny",
       read: "allow",
-      edit: context.sandbox === "workspace-write" ? "allow" : "deny",
+      edit: context.execution.role === "implementer" ? "allow" : "deny",
       glob: "allow",
       grep: "allow",
       list: "allow",
