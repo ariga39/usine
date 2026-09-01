@@ -20,7 +20,6 @@ import {
   type CodingSessionMcpServer,
   type CodingSessionObservation,
   codexAppServerProfilesFromEnvironment,
-  codexMcpConfig,
   createOpenAICompatibleRoleOutputTransform,
   createCodexLauncher,
   discoverOwnedExecutions,
@@ -39,6 +38,13 @@ import {
 } from "@usine/coding-session";
 import { decodeTaskObservationEventInput, type TaskContract } from "@usine/task-authority";
 import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
+import { createCodexCodingSessionForTesting } from "../src/coding-session.js";
+import { codexAdapterConfig } from "../src/codex-adapter-config.js";
+import { normalizeCodingSessionMcpServer } from "../src/coding-session-policy.js";
+import type {
+  CodingSessionAdapter,
+  CodingSessionAdapterRequest,
+} from "../src/coding-session-adapter.js";
 import { z } from "zod";
 
 const sha = "a".repeat(40);
@@ -973,7 +979,17 @@ describe("Coding Session", () => {
       toolTimeoutMs: 7_000,
       required: true,
     };
-    const fixture = await fakeAppServerEnvironment("success", codexMcpConfig(mcpServer));
+    const fixture = await fakeAppServerEnvironment(
+      "success",
+      codexAdapterConfig(
+        {
+          model: "fixture-model",
+          reasoningEffort: "minimal",
+          developerInstructions: "Fixture reviewer instructions",
+        },
+        normalizeCodingSessionMcpServer(mcpServer),
+      ),
+    );
     const observations: CodingSessionObservation[] = [];
     const finalObservationEntered = deferred<void>();
     const releaseFinalObservation = deferred<void>();
@@ -1053,13 +1069,13 @@ describe("Coding Session", () => {
     expect(observation.effectiveProfile?.configSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(observation.effectiveProfile?.configSha256).not.toBe(archive.profile.sha256);
     expect(archive.items.map((item) => item.type)).toEqual([
-      "commandExecution",
-      "mcpToolCall",
-      "agentMessage",
+      "command_execution",
+      "mcp_tool_call",
+      "agent_message",
     ]);
     expect(archive.items).toContainEqual(
       expect.objectContaining({
-        type: "mcpToolCall",
+        type: "mcp_tool_call",
         arguments: { issue: 285, workspace: fixture.runtimePath },
         output: {
           content: [{ type: "text", text: `app-server tool output ${fixture.runtimePath}` }],
@@ -1334,7 +1350,13 @@ describe("Coding Session", () => {
           }),
         ),
       })
-      .parse(JSON.parse(JSON.stringify(codexMcpConfig(server))));
+      .parse(
+        JSON.parse(
+          JSON.stringify(
+            codexAdapterConfig({ model: "fixture-model" }, normalizeCodingSessionMcpServer(server)),
+          ),
+        ),
+      );
     const configured = config.mcp_servers[server.name];
     expect(config.approval_policy).toBe("never");
     expect(configured.enabled_tools).toEqual([...enabledTools]);
@@ -1361,7 +1383,7 @@ describe("Coding Session", () => {
       { ...server, toolTimeoutMs: Number.POSITIVE_INFINITY },
     ];
     for (const invalidServer of invalidServers)
-      expect(() => codexMcpConfig(invalidServer)).toThrow();
+      expect(() => normalizeCodingSessionMcpServer(invalidServer)).toThrow();
   });
 
   test("reads the admitted Issue through read-only MCP without giving the worker credentials", async () => {
@@ -1370,8 +1392,11 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(
       async (request) => {
         if (!request.mcpServer) throw new Error("GitHub read MCP server is missing");
-        const config = codexMcpConfig(request.mcpServer);
-        expect(JSON.stringify(config)).not.toContain("worker-github-secret");
+        expect(request.mcpServer).toMatchObject({
+          name: "github_read",
+          enabledTools: ["github_issue_get"],
+        });
+        expect(JSON.stringify(request.mcpServer)).not.toContain("worker-github-secret");
         expect(explicitWorkerEnvironment(request.environment ?? {})).not.toHaveProperty(
           "GITHUB_TOKEN",
         );
@@ -2576,6 +2601,169 @@ describe("Coding Session", () => {
     expect(archive.items).toContainEqual(
       expect.objectContaining({ type: "command_execution", id: "non-json-command" }),
     );
+  });
+
+  test("substitutes bounded peer adapters while the facade archives neutral evidence", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-adapter-seam-"));
+    const calls: Array<
+      Pick<
+        CodingSessionAdapterRequest,
+        "profile" | "mcpServer" | "sandbox" | "outputSchema" | "signal"
+      >
+    > = [];
+    const observations: CodingSessionObservation[] = [];
+    const makeAdapter = (name: CodingSessionAdapter["name"]): CodingSessionAdapter => ({
+      name,
+      run: async (context) => {
+        calls.push({
+          profile: context.profile,
+          mcpServer: context.mcpServer,
+          sandbox: context.sandbox,
+          outputSchema: context.outputSchema,
+          signal: context.signal,
+        });
+        await context.onObservation?.({ type: "thread_started" });
+        await context.onObservation?.({ type: "turn_started", turn: 1 });
+        context.onSessionId?.(`${name}-session`);
+        context.onPhase?.("turn");
+        await context.onItemCompleted?.({
+          type: "mcp_tool_call",
+          id: `${name}-tool`,
+          server: "github_read",
+          tool: "github_issue_get",
+          arguments: { issue: 285 },
+          output: { ok: true },
+          status: "completed",
+        });
+        context.onUsage?.({ inputTokens: 3, outputTokens: 4 });
+        return {
+          finalResponse:
+            name === "sdk"
+              ? JSON.stringify({ status: "proposed", summary: "adapter" })
+              : JSON.stringify({ sha, verdict: "approved", summary: "adapter", findings: [] }),
+          usage: { inputTokens: 1, outputTokens: 2 },
+          sessionId: `${name}-session`,
+        };
+      },
+    });
+    const session = createCodexCodingSessionForTesting(
+      undefined,
+      {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        appServerProfiles: ["reviewer-profile"],
+        profileResolver: syntheticProfileResolver,
+      },
+      { sdk: makeAdapter("sdk"), "app-server": makeAdapter("app-server") },
+    );
+
+    await expect(
+      session.run({
+        role: "implementer",
+        workspace: ".",
+        contract,
+        prompt: "implement",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        mcpServer: {
+          name: "github_read",
+          url: "https://github.example.test/mcp",
+          enabledTools: ["github_issue_get"],
+          startupTimeoutMs: 5_000,
+          toolTimeoutMs: 5_000,
+          required: true,
+        },
+        execution: implementerExecution,
+        onObservation: (observation) => {
+          observations.push(observation);
+        },
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: { status: "proposed" } });
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+        onObservation: (observation) => {
+          observations.push(observation);
+        },
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: { verdict: "approved" } });
+
+    expect(calls.map(({ profile, sandbox }) => ({ profile, sandbox }))).toEqual([
+      {
+        profile: {
+          model: "implementer-model",
+          reasoningEffort: "low",
+          developerInstructions:
+            "Implementer role instruction: implement the frozen task contract.",
+        },
+        sandbox: "workspace-write",
+      },
+      {
+        profile: {
+          model: "reviewer-model",
+          reasoningEffort: "high",
+          developerInstructions: "Reviewer role instruction: inspect the candidate independently.",
+        },
+        sandbox: "read-only",
+      },
+    ]);
+    expect(calls[0]?.mcpServer).toEqual({
+      name: "github_read",
+      url: "https://github.example.test/mcp",
+      enabledTools: ["github_issue_get"],
+      startupTimeoutMs: 5_000,
+      toolTimeoutMs: 5_000,
+      required: true,
+    });
+    expect(calls[1]?.mcpServer).toBeUndefined();
+    expect(JSON.stringify(calls)).not.toContain("approval_policy");
+    expect(JSON.stringify(calls)).not.toContain("mcp_servers");
+    expect(JSON.stringify(calls)).not.toContain("model_reasoning_effort");
+    expect(JSON.stringify(calls)).not.toContain("developer_instructions");
+    expect(calls.map(({ outputSchema }) => outputSchema)).toEqual([
+      expect.objectContaining({ type: "object" }),
+      expect.objectContaining({ type: "object" }),
+    ]);
+    expect(calls.every(({ signal }) => signal instanceof AbortSignal)).toBe(true);
+    expect(observations).toEqual([
+      { type: "thread_started" },
+      { type: "turn_started", turn: 1 },
+      {
+        type: "mcp_tool_completed",
+        server: "github_read",
+        tool: "github_issue_get",
+        outcome: "succeeded",
+      },
+      { type: "thread_started" },
+      { type: "turn_started", turn: 1 },
+      {
+        type: "mcp_tool_completed",
+        server: "github_read",
+        tool: "github_issue_get",
+        outcome: "succeeded",
+      },
+    ]);
+    const archives = await listSessionArchives(stateDirectory, contract.id);
+    expect(archives).toHaveLength(2);
+    for (const manifest of archives) {
+      const archive = completeArchive(await readSessionArchive(stateDirectory, manifest.archiveId));
+      expect(archive.items).toEqual([
+        expect.objectContaining({ type: "mcp_tool_call", server: "github_read" }),
+      ]);
+      expect(archive.usage).toEqual({ inputTokens: 1, outputTokens: 2 });
+      expect(JSON.stringify(archive)).not.toContain("commandExecution");
+      expect(JSON.stringify(archive)).not.toContain("mcpToolCall");
+    }
   });
 
   test.each(["provider failure", "cancellation", "schema-invalid"] as const)(

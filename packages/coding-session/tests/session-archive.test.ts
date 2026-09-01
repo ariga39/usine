@@ -69,7 +69,7 @@ async function writeArchive(
     server: "github_read",
     tool: "github_issue_get",
     arguments: { issue: 285 },
-    result: { content: [{ type: "text", text: "output" }] },
+    output: { content: [{ type: "text", text: "output" }] },
     status: "completed",
   });
   return writer.finish({
@@ -132,7 +132,7 @@ describe("Session Archive operator boundary", () => {
     expect(archive.byteLength).toBeLessThanOrEqual(700);
   });
 
-  test("retains the exact contract and provider evidence while excluding transport labels", async () => {
+  test("retains neutral evidence and sanitized profile facts", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-evidence-"));
     const runtimePath = resolve(tmpdir(), `usine-runtime-path-${Date.now()}`);
     const writer = new SessionArchiveWriter(
@@ -161,7 +161,7 @@ describe("Session Archive operator boundary", () => {
       type: "command_execution",
       id: "command-1",
       command: `cat ${runtimePath}`,
-      aggregated_output: `command output ${runtimePath}`,
+      output: `command output ${runtimePath}`,
       status: "completed",
     });
     writer.addCompletedItem({
@@ -173,10 +173,10 @@ describe("Session Archive operator boundary", () => {
     writer.addCompletedItem({
       type: "mcp_tool_call",
       id: "tool-1",
-      server: "github_read?token=transport-secret",
-      tool: "github_issue_get?token=transport-secret",
+      server: "github_read",
+      tool: "github_issue_get",
       arguments: { path: runtimePath, issue: 285 },
-      result: { output: runtimePath },
+      output: { output: runtimePath },
       status: "completed",
     });
     writer.addCompletedItem({
@@ -231,7 +231,6 @@ describe("Session Archive operator boundary", () => {
         expect.objectContaining({ type: "reasoning", text: `reasoning ${runtimePath}` }),
       ]),
     );
-    expect(JSON.stringify(archive)).not.toContain("transport-secret");
     expect(JSON.stringify(archive)).not.toContain("profile-credential-sentinel");
     expect(JSON.stringify(archive)).not.toContain("profile.example.test");
   });

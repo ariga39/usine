@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, rename, unlink, writeFile } from "n
 import { join } from "node:path";
 import type { TaskContract } from "@usine/task-authority";
 import { z } from "zod";
+import type { ProviderNeutralCompletedEvidence } from "./coding-session-adapter.js";
 
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const durableIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -249,15 +250,8 @@ export class SessionArchiveWriter {
     void this.schedulePersist();
   }
 
-  addCompletedItem(item: unknown): void {
-    const sanitized = sanitizeCompletedItem(item);
-    if (sanitized) this.record.items.push(sanitized);
-    if (
-      isRecord(item) &&
-      typeof item.text === "string" &&
-      (item.type === "agent_message" || item.type === "agentMessage")
-    )
-      this.record.rawFinalResponse = item.text;
+  addCompletedItem(item: ProviderNeutralCompletedEvidence): void {
+    this.record.items.push(item);
     void this.schedulePersist();
   }
 
@@ -799,61 +793,6 @@ function serializeWithByteLength<T extends { byteLength: number }>(
   return { record: candidate, bytes };
 }
 
-function sanitizeCompletedItem(value: unknown): z.infer<typeof archiveItemSchema> | null {
-  if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string")
-    return null;
-  const status = typeof value.status === "string" ? value.status : undefined;
-  const base = { type: value.type, id: value.id, ...(status ? { status } : {}) };
-  switch (value.type) {
-    case "command_execution":
-    case "commandExecution":
-      return {
-        ...base,
-        ...(Object.hasOwn(value, "command") ? { command: cloneJsonValue(value.command) } : {}),
-        ...(Object.hasOwn(value, "aggregated_output")
-          ? { output: cloneJsonValue(value.aggregated_output) }
-          : Object.hasOwn(value, "aggregatedOutput")
-            ? { output: cloneJsonValue(value.aggregatedOutput) }
-            : {}),
-        ...(typeof value.exit_code === "number"
-          ? { exitCode: value.exit_code }
-          : typeof value.exitCode === "number"
-            ? { exitCode: value.exitCode }
-            : {}),
-      };
-    case "file_change":
-    case "fileChange":
-      return {
-        ...base,
-        ...(Object.hasOwn(value, "changes") ? { changes: cloneJsonValue(value.changes) } : {}),
-      };
-    case "mcp_tool_call":
-    case "mcpToolCall":
-      return {
-        ...base,
-        server: safeLabel(value.server),
-        tool: safeLabel(value.tool),
-        ...(Object.hasOwn(value, "arguments")
-          ? { arguments: cloneJsonValue(value.arguments) }
-          : {}),
-        ...(Object.hasOwn(value, "result") ? { output: cloneJsonValue(value.result) } : {}),
-        ...(Object.hasOwn(value, "error") ? { error: cloneJsonValue(value.error) } : {}),
-      };
-    case "agent_message":
-    case "agentMessage":
-    case "reasoning":
-      return {
-        ...base,
-        ...(typeof value.text === "string" ? { text: value.text } : {}),
-      };
-    case "web_search":
-    case "webSearch":
-      return { ...base, ...(typeof value.query === "string" ? { query: value.query } : {}) };
-    default:
-      return base;
-  }
-}
-
 function cloneJsonValue(value: unknown): unknown {
   if (value === undefined) return undefined;
   try {
@@ -861,12 +800,6 @@ function cloneJsonValue(value: unknown): unknown {
   } catch {
     return undefined;
   }
-}
-
-function safeLabel(value: unknown): string {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value)
-    ? value
-    : "unknown";
 }
 
 function profileSnapshot(
@@ -924,10 +857,6 @@ function finitePositiveLimit(value: number | undefined, fallback: number, maximu
   return value !== undefined && Number.isSafeInteger(value) && value > 0
     ? Math.min(value, maximum)
     : fallback;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isErrno(error: unknown, code: string): boolean {

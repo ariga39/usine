@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Deferred, Effect, Queue } from "effect";
-import { codexMcpConfig, safeObservationLabel } from "./coding-session-policy.js";
+import { codexAdapterConfig, type CodexNativeConfig } from "./codex-adapter-config.js";
 import { createCodexLauncher } from "./codex-execution.js";
 import {
   classifyAdapterFailure,
@@ -9,25 +9,48 @@ import {
   type CodingSessionFailureClass,
   type CodingSessionPhase,
 } from "./coding-session-interruption.js";
-import { codexAdapterConfig, normalizeCodexProfileSelection } from "./codex-profile.js";
-import type { SessionRequest } from "./coding-session.js";
+import type {
+  CodingSessionAdapter,
+  CodingSessionAdapterRequest,
+  CodingSessionAdapterResult,
+  ProviderNeutralCompletedEvidence,
+  ProviderNeutralUsage,
+} from "./coding-session-adapter.js";
+import { providerNeutralJsonValue } from "./coding-session-adapter.js";
+import { safeObservationLabel } from "./coding-session-policy.js";
 import { z } from "zod";
 
 interface AppServerRunResult {
   finalResponse: string;
-  usage: { input_tokens: number; output_tokens: number } | null;
+  usage: ProviderNeutralUsage | null;
   sessionId: string;
 }
 
-interface AppServerRunOptions {
-  request: SessionRequest;
-  environment: NodeJS.ProcessEnv;
+type AppServerRunOptions = Omit<
+  CodingSessionAdapterRequest,
+  "executionStateDirectory" | "onUsage" | "profile" | "mcpServer"
+> & {
   executionStateDirectory: string;
-  profileSelection: ReturnType<typeof normalizeCodexProfileSelection>;
-  onItemCompleted?: (item: Record<string, unknown>) => void | Promise<void>;
-  onSessionId?: (sessionId: string) => void;
-  onPhase?: (phase: CodingSessionPhase) => void;
-  onUsage?: (usage: AppServerRunResult["usage"]) => void;
+  config: CodexNativeConfig;
+  onUsage?: (usage: ProviderNeutralUsage) => void;
+};
+
+/** The bounded local App Server lifecycle, peer to the official SDK adapter. */
+export class CodexAppServerAdapter implements CodingSessionAdapter {
+  readonly name = "app-server" as const;
+
+  async run(context: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult> {
+    const executionStateDirectory = context.executionStateDirectory;
+    if (!executionStateDirectory)
+      throw new Error("app-server execution state directory is unavailable");
+    const { onUsage, ...adapterContext } = context;
+    return runCodexAppServer({
+      ...adapterContext,
+      executionStateDirectory,
+      config: codexAdapterConfig(context.profile, context.mcpServer),
+      onUsage,
+    });
+  }
 }
 
 class AppServerCancelled extends Error {}
@@ -222,11 +245,18 @@ class AppServerClient {
   }
 }
 
-export async function runCodexAppServer({
-  request,
+async function runCodexAppServer({
+  workspace,
+  prompt,
+  sandbox,
+  approvalPolicy,
+  config,
+  outputSchema,
   environment,
   executionStateDirectory,
-  profileSelection,
+  execution,
+  signal,
+  onObservation,
   onItemCompleted,
   onSessionId,
   onPhase,
@@ -235,17 +265,13 @@ export async function runCodexAppServer({
   let launcher: Awaited<ReturnType<typeof createCodexLauncher>>;
   let child: ChildProcessWithoutNullStreams;
   try {
-    launcher = await createCodexLauncher(
-      executionStateDirectory,
-      request.workspace,
-      request.execution,
-    );
+    launcher = await createCodexLauncher(executionStateDirectory, workspace, execution);
     child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
-      cwd: request.workspace,
+      cwd: workspace,
       env: {
         ...environment,
         USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODEX_WORKSPACE: request.workspace,
+        USINE_CODEX_WORKSPACE: workspace,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -310,10 +336,10 @@ export async function runCodexAppServer({
           });
 
         const observe = (
-          observation: Parameters<NonNullable<SessionRequest["onObservation"]>>[0],
+          observation: Parameters<NonNullable<CodingSessionAdapterRequest["onObservation"]>>[0],
         ) =>
           Effect.tryPromise({
-            try: async () => await request.onObservation?.(observation),
+            try: async () => await onObservation?.(observation),
             catch: asError,
           });
         const assertIdentity = (eventThreadId: string, eventTurnId: string): void => {
@@ -387,8 +413,7 @@ export async function runCodexAppServer({
                       finalResponse = item.text;
                     yield* Effect.tryPromise({
                       try: async () => {
-                        await onItemCompleted?.(item);
-                        await emitAppServerItem(item, request.onObservation);
+                        await onItemCompleted?.(appServerCompletedEvidence(item));
                       },
                       catch: asError,
                     });
@@ -398,10 +423,10 @@ export async function runCodexAppServer({
                     const event = tokenUsageSchema.parse(incoming.params);
                     assertIdentity(event.threadId, event.turnId);
                     usage = {
-                      input_tokens: event.tokenUsage.last.inputTokens,
-                      output_tokens: event.tokenUsage.last.outputTokens,
+                      inputTokens: event.tokenUsage.last.inputTokens,
+                      outputTokens: event.tokenUsage.last.outputTokens,
                     };
-                    onUsage?.(usage);
+                    if (usage) onUsage?.(usage);
                     break;
                   }
                   case "turn/completed": {
@@ -420,7 +445,7 @@ export async function runCodexAppServer({
                         usage,
                         sessionId: threadId,
                       });
-                    } else if (event.turn.status === "interrupted" && request.signal?.aborted) {
+                    } else if (event.turn.status === "interrupted" && signal?.aborted) {
                       yield* failTerminal(new AppServerCancelled("coding session cancelled"));
                       return;
                     } else {
@@ -445,7 +470,7 @@ export async function runCodexAppServer({
         });
         yield* processMessages.pipe(Effect.forkScoped);
         yield* Effect.addFinalizer(() => {
-          if (!request.signal?.aborted || !turnActive) return Effect.void;
+          if (!signal?.aborted || !turnActive) return Effect.void;
           return Effect.sync(() => {
             if (!threadId || !turnId) return;
             try {
@@ -460,45 +485,42 @@ export async function runCodexAppServer({
           clientInfo: { name: "usine-coding-session", version: "0.1.0" },
           capabilities: null,
         });
-        throwIfAborted(request.signal);
+        throwIfAborted(signal);
         transport.notify("initialized", {});
         phase = "thread";
         onPhase?.(phase);
         const thread = threadStartResponseSchema.parse(
           yield* requestAppServer("thread/start", {
-            cwd: request.workspace,
-            approvalPolicy: "never",
-            sandbox: request.sandbox,
-            config: codexAdapterConfig(
-              profileSelection,
-              request.mcpServer ? codexMcpConfig(request.mcpServer) : {},
-            ),
+            cwd: workspace,
+            approvalPolicy,
+            sandbox,
+            config,
             ephemeral: true,
           }),
         );
         threadId = thread.thread.id;
         onSessionId?.(threadId);
-        throwIfAborted(request.signal);
+        throwIfAborted(signal);
         phase = "turn";
         onPhase?.(phase);
         const turn = turnStartResponseSchema.parse(
           yield* requestAppServer("turn/start", {
             threadId,
-            input: [{ type: "text", text: request.prompt, text_elements: [] }],
-            cwd: request.workspace,
-            outputSchema: z.toJSONSchema(request.outputSchema, { target: "openAi" }),
+            input: [{ type: "text", text: prompt, text_elements: [] }],
+            cwd: workspace,
+            outputSchema,
           }),
         );
         turnId = turn.turn.id;
         turnActive = true;
-        throwIfAborted(request.signal);
+        throwIfAborted(signal);
         return yield* Deferred.await(terminal);
       }),
     ),
-    { signal: request.signal },
+    { signal },
   ).catch((error) => {
     if (error instanceof CodingSessionInterruption) throw error;
-    if (error instanceof AppServerCancelled || request.signal?.aborted)
+    if (error instanceof AppServerCancelled || signal?.aborted)
       throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
     const classification = stderr.classification();
     const failureClass = appServerFailureClass(classification ?? classifyAdapterFailure(error));
@@ -560,38 +582,73 @@ function identityMismatch(): Error {
   return new Error("app-server event identity mismatch");
 }
 
-async function emitAppServerItem(
+function appServerCompletedEvidence(
   item: Record<string, unknown>,
-  onObservation: SessionRequest["onObservation"],
-): Promise<void> {
-  const status = item.status === "completed" ? "succeeded" : "failed";
+): ProviderNeutralCompletedEvidence {
+  const status = item.status === "failed" ? "failed" : "completed";
+  const id = typeof item.id === "string" ? item.id : "unknown";
+  const base = { id, status } as const;
   switch (item.type) {
-    case "commandExecution":
-      await onObservation?.({ type: "tool_completed", tool: "shell", outcome: status });
-      break;
-    case "fileChange":
-      await onObservation?.({ type: "tool_completed", tool: "apply_patch", outcome: status });
-      break;
-    case "mcpToolCall":
-      await onObservation?.({
-        type: "mcp_tool_completed",
+    case "commandExecution": {
+      const command = jsonField(item.command);
+      const output = jsonField(item.aggregatedOutput);
+      return {
+        ...base,
+        type: "command_execution",
+        ...(command !== undefined ? { command } : {}),
+        ...(output !== undefined ? { output } : {}),
+        ...(typeof item.exitCode === "number" ? { exitCode: item.exitCode } : {}),
+      };
+    }
+    case "fileChange": {
+      const changes = jsonField(item.changes);
+      return {
+        ...base,
+        type: "file_change",
+        ...(changes !== undefined ? { changes } : {}),
+      };
+    }
+    case "mcpToolCall": {
+      const argumentsValue = jsonField(item.arguments);
+      const output = jsonField(item.result);
+      const error = jsonField(item.error);
+      return {
+        ...base,
+        type: "mcp_tool_call",
         server: safeObservationLabel(item.server),
         tool: safeObservationLabel(item.tool),
-        outcome: status,
-      });
-      break;
+        ...(argumentsValue !== undefined ? { arguments: argumentsValue } : {}),
+        ...(output !== undefined ? { output } : {}),
+        ...(error !== undefined ? { error } : {}),
+      };
+    }
+    case "agentMessage":
+      return {
+        ...base,
+        type: "agent_message",
+        ...(typeof item.text === "string" ? { text: item.text } : {}),
+      };
+    case "reasoning":
+      return {
+        ...base,
+        type: "reasoning",
+        ...(typeof item.text === "string" ? { text: item.text } : {}),
+      };
     case "webSearch":
-      await onObservation?.({ type: "tool_completed", tool: "search", outcome: "succeeded" });
-      break;
+      return {
+        ...base,
+        type: "web_search",
+        ...(typeof item.query === "string" ? { query: item.query } : {}),
+      };
     default:
-      break;
+      return { ...base, type: "other" };
   }
+}
+
+function jsonField(value: unknown) {
+  return providerNeutralJsonValue(value);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new AppServerCancelled("coding session cancelled");
-}
-
-export function isAppServerCancellation(error: unknown): boolean {
-  return error instanceof AppServerCancelled;
 }
