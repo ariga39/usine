@@ -4,6 +4,7 @@ import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "nod
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { Schema } from "effect";
 import {
   resolveTaskContract,
   repositoryRegistrationSchema,
@@ -27,7 +28,6 @@ import {
 import { runCommand } from "./cli-failure.js";
 import {
   admitProfilePair,
-  isProfilePairChangedFactor,
   profilePairFieldSnapshot,
   type ProfilePairChangedFactor,
 } from "./profile-pair-admission.js";
@@ -41,6 +41,35 @@ const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+const reviewerEvaluationCaseSchema = Schema.Struct({
+  id: Schema.String,
+  repetition: Schema.Number,
+  contractPath: Schema.String,
+  candidateSha: Schema.String,
+  checkPath: Schema.String,
+  labelPath: Schema.String,
+});
+
+const reviewerEvaluationPlanSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  id: Schema.String,
+  repositoryId: Schema.String,
+  baseSha: Schema.String,
+  subjectRole: Schema.Literal("reviewer"),
+  changedFactor: Schema.Literals(["model_stack", "reasoning", "developer_instructions"]),
+  baselineProfile: Schema.String,
+  candidateProfile: Schema.String,
+  maxRuns: Schema.Number,
+  usineBuild: Schema.String,
+  reportPath: Schema.String,
+  registrationPath: Schema.String,
+  cases: Schema.Array(reviewerEvaluationCaseSchema),
+});
+
+const decodeReviewerEvaluationPlan = Schema.decodeUnknownSync(reviewerEvaluationPlanSchema, {
+  onExcessProperty: "error",
+});
 
 export type ReviewerEvaluationChangedFactor = ProfilePairChangedFactor;
 
@@ -911,83 +940,11 @@ function validatePlanShape(plan: ReviewerEvaluationPlan): void {
 }
 
 function normalizePlan(input: unknown): ReviewerEvaluationPlan {
-  if (!isRecord(input))
-    throw new ReviewerEvaluationValidationError("evaluation plan must be an object");
-  const allowed = new Set([
-    "schemaVersion",
-    "id",
-    "repositoryId",
-    "baseSha",
-    "subjectRole",
-    "changedFactor",
-    "baselineProfile",
-    "candidateProfile",
-    "maxRuns",
-    "usineBuild",
-    "reportPath",
-    "registrationPath",
-    "cases",
-  ]);
-  if (Object.keys(input).some((key) => !allowed.has(key)))
-    throw new ReviewerEvaluationValidationError("evaluation plan has unexpected fields");
-  if (
-    input.schemaVersion !== 1 ||
-    typeof input.id !== "string" ||
-    typeof input.repositoryId !== "string" ||
-    typeof input.baseSha !== "string" ||
-    input.subjectRole !== "reviewer" ||
-    !isProfilePairChangedFactor(input.changedFactor) ||
-    typeof input.baselineProfile !== "string" ||
-    typeof input.candidateProfile !== "string" ||
-    typeof input.maxRuns !== "number" ||
-    typeof input.usineBuild !== "string" ||
-    typeof input.reportPath !== "string" ||
-    typeof input.registrationPath !== "string" ||
-    !Array.isArray(input.cases)
-  )
+  try {
+    return decodeReviewerEvaluationPlan(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("evaluation plan has missing or invalid fields");
-  return {
-    schemaVersion: 1,
-    id: input.id,
-    repositoryId: input.repositoryId,
-    baseSha: input.baseSha,
-    subjectRole: "reviewer",
-    changedFactor: input.changedFactor,
-    baselineProfile: input.baselineProfile,
-    candidateProfile: input.candidateProfile,
-    maxRuns: input.maxRuns,
-    usineBuild: input.usineBuild,
-    reportPath: input.reportPath,
-    registrationPath: input.registrationPath,
-    cases: input.cases.map(parseCase),
-  };
-}
-
-function parseCase(input: unknown): ReviewerEvaluationCase {
-  if (
-    !isRecord(input) ||
-    typeof input.id !== "string" ||
-    typeof input.repetition !== "number" ||
-    typeof input.contractPath !== "string" ||
-    typeof input.candidateSha !== "string" ||
-    typeof input.checkPath !== "string" ||
-    typeof input.labelPath !== "string" ||
-    Object.keys(input).some(
-      (key) =>
-        !["id", "repetition", "contractPath", "candidateSha", "checkPath", "labelPath"].includes(
-          key,
-        ),
-    )
-  )
-    throw new ReviewerEvaluationValidationError("reviewer evaluation case is invalid");
-  return {
-    id: input.id,
-    repetition: input.repetition,
-    contractPath: input.contractPath,
-    candidateSha: input.candidateSha,
-    checkPath: input.checkPath,
-    labelPath: input.labelPath,
-  };
+  }
 }
 
 function parseContract(raw: string): TaskContract {

@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   readReviewerEvaluationPlan,
   type ReviewerEvaluationArchiveManifest,
@@ -200,6 +200,98 @@ function withCurrentArchive(
 }
 
 describe("reviewer profile evaluation public path", () => {
+  async function expectMalformedPlan(
+    value: Awaited<ReturnType<typeof fixture>>,
+    mutate: (plan: Record<string, unknown>) => unknown,
+  ): Promise<void> {
+    const plan = JSON.parse(await readFile(value.planPath, "utf8")) as Record<string, unknown>;
+    const malformed = mutate(plan);
+    await writeFile(
+      value.planPath,
+      typeof malformed === "string" ? malformed : JSON.stringify(malformed),
+    );
+    await execFile("git", ["add", "reviewer-evaluation-plan.json"], { cwd: value.root });
+    await execFile("git", ["commit", "-m", "invalid reviewer evaluation plan structure"], {
+      cwd: value.root,
+    });
+
+    let providerCalls = 0;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    try {
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      expect(stderr).toHaveBeenCalledWith(
+        '{"error":"invalid_reviewer_evaluation_plan","kind":"validation","message":"evaluation plan has missing or invalid fields"}\n',
+      );
+      await expect(readFile(join(value.root, "reports/reviewer-report.json"))).rejects.toThrow();
+    } finally {
+      stderr.mockRestore();
+      process.exitCode = 0;
+    }
+  }
+
+  test("rejects a non-object plan before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), () => "[]");
+  });
+
+  test("rejects a plan with a missing field before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), (plan) => {
+      delete plan.changedFactor;
+      return plan;
+    });
+  });
+
+  test("rejects a plan with a mistyped field before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), (plan) => {
+      plan.maxRuns = "4";
+      return plan;
+    });
+  });
+
+  test("rejects an invalid nested case before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), (plan) => {
+      plan.cases = [null];
+      return plan;
+    });
+  });
+
+  test("rejects an excess plan field before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), (plan) => {
+      plan.unexpected = true;
+      return plan;
+    });
+  });
+
+  test("rejects an excess case field before provider effects or report writes", async () => {
+    await expectMalformedPlan(await fixture(), (plan) => {
+      plan.cases = [
+        {
+          id: "case-one",
+          repetition: 1,
+          contractPath: "case-approved.json",
+          candidateSha: "a".repeat(40),
+          checkPath: "check.json",
+          labelPath: "label-approved.json",
+          unexpected: true,
+        },
+      ];
+      return plan;
+    });
+  });
+
   test("accepts an ignored uncommitted regular registration before provider execution", async () => {
     const value = await fixture();
     expect(await git(value.root, "check-ignore", "repository.json")).toBe("repository.json");
