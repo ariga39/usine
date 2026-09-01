@@ -15,7 +15,7 @@ describe("Task Authority module contract", () => {
 
   test("makes a turn network interruption waiting until an explicit retry fact", () => {
     const active: TaskResult = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
@@ -28,6 +28,7 @@ describe("Task Authority module contract", () => {
       review: null,
       delivery: null,
       blocker: null,
+      blockerClassification: null,
       waiting: null,
       activeActivation: 1,
       writer: { repositoryIdentity: "owner/repo" },
@@ -54,7 +55,7 @@ describe("Task Authority module contract", () => {
 
   test("applies legal facts and rejects stale fences without persistence", () => {
     const admitted: TaskResult = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
@@ -67,6 +68,7 @@ describe("Task Authority module contract", () => {
       review: null,
       delivery: null,
       blocker: null,
+      blockerClassification: null,
       waiting: null,
       activeActivation: 1,
       writer: { repositoryIdentity: "owner/repo" },
@@ -96,7 +98,7 @@ describe("Task Authority module contract", () => {
 
   test("requires an authorized merge effect for the merged terminal state", () => {
     const reviewed: TaskResult = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       taskId: contract.id,
       contractHash: "hash",
       revision: 4,
@@ -109,6 +111,7 @@ describe("Task Authority module contract", () => {
       review: { sha, verdict: "approved", summary: "approved", findings: [] },
       delivery: null,
       blocker: null,
+      blockerClassification: null,
       waiting: null,
       activeActivation: null,
       writer: { repositoryIdentity: "owner/repo" },

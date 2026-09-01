@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
   openSqliteDatabase,
+  taskResourceFromResult,
   TaskAuthority,
   type TaskContract,
   type TaskResult,
@@ -46,7 +47,7 @@ async function makeDatabase() {
   return path;
 }
 
-async function makePreTaskEventsDatabase(): Promise<string> {
+async function makeDatabaseBeforeMigration(migrationCount: number): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "usine-authority-upgrade-"));
   const path = join(directory, "state.sqlite");
   const sourceDirectory = fileURLToPath(new URL("../drizzle/", import.meta.url));
@@ -59,7 +60,7 @@ async function makePreTaskEventsDatabase(): Promise<string> {
   ) as { version: string; dialect: string; entries: unknown[] };
   await writeFile(
     join(migrationsDirectory, "meta/_journal.json"),
-    JSON.stringify({ ...journal, entries: journal.entries.slice(0, 10) }),
+    JSON.stringify({ ...journal, entries: journal.entries.slice(0, migrationCount) }),
   );
 
   const prior = openSqliteDatabase(path);
@@ -71,6 +72,11 @@ async function makePreTaskEventsDatabase(): Promise<string> {
     prior.close();
   }
 
+  return path;
+}
+
+async function makePreTaskEventsDatabase(): Promise<string> {
+  const path = await makeDatabaseBeforeMigration(10);
   const legacy = new DatabaseSync(path);
   const deadline = Date.now() + 30_000;
   const taskRuns = legacy.prepare(
@@ -86,6 +92,45 @@ async function makePreTaskEventsDatabase(): Promise<string> {
   legacy.close();
 
   await applyMigrations(path);
+  return path;
+}
+
+async function makePreBlockerClassificationDatabase(): Promise<string> {
+  const path = await makeDatabaseBeforeMigration(13);
+  const initialHandle = openSqliteDatabase(path);
+  const admitted = await new TaskAuthority(initialHandle.database).admit({
+    contract: makeContract("legacy-blocked-with-event"),
+    contractHash: "d".repeat(64),
+    repositoryIdentity: "authority/legacy-blocked-with-event",
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+  initialHandle.close();
+
+  const diagnostic = "check failure: exact legacy private diagnostic";
+  const legacyResult = {
+    ...admitted,
+    schemaVersion: 3,
+    state: "blocked",
+    blocker: diagnostic,
+  } as Record<string, unknown>;
+  delete legacyResult.blockerClassification;
+
+  const legacy = new DatabaseSync(path);
+  legacy
+    .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+    .run(JSON.stringify(legacyResult), admitted.taskId);
+  legacy
+    .prepare(
+      "INSERT INTO task_events (task_id, sequence, event_id, occurred_at_epoch_ms, data) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(
+      admitted.taskId,
+      2,
+      "blocked:legacy",
+      Date.now(),
+      JSON.stringify({ type: "task_blocked", reason: "unknown" }),
+    );
+  legacy.close();
   return path;
 }
 
@@ -533,9 +578,10 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     inspection.close();
 
     await expect(authority.lookup(taskId)).resolves.toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       mergeAuthorized: false,
       state: "admitted",
+      blockerClassification: null,
     });
   });
 
@@ -558,11 +604,154 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     inspection.close();
 
     await expect(authority.lookup(taskId)).resolves.toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       state: "admitted",
       waiting: null,
     });
   });
+
+  test("backfills a legacy blocked classification from its frozen event across migration and reopen", async () => {
+    const path = await makePreBlockerClassificationDatabase();
+    await applyMigrations(path);
+
+    const inspection = new DatabaseSync(path);
+    const persisted = inspection
+      .prepare("SELECT result FROM task_runs WHERE task_id = ?")
+      .get("legacy-blocked-with-event") as { result: string };
+    inspection.close();
+    expect(JSON.parse(persisted.result)).toMatchObject({ blockerClassification: "unknown" });
+
+    const authority = authorityAt(path);
+    const reopened = await authority.lookup("legacy-blocked-with-event");
+    if (!reopened) throw new Error("blocked task is missing after migration");
+    const resource = taskResourceFromResult(reopened);
+    const blockedEvent = (await authority.listEvents(reopened.taskId)).find(
+      (event) => event.data.type === "task_blocked",
+    );
+    if (!blockedEvent || blockedEvent.data.type !== "task_blocked")
+      throw new Error("legacy blocked event is missing");
+
+    expect(reopened.blocker).toBe("check failure: exact legacy private diagnostic");
+    expect(reopened.blockerClassification).toBe(blockedEvent.data.reason);
+    expect(resource.blocker).toEqual({ classification: blockedEvent.data.reason });
+  });
+
+  test("keeps blocker classification and exact diagnostic across SQLite close and reopen", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-blocker-reopen-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const firstHandle = openSqliteDatabase(path);
+    const first = new TaskAuthority(firstHandle.database);
+    const admitted = await first.admit({
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: `authority/blocker-reopen-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const diagnostic = "check failure: exact private diagnostic";
+    const blocked = await first.block({ taskId, revision: admitted.revision }, diagnostic);
+    firstHandle.close();
+
+    const secondHandle = openSqliteDatabase(path);
+    const second = new TaskAuthority(secondHandle.database);
+    const reopened = await second.lookup(taskId);
+    if (!reopened) throw new Error("blocked task is missing after reopen");
+    const resource = taskResourceFromResult(reopened);
+    const blockedEvent = (await second.listEvents(taskId)).find(
+      (event) => event.data.type === "task_blocked",
+    );
+
+    expect(blocked.blocker).toBe(diagnostic);
+    expect(blocked.blockerClassification).toBe("project_check_failure");
+    expect(reopened.blocker).toBe(blocked.blocker);
+    expect(reopened.blockerClassification).toBe(blocked.blockerClassification);
+    expect(resource.blocker).toEqual({ classification: "project_check_failure" });
+    expect(blockedEvent).toMatchObject({
+      data: { type: "task_blocked", reason: resource.blocker?.classification },
+    });
+    secondHandle.close();
+  });
+
+  test("blocks retry expiry with the same durable classification and diagnostic", async () => {
+    const path = await makeDatabase();
+    const taskId = `authority-retry-expiry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const handle = openSqliteDatabase(path);
+    const authority = new TaskAuthority(handle.database);
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "b".repeat(64),
+      repositoryIdentity: `authority/retry-expiry-${taskId}`,
+      deadlineEpochMs: Date.now() - 1,
+    });
+    const reservation = await authority.reserveActivation(taskId, 3);
+    const waiting = await authority.recordWaiting(
+      { taskId, revision: reservation.result.revision },
+      {
+        reason: "network_interruption",
+        resumeState: "admitted",
+        activation: reservation.activation,
+      },
+    );
+
+    const blocked = await authority.retryTask(taskId, 3);
+    const resource = taskResourceFromResult(blocked);
+    const events = await authority.listEvents(taskId);
+
+    expect(waiting.state).toBe("waiting");
+    expect(blocked.blocker).toBe("elapsed budget exhausted");
+    expect(blocked.blockerClassification).toBe("elapsed_budget");
+    expect(resource.blocker).toEqual({ classification: "elapsed_budget" });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        data: { type: "task_blocked", reason: resource.blocker?.classification },
+      }),
+    );
+    handle.close();
+  });
+
+  test.each(["unversioned", 1, 2, 3] as const)(
+    "decodes a %s persisted blocker without quarantine",
+    async (version) => {
+      const path = await makeDatabase();
+      const taskId = `authority-blocker-legacy-${String(version)}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const firstHandle = openSqliteDatabase(path);
+      const first = new TaskAuthority(firstHandle.database);
+      const admitted = await first.admit({
+        contract: makeContract(taskId),
+        contractHash: "c".repeat(64),
+        repositoryIdentity: `authority/blocker-legacy-${String(version)}-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      const legacy = {
+        ...admitted,
+        state: "blocked",
+        blocker: "check failure: legacy exact diagnostic",
+      } as Record<string, unknown>;
+      delete legacy.blockerClassification;
+      if (version === "unversioned") delete legacy.schemaVersion;
+      else legacy.schemaVersion = version;
+      if (version === "unversioned" || version === 1) {
+        delete legacy.mergeAuthorized;
+        delete legacy.waiting;
+      }
+      if (version === 2) delete legacy.waiting;
+
+      const inspection = new DatabaseSync(path);
+      inspection
+        .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+        .run(JSON.stringify(legacy), taskId);
+      inspection.close();
+      firstHandle.close();
+
+      const secondHandle = openSqliteDatabase(path);
+      const second = new TaskAuthority(secondHandle.database);
+      await expect(second.lookup(taskId)).resolves.toMatchObject({
+        schemaVersion: 4,
+        blocker: "check failure: legacy exact diagnostic",
+        blockerClassification: "unknown",
+      });
+      secondHandle.close();
+    },
+  );
 
   test("keeps repository paths out of admitted and terminal durable results", async () => {
     const path = await makeDatabase();
@@ -581,7 +770,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     const admittedRow = inspection
       .prepare("SELECT result FROM task_runs WHERE task_id = ?")
       .get(taskId) as { result: string };
-    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 3 });
+    expect(JSON.parse(admittedRow.result)).toMatchObject({ schemaVersion: 4 });
     expect(JSON.parse(admittedRow.result).writer).toEqual(admitted.writer);
     expect(admittedRow.result).not.toContain('"repository"');
 

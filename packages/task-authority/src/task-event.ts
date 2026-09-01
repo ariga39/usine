@@ -1,4 +1,5 @@
 import { Predicate, Schema } from "effect";
+import { TASK_BLOCKER_CLASSIFICATIONS } from "./task-state.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
 const safeObservationId = Schema.String.check(
@@ -177,16 +178,7 @@ const eventData = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("task_blocked"),
-    reason: Schema.Literals([
-      "elapsed_budget",
-      "invalid_phase",
-      "missing_evidence",
-      "provider_failure",
-      "project_check_failure",
-      "review_inconclusive",
-      "delivery_failure",
-      "unknown",
-    ]),
+    reason: Schema.Literals(TASK_BLOCKER_CLASSIFICATIONS),
   }),
   Schema.Struct({
     type: Schema.Literal("task_waiting"),

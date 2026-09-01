@@ -59,7 +59,7 @@ function persistedResult(
   mergeAuthorized = false,
 ): TaskResult {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     taskId: id,
     contractHash: "hash",
     revision: 4,
@@ -76,6 +76,7 @@ function persistedResult(
       state === "reviewed" ? { sha, verdict: "approved", summary: "approved", findings: [] } : null,
     delivery: null,
     blocker: null,
+    blockerClassification: null,
     waiting: null,
     activeActivation: null,
     writer: { repositoryIdentity: `recovery/${id}` },
@@ -661,6 +662,7 @@ describe("Delivery Run durable phase recovery", () => {
     expect(result).toMatchObject({
       state: "blocked",
       blocker: "platform merge refused after authoritative probe: required check is pending",
+      blockerClassification: "delivery_failure",
       delivery: null,
     });
     expect(fake.getStored().delivery).toBeNull();
@@ -850,6 +852,7 @@ describe("Delivery Run durable phase recovery", () => {
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toBe("implementer activation budget exhausted");
+      expect(result.blockerClassification).toBe("elapsed_budget");
       expect(result.evidence.implementerActivations).toBe(1);
       expect(blockCalls).toBe(1);
 
@@ -1172,6 +1175,7 @@ describe("Delivery Run durable phase recovery", () => {
     );
     expect(result.state).toBe("blocked");
     expect(result.blocker).toBe("elapsed budget exhausted");
+    expect(result.blockerClassification).toBe("elapsed_budget");
     expect(fake.getImplementerActivations()).toBe(0);
   });
 
