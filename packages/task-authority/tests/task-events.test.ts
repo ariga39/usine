@@ -5,8 +5,8 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
   openSqliteDatabase,
-  publicBlockerFromText,
   TaskAuthority,
+  taskResourceFromResult,
   type TaskContract,
   type TaskObservationEventInput,
 } from "../src/index.js";
@@ -56,10 +56,26 @@ async function authorityFor(taskId: string): Promise<{ authority: TaskAuthority;
 }
 
 describe("Task event stream", () => {
-  test("projects coding-session failures as provider failures", () => {
-    expect(publicBlockerFromText("implementer coding session failed")).toEqual({
-      classification: "provider_failure",
+  test("uses one blocker classification for the durable event and public resource", async () => {
+    const taskId = `blocker-classification-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    const admitted = await authority.lookup(taskId);
+    if (!admitted) throw new Error("admitted task is missing");
+
+    const diagnostic = "check failure: exact private diagnostic";
+    const blocked = await authority.block({ taskId, revision: admitted.revision }, diagnostic);
+    const resource = taskResourceFromResult(blocked);
+    const blockedEvent = (await authority.listEvents(taskId)).find(
+      (event) => event.data.type === "task_blocked",
+    );
+
+    expect(blocked.blocker).toBe(diagnostic);
+    expect(blocked.blockerClassification).toBe("project_check_failure");
+    expect(resource.blocker).toEqual({ classification: "project_check_failure" });
+    expect(blockedEvent).toMatchObject({
+      data: { type: "task_blocked", reason: resource.blocker?.classification },
     });
+    expect(JSON.stringify(resource)).not.toContain(diagnostic);
   });
 
   test("replays one ordered Task-local stream and deduplicates a stable event identity", async () => {

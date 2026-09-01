@@ -46,7 +46,7 @@ export interface MergeEffect {
 
 export interface TaskResult {
   /** Version of the durable Task Authority result projection. */
-  schemaVersion: 3;
+  schemaVersion: 4;
   taskId: string;
   contractHash: string;
   /** Durable compare-and-set identity for this observation. */
@@ -61,7 +61,10 @@ export interface TaskResult {
   check: CheckResult | null;
   review: ReviewVerdict | null;
   delivery: DeliveryEffect | null;
+  /** Exact coordinator diagnostic; this never crosses into public projections. */
   blocker: string | null;
+  /** Durable public-safe classification of the terminal blocker. */
+  blockerClassification: TaskBlockerClassification | null;
   waiting: TaskWaiting | null;
   activeActivation: number | null;
   writer: { repositoryIdentity: string };
@@ -96,15 +99,17 @@ export interface PublicCheckResult {
   exitCode: number;
 }
 
-export type TaskBlockerClassification =
-  | "elapsed_budget"
-  | "invalid_phase"
-  | "missing_evidence"
-  | "provider_failure"
-  | "project_check_failure"
-  | "review_inconclusive"
-  | "delivery_failure"
-  | "unknown";
+export const TASK_BLOCKER_CLASSIFICATIONS = [
+  "elapsed_budget",
+  "invalid_phase",
+  "missing_evidence",
+  "provider_failure",
+  "project_check_failure",
+  "review_inconclusive",
+  "delivery_failure",
+  "unknown",
+] as const;
+export type TaskBlockerClassification = (typeof TASK_BLOCKER_CLASSIFICATIONS)[number];
 
 export interface PublicReviewVerdict {
   sha: string;
@@ -175,7 +180,7 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
           merge: result.delivery.merge ? { ...result.delivery.merge } : null,
         }
       : null,
-    blocker: result.blocker ? publicBlockerFromText(result.blocker) : null,
+    blocker: result.blockerClassification ? { classification: result.blockerClassification } : null,
     waiting: result.waiting ? { reason: result.waiting.reason } : null,
     retryable: result.waiting != null,
     activeActivation: result.activeActivation,
@@ -192,27 +197,29 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
   };
 }
 
-export function publicBlockerFromText(blocker: string): PublicBlockerDiagnostic {
-  const normalized = blocker.toLowerCase();
-  const classification: TaskBlockerClassification =
-    normalized.includes("elapsed") ||
+export function classifyTaskBlocker(diagnostic: string): TaskBlockerClassification {
+  const normalized = diagnostic.toLowerCase();
+  return normalized.includes("elapsed") ||
     normalized.includes("deadline") ||
     normalized.includes("budget")
-      ? "elapsed_budget"
-      : normalized.includes("invalid phase")
-        ? "invalid_phase"
-        : normalized.includes("missing") && normalized.includes("evidence")
-          ? "missing_evidence"
-          : normalized.includes("provider") || normalized.includes("coding session")
-            ? "provider_failure"
-            : normalized.includes("project check") || normalized.includes("check failure")
-              ? "project_check_failure"
-              : normalized.includes("review") && normalized.includes("inconclusive")
-                ? "review_inconclusive"
-                : normalized.includes("delivery") || normalized.includes("merge")
-                  ? "delivery_failure"
+    ? "elapsed_budget"
+    : normalized.includes("invalid phase")
+      ? "invalid_phase"
+      : normalized.includes("missing") && normalized.includes("evidence")
+        ? "missing_evidence"
+        : normalized.includes("provider") || normalized.includes("coding session")
+          ? "provider_failure"
+          : normalized.includes("project check") || normalized.includes("check failure")
+            ? "project_check_failure"
+            : normalized.includes("review") && normalized.includes("inconclusive")
+              ? "review_inconclusive"
+              : normalized.includes("delivery") ||
+                  normalized.includes("forge") ||
+                  normalized.includes("merge")
+                ? "delivery_failure"
+                : normalized.includes("phase") || normalized.includes("evidence")
+                  ? "invalid_phase"
                   : "unknown";
-  return { classification };
 }
 
 export function isTerminalState(state: TaskState): boolean {
@@ -301,6 +308,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         review: null,
         delivery: null,
         blocker: null,
+        blockerClassification: null,
         activeActivation: null,
       };
     }
@@ -405,6 +413,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         ...result,
         state: "blocked",
         blocker: fact.blocker,
+        blockerClassification: classifyTaskBlocker(fact.blocker),
         waiting: null,
         activeActivation: null,
       };

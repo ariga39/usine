@@ -563,6 +563,7 @@ export class TaskAuthority {
         review: null,
         delivery: null,
         blocker: null,
+        blockerClassification: null,
         waiting: null,
         activeActivation: null,
         writer: {
@@ -758,7 +759,7 @@ export class TaskAuthority {
         const blockedEvent = await TaskAuthority.appendEvent(database, taskId, {
           eventId: `blocked:${prior.revision}`,
           occurredAtEpochMs: Date.now(),
-          data: { type: "task_blocked", reason: "elapsed_budget" },
+          data: { type: "task_blocked", reason: saved.blockerClassification! },
         });
         const terminalEvent = await TaskAuthority.appendEvent(database, taskId, {
           eventId: `terminal:${saved.state}`,
@@ -836,7 +837,7 @@ export class TaskAuthority {
     saved: TaskResult,
   ): Promise<TaskEvent[]> {
     const events: TaskEvent[] = [];
-    const event = factEvent(prior, fact);
+    const event = factEvent(prior, fact, saved);
     if (event) events.push(await TaskAuthority.appendEvent(database, saved.taskId, event));
     if (saved.state === "reviewed_pr" || saved.state === "merged" || saved.state === "blocked") {
       events.push(
@@ -897,6 +898,7 @@ export class TaskAuthority {
 function factEvent(
   prior: TaskResult,
   fact: TaskFact,
+  saved: TaskResult,
 ): { eventId: string; occurredAtEpochMs: number; data: TaskEventData } | null {
   const occurredAtEpochMs = Date.now();
   switch (fact.type) {
@@ -965,22 +967,8 @@ function factEvent(
       return {
         eventId: `blocked:${prior.revision}`,
         occurredAtEpochMs,
-        data: { type: "task_blocked", reason: blockerReason(fact.blocker) },
+        data: { type: "task_blocked", reason: saved.blockerClassification! },
       };
   }
   return null;
-}
-
-type TaskBlockReason = Extract<TaskEventData, { type: "task_blocked" }>["reason"];
-
-function blockerReason(blocker: string): TaskBlockReason {
-  const normalized = blocker.toLowerCase();
-  if (normalized.includes("elapsed budget")) return "elapsed_budget";
-  if (normalized.includes("project check")) return "project_check_failure";
-  if (normalized.includes("review inconclusive")) return "review_inconclusive";
-  if (normalized.includes("delivery") || normalized.includes("forge")) return "delivery_failure";
-  if (normalized.includes("provider") || normalized.includes("coding session"))
-    return "provider_failure";
-  if (normalized.includes("phase") || normalized.includes("evidence")) return "invalid_phase";
-  return "unknown";
 }

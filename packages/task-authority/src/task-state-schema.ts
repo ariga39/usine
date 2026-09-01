@@ -1,7 +1,11 @@
 import { Schema } from "effect";
-import type { TaskResult } from "./task-state.js";
+import {
+  classifyTaskBlocker,
+  TASK_BLOCKER_CLASSIFICATIONS,
+  type TaskResult,
+} from "./task-state.js";
 
-export const TASK_RESULT_SCHEMA_VERSION = 3 as const;
+export const TASK_RESULT_SCHEMA_VERSION = 4 as const;
 export const TASK_STATE_QUARANTINE_DIAGNOSTIC = "durable task state quarantined";
 
 export class TaskStateQuarantinedError extends Error {
@@ -82,6 +86,7 @@ const taskWaiting = Schema.Struct({
   resumeState: Schema.Literals(["admitted", "checked", "reviewed"]),
   activation: Schema.Natural,
 });
+const taskBlockerClassification = Schema.Literals(TASK_BLOCKER_CLASSIFICATIONS);
 const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -95,6 +100,7 @@ const taskResultFields = {
   review: Schema.NullOr(reviewVerdict),
   delivery: Schema.NullOr(deliveryEffect),
   blocker: Schema.NullOr(Schema.String),
+  blockerClassification: Schema.NullOr(taskBlockerClassification),
   waiting: Schema.NullOr(taskWaiting),
   activeActivation: Schema.NullOr(Schema.Natural),
   writer: Schema.Struct({ repositoryIdentity: Schema.String }),
@@ -113,6 +119,13 @@ const currentTaskResult = Schema.Struct({
 });
 
 const previousTaskResult = Schema.Struct({
+  schemaVersion: Schema.Literal(3),
+  ...taskResultFields,
+  blocker: Schema.NullOr(Schema.String),
+  blockerClassification: Schema.optional(Schema.NullOr(taskBlockerClassification)),
+});
+
+const priorVersionTwoTaskResult = Schema.Struct({
   schemaVersion: Schema.Literal(2),
   taskId: Schema.String,
   contractHash: Schema.String,
@@ -178,16 +191,7 @@ const publicReviewVerdict = Schema.Struct({
   findingCount: Schema.Natural,
 });
 const publicBlockerDiagnostic = Schema.Struct({
-  classification: Schema.Literals([
-    "elapsed_budget",
-    "invalid_phase",
-    "missing_evidence",
-    "provider_failure",
-    "project_check_failure",
-    "review_inconclusive",
-    "delivery_failure",
-    "unknown",
-  ]),
+  classification: taskBlockerClassification,
 });
 const publicTaskWaiting = Schema.Struct({
   reason: Schema.Literal("network_interruption"),
@@ -199,7 +203,7 @@ const publicTaskRepository = Schema.Struct({
   baseBranch: Schema.String,
 });
 export const taskResourceSchema = Schema.Struct({
-  schemaVersion: Schema.Literals([2, TASK_RESULT_SCHEMA_VERSION]),
+  schemaVersion: Schema.Literals([2, 3]),
   taskId: Schema.String,
   contractHash: Schema.String,
   revision: Schema.Natural,
@@ -269,10 +273,19 @@ const priorTaskResult = Schema.Struct({
 const persistedTaskResult = Schema.Union([
   currentTaskResult,
   previousTaskResult,
+  priorVersionTwoTaskResult,
   legacyTaskResult,
   priorTaskResult,
 ]);
 type DecodedPersistedTaskResult = Schema.Schema.Type<typeof persistedTaskResult>;
+
+function projectBlockerClassification(
+  blocker: string | null,
+  classification: TaskResult["blockerClassification"] | undefined,
+): TaskResult["blockerClassification"] {
+  if (blocker === null) return null;
+  return classification ?? classifyTaskBlocker(blocker);
+}
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
   return {
@@ -305,6 +318,10 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
         }
       : null,
     blocker: decoded.blocker,
+    blockerClassification: projectBlockerClassification(
+      decoded.blocker,
+      "blockerClassification" in decoded ? decoded.blockerClassification : undefined,
+    ),
     waiting: "waiting" in decoded ? decoded.waiting : null,
     activeActivation: decoded.activeActivation,
     writer: { repositoryIdentity: decoded.writer.repositoryIdentity },

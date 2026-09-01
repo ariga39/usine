@@ -425,6 +425,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toContain("closed delivery PR");
+      expect(result.blockerClassification).toBe("delivery_failure");
       await expect(readFile(join(fixture.remote, "update-count"))).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -522,6 +523,7 @@ describe.sequential("Forge Delivery controlled protocol", () => {
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toBe("forge authentication capability is unavailable");
+      expect(result.blockerClassification).toBe("delivery_failure");
       expect(result.blocker).not.toContain(privateKeyPath);
       const status = await authority.lookup(result.taskId);
       expect(status?.state).toBe("blocked");
