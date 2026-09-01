@@ -61,7 +61,7 @@ const reviewerEvaluationCheckSchema = Schema.Struct({
 });
 
 const reviewerEvaluationLabelSchema = Schema.Struct({
-  verdict: Schema.String,
+  verdict: Schema.Literals(["approved", "changes_requested"]),
   rationale: Schema.String,
   reference: Schema.String,
   protected: Schema.optionalKey(Schema.Boolean),
@@ -1027,8 +1027,6 @@ function parseLabel(raw: string): ReviewerEvaluationLabel {
   } catch {
     throw new ReviewerEvaluationValidationError("external label is invalid");
   }
-  if (label.verdict !== "approved" && label.verdict !== "changes_requested")
-    throw new ReviewerEvaluationValidationError("external label is invalid");
   if (label.rationale.trim() === "" || label.reference.trim() === "")
     throw new ReviewerEvaluationValidationError(
       "external label rationale and reference are required",

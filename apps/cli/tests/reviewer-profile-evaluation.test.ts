@@ -388,6 +388,18 @@ describe("reviewer profile evaluation public path", () => {
       );
   });
 
+  test("rejects an external label with an invalid verdict before provider effects or report writes", async () => {
+    await expectMalformedEvidence(
+      await fixture(),
+      "label-approved.json",
+      (input) => {
+        input.verdict = "invalid";
+        return input;
+      },
+      "external label is invalid",
+    );
+  });
+
   test("preserves exact external-label semantic diagnostics after structural decoding", async () => {
     for (const field of ["rationale", "reference"] as const)
       await expectMalformedEvidence(
