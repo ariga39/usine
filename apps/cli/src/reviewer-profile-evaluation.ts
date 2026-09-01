@@ -4,6 +4,7 @@ import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "nod
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { Schema } from "effect";
 import {
   resolveTaskContract,
   repositoryRegistrationSchema,
@@ -27,7 +28,6 @@ import {
 import { runCommand } from "./cli-failure.js";
 import {
   admitProfilePair,
-  isProfilePairChangedFactor,
   profilePairFieldSnapshot,
   type ProfilePairChangedFactor,
 } from "./profile-pair-admission.js";
@@ -41,6 +41,57 @@ const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+const reviewerEvaluationCaseSchema = Schema.Struct({
+  id: Schema.String,
+  repetition: Schema.Number,
+  contractPath: Schema.String,
+  candidateSha: Schema.String,
+  checkPath: Schema.String,
+  labelPath: Schema.String,
+});
+
+const reviewerEvaluationCheckSchema = Schema.Struct({
+  sha: Schema.String,
+  status: Schema.String,
+  command: Schema.String,
+  exitCode: Schema.Number,
+  stdout: Schema.String,
+  stderr: Schema.String,
+});
+
+const reviewerEvaluationLabelSchema = Schema.Struct({
+  verdict: Schema.Literals(["approved", "changes_requested"]),
+  rationale: Schema.String,
+  reference: Schema.String,
+  protected: Schema.optionalKey(Schema.Boolean),
+});
+
+const reviewerEvaluationPlanSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  id: Schema.String,
+  repositoryId: Schema.String,
+  baseSha: Schema.String,
+  subjectRole: Schema.Literal("reviewer"),
+  changedFactor: Schema.Literals(["model_stack", "reasoning", "developer_instructions"]),
+  baselineProfile: Schema.String,
+  candidateProfile: Schema.String,
+  maxRuns: Schema.Number,
+  usineBuild: Schema.String,
+  reportPath: Schema.String,
+  registrationPath: Schema.String,
+  cases: Schema.Array(reviewerEvaluationCaseSchema),
+});
+
+const decodeReviewerEvaluationPlan = Schema.decodeUnknownSync(reviewerEvaluationPlanSchema, {
+  onExcessProperty: "error",
+});
+const decodeReviewerEvaluationCheck = Schema.decodeUnknownSync(reviewerEvaluationCheckSchema, {
+  onExcessProperty: "error",
+});
+const decodeReviewerEvaluationLabel = Schema.decodeUnknownSync(reviewerEvaluationLabelSchema, {
+  onExcessProperty: "error",
+});
 
 export type ReviewerEvaluationChangedFactor = ProfilePairChangedFactor;
 
@@ -911,83 +962,11 @@ function validatePlanShape(plan: ReviewerEvaluationPlan): void {
 }
 
 function normalizePlan(input: unknown): ReviewerEvaluationPlan {
-  if (!isRecord(input))
-    throw new ReviewerEvaluationValidationError("evaluation plan must be an object");
-  const allowed = new Set([
-    "schemaVersion",
-    "id",
-    "repositoryId",
-    "baseSha",
-    "subjectRole",
-    "changedFactor",
-    "baselineProfile",
-    "candidateProfile",
-    "maxRuns",
-    "usineBuild",
-    "reportPath",
-    "registrationPath",
-    "cases",
-  ]);
-  if (Object.keys(input).some((key) => !allowed.has(key)))
-    throw new ReviewerEvaluationValidationError("evaluation plan has unexpected fields");
-  if (
-    input.schemaVersion !== 1 ||
-    typeof input.id !== "string" ||
-    typeof input.repositoryId !== "string" ||
-    typeof input.baseSha !== "string" ||
-    input.subjectRole !== "reviewer" ||
-    !isProfilePairChangedFactor(input.changedFactor) ||
-    typeof input.baselineProfile !== "string" ||
-    typeof input.candidateProfile !== "string" ||
-    typeof input.maxRuns !== "number" ||
-    typeof input.usineBuild !== "string" ||
-    typeof input.reportPath !== "string" ||
-    typeof input.registrationPath !== "string" ||
-    !Array.isArray(input.cases)
-  )
+  try {
+    return decodeReviewerEvaluationPlan(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("evaluation plan has missing or invalid fields");
-  return {
-    schemaVersion: 1,
-    id: input.id,
-    repositoryId: input.repositoryId,
-    baseSha: input.baseSha,
-    subjectRole: "reviewer",
-    changedFactor: input.changedFactor,
-    baselineProfile: input.baselineProfile,
-    candidateProfile: input.candidateProfile,
-    maxRuns: input.maxRuns,
-    usineBuild: input.usineBuild,
-    reportPath: input.reportPath,
-    registrationPath: input.registrationPath,
-    cases: input.cases.map(parseCase),
-  };
-}
-
-function parseCase(input: unknown): ReviewerEvaluationCase {
-  if (
-    !isRecord(input) ||
-    typeof input.id !== "string" ||
-    typeof input.repetition !== "number" ||
-    typeof input.contractPath !== "string" ||
-    typeof input.candidateSha !== "string" ||
-    typeof input.checkPath !== "string" ||
-    typeof input.labelPath !== "string" ||
-    Object.keys(input).some(
-      (key) =>
-        !["id", "repetition", "contractPath", "candidateSha", "checkPath", "labelPath"].includes(
-          key,
-        ),
-    )
-  )
-    throw new ReviewerEvaluationValidationError("reviewer evaluation case is invalid");
-  return {
-    id: input.id,
-    repetition: input.repetition,
-    contractPath: input.contractPath,
-    candidateSha: input.candidateSha,
-    checkPath: input.checkPath,
-    labelPath: input.labelPath,
-  };
+  }
 }
 
 function parseContract(raw: string): TaskContract {
@@ -1009,36 +988,29 @@ function parseCheck(raw: string, projectCheckCommand: string): CheckResult {
   } catch {
     throw new ReviewerEvaluationValidationError("check evidence is not JSON");
   }
-  if (
-    !isRecord(input) ||
-    typeof input.sha !== "string" ||
-    typeof input.status !== "string" ||
-    typeof input.command !== "string" ||
-    typeof input.exitCode !== "number" ||
-    typeof input.stdout !== "string" ||
-    typeof input.stderr !== "string" ||
-    Object.keys(input).some(
-      (key) => !["sha", "status", "command", "exitCode", "stdout", "stderr"].includes(key),
-    )
-  )
+  let check: ReturnType<typeof decodeReviewerEvaluationCheck>;
+  try {
+    check = decodeReviewerEvaluationCheck(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("check evidence is invalid");
+  }
   if (
-    !exactSha.test(input.sha) ||
-    input.status !== "passed" ||
-    !Number.isSafeInteger(input.exitCode) ||
-    input.exitCode !== 0 ||
-    input.command !== projectCheckCommand
+    !exactSha.test(check.sha) ||
+    check.status !== "passed" ||
+    !Number.isSafeInteger(check.exitCode) ||
+    check.exitCode !== 0 ||
+    check.command !== projectCheckCommand
   )
     throw new ReviewerEvaluationValidationError(
       "check evidence identity, status, exit code, or project command is invalid",
     );
   return {
-    sha: input.sha,
+    sha: check.sha,
     status: "passed",
-    command: input.command,
-    exitCode: input.exitCode,
-    stdout: input.stdout,
-    stderr: input.stderr,
+    command: check.command,
+    exitCode: check.exitCode,
+    stdout: check.stdout,
+    stderr: check.stderr,
   };
 }
 
@@ -1049,26 +1021,21 @@ function parseLabel(raw: string): ReviewerEvaluationLabel {
   } catch {
     throw new ReviewerEvaluationValidationError("external label is not JSON");
   }
-  if (
-    !isRecord(input) ||
-    (input.verdict !== "approved" && input.verdict !== "changes_requested") ||
-    typeof input.rationale !== "string" ||
-    typeof input.reference !== "string" ||
-    (input.protected !== undefined && typeof input.protected !== "boolean") ||
-    Object.keys(input).some(
-      (key) => !["verdict", "rationale", "reference", "protected"].includes(key),
-    )
-  )
+  let label: ReturnType<typeof decodeReviewerEvaluationLabel>;
+  try {
+    label = decodeReviewerEvaluationLabel(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("external label is invalid");
-  if (input.rationale.trim() === "" || input.reference.trim() === "")
+  }
+  if (label.rationale.trim() === "" || label.reference.trim() === "")
     throw new ReviewerEvaluationValidationError(
       "external label rationale and reference are required",
     );
   return {
-    verdict: input.verdict,
-    rationale: input.rationale,
-    reference: input.reference,
-    protected: input.protected ?? false,
+    verdict: label.verdict,
+    rationale: label.rationale,
+    reference: label.reference,
+    protected: label.protected ?? false,
   };
 }
 
@@ -1394,10 +1361,6 @@ function parseJson(raw: string): unknown {
   } catch {
     throw new ReviewerEvaluationValidationError("evaluation plan is not JSON");
   }
-}
-
-function isRecord(input: unknown): input is Record<string, unknown> {
-  return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
