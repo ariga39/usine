@@ -9,7 +9,6 @@ import { executionLifecycle, listExecutionTaskIds, reapOwnedExecution } from "./
 import {
   codingSessionAdapterForProfile,
   codingSessionAdapterProfilesFromEnvironment,
-  normalizeCodingSessionAdapterProfiles,
   type CodingSessionAdapterProfiles,
 } from "./coding-session-config.js";
 import type { ExecutionReference } from "./coding-session-types.js";
@@ -198,10 +197,6 @@ export interface CodingSessionOptions {
   adapterSelectionEnvironment?: NodeJS.ProcessEnv;
   executionStateDirectory?: string;
   sessionArchive?: SessionArchiveOptions;
-  adapterProfiles?: CodingSessionAdapterProfiles;
-  appServerProfiles?: readonly string[];
-  /** Source-composed static selection for the bounded OpenCode2 adapter. */
-  openCode2Profiles?: readonly string[];
   profileResolver?: CodexProfileResolver;
   roleOutputTransform?: RoleOutputTransform;
   mcpServerFactory?: CodingSessionMcpServerFactory;
@@ -281,16 +276,9 @@ export class CodexCodingSession {
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
   ) {
-    const configuredAdapterProfiles = codingSessionAdapterProfilesFromEnvironment(
-      options.adapterSelectionEnvironment ?? options.environment,
+    this.adapterProfiles = codingSessionAdapterProfilesFromEnvironment(
+      options.adapterSelectionEnvironment ?? {},
     );
-    const adapterProfiles = normalizeCodingSessionAdapterProfiles(
-      options.adapterProfiles ?? {
-        appServerProfiles: options.appServerProfiles ?? configuredAdapterProfiles.appServerProfiles,
-        openCode2Profiles: options.openCode2Profiles ?? configuredAdapterProfiles.openCode2Profiles,
-      },
-    );
-    this.adapterProfiles = adapterProfiles;
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
     this.sdkAdapter = new CodexSdkAdapter();
     this.appServerAdapter = new CodexAppServerAdapter();

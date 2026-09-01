@@ -664,7 +664,9 @@ describe("Coding Session", () => {
       {
         environment: fixture.environment,
         executionStateDirectory: fixture.stateDirectory,
-        appServerProfiles: ["reviewer-profile"],
+        adapterSelectionEnvironment: {
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+        },
         profileResolver: syntheticProfileResolver,
       },
     );
@@ -701,6 +703,47 @@ describe("Coding Session", () => {
       status: "completed",
       output: { verdict: "approved", summary: "app-server" },
     });
+  });
+
+  test("defaults to SDK and ignores adapter selection variables in provider environment", async () => {
+    let sdkCalls = 0;
+    const session = new CodexCodingSession(
+      async () => {
+        sdkCalls += 1;
+        return testClient(async () =>
+          sdkTurn(
+            JSON.stringify({ sha, verdict: "approved", summary: "sdk-default", findings: [] }),
+          ),
+        );
+      },
+      {
+        environment: {
+          CI: "true",
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+          USINE_OPENCODE2_PROFILES: "opencode-profile",
+        },
+        profileResolver: syntheticProfileResolver,
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: "fixtures/reviewer",
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+      }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      output: { verdict: "approved", summary: "sdk-default" },
+      effectiveProfile: { adapter: "sdk" },
+    });
+    expect(sdkCalls).toBe(1);
   });
 
   test("maps unsafe effective model and provider identities to null before Task observation", async () => {
@@ -832,7 +875,9 @@ describe("Coding Session", () => {
       {
         environment: fixture.environment,
         executionStateDirectory: fixture.stateDirectory,
-        appServerProfiles: ["reviewer-profile"],
+        adapterSelectionEnvironment: {
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+        },
         profileResolver: syntheticProfileResolver,
       },
     );
@@ -1015,7 +1060,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const pending = session.run({
       role: "reviewer",
@@ -1112,7 +1159,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const pending = session.run({
       role: "reviewer",
@@ -1164,7 +1213,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
       roleOutputTransform: async () => ({ invalid: true }),
     });
     const observation = await session.run({
@@ -1202,7 +1253,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const observation = await session.run({
       role: "reviewer",
@@ -1241,7 +1294,9 @@ describe("Coding Session", () => {
       const session = new CodexCodingSession(undefined, {
         environment: fixture.environment,
         executionStateDirectory: fixture.stateDirectory,
-        appServerProfiles: ["reviewer-profile"],
+        adapterSelectionEnvironment: {
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+        },
       });
       const observation = await session.run({
         role: "reviewer",
@@ -1272,7 +1327,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const observation = await session.run({
       role: "reviewer",
@@ -1299,7 +1356,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const observation = await session.run({
       role: "reviewer",
@@ -1331,7 +1390,9 @@ describe("Coding Session", () => {
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
       executionStateDirectory: fixture.stateDirectory,
-      appServerProfiles: ["reviewer-profile"],
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
     });
     const observation = await session.run({
       role: "reviewer",
