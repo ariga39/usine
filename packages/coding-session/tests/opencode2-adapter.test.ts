@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,11 @@ import type { ProviderNeutralCompletedEvidence } from "../src/coding-session-ada
 import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { executionIdentityPath, discoverOwnedExecutions } from "../src/codex-execution.js";
 import { OpenCode2Adapter } from "../src/opencode2-adapter.js";
-import { sandboxProfile, type OpenCode2Sandbox } from "../src/opencode2-sandbox.js";
+import {
+  DarwinOpenCode2Sandbox,
+  sandboxProfile,
+  type OpenCode2Sandbox,
+} from "../src/opencode2-sandbox.js";
 import { normalizeCodexProfileSelection } from "../src/codex-profile.js";
 
 const execution = { taskId: "opencode2-test", role: "reviewer" as const, attempt: "1" };
@@ -371,6 +375,44 @@ describe("OpenCode2 bounded adapter", () => {
     expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
     expect(reviewer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
+  });
+
+  test("runs the real host preflight and never substitutes an unverified boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-opencode2-sandbox-real-"));
+    const bin = join(root, "bin");
+    const workspace = join(root, "workspace");
+    const privateDirectory = join(root, "private");
+    await mkdir(bin, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await mkdir(privateDirectory, { recursive: true });
+    await writeFile(join(bin, "opencode"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(bin, "opencode"), 0o755);
+    try {
+      for (const role of ["implementer", "reviewer"] as const) {
+        try {
+          const prepared = await new DarwinOpenCode2Sandbox().prepare({
+            workspace,
+            privateDirectory,
+            role,
+            environment: { PATH: bin },
+            signal: AbortSignal.timeout(5_000),
+          });
+          expect(prepared.evidence).toEqual({
+            host: "darwin-seatbelt",
+            role,
+            workspaceRead: "verified",
+            workspaceWrite: role === "implementer" ? "verified" : "denied",
+            externalRead: "denied",
+            externalWrite: "denied",
+            subprocess: "inherited",
+          });
+        } catch (error) {
+          expect(error).toMatchObject({ code: "opencode2_sandbox_unavailable" });
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("runs one V2 session and returns only provider-neutral evidence", async () => {
