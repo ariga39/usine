@@ -240,6 +240,14 @@ describe("reviewer profile evaluation public path", () => {
 
   test("rejects a reviewer profile pair with more than its declared changed factor before provider execution", async () => {
     const value = await fixture();
+    await writeFile(
+      join(value.root, "codex/baseline-reviewer.config.toml"),
+      'model = "baseline-model"\nmodel_reasoning_effort = "low"\n',
+    );
+    await writeFile(
+      join(value.root, "codex/candidate-reviewer.config.toml"),
+      'model = "candidate-model"\nmodel_reasoning_effort = "high"\n',
+    );
     const plan = JSON.parse(await readFile(value.planPath, "utf8")) as Record<string, unknown>;
     plan.changedFactor = "reasoning";
     await writeFile(value.planPath, JSON.stringify(plan));
