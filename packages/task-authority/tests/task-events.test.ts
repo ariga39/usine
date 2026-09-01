@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
   openSqliteDatabase,
+  publicBlockerFromText,
   TaskAuthority,
   type TaskContract,
   type TaskObservationEventInput,
@@ -55,6 +56,12 @@ async function authorityFor(taskId: string): Promise<{ authority: TaskAuthority;
 }
 
 describe("Task event stream", () => {
+  test("projects coding-session failures as provider failures", () => {
+    expect(publicBlockerFromText("implementer coding session failed")).toEqual({
+      classification: "provider_failure",
+    });
+  });
+
   test("replays one ordered Task-local stream and deduplicates a stable event identity", async () => {
     const taskId = `events-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);

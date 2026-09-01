@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
 import {
+  createRuntimeCodingSession,
   ForgeProfileResolutionError,
   forgePolicyFromEnvironment,
   githubReadPolicyFromEnvironment,
@@ -82,6 +83,40 @@ describe("runtime composition", () => {
         privateKeyPath: "./app-private-key.pem",
       },
     });
+  });
+
+  test("leaves opaque role names to Coding Session and composes the three adapter choices", () => {
+    const policy = runtimePolicyFromEnvironment(
+      {
+        ...forgeEnvironment,
+        USINE_CODEX_APP_SERVER_PROFILES: "app-server-profile",
+        USINE_OPENCODE2_PROFILES: "opencode2-profile",
+      },
+      {
+        ...repository,
+        implementerProfile: "OpenCode 2 implementer",
+        reviewerProfile: "app-server reviewer",
+      },
+    );
+
+    expect(policy.roles.implementer.profile).toBe("OpenCode 2 implementer");
+    expect(policy.roles.reviewer.profile).toBe("app-server reviewer");
+    expect(policy.workerEnvironment).not.toHaveProperty("USINE_CODEX_APP_SERVER_PROFILES");
+    expect(policy.workerEnvironment).not.toHaveProperty("USINE_OPENCODE2_PROFILES");
+    expect(policy.adapterSelectionEnvironment).toEqual({
+      USINE_CODEX_APP_SERVER_PROFILES: "app-server-profile",
+      USINE_OPENCODE2_PROFILES: "opencode2-profile",
+    });
+  });
+
+  test("rejects a profile selected for more than one adapter before execution", () => {
+    expect(() =>
+      createRuntimeCodingSession({
+        ...forgeEnvironment,
+        USINE_CODEX_APP_SERVER_PROFILES: "shared-profile",
+        USINE_OPENCODE2_PROFILES: "shared-profile",
+      }),
+    ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
   test("validates deployment inputs once and derives capability-safe values", () => {

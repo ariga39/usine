@@ -270,8 +270,8 @@ async function runCodexAppServer({
       cwd: workspace,
       env: {
         ...environment,
-        USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODEX_WORKSPACE: workspace,
+        USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
+        USINE_CODING_SESSION_WORKSPACE: workspace,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });

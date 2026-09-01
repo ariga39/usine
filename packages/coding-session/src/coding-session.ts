@@ -6,6 +6,12 @@ import { Effect } from "effect";
 import { remainingUntil, type TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import { executionLifecycle, listExecutionTaskIds, reapOwnedExecution } from "./codex-execution.js";
+import {
+  codingSessionAdapterForProfile,
+  codingSessionAdapterProfilesFromEnvironment,
+  normalizeCodingSessionAdapterProfiles,
+  type CodingSessionAdapterProfiles,
+} from "./coding-session-config.js";
 import type { ExecutionReference } from "./coding-session-types.js";
 import { CodexAppServerAdapter } from "./codex-app-server.js";
 import { OpenCode2Adapter } from "./opencode2-adapter.js";
@@ -58,15 +64,6 @@ export interface RolePolicy {
   role: "implementer" | "reviewer";
   profile: string;
   sandbox: "workspace-write" | "read-only";
-}
-
-export function codexAppServerProfilesFromEnvironment(
-  environment: NodeJS.ProcessEnv,
-): readonly string[] {
-  const configured = environment.USINE_CODEX_APP_SERVER_PROFILES?.trim();
-  if (!configured) return [];
-  const profiles = configured.split(",").map(validateCodexProfile);
-  return [...new Set(profiles)];
 }
 
 export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
@@ -195,9 +192,13 @@ export function createOpenAICompatibleRoleOutputTransform(
 }
 
 export interface CodingSessionOptions {
+  /** Environment visible to provider adapters and their child processes. */
   environment: NodeJS.ProcessEnv;
+  /** Host-private static adapter selection input; never sent to an adapter. */
+  adapterSelectionEnvironment?: NodeJS.ProcessEnv;
   executionStateDirectory?: string;
   sessionArchive?: SessionArchiveOptions;
+  adapterProfiles?: CodingSessionAdapterProfiles;
   appServerProfiles?: readonly string[];
   /** Source-composed static selection for the bounded OpenCode2 adapter. */
   openCode2Profiles?: readonly string[];
@@ -270,8 +271,7 @@ async function runRoleOutputTransform(
 }
 
 export class CodexCodingSession {
-  private readonly appServerProfiles: ReadonlySet<string>;
-  private readonly openCode2Profiles: ReadonlySet<string>;
+  private readonly adapterProfiles: CodingSessionAdapterProfiles;
   private readonly profileResolver: CodexProfileResolver;
   private readonly sdkAdapter: CodingSessionAdapter;
   private readonly appServerAdapter: CodingSessionAdapter;
@@ -281,8 +281,16 @@ export class CodexCodingSession {
     private readonly clientFactory?: CodingSessionClientFactory,
     private readonly options: CodingSessionOptions = { environment: process.env },
   ) {
-    this.appServerProfiles = new Set(options.appServerProfiles ?? []);
-    this.openCode2Profiles = new Set(options.openCode2Profiles ?? []);
+    const configuredAdapterProfiles = codingSessionAdapterProfilesFromEnvironment(
+      options.adapterSelectionEnvironment ?? options.environment,
+    );
+    const adapterProfiles = normalizeCodingSessionAdapterProfiles(
+      options.adapterProfiles ?? {
+        appServerProfiles: options.appServerProfiles ?? configuredAdapterProfiles.appServerProfiles,
+        openCode2Profiles: options.openCode2Profiles ?? configuredAdapterProfiles.openCode2Profiles,
+      },
+    );
+    this.adapterProfiles = adapterProfiles;
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
     this.sdkAdapter = new CodexSdkAdapter();
     this.appServerAdapter = new CodexAppServerAdapter();
@@ -482,14 +490,16 @@ export class CodexCodingSession {
         adapterMcpServer = normalizeCodingSessionMcpServer(effectiveRequest.mcpServer);
       const clientFactory = this.clientFactory;
       const adapterOverrides = internalAdapterOverrides.get(this);
-      const adapter = this.openCode2Profiles.has(profileName)
-        ? (adapterOverrides?.opencode2 ?? this.openCode2Adapter)
-        : this.appServerProfiles.has(profileName)
-          ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
-          : (adapterOverrides?.sdk ??
-            (clientFactory
-              ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
-              : this.sdkAdapter));
+      const adapterName = codingSessionAdapterForProfile(profileName, this.adapterProfiles);
+      const adapter =
+        adapterName === "opencode2"
+          ? (adapterOverrides?.opencode2 ?? this.openCode2Adapter)
+          : adapterName === "app-server"
+            ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
+            : (adapterOverrides?.sdk ??
+              (clientFactory
+                ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
+                : this.sdkAdapter));
       effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);
       const result = await adapter.run({

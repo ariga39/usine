@@ -79,8 +79,8 @@ export class CodexSdkAdapter implements CodingSessionAdapter {
       codexPathOverride: launcher.launcherPath,
       env: {
         ...options.env,
-        USINE_CODEX_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODEX_WORKSPACE: context.workspace,
+        USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
+        USINE_CODING_SESSION_WORKSPACE: context.workspace,
       },
     });
   }
