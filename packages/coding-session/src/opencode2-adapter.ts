@@ -23,11 +23,17 @@ import {
   type ProviderNeutralUsage,
 } from "./coding-session-adapter.js";
 import { safeObservationLabel } from "./coding-session-policy.js";
+import {
+  DarwinOpenCode2Sandbox,
+  OpenCode2SandboxUnavailableError,
+  type OpenCode2Sandbox,
+} from "./opencode2-sandbox.js";
 
 const STARTUP_POLL_MS = 20;
 const GRACEFUL_INTERRUPT_WAIT_MS = 1_000;
 const sessionInfoSchema = z.object({ id: z.string().min(1) });
 const promptAdmissionSchema = z.object({ sessionID: z.string().min(1) });
+const PERMISSION_REPLY_TIMEOUT_MS = 1_000;
 
 function noOpGracefulInterrupt(): Promise<void> {
   return Promise.resolve();
@@ -36,6 +42,8 @@ function noOpGracefulInterrupt(): Promise<void> {
 /** Source-internal OpenCode V2 adapter. Its server process is owned by Usine. */
 export class OpenCode2Adapter implements CodingSessionAdapter {
   readonly name = "opencode2" as const;
+
+  constructor(private readonly sandbox: OpenCode2Sandbox = new DarwinOpenCode2Sandbox()) {}
 
   async run(context: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult> {
     if (!context.executionStateDirectory)
@@ -61,12 +69,6 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
 
     try {
       const port = await availablePort();
-      launcher = await createOwnedProcessLauncher(
-        context.executionStateDirectory,
-        context.workspace,
-        context.execution,
-        "opencode",
-      );
       privateDirectory = join(
         context.executionStateDirectory,
         "opencode-private",
@@ -85,12 +87,26 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         mkdir(join(privateDirectory, "xdg-state"), { recursive: true }),
         mkdir(join(privateDirectory, "xdg-cache"), { recursive: true }),
       ]);
+      const sandbox = await this.sandbox.prepare({
+        workspace: context.workspace,
+        privateDirectory,
+        role: context.execution.role,
+        environment: context.environment,
+        signal: context.signal,
+      });
+      await context.onObservation?.({ type: "sandbox_verified", ...sandbox.evidence });
+      launcher = await createOwnedProcessLauncher(
+        context.executionStateDirectory,
+        context.workspace,
+        context.execution,
+        sandbox.launch.command,
+      );
       const childEnvironment = Object.fromEntries(
         Object.entries(context.environment).filter(([key]) => !key.startsWith("OPENCODE_")),
       );
       server = spawn(
         launcher.launcherPath,
-        ["serve", "--hostname=127.0.0.1", `--port=${port}`, "--pure"],
+        [...sandbox.launch.args, "serve", "--hostname=127.0.0.1", `--port=${port}`, "--pure"],
         {
           cwd: context.workspace,
           env: {
@@ -148,6 +164,10 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
           sseMaxRetryAttempts: 0,
         },
       );
+      const globalEvents = await client.v2.event.subscribe({
+        signal: context.signal,
+        sseMaxRetryAttempts: 0,
+      });
       let finalResponse = "";
       let usage: ProviderNeutralUsage | null = null;
       let promptAdmitted = false;
@@ -172,6 +192,60 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         completionSettled = true;
         completionReject(error);
       };
+      const processGlobalEvents = async (): Promise<void> => {
+        try {
+          for await (const rawEvent of globalEvents.stream) {
+            const event = parseGlobalEvent(rawEvent);
+            if (event.type !== "permission.v2.asked") continue;
+            if (event.properties.sessionID !== createdSessionID) continue;
+            try {
+              await bounded(
+                client!.v2.session.permission.reply(
+                  {
+                    sessionID: createdSessionID,
+                    requestID: event.properties.id,
+                    reply: "reject",
+                    message: "Usine does not approve OpenCode2 permission requests",
+                  },
+                  { responseStyle: "data", throwOnError: true, signal: context.signal },
+                ),
+                PERMISSION_REPLY_TIMEOUT_MS,
+              );
+            } catch {
+              fail(
+                new CodingSessionInterruption(
+                  "turn",
+                  "authority",
+                  "OpenCode2 permission request could not be rejected",
+                ),
+              );
+              return;
+            }
+            fail(
+              new CodingSessionInterruption(
+                "turn",
+                "authority",
+                "OpenCode2 permission request was rejected",
+              ),
+            );
+            return;
+          }
+          fail(
+            new CodingSessionInterruption("turn", "transport", "OpenCode2 permission stream ended"),
+          );
+        } catch {
+          fail(
+            context.signal.aborted
+              ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
+              : new CodingSessionInterruption(
+                  "turn",
+                  "transport",
+                  "OpenCode2 permission stream failed",
+                ),
+          );
+        }
+      };
+      void processGlobalEvents();
       const completionOutcome = completion.then(
         () => ({ ok: true as const }),
         (error: unknown) => ({
@@ -311,17 +385,18 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         throw new Error("OpenCode2 prompt identity mismatch");
       const cancellationWait = cancellation(context.signal, gracefulInterrupt);
       try {
-        const [, completionResult] = await Promise.race([
-          Promise.all([
-            client.v2.session.wait(
-              { sessionID: createdSessionID },
-              { responseStyle: "data", throwOnError: true, signal: context.signal },
-            ),
-            completionOutcome,
-          ]),
+        const waitForIdle = client.v2.session.wait(
+          { sessionID: createdSessionID },
+          { responseStyle: "data", throwOnError: true, signal: context.signal },
+        );
+        const completionResult = completionOutcome.then((outcome) => {
+          if (!outcome.ok) throw outcome.error;
+          return outcome;
+        });
+        await Promise.race([
+          Promise.all([waitForIdle, completionResult]),
           cancellationWait.promise,
         ]);
-        if (!completionResult.ok) throw completionResult.error;
       } finally {
         cancellationWait.dispose();
       }
@@ -332,6 +407,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     } catch (error) {
       if (error instanceof CodingSessionInterruption) {
         primaryFailure = error;
+      } else if (error instanceof OpenCode2SandboxUnavailableError) {
+        primaryFailure = new CodingSessionInterruption("startup", "configuration", error.message);
       } else if (context.signal.aborted) {
         await gracefulInterrupt();
         primaryFailure = new CodingSessionInterruption(
@@ -382,6 +459,24 @@ function opencodeConfig(context: CodingSessionAdapterRequest): Config {
   const config: Config = {
     model,
     default_agent: "usine",
+    permission: {
+      "*": "deny",
+      read: "allow",
+      edit: context.sandbox === "workspace-write" ? "allow" : "deny",
+      glob: "allow",
+      grep: "allow",
+      list: "allow",
+      bash: "allow",
+      task: "deny",
+      external_directory: "deny",
+      todowrite: "deny",
+      question: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      lsp: "deny",
+      doom_loop: "deny",
+      skill: "deny",
+    },
     agent: {
       usine: {
         model,
@@ -538,6 +633,24 @@ function parseSessionEvent(rawEvent: unknown): SessionEvent {
   return sessionEventSchema.parse(JSON.parse(payload));
 }
 
+const globalPermissionEventSchema = z.object({
+  type: z.literal("permission.v2.asked"),
+  properties: z.object({ id: z.string().min(1), sessionID: z.string().min(1) }),
+});
+
+function parseGlobalEvent(
+  rawEvent: unknown,
+): z.infer<typeof globalPermissionEventSchema> | { readonly type: "other" } {
+  try {
+    const first = typeof rawEvent === "string" ? JSON.parse(rawEvent) : rawEvent;
+    const value = typeof first === "string" ? JSON.parse(first) : first;
+    const parsed = globalPermissionEventSchema.safeParse(value);
+    return parsed.success ? parsed.data : { type: "other" };
+  } catch {
+    return { type: "other" };
+  }
+}
+
 function jsonField(value: unknown) {
   return providerNeutralJsonValue(value);
 }
@@ -613,6 +726,19 @@ function cancellation(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return await Promise.race([
+    promise,
+    delay(milliseconds).then(() => {
+      throw new CodingSessionInterruption(
+        "turn",
+        "timeout",
+        "OpenCode2 permission reply timed out",
+      );
+    }),
+  ]);
 }
 
 function waitForProcessExit(process: ReturnType<typeof spawn>): Promise<void> {

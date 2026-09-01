@@ -128,6 +128,16 @@ export type CodingSessionMcpServerFactory = (
 
 export type CodingSessionObservation =
   | { type: "thread_started" }
+  | {
+      type: "sandbox_verified";
+      host: "darwin-seatbelt";
+      role: SessionRole;
+      workspaceRead: "verified";
+      workspaceWrite: "verified" | "denied";
+      externalRead: "denied";
+      externalWrite: "denied";
+      subprocess: "inherited";
+    }
   | { type: "turn_started"; turn: number }
   | {
       type: "tool_completed";

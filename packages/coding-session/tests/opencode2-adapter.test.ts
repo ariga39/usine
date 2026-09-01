@@ -4,16 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
 import { z } from "zod";
-import {
-  CodexCodingSession,
-  readSessionArchive,
-  reviewerOutputSchema,
-} from "@usine/coding-session";
+import { readSessionArchive, reviewerOutputSchema } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
 import type { CodingSessionAdapterRequest } from "../src/coding-session-adapter.js";
 import type { ProviderNeutralCompletedEvidence } from "../src/coding-session-adapter.js";
+import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { executionIdentityPath, discoverOwnedExecutions } from "../src/codex-execution.js";
 import { OpenCode2Adapter } from "../src/opencode2-adapter.js";
+import { sandboxProfile, type OpenCode2Sandbox } from "../src/opencode2-sandbox.js";
 import { normalizeCodexProfileSelection } from "../src/codex-profile.js";
 
 const execution = { taskId: "opencode2-test", role: "reviewer" as const, attempt: "1" };
@@ -42,6 +40,24 @@ const facadeContract = {
 } satisfies TaskContract;
 const launchRecordSchema = z.object({ processId: z.number().int().positive() });
 
+function fixtureAdapter(): OpenCode2Adapter {
+  const sandbox: OpenCode2Sandbox = {
+    prepare: async ({ role }) => ({
+      launch: { command: "opencode", args: [] },
+      evidence: {
+        host: "darwin-seatbelt",
+        role,
+        workspaceRead: "verified",
+        workspaceWrite: role === "implementer" ? "verified" : "denied",
+        externalRead: "denied",
+        externalWrite: "denied",
+        subprocess: "inherited",
+      },
+    }),
+  };
+  return new OpenCode2Adapter(sandbox);
+}
+
 async function fixture(
   mode:
     | "success"
@@ -52,7 +68,8 @@ async function fixture(
     | "startup-abort"
     | "no-response"
     | "out-of-order"
-    | "step-failure",
+    | "step-failure"
+    | "permission-ask",
   finalResponse = '{"verdict":"approved"}',
 ): Promise<{
   environment: Record<string, string>;
@@ -120,9 +137,11 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
 }) + "\\n");
 if (${JSON.stringify(mode)} === "startup-failure") process.exit(17);
 let eventResponse;
+let globalEventResponse;
 let waitResponse;
 let idle = false;
 const pendingEvents = [];
+const pendingGlobalEvents = [];
 let prompted = false;
 const readBody = (req) => new Promise((resolve) => {
   let body = "";
@@ -135,6 +154,13 @@ const writeEvent = (event) => {
     return;
   }
   eventResponse.write("data: " + JSON.stringify(JSON.stringify(event)) + "\\n\\n");
+};
+const writeGlobalEvent = (event) => {
+  if (!globalEventResponse) {
+    pendingGlobalEvents.push(event);
+    return;
+  }
+  globalEventResponse.write("data: " + JSON.stringify(event) + "\\n\\n");
 };
 const response = (res, status, body) => {
   res.writeHead(status, { "content-type": "application/json" });
@@ -154,6 +180,13 @@ const server = createServer((req, res) => {
     if (${JSON.stringify(mode)} === "prompt-failure") return res.end();
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/event") {
+    appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ globalEventsConnected: true }) + "\\n");
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    globalEventResponse = res;
+    for (const event of pendingGlobalEvents.splice(0)) writeGlobalEvent(event);
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/session") {
     return readBody(req).then((body) => {
       appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ sessionCreate: JSON.parse(body) }) + "\\n");
@@ -171,6 +204,10 @@ const server = createServer((req, res) => {
       if (${JSON.stringify(mode)} === "out-of-order")
         writeEvent({ id: "early-text", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", textID: "text-fixture", text: ${JSON.stringify(finalResponse)} } });
       writeEvent({ id: "admitted", type: "session.next.prompt.admitted", data: { sessionID: "session-fixture", messageID: "message-fixture", prompt: { text: "fixture" }, delivery: "queue" } });
+      if (${JSON.stringify(mode)} === "permission-ask") {
+        writeGlobalEvent({ id: "permission-event-fixture", type: "permission.v2.asked", properties: { id: "permission-fixture", sessionID: "session-fixture", action: "external_directory", resources: ["/outside"] } });
+        return;
+      }
       if (${JSON.stringify(mode)} === "malformed")
         writeEvent({ id: "wrong", type: "session.next.text.ended", data: { sessionID: "wrong-session", assistantMessageID: "message-fixture", textID: "text-fixture", text: "{}" } });
       else if (${JSON.stringify(mode)} !== "success")
@@ -211,6 +248,10 @@ const server = createServer((req, res) => {
       waitResponse = undefined;
     }
     return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/session/session-fixture/permission/permission-fixture/reply") {
+    appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ permissionReply: true }) + "\\n");
+    return response(res, 204);
   }
   if (req.method === "GET" && url.pathname === "/api/session/session-fixture/status") return response(res, 200, { data: prompted ? { type: "busy" } : { type: "idle" } });
   if (req.method === "POST" && url.pathname === "/api/session/session-fixture/wait") {
@@ -315,11 +356,28 @@ async function waitForProtocolFact(protocolLog: string, fact: string): Promise<v
 }
 
 describe("OpenCode2 bounded adapter", () => {
+  test("builds explicit role profiles with no reviewer workspace write rule", () => {
+    const workspace = join("/tmp", "opencode2-workspace");
+    const privateDirectory = join("/tmp", "opencode2-private");
+    const base = {
+      workspace,
+      privateDirectory,
+      opencodeExecutable: join("/tmp", "opencode"),
+    };
+    const implementer = sandboxProfile({ ...base, role: "implementer" });
+    const reviewer = sandboxProfile({ ...base, role: "reviewer" });
+
+    expect(implementer).toContain(`(allow file-write* (subpath "${workspace}"))`);
+    expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
+    expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
+    expect(reviewer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
+  });
+
   test("runs one V2 session and returns only provider-neutral evidence", async () => {
     const testFixture = await fixture("success");
     const observations: unknown[] = [];
     const evidence: ProviderNeutralCompletedEvidence[] = [];
-    const result = await new OpenCode2Adapter().run({
+    const result = await fixtureAdapter().run({
       ...request(
         testFixture.workspace,
         testFixture.environment,
@@ -340,6 +398,16 @@ describe("OpenCode2 bounded adapter", () => {
       sessionId: "session-fixture",
     });
     expect(observations).toEqual([
+      {
+        type: "sandbox_verified",
+        host: "darwin-seatbelt",
+        role: "reviewer",
+        workspaceRead: "verified",
+        workspaceWrite: "denied",
+        externalRead: "denied",
+        externalWrite: "denied",
+        subprocess: "inherited",
+      },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
@@ -386,6 +454,24 @@ describe("OpenCode2 bounded adapter", () => {
     expect(launch.config).toEqual({
       model: "fixture-provider/fixture-model",
       default_agent: "usine",
+      permission: {
+        "*": "deny",
+        read: "allow",
+        edit: "deny",
+        glob: "allow",
+        grep: "allow",
+        list: "allow",
+        bash: "allow",
+        task: "deny",
+        external_directory: "deny",
+        todowrite: "deny",
+        question: "deny",
+        webfetch: "deny",
+        websearch: "deny",
+        lsp: "deny",
+        doom_loop: "deny",
+        skill: "deny",
+      },
       agent: {
         usine: {
           model: "fixture-provider/fixture-model",
@@ -424,7 +510,7 @@ describe("OpenCode2 bounded adapter", () => {
   test("fails closed on a V2 event identity mismatch and reaps the owned process", async () => {
     const testFixture = await fixture("malformed");
     await expect(
-      new OpenCode2Adapter().run(
+      fixtureAdapter().run(
         request(
           testFixture.workspace,
           testFixture.environment,
@@ -440,7 +526,7 @@ describe("OpenCode2 bounded adapter", () => {
   test("requests graceful V2 interruption before cleanup on cancellation", async () => {
     const testFixture = await fixture("wait");
     const controller = new AbortController();
-    const run = new OpenCode2Adapter().run(
+    const run = fixtureAdapter().run(
       request(
         testFixture.workspace,
         testFixture.environment,
@@ -463,7 +549,7 @@ describe("OpenCode2 bounded adapter", () => {
   test("fails as a typed startup transport error and removes an unowned identity", async () => {
     const testFixture = await fixture("startup-failure");
     await expect(
-      new OpenCode2Adapter().run(
+      fixtureAdapter().run(
         request(
           testFixture.workspace,
           testFixture.environment,
@@ -479,7 +565,7 @@ describe("OpenCode2 bounded adapter", () => {
   test("preserves typed startup cancellation and reaps the launcher-owned child", async () => {
     const testFixture = await fixture("startup-abort");
     const controller = new AbortController();
-    const run = new OpenCode2Adapter().run(
+    const run = fixtureAdapter().run(
       request(
         testFixture.workspace,
         testFixture.environment,
@@ -503,7 +589,7 @@ describe("OpenCode2 bounded adapter", () => {
     process.on("unhandledRejection", onUnhandledRejection);
     try {
       await expect(
-        new OpenCode2Adapter().run(
+        fixtureAdapter().run(
           request(
             testFixture.workspace,
             testFixture.environment,
@@ -530,7 +616,7 @@ describe("OpenCode2 bounded adapter", () => {
     async (mode, failureClass) => {
       const testFixture = await fixture(mode);
       await expect(
-        new OpenCode2Adapter().run(
+        fixtureAdapter().run(
           request(
             testFixture.workspace,
             testFixture.environment,
@@ -544,6 +630,25 @@ describe("OpenCode2 bounded adapter", () => {
     },
   );
 
+  test("rejects an unexpected V2 permission ask with a bounded typed interruption", async () => {
+    const testFixture = await fixture("permission-ask");
+    await expect(
+      fixtureAdapter().run(
+        request(
+          testFixture.workspace,
+          testFixture.environment,
+          testFixture.stateDirectory,
+          AbortSignal.timeout(5_000),
+        ),
+      ),
+    ).rejects.toMatchObject({ phase: "turn", failureClass: "authority" });
+    await expect(readFile(testFixture.protocolLog, "utf8")).resolves.toContain(
+      '"permissionReply":true',
+    );
+    await assertOwnedExecutionGone(testFixture);
+    await testFixture.close();
+  });
+
   test("runs through the ordinary facade, selects OpenCode2, and archives the role result", async () => {
     const finalResponse = JSON.stringify({
       sha: "a".repeat(40),
@@ -552,8 +657,66 @@ describe("OpenCode2 bounded adapter", () => {
       findings: [],
     });
     const testFixture = await fixture("success", finalResponse);
+    const observations: unknown[] = [];
+    const session = createCodexCodingSessionForTesting(
+      undefined,
+      {
+        environment: testFixture.environment,
+        executionStateDirectory: testFixture.stateDirectory,
+        sessionArchive: { stateDirectory: testFixture.stateDirectory },
+        openCode2Profiles: ["reviewer-profile"],
+        profileResolver: async () =>
+          normalizeCodexProfileSelection("reviewer-profile", {
+            model: "fixture-model",
+            developerInstructions: "private instructions",
+            config: { model_provider: "fixture-provider" },
+          }),
+      },
+      { opencode2: fixtureAdapter() },
+    );
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: testFixture.workspace,
+      contract: facadeContract,
+      prompt: "review fixture",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 5_000,
+      outputSchema: reviewerOutputSchema,
+      execution,
+      onObservation: (observation) => {
+        observations.push(observation);
+      },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: {
+        sha: "a".repeat(40),
+        verdict: "approved",
+        summary: "fixture review",
+        findings: [],
+      },
+      effectiveProfile: { profileName: "reviewer-profile", adapter: "opencode2" },
+    });
+    expect(observation.archiveId).toMatch(/^archive_/);
+    expect(observations[0]).toMatchObject({ type: "sandbox_verified", role: "reviewer" });
+    const archive = await readSessionArchive(testFixture.stateDirectory, observation.archiveId!);
+    expect(archive).toMatchObject({
+      adapter: "opencode2",
+      status: "completed",
+      completeness: "complete",
+    });
+    expect(JSON.stringify(archive)).not.toContain("hostile");
+    expect(JSON.stringify(archive)).not.toContain("session.next");
+    await assertOwnedExecutionGone(testFixture);
+    await testFixture.close();
+  });
+
+  test("ordinary facade reports missing OpenCode2 sandbox prerequisites before provider launch", async () => {
+    const testFixture = await fixture("success");
     const session = new CodexCodingSession(undefined, {
-      environment: testFixture.environment,
+      environment: { PATH: join(testFixture.stateDirectory, "no-opencode") },
       executionStateDirectory: testFixture.stateDirectory,
       sessionArchive: { stateDirectory: testFixture.stateDirectory },
       openCode2Profiles: ["reviewer-profile"],
@@ -577,25 +740,14 @@ describe("OpenCode2 bounded adapter", () => {
     });
 
     expect(observation).toMatchObject({
-      status: "completed",
-      output: {
-        sha: "a".repeat(40),
-        verdict: "approved",
-        summary: "fixture review",
-        findings: [],
-      },
-      effectiveProfile: { profileName: "reviewer-profile", adapter: "opencode2" },
+      status: "failed",
+      failureClass: "configuration",
+      effectiveProfile: { adapter: "opencode2" },
     });
-    expect(observation.archiveId).toMatch(/^archive_/);
-    const archive = await readSessionArchive(testFixture.stateDirectory, observation.archiveId!);
-    expect(archive).toMatchObject({
-      adapter: "opencode2",
-      status: "completed",
-      completeness: "complete",
-    });
-    expect(JSON.stringify(archive)).not.toContain("hostile");
-    expect(JSON.stringify(archive)).not.toContain("session.next");
-    await assertOwnedExecutionGone(testFixture);
+    await expect(readFile(testFixture.protocolLog, "utf8")).resolves.not.toContain('"args"');
+    await expect(
+      discoverOwnedExecutions(testFixture.stateDirectory, execution.taskId),
+    ).resolves.toEqual([]);
     await testFixture.close();
   });
 });
