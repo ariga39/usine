@@ -4,7 +4,7 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import {
   contractIssues,
@@ -50,6 +50,34 @@ const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const exactSha = /^[0-9a-f]{40}$/;
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const usineSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+const profileEvaluationPairSchema = Schema.Struct({
+  id: Schema.String,
+  repetition: Schema.Number,
+  baselineContractPath: Schema.String,
+  candidateContractPath: Schema.String,
+});
+
+const profileEvaluationPlanSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  id: Schema.String,
+  repositoryId: Schema.String,
+  baseSha: Schema.String,
+  subjectRole: Schema.Literal("implementer"),
+  changedFactor: Schema.Literals(["model_stack", "reasoning", "developer_instructions"]),
+  baselineProfile: Schema.String,
+  candidateProfile: Schema.String,
+  reviewerProfile: Schema.String,
+  maxTasks: Schema.Number,
+  usineBuild: Schema.String,
+  reportPath: Schema.String,
+  registrationPath: Schema.String,
+  pairs: Schema.Array(profileEvaluationPairSchema),
+});
+
+const decodeProfileEvaluationPlan = Schema.decodeUnknownSync(profileEvaluationPlanSchema, {
+  onExcessProperty: "error",
+});
 
 export type ProfileEvaluationChangedFactor = ProfilePairChangedFactor;
 
@@ -1377,88 +1405,11 @@ async function validateExistingTask(
 }
 
 function normalizePlan(input: unknown): ProfileEvaluationPlan {
-  if (!isRecord(input))
-    throw new ProfileEvaluationValidationError("evaluation plan must be an object");
-  const allowedKeys = new Set([
-    "schemaVersion",
-    "id",
-    "repositoryId",
-    "baseSha",
-    "subjectRole",
-    "changedFactor",
-    "baselineProfile",
-    "candidateProfile",
-    "reviewerProfile",
-    "maxTasks",
-    "usineBuild",
-    "reportPath",
-    "pairs",
-    "registrationPath",
-  ]);
-  if (Object.keys(input).some((key) => !allowedKeys.has(key)))
-    throw new ProfileEvaluationValidationError("evaluation plan has unexpected fields");
-  if (!Array.isArray(input.pairs))
-    throw new ProfileEvaluationValidationError("plan must contain paired contracts");
-  if (
-    input.schemaVersion !== 1 ||
-    typeof input.id !== "string" ||
-    typeof input.repositoryId !== "string" ||
-    typeof input.baseSha !== "string" ||
-    input.subjectRole !== "implementer" ||
-    !isProfilePairChangedFactor(input.changedFactor) ||
-    typeof input.baselineProfile !== "string" ||
-    typeof input.candidateProfile !== "string" ||
-    typeof input.reviewerProfile !== "string" ||
-    typeof input.maxTasks !== "number" ||
-    typeof input.usineBuild !== "string" ||
-    typeof input.reportPath !== "string" ||
-    typeof input.registrationPath !== "string"
-  )
+  try {
+    return decodeProfileEvaluationPlan(input);
+  } catch {
     throw new ProfileEvaluationValidationError("evaluation plan has missing or invalid fields");
-  const plan: ProfileEvaluationPlan = {
-    schemaVersion: 1,
-    id: input.id,
-    repositoryId: input.repositoryId,
-    baseSha: input.baseSha,
-    subjectRole: "implementer",
-    changedFactor: input.changedFactor,
-    baselineProfile: input.baselineProfile,
-    candidateProfile: input.candidateProfile,
-    reviewerProfile: input.reviewerProfile,
-    maxTasks: input.maxTasks,
-    usineBuild: input.usineBuild,
-    reportPath: input.reportPath,
-    registrationPath: input.registrationPath,
-    pairs: input.pairs.map(parsePair),
-  };
-  return plan;
-}
-
-function parsePair(input: unknown): ProfileEvaluationPair {
-  if (
-    !isRecord(input) ||
-    typeof input.id !== "string" ||
-    typeof input.repetition !== "number" ||
-    typeof input.baselineContractPath !== "string" ||
-    typeof input.candidateContractPath !== "string"
-  )
-    throw new ProfileEvaluationValidationError("paired contract identity is invalid");
-  if (
-    Object.keys(input).some(
-      (key) => !["id", "repetition", "baselineContractPath", "candidateContractPath"].includes(key),
-    )
-  )
-    throw new ProfileEvaluationValidationError("paired contract identity has unexpected fields");
-  return {
-    id: input.id,
-    repetition: input.repetition,
-    baselineContractPath: input.baselineContractPath,
-    candidateContractPath: input.candidateContractPath,
-  };
-}
-
-function isRecord(input: unknown): input is Record<string, unknown> {
-  return typeof input === "object" && input !== null && !Array.isArray(input);
+  }
 }
 
 function parseContract(raw: string, label: string): TaskContract {

@@ -263,6 +263,7 @@ describe("profile evaluate plan boundary", () => {
     };
 
     process.exitCode = 0;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       await runProfileEvaluateCommand(
         { planPath: value.planPath, subjectRole: "implementer", json: true },
@@ -272,8 +273,12 @@ describe("profile evaluate plan boundary", () => {
       );
       expect(serverCalls).toBe(0);
       expect(process.exitCode).toBe(7);
+      expect(stderr).toHaveBeenCalledWith(
+        '{"error":"invalid_evaluation_plan","kind":"validation","message":"evaluation plan has missing or invalid fields"}\n',
+      );
       await expect(readFile(join(value.root, "reports/evaluation-report.json"))).rejects.toThrow();
     } finally {
+      stderr.mockRestore();
       process.exitCode = 0;
     }
   }
@@ -318,10 +323,18 @@ describe("profile evaluate plan boundary", () => {
     });
   });
 
-  test("rejects an excess plan field before server effects or report writes", async () => {
+  test("rejects an excess pair field before server effects or report writes", async () => {
     const value = await fixture();
     await expectMalformedPlan(value, (plan) => {
-      plan.unexpected = true;
+      plan.pairs = [
+        {
+          id: "case-one",
+          repetition: 1,
+          baselineContractPath: "baseline.json",
+          candidateContractPath: "candidate.json",
+          unexpected: true,
+        },
+      ];
       return plan;
     });
   });
