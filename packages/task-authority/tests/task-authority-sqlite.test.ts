@@ -47,7 +47,7 @@ async function makeDatabase() {
   return path;
 }
 
-async function makePreTaskEventsDatabase(): Promise<string> {
+async function makeDatabaseBeforeMigration(migrationCount: number): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "usine-authority-upgrade-"));
   const path = join(directory, "state.sqlite");
   const sourceDirectory = fileURLToPath(new URL("../drizzle/", import.meta.url));
@@ -60,7 +60,7 @@ async function makePreTaskEventsDatabase(): Promise<string> {
   ) as { version: string; dialect: string; entries: unknown[] };
   await writeFile(
     join(migrationsDirectory, "meta/_journal.json"),
-    JSON.stringify({ ...journal, entries: journal.entries.slice(0, 10) }),
+    JSON.stringify({ ...journal, entries: journal.entries.slice(0, migrationCount) }),
   );
 
   const prior = openSqliteDatabase(path);
@@ -72,6 +72,11 @@ async function makePreTaskEventsDatabase(): Promise<string> {
     prior.close();
   }
 
+  return path;
+}
+
+async function makePreTaskEventsDatabase(): Promise<string> {
+  const path = await makeDatabaseBeforeMigration(10);
   const legacy = new DatabaseSync(path);
   const deadline = Date.now() + 30_000;
   const taskRuns = legacy.prepare(
@@ -87,6 +92,45 @@ async function makePreTaskEventsDatabase(): Promise<string> {
   legacy.close();
 
   await applyMigrations(path);
+  return path;
+}
+
+async function makePreBlockerClassificationDatabase(): Promise<string> {
+  const path = await makeDatabaseBeforeMigration(13);
+  const initialHandle = openSqliteDatabase(path);
+  const admitted = await new TaskAuthority(initialHandle.database).admit({
+    contract: makeContract("legacy-blocked-with-event"),
+    contractHash: "d".repeat(64),
+    repositoryIdentity: "authority/legacy-blocked-with-event",
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+  initialHandle.close();
+
+  const diagnostic = "check failure: exact legacy private diagnostic";
+  const legacyResult = {
+    ...admitted,
+    schemaVersion: 3,
+    state: "blocked",
+    blocker: diagnostic,
+  } as Record<string, unknown>;
+  delete legacyResult.blockerClassification;
+
+  const legacy = new DatabaseSync(path);
+  legacy
+    .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+    .run(JSON.stringify(legacyResult), admitted.taskId);
+  legacy
+    .prepare(
+      "INSERT INTO task_events (task_id, sequence, event_id, occurred_at_epoch_ms, data) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(
+      admitted.taskId,
+      2,
+      "blocked:legacy",
+      Date.now(),
+      JSON.stringify({ type: "task_blocked", reason: "unknown" }),
+    );
+  legacy.close();
   return path;
 }
 
@@ -537,6 +581,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       schemaVersion: 4,
       mergeAuthorized: false,
       state: "admitted",
+      blockerClassification: null,
     });
   });
 
@@ -563,6 +608,32 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       state: "admitted",
       waiting: null,
     });
+  });
+
+  test("backfills a legacy blocked classification from its frozen event across migration and reopen", async () => {
+    const path = await makePreBlockerClassificationDatabase();
+    await applyMigrations(path);
+
+    const inspection = new DatabaseSync(path);
+    const persisted = inspection
+      .prepare("SELECT result FROM task_runs WHERE task_id = ?")
+      .get("legacy-blocked-with-event") as { result: string };
+    inspection.close();
+    expect(JSON.parse(persisted.result)).toMatchObject({ blockerClassification: "unknown" });
+
+    const authority = authorityAt(path);
+    const reopened = await authority.lookup("legacy-blocked-with-event");
+    if (!reopened) throw new Error("blocked task is missing after migration");
+    const resource = taskResourceFromResult(reopened);
+    const blockedEvent = (await authority.listEvents(reopened.taskId)).find(
+      (event) => event.data.type === "task_blocked",
+    );
+    if (!blockedEvent || blockedEvent.data.type !== "task_blocked")
+      throw new Error("legacy blocked event is missing");
+
+    expect(reopened.blocker).toBe("check failure: exact legacy private diagnostic");
+    expect(reopened.blockerClassification).toBe(blockedEvent.data.reason);
+    expect(resource.blocker).toEqual({ classification: blockedEvent.data.reason });
   });
 
   test("keeps blocker classification and exact diagnostic across SQLite close and reopen", async () => {
@@ -650,10 +721,11 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         repositoryIdentity: `authority/blocker-legacy-${String(version)}-${taskId}`,
         deadlineEpochMs: Date.now() + 30_000,
       });
-      const legacy = { ...admitted, blocker: "check failure: legacy exact diagnostic" } as Record<
-        string,
-        unknown
-      >;
+      const legacy = {
+        ...admitted,
+        state: "blocked",
+        blocker: "check failure: legacy exact diagnostic",
+      } as Record<string, unknown>;
       delete legacy.blockerClassification;
       if (version === "unversioned") delete legacy.schemaVersion;
       else legacy.schemaVersion = version;
@@ -675,7 +747,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       await expect(second.lookup(taskId)).resolves.toMatchObject({
         schemaVersion: 4,
         blocker: "check failure: legacy exact diagnostic",
-        blockerClassification: "project_check_failure",
+        blockerClassification: "unknown",
       });
       secondHandle.close();
     },

@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import {
-  classifyTaskBlocker,
   TASK_BLOCKER_CLASSIFICATIONS,
+  type TaskBlockerClassification,
   type TaskResult,
 } from "./task-state.js";
 
@@ -279,12 +279,15 @@ const persistedTaskResult = Schema.Union([
 ]);
 type DecodedPersistedTaskResult = Schema.Schema.Type<typeof persistedTaskResult>;
 
+const LEGACY_BLOCKER_CLASSIFICATION: TaskBlockerClassification = "unknown";
+
 function projectBlockerClassification(
   blocker: string | null,
   classification: TaskResult["blockerClassification"] | undefined,
+  state: TaskResult["state"],
 ): TaskResult["blockerClassification"] {
-  if (blocker === null) return null;
-  return classification ?? classifyTaskBlocker(blocker);
+  if (state !== "blocked" || blocker === null) return null;
+  return classification ?? LEGACY_BLOCKER_CLASSIFICATION;
 }
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
@@ -321,6 +324,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     blockerClassification: projectBlockerClassification(
       decoded.blocker,
       "blockerClassification" in decoded ? decoded.blockerClassification : undefined,
+      decoded.state,
     ),
     waiting: "waiting" in decoded ? decoded.waiting : null,
     activeActivation: decoded.activeActivation,
