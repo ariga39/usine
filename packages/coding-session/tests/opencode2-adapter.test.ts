@@ -833,8 +833,8 @@ describe("OpenCode2 bounded adapter", () => {
       deadlineEpochMs: Date.now() + 5_000,
       outputSchema: reviewerOutputSchema,
       execution,
-      onObservation: (observation) => {
-        observations.push(observation);
+      onObservation: (sessionObservation) => {
+        observations.push(sessionObservation);
       },
     });
 
