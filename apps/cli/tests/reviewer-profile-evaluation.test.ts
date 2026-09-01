@@ -243,6 +243,52 @@ describe("reviewer profile evaluation public path", () => {
     }
   }
 
+  async function expectMalformedEvidence(
+    value: Awaited<ReturnType<typeof fixture>>,
+    path: "check.json" | "label-approved.json",
+    mutate: (input: Record<string, unknown>) => unknown,
+    message: string,
+  ): Promise<void> {
+    const evidencePath = join(value.root, path);
+    const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as Record<string, unknown>;
+    const malformed = mutate(evidence);
+    await writeFile(
+      evidencePath,
+      typeof malformed === "string" ? malformed : JSON.stringify(malformed),
+    );
+    await execFile("git", ["add", path], { cwd: value.root });
+    await execFile("git", ["commit", "-m", "invalid reviewer evaluation evidence structure"], {
+      cwd: value.root,
+    });
+
+    let providerCalls = 0;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    process.exitCode = 0;
+    try {
+      await runProfileEvaluateCommand(
+        { planPath: value.planPath, subjectRole: "reviewer", json: true },
+        "http://server.test",
+        value.environment,
+        undefined,
+        {
+          review: async () => {
+            providerCalls += 1;
+            throw new Error("must not run");
+          },
+        },
+      );
+      expect(providerCalls).toBe(0);
+      expect(process.exitCode).toBe(7);
+      expect(stderr).toHaveBeenCalledWith(
+        `{"error":"invalid_reviewer_evaluation_plan","kind":"validation","message":"${message}"}\n`,
+      );
+      await expect(readFile(join(value.root, "reports/reviewer-report.json"))).rejects.toThrow();
+    } finally {
+      stderr.mockRestore();
+      process.exitCode = 0;
+    }
+  }
+
   test("rejects a non-object plan before provider effects or report writes", async () => {
     await expectMalformedPlan(await fixture(), () => "[]");
   });
@@ -290,6 +336,69 @@ describe("reviewer profile evaluation public path", () => {
       ];
       return plan;
     });
+  });
+
+  test("rejects non-object, missing, mistyped, and excess check evidence before provider effects", async () => {
+    const cases: Array<(input: Record<string, unknown>) => unknown> = [
+      () => "[]",
+      (input) => {
+        delete input.sha;
+        return input;
+      },
+      (input) => {
+        input.exitCode = "0";
+        return input;
+      },
+      (input) => {
+        input.unexpected = true;
+        return input;
+      },
+    ];
+    for (const mutate of cases)
+      await expectMalformedEvidence(
+        await fixture(),
+        "check.json",
+        mutate,
+        "check evidence is invalid",
+      );
+  });
+
+  test("rejects non-object, missing, mistyped, and excess external labels before provider effects", async () => {
+    const cases: Array<(input: Record<string, unknown>) => unknown> = [
+      () => "[]",
+      (input) => {
+        delete input.rationale;
+        return input;
+      },
+      (input) => {
+        input.protected = "true";
+        return input;
+      },
+      (input) => {
+        input.unexpected = true;
+        return input;
+      },
+    ];
+    for (const mutate of cases)
+      await expectMalformedEvidence(
+        await fixture(),
+        "label-approved.json",
+        mutate,
+        "external label is invalid",
+      );
+  });
+
+  test("preserves exact external-label semantic diagnostics after structural decoding", async () => {
+    for (const field of ["rationale", "reference"] as const)
+      await expectMalformedEvidence(
+        await fixture(),
+        "label-approved.json",
+        (input) => {
+          input[field] = "  ";
+          return input;
+        },
+        "external label rationale and reference are required",
+      );
   });
 
   test("accepts an ignored uncommitted regular registration before provider execution", async () => {
@@ -628,30 +737,15 @@ describe("reviewer profile evaluation public path", () => {
   test("rejects inconsistent passing check evidence before provider execution", async () => {
     for (const change of [{ exitCode: 1 }, { command: "unrelated-check" }]) {
       const value = await fixture();
-      const check = JSON.parse(await readFile(join(value.root, "check.json"), "utf8")) as {
-        command: string;
-        exitCode: number;
-      };
-      Object.assign(check, change);
-      await writeFile(join(value.root, "check.json"), JSON.stringify(check));
-      await execFile("git", ["add", "check.json"], { cwd: value.root });
-      await execFile("git", ["commit", "-m", "invalid check evidence"], { cwd: value.root });
-      let providerCalls = 0;
-      await runProfileEvaluateCommand(
-        { planPath: value.planPath, subjectRole: "reviewer", json: true },
-        "http://server.test",
-        value.environment,
-        undefined,
-        {
-          review: async () => {
-            providerCalls += 1;
-            throw new Error("must not run");
-          },
+      await expectMalformedEvidence(
+        value,
+        "check.json",
+        (input) => {
+          Object.assign(input, change);
+          return input;
         },
+        "check evidence identity, status, exit code, or project command is invalid",
       );
-      expect(providerCalls).toBe(0);
-      expect(process.exitCode).toBe(7);
-      process.exitCode = 0;
     }
   });
 

@@ -51,6 +51,22 @@ const reviewerEvaluationCaseSchema = Schema.Struct({
   labelPath: Schema.String,
 });
 
+const reviewerEvaluationCheckSchema = Schema.Struct({
+  sha: Schema.String,
+  status: Schema.String,
+  command: Schema.String,
+  exitCode: Schema.Number,
+  stdout: Schema.String,
+  stderr: Schema.String,
+});
+
+const reviewerEvaluationLabelSchema = Schema.Struct({
+  verdict: Schema.String,
+  rationale: Schema.String,
+  reference: Schema.String,
+  protected: Schema.optionalKey(Schema.Boolean),
+});
+
 const reviewerEvaluationPlanSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   id: Schema.String,
@@ -68,6 +84,12 @@ const reviewerEvaluationPlanSchema = Schema.Struct({
 });
 
 const decodeReviewerEvaluationPlan = Schema.decodeUnknownSync(reviewerEvaluationPlanSchema, {
+  onExcessProperty: "error",
+});
+const decodeReviewerEvaluationCheck = Schema.decodeUnknownSync(reviewerEvaluationCheckSchema, {
+  onExcessProperty: "error",
+});
+const decodeReviewerEvaluationLabel = Schema.decodeUnknownSync(reviewerEvaluationLabelSchema, {
   onExcessProperty: "error",
 });
 
@@ -966,36 +988,29 @@ function parseCheck(raw: string, projectCheckCommand: string): CheckResult {
   } catch {
     throw new ReviewerEvaluationValidationError("check evidence is not JSON");
   }
-  if (
-    !isRecord(input) ||
-    typeof input.sha !== "string" ||
-    typeof input.status !== "string" ||
-    typeof input.command !== "string" ||
-    typeof input.exitCode !== "number" ||
-    typeof input.stdout !== "string" ||
-    typeof input.stderr !== "string" ||
-    Object.keys(input).some(
-      (key) => !["sha", "status", "command", "exitCode", "stdout", "stderr"].includes(key),
-    )
-  )
+  let check: ReturnType<typeof decodeReviewerEvaluationCheck>;
+  try {
+    check = decodeReviewerEvaluationCheck(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("check evidence is invalid");
+  }
   if (
-    !exactSha.test(input.sha) ||
-    input.status !== "passed" ||
-    !Number.isSafeInteger(input.exitCode) ||
-    input.exitCode !== 0 ||
-    input.command !== projectCheckCommand
+    !exactSha.test(check.sha) ||
+    check.status !== "passed" ||
+    !Number.isSafeInteger(check.exitCode) ||
+    check.exitCode !== 0 ||
+    check.command !== projectCheckCommand
   )
     throw new ReviewerEvaluationValidationError(
       "check evidence identity, status, exit code, or project command is invalid",
     );
   return {
-    sha: input.sha,
+    sha: check.sha,
     status: "passed",
-    command: input.command,
-    exitCode: input.exitCode,
-    stdout: input.stdout,
-    stderr: input.stderr,
+    command: check.command,
+    exitCode: check.exitCode,
+    stdout: check.stdout,
+    stderr: check.stderr,
   };
 }
 
@@ -1006,26 +1021,23 @@ function parseLabel(raw: string): ReviewerEvaluationLabel {
   } catch {
     throw new ReviewerEvaluationValidationError("external label is not JSON");
   }
-  if (
-    !isRecord(input) ||
-    (input.verdict !== "approved" && input.verdict !== "changes_requested") ||
-    typeof input.rationale !== "string" ||
-    typeof input.reference !== "string" ||
-    (input.protected !== undefined && typeof input.protected !== "boolean") ||
-    Object.keys(input).some(
-      (key) => !["verdict", "rationale", "reference", "protected"].includes(key),
-    )
-  )
+  let label: ReturnType<typeof decodeReviewerEvaluationLabel>;
+  try {
+    label = decodeReviewerEvaluationLabel(input);
+  } catch {
     throw new ReviewerEvaluationValidationError("external label is invalid");
-  if (input.rationale.trim() === "" || input.reference.trim() === "")
+  }
+  if (label.verdict !== "approved" && label.verdict !== "changes_requested")
+    throw new ReviewerEvaluationValidationError("external label is invalid");
+  if (label.rationale.trim() === "" || label.reference.trim() === "")
     throw new ReviewerEvaluationValidationError(
       "external label rationale and reference are required",
     );
   return {
-    verdict: input.verdict,
-    rationale: input.rationale,
-    reference: input.reference,
-    protected: input.protected ?? false,
+    verdict: label.verdict,
+    rationale: label.rationale,
+    reference: label.reference,
+    protected: label.protected ?? false,
   };
 }
 
@@ -1351,10 +1363,6 @@ function parseJson(raw: string): unknown {
   } catch {
     throw new ReviewerEvaluationValidationError("evaluation plan is not JSON");
   }
-}
-
-function isRecord(input: unknown): input is Record<string, unknown> {
-  return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
