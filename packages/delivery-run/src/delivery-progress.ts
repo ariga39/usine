@@ -32,6 +32,19 @@ export function emitCodingObservation(
     switch (observation.type) {
       case "thread_started":
         return { type: "coding_thread_started", role, activation, sessionId };
+      case "sandbox_verified":
+        return {
+          type: "coding_sandbox_verified",
+          role,
+          activation,
+          sessionId,
+          host: observation.host,
+          workspaceRead: observation.workspaceRead,
+          workspaceWrite: observation.workspaceWrite,
+          externalRead: observation.externalRead,
+          externalWrite: observation.externalWrite,
+          subprocess: observation.subprocess,
+        };
       case "turn_started":
         return { type: "coding_turn_started", role, activation, turn: observation.turn, sessionId };
       case "tool_completed":
