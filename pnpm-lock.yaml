@@ -144,6 +144,9 @@ importers:
       '@openai/codex-sdk':
         specifier: 0.146.0
         version: 0.146.0
+      '@opencode-ai/sdk':
+        specifier: 1.18.25
+        version: 1.18.25
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
@@ -1023,6 +1026,9 @@ packages:
     resolution: {integrity: sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==}
     engines: {node: '>=16'}
     hasBin: true
+
+  '@opencode-ai/sdk@1.18.25':
+    resolution: {integrity: sha512-GwgwhW+vE8FWSDw730SjzqNhsWXB0uJjbFOiqFkmM+USFuG13HuTlGe6SR2ixt+WXxoD6FV1hILWqsXyqej9hQ==}
 
   '@openai/codex@0.146.0-darwin-arm64':
     resolution: {integrity: sha512-nb61yX4r5L6Z0dlC4o3u0GAK1YCd4TUvjaB382bajDoh84V+uv2hTBIVZ++fgXWV9yoeuNrNnNcn7GoTGOe2Tg==}
@@ -3291,6 +3297,10 @@ snapshots:
   '@openai/codex-sdk@0.146.0':
     dependencies:
       '@openai/codex': 0.146.0
+
+  '@opencode-ai/sdk@1.18.25':
+    dependencies:
+      cross-spawn: 7.0.6
 
   '@openai/codex@0.146.0':
     optionalDependencies:

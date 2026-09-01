@@ -137,7 +137,7 @@ describe("Task event stream", () => {
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
   });
 
-  test("accepts a bounded configured profile name through role evidence", async () => {
+  test("round-trips a bounded configured profile and adapter through role evidence", async () => {
     const taskId = `events-profile-boundary-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);
     const profile = `p${"x".repeat(127)}`;
@@ -167,7 +167,7 @@ describe("Task event stream", () => {
         effectiveProfile: {
           profileName: profile,
           configSha256: "a".repeat(64),
-          adapter: "sdk",
+          adapter: "opencode2",
           model: "gpt-5.4",
           modelProvider: "openai",
           reasoningEffort: "high",
@@ -182,7 +182,10 @@ describe("Task event stream", () => {
         expect.objectContaining({ data: expect.objectContaining({ requestedProfile: profile }) }),
         expect.objectContaining({
           data: expect.objectContaining({
-            effectiveProfile: expect.objectContaining({ profileName: profile }),
+            effectiveProfile: expect.objectContaining({
+              profileName: profile,
+              adapter: "opencode2",
+            }),
           }),
         }),
       ]),

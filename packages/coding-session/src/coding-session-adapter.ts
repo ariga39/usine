@@ -1,6 +1,6 @@
 import type { CodingSessionObservation } from "./coding-session.js";
 import type { CodingSessionPhase } from "./coding-session-interruption.js";
-import type { ExecutionReference } from "./codex-execution.js";
+import type { ExecutionReference } from "./coding-session-types.js";
 
 export type ProviderNeutralJsonValue =
   | null
@@ -104,7 +104,7 @@ export interface CodingSessionAdapterResult {
 }
 
 export interface CodingSessionAdapter {
-  readonly name: "sdk" | "app-server";
+  readonly name: "sdk" | "app-server" | "opencode2";
   run(request: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult>;
 }
 
