@@ -47,6 +47,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
 
     let phase: "startup" | "thread" | "turn" | "output" = "startup";
     let launcher: Awaited<ReturnType<typeof createOwnedProcessLauncher>> | undefined;
+    let privateDirectory: string | undefined;
     let configDirectory: string | undefined;
     let server: ReturnType<typeof spawn> | undefined;
     let launchFailed = false;
@@ -54,6 +55,9 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     let interruptRequest: Promise<void> | undefined;
     let client: ReturnType<typeof createOpencodeClient> | undefined;
     let gracefulInterrupt = noOpGracefulInterrupt;
+    let primaryFailure: unknown;
+    let result: CodingSessionAdapterResult | undefined;
+    let cleanupFailure: unknown;
 
     try {
       const port = await availablePort();
@@ -63,16 +67,24 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         context.execution,
         "opencode",
       );
-      configDirectory = join(
+      privateDirectory = join(
         context.executionStateDirectory,
-        "opencode-config",
+        "opencode-private",
         createHash("sha256")
           .update(
             `${context.execution.taskId}\0${context.execution.role}\0${context.execution.attempt}`,
           )
           .digest("hex"),
       );
-      await mkdir(configDirectory, { recursive: true });
+      configDirectory = join(privateDirectory, "config");
+      await Promise.all([
+        mkdir(configDirectory, { recursive: true }),
+        mkdir(join(privateDirectory, "home"), { recursive: true }),
+        mkdir(join(privateDirectory, "xdg-config"), { recursive: true }),
+        mkdir(join(privateDirectory, "xdg-data"), { recursive: true }),
+        mkdir(join(privateDirectory, "xdg-state"), { recursive: true }),
+        mkdir(join(privateDirectory, "xdg-cache"), { recursive: true }),
+      ]);
       const childEnvironment = Object.fromEntries(
         Object.entries(context.environment).filter(([key]) => !key.startsWith("OPENCODE_")),
       );
@@ -88,6 +100,11 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
             OPENCODE_DISABLE_AUTOUPDATE: "1",
             OPENCODE_DISABLE_PROJECT_CONFIG: "1",
             OPENCODE_DISABLE_SHARE: "1",
+            HOME: join(privateDirectory, "home"),
+            XDG_CONFIG_HOME: join(privateDirectory, "xdg-config"),
+            XDG_DATA_HOME: join(privateDirectory, "xdg-data"),
+            XDG_STATE_HOME: join(privateDirectory, "xdg-state"),
+            XDG_CACHE_HOME: join(privateDirectory, "xdg-cache"),
             USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
             USINE_CODING_SESSION_WORKSPACE: context.workspace,
           },
@@ -134,89 +151,131 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       let finalResponse = "";
       let usage: ProviderNeutralUsage | null = null;
       let promptAdmitted = false;
-      let textCompleted = false;
-      let stepCompleted = false;
+      let currentStepID: string | undefined;
+      let currentStepHasText = false;
+      let terminalStepCompleted = false;
+      const toolCalls = new Map<string, { tool: string; input: unknown }>();
       let completionResolve!: () => void;
       let completionReject!: (error: Error) => void;
+      let completionSettled = false;
       const completion = new Promise<void>((resolve, reject) => {
         completionResolve = resolve;
         completionReject = reject;
       });
-      void Promise.allSettled([completion]);
+      const complete = (): void => {
+        if (completionSettled) return;
+        completionSettled = true;
+        completionResolve();
+      };
+      const fail = (error: Error): void => {
+        if (completionSettled) return;
+        completionSettled = true;
+        completionReject(error);
+      };
+      const completionOutcome = completion.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({
+          error: error instanceof Error ? error : new Error(String(error)),
+          ok: false as const,
+        }),
+      );
       const processEvents = async (): Promise<void> => {
         try {
           for await (const rawEvent of events.stream) {
-            const event = parseSessionEvent(sessionEventPayloadSchema.parse(rawEvent));
-            if (eventSessionID(event) !== undefined && eventSessionID(event) !== createdSessionID)
+            const event = parseSessionEvent(rawEvent);
+            if (event.data.sessionID !== createdSessionID)
               throw new Error("OpenCode2 event identity mismatch");
-            if (
-              !promptAdmitted &&
-              event.type.startsWith("session.next.") &&
-              event.type !== "session.next.prompt.admitted"
-            )
+            if (!promptAdmitted && event.type !== "session.next.prompt.admitted")
               throw new Error("OpenCode2 event arrived before prompt admission");
             if (event.type === "session.next.prompt.admitted") {
+              const data = promptAdmittedDataSchema.parse(event.data);
               promptAdmitted = true;
               context.onPhase?.("turn");
               await context.onObservation?.({ type: "turn_started", turn: 1 });
+              if (data.sessionID !== createdSessionID)
+                throw new Error("OpenCode2 event identity mismatch");
             } else if (event.type === "session.next.shell.ended") {
+              const data = shellEndedDataSchema.parse(event.data);
               await context.onItemCompleted?.({
                 type: "command_execution",
-                id: event.data.callID,
+                id: data.callID,
                 status: "completed",
-                output: jsonField(event.data.output),
+                output: jsonField(data.output),
               });
             } else if (
               event.type === "session.next.tool.success" ||
               event.type === "session.next.tool.failed"
             ) {
-              const evidence = toolEvidence(event, context);
+              const data = toolCompletionDataSchema.parse(event.data);
+              const identity = toolCalls.get(data.callID);
+              if (!identity) throw new Error("OpenCode2 tool completion had no preceding call");
+              const evidence = toolEvidence(event.type, data, identity, context);
               await context.onItemCompleted?.(evidence);
+            } else if (event.type === "session.next.tool.called") {
+              const data = toolCalledDataSchema.parse(event.data);
+              toolCalls.set(data.callID, { input: data.input, tool: data.tool });
             } else if (event.type === "session.next.text.ended") {
-              finalResponse = event.data.text;
-              textCompleted = true;
+              const data = textEndedDataSchema.parse(event.data);
+              if (currentStepID !== data.assistantMessageID)
+                throw new Error("OpenCode2 text ended outside its step");
+              finalResponse = data.text;
+              currentStepHasText = true;
               await context.onItemCompleted?.({
                 type: "agent_message",
-                id: event.data.textID,
+                id: data.textID,
                 status: "completed",
-                text: event.data.text,
+                text: data.text,
               });
             } else if (event.type === "session.next.reasoning.ended") {
+              const data = reasoningEndedDataSchema.parse(event.data);
               await context.onItemCompleted?.({
                 type: "reasoning",
-                id: event.data.reasoningID,
+                id: data.reasoningID,
                 status: "completed",
-                text: event.data.text,
+                text: data.text,
               });
+            } else if (event.type === "session.next.step.started") {
+              const data = stepStartedDataSchema.parse(event.data);
+              currentStepID = data.assistantMessageID;
+              currentStepHasText = false;
             } else if (event.type === "session.next.step.ended") {
-              if (!textCompleted) {
-                completionReject(
+              const data = stepEndedDataSchema.parse(event.data);
+              if (currentStepID !== data.assistantMessageID)
+                throw new Error("OpenCode2 step ended outside its step");
+              if (data.finish === "stop" && !currentStepHasText) {
+                fail(
                   new CodingSessionInterruption(
                     "turn",
                     "transport",
-                    "OpenCode2 completed a step without an assistant response",
+                    "OpenCode2 completed the terminal step without an assistant response",
                   ),
                 );
                 return;
               }
-              stepCompleted = true;
               usage = {
-                inputTokens: event.data.tokens.input,
-                outputTokens: event.data.tokens.output,
+                inputTokens: data.tokens.input,
+                outputTokens: data.tokens.output,
               };
               context.onUsage?.(usage);
-              completionResolve();
+              if (data.finish === "stop") {
+                terminalStepCompleted = true;
+                complete();
+              }
             } else if (event.type === "session.next.step.failed") {
+              const data = stepFailedDataSchema.parse(event.data);
               await context.onItemCompleted?.({
                 type: "other",
                 id: event.id,
                 status: "failed",
               });
-              throw providerFailure("turn");
+              if (data.sessionID !== createdSessionID)
+                throw new Error("OpenCode2 event identity mismatch");
+              fail(providerFailure("turn"));
+              return;
             }
           }
-          if (!stepCompleted)
-            completionReject(
+          if (!terminalStepCompleted)
+            fail(
               context.signal.aborted
                 ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
                 : new CodingSessionInterruption(
@@ -226,7 +285,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                   ),
             );
         } catch (error) {
-          completionReject(
+          fail(
             context.signal.aborted
               ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
               : error instanceof CodingSessionInterruption
@@ -252,51 +311,69 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         throw new Error("OpenCode2 prompt identity mismatch");
       const cancellationWait = cancellation(context.signal, gracefulInterrupt);
       try {
-        await Promise.race([
+        const [, completionResult] = await Promise.race([
           Promise.all([
             client.v2.session.wait(
               { sessionID: createdSessionID },
               { responseStyle: "data", throwOnError: true, signal: context.signal },
             ),
-            completion,
+            completionOutcome,
           ]),
           cancellationWait.promise,
         ]);
+        if (!completionResult.ok) throw completionResult.error;
       } finally {
         cancellationWait.dispose();
       }
       await context.onObservation?.({ type: "turn_completed", turn: 1, outcome: "succeeded" });
       phase = "output";
       context.onPhase?.("output");
-      return { finalResponse, usage, sessionId: createdSessionID };
+      result = { finalResponse, usage, sessionId: createdSessionID };
     } catch (error) {
-      if (error instanceof CodingSessionInterruption) throw error;
-      if (context.signal.aborted) {
+      if (error instanceof CodingSessionInterruption) {
+        primaryFailure = error;
+      } else if (context.signal.aborted) {
         await gracefulInterrupt();
-        throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
+        primaryFailure = new CodingSessionInterruption(
+          phase,
+          "cancellation",
+          "coding session cancelled",
+        );
+      } else {
+        primaryFailure = new CodingSessionInterruption(
+          phase,
+          classifyAdapterFailure(error),
+          "OpenCode2 provider interruption",
+        );
       }
-      throw new CodingSessionInterruption(
-        phase,
-        classifyAdapterFailure(error),
-        "OpenCode2 provider interruption",
-      );
     } finally {
-      if (context.signal.aborted) await gracefulInterrupt();
-      if (launcher) {
-        try {
+      try {
+        if (context.signal.aborted) await gracefulInterrupt();
+        if (server && !sessionID && server.exitCode === null && server.signalCode === null) {
+          server.kill("SIGTERM");
+          await waitForProcessExit(server);
+        }
+        if (launcher) {
           if (launchFailed || !server || (server.exitCode !== null && !sessionID))
             await discardStartingOwnedExecution(context.executionStateDirectory, context.execution);
           await reapOwnedExecution(context.executionStateDirectory, {
             reference: context.execution,
             workspace: context.workspace,
           });
-        } finally {
-          if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
         }
-      } else if (configDirectory) {
-        await rm(configDirectory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupFailure = error;
+      }
+      try {
+        if (privateDirectory) await rm(privateDirectory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupFailure ??= error;
       }
     }
+    if (primaryFailure !== undefined) throw primaryFailure;
+    if (cleanupFailure !== undefined) throw cleanupFailure;
+    if (result === undefined) throw new Error("OpenCode2 session did not produce a result");
+    return result;
   }
 }
 
@@ -358,111 +435,107 @@ function modelReference(
 }
 
 function toolEvidence(
-  event: Extract<SessionEvent, { type: "session.next.tool.success" | "session.next.tool.failed" }>,
+  eventType: "session.next.tool.success" | "session.next.tool.failed",
+  data: ToolCompletionData,
+  identity: { tool: string; input: unknown },
   context: CodingSessionAdapterRequest,
 ): ProviderNeutralCompletedEvidence {
-  const tool = safeObservationLabel(event.data.tool ?? "unknown");
-  const server = context.mcpServer?.enabledTools.includes(event.data.tool ?? "")
+  const tool = safeObservationLabel(identity.tool);
+  const server = context.mcpServer?.enabledTools.includes(identity.tool)
     ? context.mcpServer.name
     : "unknown";
   const base = {
     type: "mcp_tool_call" as const,
-    id: event.data.callID,
-    status: event.type.endsWith("failed") ? ("failed" as const) : ("completed" as const),
+    id: data.callID,
+    status: eventType.endsWith("failed") ? ("failed" as const) : ("completed" as const),
     server: safeObservationLabel(server),
     tool,
-    arguments: jsonField(event.data.input),
+    arguments: jsonField(identity.input),
   };
-  if (event.type === "session.next.tool.success")
-    return { ...base, output: jsonField(event.data.result) };
-  return { ...base, error: jsonField(event.data.error) };
+  if (eventType === "session.next.tool.success") return { ...base, output: jsonField(data.result) };
+  return { ...base, error: jsonField(data.error) };
 }
 
-function eventSessionID(event: { data: unknown }): string | undefined {
-  if (
-    "data" in event &&
-    typeof event.data === "object" &&
-    event.data !== null &&
-    "sessionID" in event.data
-  )
-    return typeof event.data.sessionID === "string" ? event.data.sessionID : undefined;
-  return undefined;
-}
-
-const sessionEventSchema = z.discriminatedUnion("type", [
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.prompt.admitted"),
-    data: z.object({ sessionID: z.string().min(1) }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.shell.ended"),
-    data: z.object({ sessionID: z.string().min(1), callID: z.string().min(1), output: z.string() }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.tool.success"),
-    data: z.object({
-      sessionID: z.string().min(1),
-      callID: z.string().min(1),
-      tool: z.string().optional(),
-      input: z.unknown().optional(),
-      result: z.unknown().optional(),
-    }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.tool.failed"),
-    data: z.object({
-      sessionID: z.string().min(1),
-      callID: z.string().min(1),
-      tool: z.string().optional(),
-      input: z.unknown().optional(),
-      error: z.unknown(),
-    }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.text.ended"),
-    data: z.object({ sessionID: z.string().min(1), textID: z.string().min(1), text: z.string() }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.reasoning.ended"),
-    data: z.object({
-      sessionID: z.string().min(1),
-      reasoningID: z.string().min(1),
-      text: z.string(),
-    }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.step.ended"),
-    data: z.object({
-      sessionID: z.string().min(1),
-      tokens: z.object({ input: z.number(), output: z.number() }),
-    }),
-  }),
-  z.object({
-    id: z.string().min(1),
-    type: z.literal("session.next.step.failed"),
-    data: z.object({ sessionID: z.string().min(1), error: z.unknown() }),
-  }),
-]);
+const sessionEventTypes = [
+  "session.next.agent.switched",
+  "session.next.model.switched",
+  "session.next.moved",
+  "session.next.prompted",
+  "session.next.prompt.admitted",
+  "session.next.context.updated",
+  "session.next.synthetic",
+  "session.next.shell.started",
+  "session.next.shell.ended",
+  "session.next.step.started",
+  "session.next.step.ended",
+  "session.next.step.failed",
+  "session.next.text.started",
+  "session.next.text.ended",
+  "session.next.tool.input.started",
+  "session.next.tool.input.ended",
+  "session.next.tool.called",
+  "session.next.tool.progress",
+  "session.next.tool.success",
+  "session.next.tool.failed",
+  "session.next.reasoning.started",
+  "session.next.reasoning.ended",
+  "session.next.retried",
+  "session.next.compaction.started",
+  "session.next.compaction.ended",
+  "session.next.revert.staged",
+  "session.next.revert.cleared",
+  "session.next.revert.committed",
+] as const;
+const sessionEventDataSchema = z.object({ sessionID: z.string().min(1) }).passthrough();
+const sessionEventSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(sessionEventTypes),
+  data: sessionEventDataSchema,
+});
+const promptAdmittedDataSchema = sessionEventDataSchema;
+const shellEndedDataSchema = sessionEventDataSchema.extend({
+  callID: z.string().min(1),
+  output: z.string(),
+});
+const toolCalledDataSchema = sessionEventDataSchema.extend({
+  callID: z.string().min(1),
+  tool: z.string().min(1),
+  input: z.unknown(),
+});
+const toolCompletionDataSchema = sessionEventDataSchema.extend({
+  callID: z.string().min(1),
+  result: z.unknown().optional(),
+  error: z.unknown().optional(),
+});
+const textEndedDataSchema = sessionEventDataSchema.extend({
+  assistantMessageID: z.string().min(1),
+  textID: z.string().min(1),
+  text: z.string(),
+});
+const reasoningEndedDataSchema = sessionEventDataSchema.extend({
+  reasoningID: z.string().min(1),
+  text: z.string(),
+});
+const stepStartedDataSchema = sessionEventDataSchema.extend({
+  assistantMessageID: z.string().min(1),
+});
+const stepEndedDataSchema = sessionEventDataSchema.extend({
+  assistantMessageID: z.string().min(1),
+  finish: z.string().min(1),
+  tokens: z.object({ input: z.number(), output: z.number() }),
+});
+const stepFailedDataSchema = sessionEventDataSchema.extend({ error: z.unknown() });
 const sessionEventPayloadSchema = z.union([
-  z.string(),
-  z.object({ data: z.string() }).transform(({ data }) => data),
+  z.string().min(1),
+  z.object({ data: z.string().min(1) }).transform(({ data }) => data),
 ]);
 
 type SessionEvent = z.infer<typeof sessionEventSchema>;
+type ToolCompletionData = z.infer<typeof toolCompletionDataSchema>;
 
-function parseSessionEvent(rawEvent: string): SessionEvent {
-  try {
-    return sessionEventSchema.parse(JSON.parse(rawEvent));
-  } catch {
-    throw new Error("OpenCode2 session event was malformed");
-  }
+function parseSessionEvent(rawEvent: unknown): SessionEvent {
+  const payload = sessionEventPayloadSchema.parse(rawEvent);
+  return sessionEventSchema.parse(JSON.parse(payload));
 }
 
 function jsonField(value: unknown) {
@@ -540,6 +613,11 @@ function cancellation(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function waitForProcessExit(process: ReturnType<typeof spawn>): Promise<void> {
+  if (process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => process.once("close", () => resolve()));
 }
 
 async function availablePort(): Promise<number> {

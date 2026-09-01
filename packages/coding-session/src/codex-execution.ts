@@ -462,8 +462,6 @@ function hasErrorCode(error: unknown, code: string): boolean {
 // provider-neutral; these aliases preserve the established public package API.
 export const codexExecutionIdentityPath = executionIdentityPath;
 export const removeCodexExecutionIdentity = removeOwnedExecutionIdentity;
-export const reapCodexExecution = reapOwnedExecution;
-export const stopCodexExecution = stopOwnedExecution;
 export { ExecutionOwnershipError as CodexExecutionOwnershipError };
 export type {
   ExecutionHandle,

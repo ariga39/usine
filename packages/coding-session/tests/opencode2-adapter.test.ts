@@ -49,6 +49,7 @@ async function fixture(
     | "wait"
     | "prompt-failure"
     | "startup-failure"
+    | "startup-abort"
     | "no-response"
     | "out-of-order"
     | "step-failure",
@@ -103,6 +104,10 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
     CI: process.env.CI,
     SECRET: process.env.SECRET,
     HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
     OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
     OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
     OPENCODE_DISABLE_PROJECT_CONFIG: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
@@ -116,6 +121,7 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
 if (${JSON.stringify(mode)} === "startup-failure") process.exit(17);
 let eventResponse;
 let waitResponse;
+let idle = false;
 const pendingEvents = [];
 let prompted = false;
 const readBody = (req) => new Promise((resolve) => {
@@ -136,7 +142,10 @@ const response = (res, status, body) => {
 };
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  if (req.method === "GET" && url.pathname === "/api/health") return response(res, 200, { healthy: true });
+  if (req.method === "GET" && url.pathname === "/api/health") {
+    if (${JSON.stringify(mode)} === "startup-abort") return;
+    return response(res, 200, { healthy: true });
+  }
   if (req.method === "GET" && url.pathname === "/api/session/session-fixture/event") {
     appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ sessionEventsConnected: true }) + "\\n");
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -162,18 +171,35 @@ const server = createServer((req, res) => {
       if (${JSON.stringify(mode)} === "out-of-order")
         writeEvent({ id: "early-text", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", textID: "text-fixture", text: ${JSON.stringify(finalResponse)} } });
       writeEvent({ id: "admitted", type: "session.next.prompt.admitted", data: { sessionID: "session-fixture", messageID: "message-fixture", prompt: { text: "fixture" }, delivery: "queue" } });
-      writeEvent(${JSON.stringify(mode)} === "malformed"
-        ? { id: "wrong", type: "session.next.text.ended", data: { sessionID: "wrong-session", assistantMessageID: "message-fixture", textID: "text-fixture", text: "{}" } }
-        : { id: "shell", type: "session.next.shell.ended", data: { sessionID: "session-fixture", callID: "shell-fixture", output: "done" } });
+      if (${JSON.stringify(mode)} === "malformed")
+        writeEvent({ id: "wrong", type: "session.next.text.ended", data: { sessionID: "wrong-session", assistantMessageID: "message-fixture", textID: "text-fixture", text: "{}" } });
+      else if (${JSON.stringify(mode)} !== "success")
+        writeEvent({ id: "shell", type: "session.next.shell.ended", data: { sessionID: "session-fixture", callID: "shell-fixture", output: "done" } });
       if (${JSON.stringify(mode)} === "success") {
-        writeEvent({ id: "tool", type: "session.next.tool.success", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", callID: "tool-fixture", tool: "github_issue_get", input: { issue: 292 }, structured: {}, content: [], result: { ok: true }, provider: { executed: true } } });
-        writeEvent({ id: "text", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", textID: "text-fixture", text: ${JSON.stringify(finalResponse)} } });
-        writeEvent({ id: "step", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
+        writeEvent({ id: "step-started-1", type: "session.next.step.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", agent: "usine", model: { providerID: "fixture-provider", id: "fixture-model" } } });
+        writeEvent({ id: "shell-started", type: "session.next.shell.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "shell-fixture", command: "printf done" } });
+        writeEvent({ id: "shell", type: "session.next.shell.ended", data: { sessionID: "session-fixture", callID: "shell-fixture", output: "done" } });
+        writeEvent({ id: "tool-input-started", type: "session.next.tool.input.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "tool-fixture", name: "github_issue_get" } });
+        writeEvent({ id: "tool-input-ended", type: "session.next.tool.input.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "tool-fixture", text: "{\\"issue\\":292}" } });
+        writeEvent({ id: "tool-called", type: "session.next.tool.called", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "tool-fixture", tool: "github_issue_get", input: { issue: 292 }, provider: { executed: true } } });
+        writeEvent({ id: "tool-progress", type: "session.next.tool.progress", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "tool-fixture", structured: { phase: "lookup" }, content: [] } });
+        writeEvent({ id: "tool", type: "session.next.tool.success", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", callID: "tool-fixture", structured: {}, content: [], result: { ok: true }, provider: { executed: true } } });
+        writeEvent({ id: "step-1", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", finish: "tool-calls", cost: 0, tokens: { input: 5, output: 7, reasoning: 0, cache: { read: 0, write: 0 } } } });
+        writeEvent({ id: "step-started-2", type: "session.next.step.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", agent: "usine", model: { providerID: "fixture-provider", id: "fixture-model" } } });
+        writeEvent({ id: "reasoning-started", type: "session.next.reasoning.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", reasoningID: "reasoning-fixture" } });
+        writeEvent({ id: "reasoning", type: "session.next.reasoning.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", reasoningID: "reasoning-fixture", text: "checking" } });
+        writeEvent({ id: "text-started-2", type: "session.next.text.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2" } });
+        writeEvent({ id: "text-2", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2", text: ${JSON.stringify(finalResponse)} } });
+        writeEvent({ id: "step-2", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
       }
       if (${JSON.stringify(mode)} === "no-response")
         writeEvent({ id: "step-without-text", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
       if (${JSON.stringify(mode)} === "step-failure")
         writeEvent({ id: "step-failure", type: "session.next.step.failed", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", error: { name: "HostSecretProviderError", message: "private provider details" } } });
+      if (${JSON.stringify(mode)} !== "wait" && ${JSON.stringify(mode)} !== "prompt-failure") {
+        idle = true;
+        if (waitResponse) { response(waitResponse, 204); waitResponse = undefined; }
+      }
     });
     return;
   }
@@ -189,7 +215,7 @@ const server = createServer((req, res) => {
   if (req.method === "GET" && url.pathname === "/api/session/session-fixture/status") return response(res, 200, { data: prompted ? { type: "busy" } : { type: "idle" } });
   if (req.method === "POST" && url.pathname === "/api/session/session-fixture/wait") {
     appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ wait: true }) + "\\n");
-    if (${JSON.stringify(mode)} === "wait") {
+    if (${JSON.stringify(mode)} === "wait" || !idle) {
       waitResponse = res;
       return;
     }
@@ -198,6 +224,7 @@ const server = createServer((req, res) => {
   response(res, 404, { message: "not found" });
 });
 server.listen(port, "127.0.0.1");
+if (${JSON.stringify(mode)} === "startup-abort") appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ startupBlocked: true }) + "\\n");
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 `,
   );
@@ -324,10 +351,17 @@ describe("OpenCode2 bounded adapter", () => {
         id: "tool-fixture",
         server: "github_read",
         tool: "github_issue_get",
+        arguments: { issue: 292 },
       }),
       {
+        type: "reasoning",
+        id: "reasoning-fixture",
+        status: "completed",
+        text: "checking",
+      },
+      {
         type: "agent_message",
-        id: "text-fixture",
+        id: "text-fixture-2",
         status: "completed",
         text: '{"verdict":"approved"}',
       },
@@ -363,6 +397,11 @@ describe("OpenCode2 bounded adapter", () => {
       mcp: { github_read: { type: "remote", url: "https://mcp.example.test/read", enabled: true } },
     });
     expect(launch.environment.SECRET).toBe("not-a-public-observation");
+    expect(launch.environment.HOME).not.toContain("hostile-home");
+    expect(launch.environment.XDG_CONFIG_HOME).not.toContain("hostile-home");
+    expect(launch.environment.XDG_DATA_HOME).not.toContain("hostile-home");
+    expect(launch.environment.XDG_STATE_HOME).not.toContain("hostile-home");
+    expect(launch.environment.XDG_CACHE_HOME).not.toContain("hostile-home");
     expect(launch.environment.OPENCODE_DISABLE_PROJECT_CONFIG).toBe("1");
     expect(launch.environment.OPENCODE_DISABLE_AUTOUPDATE).toBe("1");
     expect(launch.environment.OPENCODE_DISABLE_SHARE).toBe("1");
@@ -433,6 +472,24 @@ describe("OpenCode2 bounded adapter", () => {
         ),
       ),
     ).rejects.toMatchObject({ phase: "startup", failureClass: "transport" });
+    await assertOwnedExecutionGone(testFixture);
+    await testFixture.close();
+  });
+
+  test("preserves typed startup cancellation and reaps the launcher-owned child", async () => {
+    const testFixture = await fixture("startup-abort");
+    const controller = new AbortController();
+    const run = new OpenCode2Adapter().run(
+      request(
+        testFixture.workspace,
+        testFixture.environment,
+        testFixture.stateDirectory,
+        controller.signal,
+      ),
+    );
+    await waitForProtocolFact(testFixture.protocolLog, '"startupBlocked":true');
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ phase: "startup", failureClass: "cancellation" });
     await assertOwnedExecutionGone(testFixture);
     await testFixture.close();
   });
