@@ -981,9 +981,9 @@ describe("Coding Session", () => {
       () =>
         new CodexCodingSession(undefined, {
           environment: { CI: "true" },
-          adapterProfiles: {
-            appServerProfiles: ["shared-profile"],
-            openCode2Profiles: ["shared-profile"],
+          adapterSelectionEnvironment: {
+            USINE_CODEX_APP_SERVER_PROFILES: "shared-profile",
+            USINE_OPENCODE2_PROFILES: "shared-profile",
           },
         }),
     ).toThrow("assigned to both codex-app-server and opencode2");
@@ -2673,6 +2673,10 @@ describe("Coding Session", () => {
       {
         environment: {
           CI: "true",
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+          USINE_OPENCODE2_PROFILES: "opencode-profile",
+        },
+        adapterSelectionEnvironment: {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
           USINE_OPENCODE2_PROFILES: "opencode-profile",
         },
