@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { startUsineServer } from "@usine/runtime";
+import { MAX_TASK_CONTRACT_BYTES, startUsineServer } from "@usine/runtime";
 import {
   applyMigrations,
   openSqliteDatabase,
@@ -26,6 +26,120 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("CLI/server boundary", () => {
+  test("bounds Task Contract ingestion before admission and accepts the exact bound", async () => {
+    const maxContractBytes = MAX_TASK_CONTRACT_BYTES;
+    const root = await mkdtemp(join(tmpdir(), "usine-server-contract-boundary-"));
+    const repositoryPath = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    await mkdir(repositoryPath);
+    await execa("git", ["init", "--initial-branch=main"], { cwd: repositoryPath });
+    await execa("git", ["config", "user.name", "Test"], { cwd: repositoryPath });
+    await execa("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: repositoryPath,
+    });
+    await writeFile(join(repositoryPath, "README.md"), "contract boundary\n");
+    await execa("git", ["add", "."], { cwd: repositoryPath });
+    await execa("git", ["commit", "-m", "base"], { cwd: repositoryPath });
+    const baseSha = await git(repositoryPath, "rev-parse", "HEAD");
+    const taskId = "bounded-contract-boundary";
+    const contractPath = join(repositoryPath, "task.json");
+    const contract: TaskContract = {
+      id: taskId,
+      repositoryId: taskId,
+      baseSha,
+      instructions: "Exercise bounded Task Contract ingestion.",
+      acceptance: ["The committed contract is admitted at the supported byte bound."],
+      nonGoals: [],
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+      authorization: {
+        source: "https://github.com/example/bounded-contract-boundary/issues/330",
+        delivery: true,
+      },
+      delivery: {
+        branch: "agent/bounded-contract-boundary",
+        issue: 330,
+        title: "Bounded contract ingestion",
+        body: "Bounded contract ingestion",
+      },
+    };
+    const contractJson = JSON.stringify(contract);
+    const contractPadding = maxContractBytes - Buffer.byteLength(contractJson);
+    if (contractPadding < 1) throw new Error("contract fixture unexpectedly exceeds its bound");
+    await writeFile(contractPath, contractJson + " ".repeat(contractPadding));
+    expect((await stat(contractPath)).size).toBe(maxContractBytes);
+    await execa("git", ["add", "task.json"], { cwd: repositoryPath });
+    await execa("git", ["commit", "-m", "authorize bounded contract"], { cwd: repositoryPath });
+
+    const oversizedPath = join(repositoryPath, "oversized.json");
+    const oversizedPadding = maxContractBytes + 1 - Buffer.byteLength(contractJson);
+    await writeFile(oversizedPath, contractJson + " ".repeat(oversizedPadding));
+    const nonRegularPath = join(repositoryPath, "contract-directory");
+    await mkdir(nonRegularPath);
+    await writeFile(join(nonRegularPath, "marker"), "directory source\n");
+    expect((await stat(oversizedPath)).size).toBe(maxContractBytes + 1);
+    await execa("git", ["add", "oversized.json", "contract-directory/marker"], {
+      cwd: repositoryPath,
+    });
+    await execa("git", ["commit", "-m", "authorize oversized contract fixture"], {
+      cwd: repositoryPath,
+    });
+    expect(await git(repositoryPath, "status", "--porcelain")).toBe("");
+    let executionCalls = 0;
+    const server = await startUsineServer({
+      environment: {
+        USINE_STATE_DIR: stateDirectory,
+        USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "bounded-contract-app",
+        USINE_FORGE_PROFILE_DEFAULT_APP_ID: "1",
+        USINE_FORGE_PROFILE_DEFAULT_INSTALLATION_ID: "2",
+        USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "bounded-contract-key.pem",
+        USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: "example/bounded-contract-boundary",
+      },
+      execute: async ({ result }) => {
+        executionCalls += 1;
+        return result;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+
+    try {
+      await registerRepository(server.url, {
+        id: taskId,
+        path: await realpath(repositoryPath),
+        owner: "example",
+        name: "bounded-contract-boundary",
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+      });
+
+      for (const [rejectedPath, message] of [
+        [oversizedPath, `task contract exceeds the ${maxContractBytes}-byte limit`],
+        [nonRegularPath, "task contract must be a regular file"],
+      ] as const) {
+        const response = await fetch(new URL("/v1/tasks", server.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ contractPath: rejectedPath }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ code: "validation", message });
+      }
+      expect(await listTasks(server.url)).toEqual({ tasks: [] });
+      expect(executionCalls).toBe(0);
+
+      await expect(submitTask(server.url, { contractPath })).resolves.toMatchObject({
+        taskId,
+        state: "admitted",
+      });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
   test("rejects non-loopback hosts before binding", async () => {
     await expect(
       startUsineServer({

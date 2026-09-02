@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
@@ -14,7 +14,6 @@ import {
   TaskCapacityError,
   TaskRetryConflictError,
   isTaskStateQuarantinedError,
-  taskContractSchema,
   repositoryRegistrationSchema,
   type RepositorySnapshot,
   type TaskContract,
@@ -42,7 +41,10 @@ import {
   lookupServerSnapshot,
   recordRecoveryObservation,
   runtimePolicyFromEnvironment,
+  parseTaskContract,
+  readTaskContract,
   stateDirectoryFromEnvironment,
+  TaskContractInputError,
   ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
@@ -220,7 +222,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   let activeTaskCount = restartState.activeTaskCount;
   for (const task of restartState.restartable) {
     try {
-      parseContract(task.input.rawContract);
+      parseTaskContract(task.input.rawContract);
       restartable.push(task);
     } catch (error) {
       await blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
@@ -294,7 +296,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
             "execution_owner_changed",
             onEvent,
           );
-          const contract = parseContract(task.input.rawContract);
+          const contract = parseTaskContract(task.input.rawContract);
           launchTask({ input: task.input, contract, result: task.result });
         },
         catch: (cause) => cause,
@@ -492,8 +494,15 @@ function createApiLayer(options: {
       submit: ({ payload }) =>
         apiEffect(async () => {
           const submission: TaskSubmission = payload;
-          const rawContract = await readFile(submission.contractPath, "utf8");
-          const contract = parseContract(rawContract);
+          let contractInput: Awaited<ReturnType<typeof readTaskContract>>;
+          try {
+            contractInput = await readTaskContract(submission.contractPath);
+          } catch (error) {
+            if (error instanceof TaskContractInputError)
+              throw new ServerValidationError(error.message);
+            throw error;
+          }
+          const { rawContract, contract } = contractInput;
           if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
             throw new ServerValidationError(
               "submitted repository ID does not match the task contract",
@@ -518,7 +527,7 @@ function createApiLayer(options: {
         apiEffect(async () => {
           const execution = await lookupTaskExecution(stateDirectory, params.taskId);
           if (!execution) throw new ServerNotFoundError("task not found");
-          const contract = parseContract(execution.input.rawContract);
+          const contract = parseTaskContract(execution.input.rawContract);
           const result = await retryTask(
             stateDirectory,
             params.taskId,
@@ -674,18 +683,4 @@ async function validateEventScope(stateDirectory: string, scope: EventScope): Pr
     if (!(await inspectRepository(stateDirectory, scope.repositoryId)))
       throw new ServerNotFoundError("repository not found");
   }
-}
-
-function parseContract(rawContract: string): TaskContract {
-  let input: unknown;
-  try {
-    input = JSON.parse(rawContract);
-  } catch {
-    throw new Error("task contract must be JSON");
-  }
-  const parsed = taskContractSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new Error(`invalid task contract: ${JSON.stringify(contractIssues(parsed.error))}`);
-  }
-  return parsed.data;
 }
