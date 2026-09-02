@@ -27,6 +27,7 @@ import {
   executionLifecycle,
   explicitWorkerEnvironment,
   implementerOutputSchema,
+  ROLE_RESULT_LIMITS,
   codexExecutionIdentityPath,
   removeCodexExecutionIdentity,
   readSessionArchive,
@@ -2313,6 +2314,155 @@ describe("Coding Session", () => {
     });
   });
 
+  test("accepts a bounded reviewer result at every role-result limit", async () => {
+    const reviewer = {
+      sha,
+      verdict: "changes_requested" as const,
+      summary: "s".repeat(ROLE_RESULT_LIMITS.summaryMaxLength),
+      findings: Array.from({ length: ROLE_RESULT_LIMITS.findingMaxCount }, () =>
+        "f".repeat(ROLE_RESULT_LIMITS.findingMaxLength),
+      ),
+    };
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(JSON.stringify(reviewer))),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({ status: "completed", output: reviewer });
+  });
+
+  test("rejects an excessive implementer summary at the Coding Session boundary", async () => {
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(async () =>
+          sdkTurn(
+            JSON.stringify({
+              status: "proposed",
+              summary: "s".repeat(ROLE_RESULT_LIMITS.summaryMaxLength + 1),
+            }),
+          ),
+        ),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
+    );
+
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failureCode: "role_output_transform_unconfigured",
+    });
+  });
+
+  test.each([
+    [
+      "summary length",
+      {
+        summary: "s".repeat(ROLE_RESULT_LIMITS.summaryMaxLength + 1),
+        findings: [],
+      },
+    ],
+    [
+      "finding count",
+      {
+        summary: "ok",
+        findings: Array.from({ length: ROLE_RESULT_LIMITS.findingMaxCount + 1 }, () => "fix"),
+      },
+    ],
+    [
+      "finding length",
+      {
+        summary: "ok",
+        findings: ["f".repeat(ROLE_RESULT_LIMITS.findingMaxLength + 1)],
+      },
+    ],
+  ] as const)("rejects excessive reviewer %s from direct output", async (_name, fields) => {
+    const reviewer = { sha, verdict: "approved" as const, ...fields };
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(JSON.stringify(reviewer))),
+      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failureCode: "role_output_transform_unconfigured",
+    });
+  });
+
+  test("rejects an excessive normalized reviewer result at the Coding Session boundary", async () => {
+    const reviewer = {
+      sha,
+      verdict: "approved" as const,
+      summary: "s".repeat(ROLE_RESULT_LIMITS.summaryMaxLength + 1),
+      findings: [],
+    };
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn("prose-wrapped review")),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => reviewer,
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      execution: reviewerExecution,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      failureCode: "role_output_schema_invalid",
+    });
+  });
+
   test("fails explicitly when normalization is needed but unconfigured", async () => {
     const session = new CodexCodingSession(
       async () => testClient(async () => sdkTurn("The review could not be represented directly.")),
@@ -2851,9 +3001,34 @@ describe("Coding Session", () => {
     expect(JSON.stringify(calls)).not.toContain("model_reasoning_effort");
     expect(JSON.stringify(calls)).not.toContain("developer_instructions");
     expect(calls.map(({ outputSchema }) => outputSchema)).toEqual([
-      expect.objectContaining({ type: "object" }),
-      expect.objectContaining({ type: "object" }),
-      expect.objectContaining({ type: "object" }),
+      expect.objectContaining({
+        type: "object",
+        properties: expect.objectContaining({
+          summary: { type: "string", maxLength: ROLE_RESULT_LIMITS.summaryMaxLength },
+        }),
+      }),
+      expect.objectContaining({
+        type: "object",
+        properties: expect.objectContaining({
+          summary: { type: "string", maxLength: ROLE_RESULT_LIMITS.summaryMaxLength },
+          findings: {
+            type: "array",
+            maxItems: ROLE_RESULT_LIMITS.findingMaxCount,
+            items: { type: "string", maxLength: ROLE_RESULT_LIMITS.findingMaxLength },
+          },
+        }),
+      }),
+      expect.objectContaining({
+        type: "object",
+        properties: expect.objectContaining({
+          summary: { type: "string", maxLength: ROLE_RESULT_LIMITS.summaryMaxLength },
+          findings: {
+            type: "array",
+            maxItems: ROLE_RESULT_LIMITS.findingMaxCount,
+            items: { type: "string", maxLength: ROLE_RESULT_LIMITS.findingMaxLength },
+          },
+        }),
+      }),
     ]);
     expect(calls.every(({ signal }) => signal instanceof AbortSignal)).toBe(true);
     expect(calls.every(({ environment }) => environment.CI === "true")).toBe(true);

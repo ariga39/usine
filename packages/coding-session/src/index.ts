@@ -52,6 +52,7 @@ export {
   type ExecutionReference,
 } from "./codex-execution.js";
 export {
+  ROLE_RESULT_LIMITS,
   implementerOutputSchema,
   reviewerOutputSchema,
   type ImplementerOutput,

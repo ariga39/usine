@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
+import { reviewerOutputSchema } from "@usine/coding-session";
 import {
   applyMigrations,
   openSqliteDatabase,
@@ -984,9 +985,15 @@ describe("Delivery Run durable phase recovery", () => {
 
   test("aggregates one changes-requested batch before the repair delivery", async () => {
     const id = "review-repair";
+    const acceptedReview = reviewerOutputSchema.parse({
+      sha,
+      verdict: "changes_requested",
+      summary: "fix the candidate",
+      findings: ["fix the regression", "add a regression test"],
+    });
     const initial = {
       ...persistedResult("reviewed", id),
-      review: { sha, verdict: "changes_requested" as const, summary: "fix", findings: ["fix"] },
+      review: acceptedReview,
     };
     const fake = fakeAuthority(initial);
     const prompts: string[] = [];
@@ -1070,7 +1077,9 @@ describe("Delivery Run durable phase recovery", () => {
     );
 
     expect(result.state).toBe("reviewed_pr");
-    expect(prompts[0]).toContain("Aggregated findings to repair: fix");
+    expect(prompts[0]).toContain(
+      `Aggregated findings to repair: ${acceptedReview.findings.join("; ")}`,
+    );
     expect(checked).toEqual([sha]);
     expect(reviewed).toEqual([sha]);
     expect(delivered).toEqual([sha]);
