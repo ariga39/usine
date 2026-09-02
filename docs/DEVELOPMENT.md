@@ -1,6 +1,6 @@
 ---
 status: current
-updated: 2026-08-24
+updated: 2026-09-02
 issue: https://github.com/ariga39/usine/issues/267
 ---
 
