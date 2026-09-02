@@ -82,7 +82,7 @@ const repositorySnapshot = Schema.Struct({
   gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
 });
 const taskWaiting = Schema.Struct({
-  reason: Schema.Literal("network_interruption"),
+  reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
   resumeState: Schema.Literals(["admitted", "checked", "reviewed"]),
   activation: Schema.Natural,
 });
@@ -194,7 +194,7 @@ const publicBlockerDiagnostic = Schema.Struct({
   classification: taskBlockerClassification,
 });
 const publicTaskWaiting = Schema.Struct({
-  reason: Schema.Literal("network_interruption"),
+  reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
 });
 const publicTaskRepository = Schema.Struct({
   id: Schema.String,

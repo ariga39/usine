@@ -368,6 +368,94 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     expect(admitted.writer.repositoryIdentity).toBe(resumed?.writer.repositoryIdentity);
   });
 
+  test("retries delivery reconciliation even when the implementer budget is exhausted", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-delivery-retry-${Date.now()}`;
+    const contract = makeContract(taskId);
+    const admitted = await authority.admit(
+      {
+        contract,
+        contractHash: "a".repeat(64),
+        repositoryIdentity: `authority/delivery-retry-${taskId}`,
+        repository: {
+          id: contract.repositoryId,
+          path: ".",
+          owner: "authority",
+          name: "delivery-retry",
+          baseBranch: "main",
+          implementerProfile: "implementer",
+          reviewerProfile: "reviewer",
+          forgeProfile: "forge",
+          githubReadProfile: null,
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          gitAuthor: { name: "Test", email: "test@example.invalid" },
+        },
+        deadlineEpochMs: Date.now() + 30_000,
+      },
+      {
+        contractPath: "task.json",
+        rawContract: JSON.stringify(contract),
+      },
+    );
+    const reservation = await authority.reserveActivation(taskId, 3);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: reservation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: reservation.activation },
+    );
+    const checked = await authority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: candidate.candidateSha!,
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const reviewed = await authority.recordReview(
+      { taskId, revision: checked.revision },
+      { sha: candidate.candidateSha!, verdict: "approved", summary: "approved", findings: [] },
+    );
+    const waiting = await authority.recordWaiting(
+      { taskId, revision: reviewed.revision },
+      {
+        reason: "delivery_reconciliation",
+        resumeState: "reviewed",
+        activation: reservation.activation,
+      },
+    );
+
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed" },
+    });
+    expect((await authority.listRestartable()).restartable).toHaveLength(0);
+
+    const resumed = await authority.retryTask(taskId, 1);
+    expect(resumed).toMatchObject({
+      state: "reviewed",
+      waiting: null,
+      candidateSha: candidate.candidateSha,
+      check: { status: "passed" },
+      review: { verdict: "approved" },
+      evidence: { implementerActivations: 1 },
+    });
+    expect((await authority.listRestartable()).restartable).toHaveLength(1);
+    expect(await authority.listEvents(taskId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: { type: "task_waiting", reason: "delivery_reconciliation", activation: 1 },
+        }),
+        expect.objectContaining({
+          data: { type: "task_retry_accepted", reason: "delivery_reconciliation", activation: 1 },
+        }),
+      ]),
+    );
+    expect(admitted.writer).toEqual(resumed.writer);
+  });
+
   test("fails closed when Task discovery encounters malformed durable state", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);

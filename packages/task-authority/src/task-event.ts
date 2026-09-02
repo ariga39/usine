@@ -182,12 +182,12 @@ const eventData = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("task_waiting"),
-    reason: Schema.Literal("network_interruption"),
+    reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
     activation: Schema.Natural,
   }),
   Schema.Struct({
     type: Schema.Literal("task_retry_accepted"),
-    reason: Schema.Literal("network_interruption"),
+    reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
     activation: Schema.Natural,
   }),
   Schema.Struct({
