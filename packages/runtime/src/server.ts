@@ -1,4 +1,4 @@
-import { readFile, mkdir, realpath } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
@@ -57,6 +57,7 @@ import {
   type ApiTaskResource,
   encodeApiWaitResponse,
 } from "./http-api.js";
+import { ensurePrivateStateDatabase } from "./private-state.js";
 type TaskEventEnvelope = ApiEventEnvelope;
 type LaunchMode = "deduplicated" | "replace";
 
@@ -212,8 +213,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       })
       .catch(() => undefined);
   };
-  await mkdir(stateDirectory, { recursive: true });
-  await applyMigrations(resolve(stateDirectory, "usine.sqlite"));
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
   const restartState = await lookupRestartableTasks(stateDirectory);
   const restartable: typeof restartState.restartable = [];
   let activeTaskCount = restartState.activeTaskCount;

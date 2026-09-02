@@ -1,11 +1,17 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
-import type { TaskContract } from "@usine/task-authority";
+import {
+  applyMigrations,
+  openSqliteDatabase,
+  TaskAuthority,
+  type RepositorySnapshot,
+  type TaskContract,
+} from "@usine/task-authority";
 import {
   inspectRepository,
   listRepositories,
@@ -28,6 +34,62 @@ describe("CLI/server boundary", () => {
         port: 0,
       }),
     ).rejects.toThrow("loopback");
+  });
+
+  test("privatizes an existing state root and database before startup", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "usine-server-private-state-"));
+    const stateDirectory = join(root, "state");
+    const databasePath = join(stateDirectory, "usine.sqlite");
+    const repository: RepositorySnapshot = {
+      id: "private-state-repository",
+      path: root,
+      owner: "example",
+      name: "private-state-repository",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    };
+
+    await mkdir(stateDirectory, { mode: 0o777 });
+    await chmod(stateDirectory, 0o777);
+    await applyMigrations(databasePath);
+    const handle = openSqliteDatabase(databasePath);
+    try {
+      await new TaskAuthority(handle.database).registerRepository(repository);
+    } finally {
+      handle.close();
+    }
+    await chmod(databasePath, 0o666);
+
+    const server = await startUsineServer({
+      environment: {
+        USINE_STATE_DIR: stateDirectory,
+        USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "private-state-app",
+        USINE_FORGE_PROFILE_DEFAULT_APP_ID: "1",
+        USINE_FORGE_PROFILE_DEFAULT_INSTALLATION_ID: "2",
+        USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "private-state-key.pem",
+        USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: "example/private-state-repository",
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+
+    try {
+      expect((await stat(stateDirectory)).mode & 0o777).toBe(0o700);
+      expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
+      await expect(inspectRepository(server.url, repository.id)).resolves.toMatchObject({
+        id: repository.id,
+        owner: repository.owner,
+        name: repository.name,
+        baseBranch: repository.baseBranch,
+      });
+    } finally {
+      await server.close();
+    }
   });
 
   test("cleans up the server scope when binding fails during startup", async () => {
