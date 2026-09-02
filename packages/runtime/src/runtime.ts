@@ -47,6 +47,7 @@ import {
   type RuntimePolicy,
 } from "./runtime-policy.js";
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
+import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./private-state.js";
 
 export {
   runtimePolicyFromEnvironment,
@@ -110,6 +111,7 @@ export async function reviewCandidateWithProfile(
   input: ReviewerQualityGateInput,
 ): Promise<ReviewAttemptObservation> {
   const stateDirectory = stateDirectoryFromEnvironment(input.environment);
+  await ensurePrivateStateDirectory(stateDirectory);
   const workspace = new CandidateWorkspace({
     repository: input.repository.path,
     stateDirectory,
@@ -144,8 +146,7 @@ export async function registerRepository(
   stateDirectory: string,
   registration: RepositorySnapshot,
 ): Promise<RepositorySnapshot> {
-  await mkdir(stateDirectory, { recursive: true });
-  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
   const handle = openSqliteDatabase(databasePath);
   try {
