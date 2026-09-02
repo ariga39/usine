@@ -1,8 +1,11 @@
-import { access, mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, mkdir, open } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
   applyMigrations,
+  contractIssues,
   hashTaskContract,
   openSqliteDatabase,
   resolveTaskContract,
@@ -16,6 +19,7 @@ import {
   type TaskEvent,
   type TaskListItem,
   type TaskResult,
+  taskContractSchema,
   type ServerHealth,
   type ServerSnapshot,
   type TaskObservationEventInput,
@@ -48,6 +52,77 @@ import {
 } from "./runtime-policy.js";
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./private-state.js";
+
+/** Maximum UTF-8 bytes read from one submitted Task Contract file. */
+export const MAX_TASK_CONTRACT_BYTES = 1_048_576;
+
+export class TaskContractInputError extends Error {
+  readonly code = "validation";
+
+  constructor(
+    message: string,
+    readonly issues: ReadonlyArray<{ readonly path: string; readonly message: string }> = [],
+  ) {
+    super(message);
+    this.name = "TaskContractInputError";
+  }
+}
+
+export async function readTaskContract(
+  contractPath: string,
+): Promise<{ readonly rawContract: string; readonly contract: TaskContract }> {
+  const rawContract = await readBoundedTaskContractFile(contractPath);
+  let input: unknown;
+  try {
+    input = JSON.parse(rawContract);
+  } catch {
+    throw new TaskContractInputError("task contract must be valid JSON", [
+      { path: "", message: "contract input is unreadable or invalid JSON" },
+    ]);
+  }
+  const parsed = taskContractSchema.safeParse(input);
+  if (!parsed.success) {
+    const issues = contractIssues(parsed.error);
+    throw new TaskContractInputError(`invalid task contract: ${JSON.stringify(issues)}`, issues);
+  }
+  return { rawContract, contract: parsed.data };
+}
+
+async function readBoundedTaskContractFile(contractPath: string): Promise<string> {
+  let file: FileHandle | undefined;
+  try {
+    const source = await lstat(contractPath);
+    if (!source.isFile()) throw new TaskContractInputError("task contract must be a regular file");
+
+    const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+    const nonBlocking = (constants as { O_NONBLOCK?: number }).O_NONBLOCK ?? 0;
+    file = await open(contractPath, constants.O_RDONLY | noFollow | nonBlocking);
+    const opened = await file.stat();
+    if (!opened.isFile()) throw new TaskContractInputError("task contract must be a regular file");
+    if (opened.size > MAX_TASK_CONTRACT_BYTES)
+      throw new TaskContractInputError(
+        `task contract exceeds the ${MAX_TASK_CONTRACT_BYTES}-byte limit`,
+      );
+
+    const bytes = Buffer.allocUnsafe(MAX_TASK_CONTRACT_BYTES);
+    let length = 0;
+    while (length < MAX_TASK_CONTRACT_BYTES) {
+      const read = await file.read(bytes, length, MAX_TASK_CONTRACT_BYTES - length, null);
+      if (read.bytesRead === 0) break;
+      length += read.bytesRead;
+    }
+    if ((await file.stat()).size > MAX_TASK_CONTRACT_BYTES)
+      throw new TaskContractInputError(
+        `task contract exceeds the ${MAX_TASK_CONTRACT_BYTES}-byte limit`,
+      );
+    return bytes.subarray(0, length).toString("utf8");
+  } catch (error) {
+    if (error instanceof TaskContractInputError) throw error;
+    throw new TaskContractInputError("task contract is unreadable");
+  } finally {
+    await file?.close().catch(() => undefined);
+  }
+}
 
 export {
   runtimePolicyFromEnvironment,

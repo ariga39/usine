@@ -246,6 +246,8 @@ Commit the contract file and verify that the checkout is clean before submission
 node apps/cli/dist/cli.mjs submit "<TASK_CONTRACT_FILE>"
 ```
 
+The submitted Task Contract must be a regular file no larger than 1,048,576 bytes (1 MiB). The server rejects larger or non-regular inputs before JSON validation and admission.
+
 `submit` returns the admitted Task resource as JSON. The server verifies that the contract is a committed file in the authorized Repository, is unchanged, and has an ancestor `baseSha`. Re-submitting the same Task ID returns its existing durable facts rather than creating a second Task.
 
 ## 5. Check health and observe the Task

@@ -1,8 +1,7 @@
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
-import { contractIssues, taskContractSchema } from "@usine/task-authority/contract";
+import { readTaskContract, TaskContractInputError } from "@usine/runtime";
 import {
   followTask,
   getTask,
@@ -214,22 +213,21 @@ export async function runLegacyTaskFollow(taskId: string, serverUrl: string): Pr
 
 export async function runSubmitCommand(contractPath: string, serverUrl: string): Promise<void> {
   return runCommand("submit_failed", async () => {
-    let input: unknown;
+    let contractRepositoryId: string | undefined;
     try {
-      input = JSON.parse(await readFile(contractPath, "utf8"));
-    } catch {
+      contractRepositoryId = (await readTaskContract(contractPath)).contract.repositoryId;
+    } catch (error) {
+      const issues =
+        error instanceof TaskContractInputError && error.issues.length > 0
+          ? error.issues
+          : [{ path: "", message: "contract input is unreadable, oversized, or invalid" }];
       throw new CliFailure("invalid_task_contract", "validation", {
-        issues: [{ path: "", message: "contract input is unreadable or invalid JSON" }],
+        issues,
       });
     }
-    const parsed = taskContractSchema.safeParse(input);
-    if (!parsed.success)
-      throw new CliFailure("invalid_task_contract", "validation", {
-        issues: contractIssues(parsed.error),
-      });
     const result = await submitTask(serverUrl, {
       contractPath: resolve(contractPath),
-      repositoryId: parsed.data.repositoryId,
+      repositoryId: contractRepositoryId,
     });
     process.stdout.write(renderJson(result));
   });

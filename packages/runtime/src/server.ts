@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
@@ -42,7 +42,9 @@ import {
   lookupServerSnapshot,
   recordRecoveryObservation,
   runtimePolicyFromEnvironment,
+  readTaskContract,
   stateDirectoryFromEnvironment,
+  TaskContractInputError,
   ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
@@ -492,8 +494,15 @@ function createApiLayer(options: {
       submit: ({ payload }) =>
         apiEffect(async () => {
           const submission: TaskSubmission = payload;
-          const rawContract = await readFile(submission.contractPath, "utf8");
-          const contract = parseContract(rawContract);
+          let contractInput: Awaited<ReturnType<typeof readTaskContract>>;
+          try {
+            contractInput = await readTaskContract(submission.contractPath);
+          } catch (error) {
+            if (error instanceof TaskContractInputError)
+              throw new ServerValidationError(error.message);
+            throw error;
+          }
+          const { rawContract, contract } = contractInput;
           if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
             throw new ServerValidationError(
               "submitted repository ID does not match the task contract",
