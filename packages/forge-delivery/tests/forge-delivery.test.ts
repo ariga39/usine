@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { approvalAttestationBody, ForgeDelivery, forgeGitEnvironment } from "../src/index.js";
+import {
+  approvalAttestationBody,
+  ForgeDelivery,
+  ForgeDeliveryReconciliationError,
+  forgeGitEnvironment,
+} from "../src/index.js";
 import { taskContractSchema, type ResolvedTaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
@@ -105,6 +110,67 @@ describe("Forge Delivery module", () => {
         { sha, verdict: "changes_requested", summary: "fix", findings: ["fix"] },
       ),
     ).rejects.toThrow("exact-SHA semantic approval");
+  });
+
+  test("emits one typed reconciliation signal after bounded unresolved transport failures", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      throw new TypeError("provider response details stay at the Forge boundary");
+    };
+    try {
+      await expect(
+        new ForgeDelivery({
+          repository: "/repo",
+          deadlineEpochMs: Date.now() + 10_000,
+          forge: {
+            mode: "test",
+            appSlug: "test-app",
+            token: "test-token",
+            apiUrl: "http://127.0.0.1:1",
+            gitUrl: "http://127.0.0.1:1/owner/repo.git",
+          },
+          environment: process.env,
+        }).deliver(
+          simpleContract,
+          sha,
+          { sha, status: "passed", command: "check", exitCode: 0, stdout: "", stderr: "" },
+          { sha, verdict: "approved", summary: "approved", findings: [] },
+        ),
+      ).rejects.toBeInstanceOf(ForgeDeliveryReconciliationError);
+      expect(attempts).toBe(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, 30_000);
+
+  test("leaves a definite 4xx refusal outside the reconciliation signal", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ message: "definite refusal" }, { status: 400 });
+    try {
+      await expect(
+        new ForgeDelivery({
+          repository: "/repo",
+          deadlineEpochMs: Date.now() + 10_000,
+          forge: {
+            mode: "test",
+            appSlug: "test-app",
+            token: "test-token",
+            apiUrl: "http://127.0.0.1:1",
+            gitUrl: "http://127.0.0.1:1/owner/repo.git",
+          },
+          environment: process.env,
+        }).deliver(
+          simpleContract,
+          sha,
+          { sha, status: "passed", command: "check", exitCode: 0, stdout: "", stderr: "" },
+          { sha, verdict: "approved", summary: "approved", findings: [] },
+        ),
+      ).rejects.not.toBeInstanceOf(ForgeDeliveryReconciliationError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("sanitizes Git credentials before adding the GitHub auth header", () => {

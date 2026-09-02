@@ -70,7 +70,8 @@ host freezes clean descendant → exact Candidate SHA
                               ▼
                        GitHub merge endpoint
                               │
-                              ├── proved refusal/ambiguity → blocked
+                              ├── proved refusal/identity conflict → blocked
+                              ├── unresolved transient/ambiguous effect → waiting
                               └── observed exact merge effect → merged (terminal)
 ```
 
@@ -119,7 +120,7 @@ The legal state names are `admitted`, `waiting`, `candidate`, `checked`, `review
 | State | Meaning | Normal next facts |
 |---|---|---|
 | `admitted` | Contract admitted, lease held, no accepted Candidate yet. | Candidate, waiting, or blocked. |
-| `waiting` | The implementer suffered the one currently retryable turn-phase network interruption. The record stores the resume state and activation. | Explicit retry resumes the recorded `admitted`, `checked`, or `reviewed` phase; expiry or invalidity blocks. |
+| `waiting` | The implementer suffered the one currently retryable turn-phase network interruption, or delivery ended with an unresolved external effect. The record stores the resume state and activation. | Explicit retry resumes the recorded phase; delivery reconciliation resumes `reviewed` with the same approved bundle; expiry or invalidity blocks. |
 | `candidate` | A clean exact Candidate SHA was accepted under the current activation fence. | Check, a repair Candidate path, waiting, or blocked. |
 | `checked` | A Check Result for the current Candidate exists. | Fresh review, repair activation after a failed check, waiting, or blocked. |
 | `reviewed` | A review verdict for a passing check exists. | One aggregated repair activation, delivery, waiting, or blocked. |
@@ -132,8 +133,8 @@ Task Authority's reducer and the Candidate Workspace enforce the following lifec
 - A new Candidate clears check, review, delivery, and blocker evidence. The reducer requires its fence to equal the reserved activation and, after the first Candidate, requires its parent to be the accepted prior Candidate. Candidate Workspace separately requires the initial Candidate to descend from the contract base.
 - A check must belong to the current Candidate. A review requires a passing check for that same SHA. A delivery requires a passing check and an `approved` review for that same SHA.
 - `changes_requested` findings are recorded as one repair batch before one implementer activation. Individual findings do not each wake an agent.
-- Only an implementer failure in the `turn` phase with `failureClass: "network"` may become `waiting`. Reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission do not implicitly retry.
-- `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline and returns to the stored resume state; the subsequent Delivery Run reserves the next activation. Deadline exhaustion blocks the retry, while an exhausted activation budget is rejected as a retry conflict.
+- Only an implementer failure in the `turn` phase with `failureClass: "network"`, or the Forge boundary's typed unresolved delivery outcome, may become `waiting`. Reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission do not implicitly retry.
+- `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline and returns to the stored resume state; the subsequent Delivery Run reserves the next activation only for implementer recovery. Delivery reconciliation reuses the same approved Candidate/check/review bundle. Deadline exhaustion blocks the retry, while an exhausted activation budget is rejected only for implementer recovery.
 - `reviewed_pr` is the no-merge terminal. `merged` requires both immutable merge authority and a Delivery Effect whose approved head and PR number match the reviewed delivery; the merge commit SHA must also be exact.
 
 ## 5. Behavioral packages and composition
@@ -203,7 +204,7 @@ Quality Gate runs the registered project command in a disposable exact-SHA check
 
 Forge Delivery requires a passing exact-SHA check and exact-SHA semantic approval. It probes for an existing branch/PR before writing, pushes with a credential-scoped GitHub capability, and creates or verifies one approval attestation tied to the Task, Issue, SHA, check, and review. Multiple, mismatched, or wrong-identity attestations quarantine delivery. A lost write response is reconciled by probing the same identity.
 
-For merge-authorized contracts, Forge Delivery re-reads the live PR and attestation immediately before calling the GitHub merge endpoint. A changed head, mismatched attestation, non-mergeable platform state, refusal, or ambiguous response does not create a merge fact. A later probe may record `merged` only when the PR is observed merged with an exact merge commit SHA and the approved head/PR identity still matches. GitHub platform policy is the final merge gate.
+For merge-authorized contracts, Forge Delivery re-reads the live PR and attestation immediately before calling the GitHub merge endpoint. A changed head, mismatched attestation, non-mergeable platform state, or refusal does not create a merge fact and remains blocked; an unresolved response becomes explicitly retryable without changing the approved bundle. A later probe may record `merged` only when the PR is observed merged with an exact merge commit SHA and the approved head/PR identity still matches. GitHub platform policy is the final merge gate.
 
 GitHub read access is optional and separate from Forge delivery. The registered opaque `githubReadProfile` resolves its own GitHub App capability, must bind to the same owner/name, and exposes only an allowlisted `github_issue_*`, `github_pull_request_*`, `github_file_get`, or `github_commit_get` tool set to the selected role through a local Streamable HTTP MCP server. Pull-request reads additionally require an authorized delivered-PR fact. Read credentials never become Forge credentials and never enter workers, prompts, MCP configuration, public resources, durable events, or logs.
 
@@ -219,7 +220,7 @@ External observers and supervisors are separate glue processes, not part of the 
 
 ## 10. Recovery, retry, capacity, and isolation
 
-Recovery is deterministic reconciliation, not replay of process operations. On re-entry the server reads the durable Task Contract, phase, revision, activation, Candidate, and effect identities; it probes Git/worktree/GitHub before repeating uncertain effects. Confirmed effects are recorded once, provably absent effects may be retried with the same stable identity, and unresolved ambiguity is quarantined. A new writer receives a new activation fence and workspace; stale work cannot publish a Candidate. The first deadline is never extended by restart.
+Recovery is deterministic reconciliation, not replay of process operations. On re-entry the server reads the durable Task Contract, phase, revision, activation, Candidate, and effect identities; it probes Git/worktree/GitHub before repeating uncertain effects. Confirmed effects are recorded once, provably absent effects may be retried with the same stable identity, and an unresolved Forge effect remains durably waiting for explicit reconciliation. Proven identity conflicts are quarantined. A new writer receives a new activation fence and workspace; stale work cannot publish a Candidate. The first deadline is never extended by restart.
 
 The default `USINE_ACTIVE_TASK_CAPACITY` is `1`; it must be a positive finite integer. Admission counts durable nonterminal Tasks and, in the same transaction, acquires the Repository lease. Same-ID idempotent resubmission is checked before capacity rejection. A full capacity returns a retryable error but does not create a queue. On startup, a durable count above the configured capacity rejects readiness rather than launching work beyond the bound. Terminal state releases the Repository lease and the capacity slot. This is bounded process-local capacity, not fairness, dynamic resizing, or distributed scheduling.
 

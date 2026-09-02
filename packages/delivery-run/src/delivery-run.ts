@@ -9,7 +9,11 @@ import type {
   SessionRequest,
 } from "@usine/coding-session";
 import type { ReviewAttemptObservation } from "@usine/quality-gate";
-import { DeliveryQuarantineError, ForgeAuthenticationError } from "@usine/forge-delivery";
+import {
+  DeliveryQuarantineError,
+  ForgeAuthenticationError,
+  ForgeDeliveryReconciliationError,
+} from "@usine/forge-delivery";
 import {
   deadlineExpired,
   isTerminalState,
@@ -314,10 +318,9 @@ export async function executeDeliveryRun(
       }
       if (result.review.verdict === "inconclusive")
         return blockTask(services, result, `review inconclusive: ${result.review.summary}`);
-      // ForgeDelivery probes before every effect, so a restart after an
-      // uncertain PR/comment write reconciles the same approved bundle.  Keep
-      // the approved review durable if delivery throws; the next run retries
-      // this exact bundle without another implementer.
+      // ForgeDelivery probes before every effect. Its typed unresolved outcome
+      // keeps the approved review durable for explicit retry of this exact
+      // bundle without another implementer or reviewer.
       let delivery: Awaited<ReturnType<DeliveryRunForge["deliver"]>>;
       try {
         delivery = await services.forge.deliver(
@@ -331,7 +334,16 @@ export async function executeDeliveryRun(
         if (input.signal?.aborted) throw error;
         if (error instanceof DeliveryQuarantineError || error instanceof ForgeAuthenticationError)
           return blockTask(services, result, error.message);
-        throw error;
+        if (error instanceof ForgeDeliveryReconciliationError && result.candidateFence !== null)
+          return services.authority.recordWaiting(
+            { taskId: result.taskId, revision: result.revision },
+            {
+              reason: "delivery_reconciliation",
+              resumeState: "reviewed",
+              activation: result.candidateFence,
+            },
+          );
+        return blockTask(services, result, error instanceof Error ? error.message : String(error));
       }
       const delivered = await services.authority.recordDelivery(
         { taskId: result.taskId, revision: result.revision },

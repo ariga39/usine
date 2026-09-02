@@ -395,7 +395,7 @@ These listeners are transient. They have no replay cursor, acknowledgement, resu
 
 ## 6. Bounded retry
 
-Only an implementer interruption during the turn phase with failure class `network` is currently retryable. The public Task projection then has:
+An implementer interruption during the turn phase with failure class `network`, or an unresolved Forge delivery effect, is retryable. The public Task projection then has a waiting reason:
 
 ```json
 {
@@ -405,13 +405,15 @@ Only an implementer interruption during the turn phase with failure class `netwo
 }
 ```
 
+An unresolved delivery effect uses `"reason": "delivery_reconciliation"` and retains the approved Candidate, check, and review. Its explicit retry probes that same approved bundle; it does not start an implementer or reviewer or consume an implementer activation.
+
 Retry it explicitly:
 
 ```sh
 node apps/cli/dist/cli.mjs task retry "<TASK_ID>" --json
 ```
 
-The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority and can be accepted only while the activation budget and deadline remain available. The subsequent Delivery Run reserves the next implementer activation. It is not an automatic retry; with the maximum activation budget of 2, there is at most one retry. Restart, re-submission, reviewer failures, project-check failures, provider configuration failures, and other failure classes do not enter this explicit `waiting`/`task retry` path. A retry against a non-waiting Task returns a retry conflict.
+The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority. Implementer recovery can be accepted only while the activation budget and deadline remain available; delivery reconciliation only requires the deadline. The subsequent Delivery Run reserves the next implementer activation only for implementer recovery. It is not an automatic retry. Restart, re-submission, reviewer failures, project-check failures, provider configuration failures, and other failure classes do not enter this explicit `waiting`/`task retry` path. A retry against a non-waiting Task returns a retry conflict.
 
 The server's default active-Task capacity is 1. A full capacity returns a retryable API error; wait for an active Task to become terminal before submitting another Task or adjust `USINE_ACTIVE_TASK_CAPACITY` to a positive finite value appropriate for the host. Capacity is a bounded admission setting, not a queue.
 

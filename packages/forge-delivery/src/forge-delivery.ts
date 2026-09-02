@@ -12,6 +12,7 @@ import {
   approvalAttestationBody,
   createForgeClient,
   forgeGitEnvironment,
+  ForgeAuthenticationError,
   type ForgeDeliveryOptions,
 } from "./forge-policy.js";
 
@@ -22,6 +23,15 @@ function statusOf(error: unknown): number | undefined {
 }
 
 export class DeliveryQuarantineError extends Error {}
+
+export class ForgeDeliveryReconciliationError extends Error {
+  readonly code = "forge_delivery_reconciliation_required" as const;
+
+  constructor() {
+    super("forge delivery effect remains unresolved; explicit reconciliation is required");
+    this.name = "ForgeDeliveryReconciliationError";
+  }
+}
 
 export class ForgeDelivery {
   constructor(private readonly options: ForgeDeliveryOptions) {}
@@ -36,13 +46,12 @@ export class ForgeDelivery {
       throw new Error("delivery requires a passed exact-SHA project check");
     if (review.sha !== sha || review.verdict !== "approved")
       throw new Error("delivery requires exact-SHA semantic approval");
-    let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         return await this.reconcile(contract, sha, check, review);
       } catch (error) {
-        lastError = error;
         if (error instanceof DeliveryQuarantineError) throw error;
+        if (error instanceof ForgeAuthenticationError) throw error;
         const status = statusOf(error);
         if (
           status !== undefined &&
@@ -59,7 +68,7 @@ export class ForgeDelivery {
           );
       }
     }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    throw new ForgeDeliveryReconciliationError();
   }
 
   private async reconcile(

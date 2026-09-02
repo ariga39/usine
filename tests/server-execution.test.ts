@@ -14,6 +14,7 @@ import {
   type ServerExecutionContext,
 } from "@usine/runtime";
 import { executeDeliveryRun } from "@usine/delivery-run";
+import { ForgeDeliveryReconciliationError } from "@usine/forge-delivery";
 import {
   submitTask,
   retryTask,
@@ -505,6 +506,179 @@ describe("server-owned execution", () => {
       await expect(retryTask(server.url, admitted.taskId)).rejects.toBeInstanceOf(
         TaskRetryConflictError,
       );
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reconciles a lost delivery response through explicit retry without rerunning roles", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const candidateSha = "e".repeat(40);
+    let implementers = 0;
+    let reviewers = 0;
+    let deliveries = 0;
+    let externalEffects = 0;
+    const bundles: string[] = [];
+    const execute = async ({ authority, contract, result, signal }: ServerExecutionContext) => {
+      const resolved: ResolvedTaskContract = {
+        ...contract,
+        repository: { path: ".", owner: "example", name: repositoryName },
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        delivery: { ...contract.delivery, baseBranch: "main" },
+      };
+      return executeDeliveryRun(
+        {
+          contract: resolved,
+          contractHash: result.contractHash,
+          repositoryIdentity: result.writer.repositoryIdentity,
+          deadlineEpochMs: result.deadlineEpochMs,
+          implementer: {
+            role: "implementer",
+            profile: "writer-profile",
+            sandbox: "workspace-write",
+          },
+          reviewer: { role: "reviewer", profile: "reviewer-profile", sandbox: "read-only" },
+          signal,
+        },
+        {
+          authority,
+          workspace: {
+            quarantinePriorWriters: async () => undefined,
+            prepareWriter: async (_taskId, activation, baseSha) => ({
+              taskId: result.taskId,
+              activation,
+              path: ".",
+              baseSha,
+            }),
+            freeze: async (workspace) => ({
+              sha: candidateSha,
+              baseSha: workspace.baseSha,
+              workspace,
+            }),
+            quarantine: async () => undefined,
+          },
+          session: {
+            run: async () => {
+              implementers += 1;
+              return {
+                status: "completed" as const,
+                output: { status: "proposed" as const, summary: "candidate" },
+                summary: "completed",
+                failure: null,
+              };
+            },
+          },
+          quality: {
+            check: async (_contract, sha) => ({
+              sha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            }),
+            reviewWithObservation: async (_contract, sha) => {
+              reviewers += 1;
+              return {
+                review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+                usage: null,
+              };
+            },
+          },
+          forge: {
+            deliver: async (_contract, sha, check, review) => {
+              deliveries += 1;
+              bundles.push(`${sha}:${check.sha}:${review.sha}:${review.verdict}`);
+              if (externalEffects === 0) {
+                externalEffects = 1;
+                throw new ForgeDeliveryReconciliationError();
+              }
+              return {
+                sha,
+                effect: "github" as const,
+                prNumber: 153,
+                url: "https://example.invalid/pr/153",
+                attestationId: "server-reconciled",
+              };
+            },
+          },
+        },
+      );
+    };
+    let server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const admitted = await submitTask(server.url, submission);
+      const waiting = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (result) => result.state === "waiting",
+      );
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        retryable: true,
+        waiting: { reason: "delivery_reconciliation" },
+        candidateSha,
+        check: { sha: candidateSha, status: "passed" },
+        review: { sha: candidateSha, verdict: "approved" },
+        delivery: null,
+      });
+      expect({ implementers, reviewers, deliveries, externalEffects }).toEqual({
+        implementers: 1,
+        reviewers: 1,
+        deliveries: 1,
+        externalEffects: 1,
+      });
+
+      await server.close();
+      server = await startUsineServer({
+        environment: environment(stateDirectory, repositoryName),
+        execute,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await taskStatus(server.url, admitted.taskId)).toMatchObject({
+        state: "waiting",
+        waiting: { reason: "delivery_reconciliation" },
+      });
+      expect({ implementers, reviewers, deliveries, externalEffects }).toEqual({
+        implementers: 1,
+        reviewers: 1,
+        deliveries: 1,
+        externalEffects: 1,
+      });
+
+      await expect(retryTask(server.url, admitted.taskId)).resolves.toMatchObject({
+        state: "reviewed",
+        retryable: false,
+        candidateSha,
+        review: { verdict: "approved" },
+      });
+      const terminal = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (result) => result.state === "reviewed_pr",
+      );
+      expect(terminal).toMatchObject({
+        state: "reviewed_pr",
+        delivery: { sha: candidateSha, prNumber: 153, attestationId: "server-reconciled" },
+      });
+      expect({ implementers, reviewers, deliveries, externalEffects }).toEqual({
+        implementers: 1,
+        reviewers: 1,
+        deliveries: 2,
+        externalEffects: 1,
+      });
+      expect(bundles).toEqual([
+        `${candidateSha}:${candidateSha}:${candidateSha}:approved`,
+        `${candidateSha}:${candidateSha}:${candidateSha}:approved`,
+      ]);
+      const events = (await taskEvents(server.url, admitted.taskId, 0, 100)).events;
+      expect(events.filter((event) => event.data.type === "delivery_completed")).toHaveLength(1);
+      expect(events.filter((event) => event.data.type === "task_terminal")).toHaveLength(1);
     } finally {
       await server.close();
     }

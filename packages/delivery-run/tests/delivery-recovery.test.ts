@@ -10,7 +10,7 @@ import {
   type ResolvedTaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
-import { DeliveryQuarantineError } from "@usine/forge-delivery";
+import { DeliveryQuarantineError, ForgeDeliveryReconciliationError } from "@usine/forge-delivery";
 import {
   applyTaskFact,
   type CandidateFact,
@@ -146,6 +146,8 @@ function fakeAuthority(initial: TaskResult) {
   };
   return {
     authority,
+    retry: async () =>
+      transition({ taskId: stored.taskId, revision: stored.revision }, { type: "retry" }),
     getStored: () => stored,
     getImplementerActivations: () => implementerActivations,
     getObservations: () => observations,
@@ -190,6 +192,101 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("waits for explicit delivery reconciliation and retries the approved bundle", async () => {
+    const id = `delivery-reconciliation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("reviewed", id));
+    let deliveries = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not run during delivery reconciliation");
+        },
+        reviewWithObservation: async () => {
+          throw new Error("review must not run during delivery reconciliation");
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha, check, review) => {
+          deliveries += 1;
+          expect(check.sha).toBe(candidateSha);
+          expect(review).toMatchObject({ sha: candidateSha, verdict: "approved" });
+          if (deliveries === 1) throw new ForgeDeliveryReconciliationError();
+          return {
+            sha: candidateSha,
+            effect: "github" as const,
+            prNumber: 80,
+            url: "https://example.invalid/pr/80",
+            attestationId: "reconciled",
+          };
+        },
+      },
+    );
+    const input = {
+      contract: contract(id),
+      contractHash: "delivery-reconciliation-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+      reviewer: { ...implementer, role: "reviewer" as const, sandbox: "read-only" as const },
+    };
+
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed", activation: 1 },
+      candidateSha: sha,
+      review: { sha, verdict: "approved" },
+    });
+    await fake.retry();
+    const delivered = await executeDeliveryRun(input, services);
+
+    expect(delivered).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: sha,
+      delivery: { sha, prNumber: 80, attestationId: "reconciled" },
+    });
+    expect(deliveries).toBe(2);
+  });
+
+  test("blocks an untyped definite delivery refusal instead of making it retryable", async () => {
+    const id = "definite-delivery-refusal";
+    const fake = fakeAuthority(persistedResult("reviewed", id));
+    const refusal = Object.assign(new Error("definite delivery refusal"), { status: 400 });
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "definite-delivery-refusal-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("check must not run for a delivery refusal");
+          },
+          reviewWithObservation: async () => {
+            throw new Error("review must not run for a delivery refusal");
+          },
+        },
+        {
+          deliver: async () => {
+            throw refusal;
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "blocked",
+      blocker: "definite delivery refusal",
+      blockerClassification: "delivery_failure",
+    });
+    expect(result.waiting).toBeNull();
+  });
+
   test("requires a typed fresh-review observation from Quality Gate", () => {
     const legacyQuality = {
       check: async () => ({
@@ -677,7 +774,7 @@ describe("Delivery Run durable phase recovery", () => {
     const forge = {
       deliver: async () => {
         calls += 1;
-        if (calls === 1) throw new Error("merge response lost after platform acceptance");
+        if (calls === 1) throw new ForgeDeliveryReconciliationError();
         return {
           sha,
           effect: "github" as const,
@@ -709,10 +806,16 @@ describe("Delivery Run durable phase recovery", () => {
       },
     };
 
-    await expect(
-      executeDeliveryRun(input, servicesFor(fake.authority, noOpQuality, forge)),
-    ).rejects.toThrow("merge response lost after platform acceptance");
-    expect(fake.getStored()).toMatchObject({ state: "reviewed", delivery: null });
+    const waiting = await executeDeliveryRun(
+      input,
+      servicesFor(fake.authority, noOpQuality, forge),
+    );
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed" },
+      delivery: null,
+    });
+    await fake.retry();
 
     const recovered = await executeDeliveryRun(
       input,
@@ -1200,7 +1303,7 @@ describe("Delivery Run durable phase recovery", () => {
           // The external PR/comment write happened, but the coordinator lost
           // the response before it could persist reviewed_pr.
           effectObserved = true;
-          throw new Error("response lost after effect");
+          throw new ForgeDeliveryReconciliationError();
         }
         return {
           sha: candidateSha,
@@ -1218,23 +1321,26 @@ describe("Delivery Run durable phase recovery", () => {
       deadlineEpochMs: Date.now() + 60_000,
       implementer,
     };
-    await expect(
-      executeDeliveryRun(
-        input,
-        servicesFor(
-          fake.authority,
-          {
-            check: async () => {
-              throw new Error("unexpected check");
-            },
-            reviewWithObservation: async () => {
-              throw new Error("unexpected review");
-            },
+    const waiting = await executeDeliveryRun(
+      input,
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("unexpected check");
           },
-          forge,
-        ),
+          reviewWithObservation: async () => {
+            throw new Error("unexpected review");
+          },
+        },
+        forge,
       ),
-    ).rejects.toThrow("response lost after effect");
+    );
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed" },
+    });
+    await fake.retry();
     const result = await executeDeliveryRun(
       input,
       servicesFor(

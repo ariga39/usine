@@ -786,7 +786,10 @@ export class TaskAuthority {
           );
         return { result: saved, events: [blockedEvent, terminalEvent] };
       }
-      if (prior.evidence.implementerActivations >= budget)
+      if (
+        prior.waiting.reason === "network_interruption" &&
+        prior.evidence.implementerActivations >= budget
+      )
         throw new TaskRetryConflictError("activation_budget_exhausted", prior.state);
       const resumed = applyTaskFact(prior, { type: "retry" });
       const saved = {
@@ -963,7 +966,10 @@ function factEvent(
       };
     case "waiting":
       return {
-        eventId: `waiting:${fact.waiting.activation}`,
+        eventId:
+          fact.waiting.reason === "network_interruption"
+            ? `waiting:${fact.waiting.activation}`
+            : `waiting:${fact.waiting.reason}:${fact.waiting.activation}`,
         occurredAtEpochMs,
         data: {
           type: "task_waiting",

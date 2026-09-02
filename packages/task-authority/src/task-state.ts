@@ -78,7 +78,7 @@ export interface TaskResult {
   };
 }
 
-export type TaskWaitingReason = "network_interruption";
+export type TaskWaitingReason = "network_interruption" | "delivery_reconciliation";
 export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed";
 export interface TaskWaiting {
   reason: TaskWaitingReason;
@@ -384,9 +384,20 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
     case "waiting":
       if (!canTransition(result.state, "waiting"))
         throw new Error(`illegal task state transition: ${result.state} -> waiting`);
+      const validActivation =
+        fact.waiting.reason === "network_interruption"
+          ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
+          : result.state === "reviewed" &&
+            result.activeActivation === null &&
+            result.candidateFence === fact.waiting.activation &&
+            result.candidateSha !== null &&
+            result.check?.sha === result.candidateSha &&
+            result.check.status === "passed" &&
+            result.review?.sha === result.candidateSha &&
+            result.review.verdict === "approved" &&
+            fact.waiting.activation > 0;
       if (
-        result.activeActivation !== fact.waiting.activation ||
-        fact.waiting.activation <= 0 ||
+        !validActivation ||
         !Number.isSafeInteger(fact.waiting.activation) ||
         fact.waiting.resumeState !== result.state
       )

@@ -1,4 +1,8 @@
-export { DeliveryQuarantineError, ForgeDelivery } from "./forge-delivery.js";
+export {
+  DeliveryQuarantineError,
+  ForgeDelivery,
+  ForgeDeliveryReconciliationError,
+} from "./forge-delivery.js";
 export {
   approvalAttestationBody,
   forgeGitEnvironment,

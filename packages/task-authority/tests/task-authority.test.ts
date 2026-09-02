@@ -53,6 +53,62 @@ describe("Task Authority module contract", () => {
     expect(resumed).toMatchObject({ state: "admitted", waiting: null, activeActivation: null });
   });
 
+  test("keeps an approved delivery waiting until an explicit reconciliation retry", () => {
+    const reviewed: TaskResult = {
+      schemaVersion: 4,
+      taskId: contract.id,
+      contractHash: "hash",
+      revision: 4,
+      deadlineEpochMs: 10_000,
+      state: "reviewed",
+      mergeAuthorized: false,
+      candidateSha: sha,
+      candidateFence: 1,
+      check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+      review: { sha, verdict: "approved", summary: "approved", findings: [] },
+      delivery: null,
+      blocker: null,
+      blockerClassification: null,
+      waiting: null,
+      activeActivation: null,
+      writer: { repositoryIdentity: "owner/repo" },
+      evidence: {
+        implementerActivations: 1,
+        reviewCycles: 1,
+        changesRequestedBatches: 0,
+        restartRecoveries: 0,
+      },
+    };
+    const waiting = applyTaskFact(reviewed, {
+      type: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed", activation: 1 },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "delivery_reconciliation", resumeState: "reviewed", activation: 1 },
+      activeActivation: null,
+      candidateSha: sha,
+      review: { verdict: "approved" },
+    });
+    expect(applyTaskFact(waiting, { type: "retry" })).toMatchObject({
+      state: "reviewed",
+      waiting: null,
+      activeActivation: null,
+      candidateSha: sha,
+      review: { verdict: "approved" },
+    });
+
+    expect(() =>
+      applyTaskFact(
+        { ...reviewed, review: { ...reviewed.review!, verdict: "changes_requested" } },
+        {
+          type: "waiting",
+          waiting: { reason: "delivery_reconciliation", resumeState: "reviewed", activation: 1 },
+        },
+      ),
+    ).toThrow("waiting activation is stale");
+  });
+
   test("applies legal facts and rejects stale fences without persistence", () => {
     const admitted: TaskResult = {
       schemaVersion: 4,
