@@ -1424,7 +1424,7 @@ describe("profile evaluate plan boundary", () => {
       registerRepository: async (_url: string, registration: { implementerProfile: string }) => {
         registrations.push(registration.implementerProfile);
         if (registration.implementerProfile !== "prior-profile")
-          throw new Error("cannot switch repository profiles while a Task is active");
+          throw new Error("cannot change repository capability policy while a Task is active");
         return {
           id: "evaluation",
           revision: registrations.length,
@@ -1441,7 +1441,7 @@ describe("profile evaluate plan boundary", () => {
     };
     await expect(
       executeProfileEvaluation(loaded, "http://server.test", undefined, services),
-    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+    ).rejects.toThrow("cannot change repository capability policy while a Task is active");
     expect(registrations).toEqual(["baseline-profile", "prior-profile"]);
   });
 
@@ -1753,7 +1753,7 @@ describe("profile evaluate plan boundary", () => {
         } catch (error) {
           guardRejected =
             error instanceof Error &&
-            error.message === "cannot switch repository profiles while a Task is active";
+            error.message === "cannot change repository capability policy while a Task is active";
         }
         await new Promise<void>((complete) => setTimeout(complete, 25));
         return authority.block(

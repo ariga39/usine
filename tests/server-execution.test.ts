@@ -22,6 +22,7 @@ import {
   openServerEventListener,
   taskEvents,
   taskStatus,
+  registerRepository as registerServerRepository,
   type TaskSubmission,
 } from "../apps/cli/src/server-client.js";
 import {
@@ -48,6 +49,7 @@ async function fixture(): Promise<{
   submission: TaskSubmission;
   stateDirectory: string;
   repositoryName: string;
+  repositoryPath: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "usine-server-execution-"));
   const repository = join(root, "repository");
@@ -94,6 +96,7 @@ async function fixture(): Promise<{
     implementerProfile: "writer-profile",
     reviewerProfile: "reviewer-profile",
     forgeProfile: "default",
+    githubReadProfile: "read-only",
     projectCheck: { command: "true", timeoutMs: 1_000 },
     gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
   };
@@ -102,6 +105,7 @@ async function fixture(): Promise<{
     contractPath,
     stateDirectory,
     repositoryName: taskId,
+    repositoryPath: repository,
     submission: {
       contractPath,
       repositoryId: taskId,
@@ -117,6 +121,18 @@ function environment(stateDirectory: string, repositoryName: string): NodeJS.Pro
     USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
     USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${repositoryName}`,
     USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: forgeSecretKeyPath,
+    USINE_GITHUB_READ_PROFILE_READ_ONLY_APP_SLUG: "read-test-app",
+    USINE_GITHUB_READ_PROFILE_READ_ONLY_TEST_TOKEN: "read-secret-token-181",
+    USINE_GITHUB_READ_PROFILE_READ_ONLY_API_URL: "http://127.0.0.1:9",
+    USINE_GITHUB_READ_PROFILE_READ_ONLY_REPOSITORY: `example/${repositoryName}`,
+    USINE_FORGE_PROFILE_SUBSTITUTED_APP_SLUG: "substituted-app",
+    USINE_FORGE_PROFILE_SUBSTITUTED_TEST_TOKEN: "substituted-secret-token-181",
+    USINE_FORGE_PROFILE_SUBSTITUTED_API_URL: "http://127.0.0.1:9",
+    USINE_FORGE_PROFILE_SUBSTITUTED_REPOSITORY: `example/${repositoryName}`,
+    USINE_GITHUB_READ_PROFILE_SUBSTITUTED_READ_APP_SLUG: "substituted-read-app",
+    USINE_GITHUB_READ_PROFILE_SUBSTITUTED_READ_TEST_TOKEN: "substituted-read-secret-token-181",
+    USINE_GITHUB_READ_PROFILE_SUBSTITUTED_READ_API_URL: "http://127.0.0.1:9",
+    USINE_GITHUB_READ_PROFILE_SUBSTITUTED_READ_REPOSITORY: `example/${repositoryName}`,
   };
 }
 
@@ -836,6 +852,87 @@ describe("server-owned execution", () => {
       await second.close();
     }
     expect(cleanupCalls.owned).toBeGreaterThan(0);
+  });
+
+  test("restarts an admitted task with its original Forge and GitHub read policy", async () => {
+    const { submission, stateDirectory, repositoryName, repositoryPath } = await fixture();
+    const firstStarted = deferred<void>();
+    const first = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ result, signal }) => {
+        firstStarted.resolve();
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        return result;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const admitted = await submitTask(first.url, submission);
+    await firstStarted.promise;
+
+    await expect(
+      registerServerRepository(first.url, {
+        id: admitted.repository!.id,
+        path: repositoryPath,
+        owner: "example",
+        name: repositoryName,
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "substituted",
+        githubReadProfile: "substituted-read",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+      }),
+    ).rejects.toThrow("server request failed");
+
+    await first.close();
+
+    const seen: Array<{
+      implementer: string;
+      reviewer: string;
+      forge: string;
+      githubRead: string | undefined;
+    }> = [];
+    const second = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, policy }) => {
+        seen.push({
+          implementer: policy.roles.implementer.profile,
+          reviewer: policy.roles.reviewer.profile,
+          forge: policy.forge.appSlug,
+          githubRead: policy.githubRead?.policy.appSlug,
+        });
+        const reservation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        return authority.block(
+          { taskId: result.taskId, revision: reservation.result.revision },
+          "policy identity recovery complete",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await waitFor(
+        () => taskStatus(second.url, admitted.taskId),
+        (result) => result.state === "blocked",
+      );
+      expect(seen).toEqual([
+        {
+          implementer: "writer-profile",
+          reviewer: "reviewer-profile",
+          forge: "test-app",
+          githubRead: "read-test-app",
+        },
+      ]);
+    } finally {
+      await second.close();
+    }
   });
 
   test("isolates corrupt restart rows and completes recovery before readiness", async () => {

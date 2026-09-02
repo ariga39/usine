@@ -48,6 +48,20 @@ type AuthorityDatabase = RuntimeDatabase;
 const MAX_EVENT_LIMIT = 200;
 const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
 
+function repositoryPolicySelectionChanged(
+  existing: typeof repositories.$inferSelect,
+  input: RepositoryRegistration,
+): boolean {
+  return (
+    existing.owner !== input.owner ||
+    existing.name !== input.name ||
+    existing.implementerProfile !== input.implementerProfile ||
+    existing.reviewerProfile !== input.reviewerProfile ||
+    existing.forgeProfile !== input.forgeProfile ||
+    existing.githubReadProfile !== (input.githubReadProfile ?? null)
+  );
+}
+
 export interface TaskAuthorityOptions {
   onEvent?: (event: TaskEvent) => void;
 }
@@ -112,12 +126,8 @@ export class TaskAuthority {
           const lease = await database.query.repositoryLeases.findFirst({
             where: eq(repositoryLeases.repositoryIdentity, repositoryIdentity),
           });
-          if (
-            lease &&
-            (existing.implementerProfile !== input.implementerProfile ||
-              existing.reviewerProfile !== input.reviewerProfile)
-          )
-            throw new Error("cannot switch repository profiles while a Task is active");
+          if (lease && repositoryPolicySelectionChanged(existing, input))
+            throw new Error("cannot change repository capability policy while a Task is active");
         }
         await database
           .update(repositories)
