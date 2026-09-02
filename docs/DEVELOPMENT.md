@@ -1,6 +1,6 @@
 ---
 status: current
-updated: 2026-08-24
+updated: 2026-09-02
 issue: https://github.com/ariga39/usine/issues/267
 ---
 
@@ -96,6 +96,8 @@ Before writing a scheduler, queue, retry system, migration layer, ORM, GitHub au
 4. write only Usine-specific policy.
 
 If custom infrastructure remains necessary, record the evaluated primitive, its concrete gap, and the deletion boundary of the custom code. Future flexibility alone is not evidence. A module earns its boundary by hiding complexity, stabilizing callers, or enabling genuinely independent work—not by increasing package count.
+
+A new direct dependency is a repository decision: name its current caller and why an existing platform or selected dependency cannot own the behavior. Ordinary dependency resolution and updates observe the seven-day pnpm cooldown.
 
 The current product package map and dependency direction are defined in [DESIGN](DESIGN.md#5-behavioral-packages-and-composition). Use [codebase-design](../.agents/skills/codebase-design/SKILL.md) before changing those boundaries and [find-simplifications](../.agents/skills/find-simplifications/SKILL.md) when a touched seam exposes removable machinery.
 

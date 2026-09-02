@@ -2,6 +2,10 @@ allowBuilds:
   esbuild: true
   msgpackr-extract: false
 
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - "@opencode-ai/sdk@1.18.25"
+
 packages:
   - packages/candidate-workspace
   - packages/coding-session
