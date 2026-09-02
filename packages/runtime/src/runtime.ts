@@ -68,15 +68,12 @@ export class TaskContractInputError extends Error {
   }
 }
 
-export async function readTaskContract(
-  contractPath: string,
-): Promise<{ readonly rawContract: string; readonly contract: TaskContract }> {
-  const rawContract = await readBoundedTaskContractFile(contractPath);
+export function parseTaskContract(rawContract: string): TaskContract {
   let input: unknown;
   try {
     input = JSON.parse(rawContract);
   } catch {
-    throw new TaskContractInputError("task contract must be valid JSON", [
+    throw new TaskContractInputError("task contract must be JSON", [
       { path: "", message: "contract input is unreadable or invalid JSON" },
     ]);
   }
@@ -85,7 +82,14 @@ export async function readTaskContract(
     const issues = contractIssues(parsed.error);
     throw new TaskContractInputError(`invalid task contract: ${JSON.stringify(issues)}`, issues);
   }
-  return { rawContract, contract: parsed.data };
+  return parsed.data;
+}
+
+export async function readTaskContract(
+  contractPath: string,
+): Promise<{ readonly rawContract: string; readonly contract: TaskContract }> {
+  const rawContract = await readBoundedTaskContractFile(contractPath);
+  return { rawContract, contract: parseTaskContract(rawContract) };
 }
 
 async function readBoundedTaskContractFile(contractPath: string): Promise<string> {

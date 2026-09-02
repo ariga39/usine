@@ -71,9 +71,19 @@ describe("CLI/server boundary", () => {
     await execa("git", ["commit", "-m", "authorize bounded contract"], { cwd: repositoryPath });
 
     const oversizedPath = join(repositoryPath, "oversized.json");
-    await writeFile(oversizedPath, Buffer.alloc(maxContractBytes + 1, 0x20));
+    const oversizedPadding = maxContractBytes + 1 - Buffer.byteLength(contractJson);
+    await writeFile(oversizedPath, contractJson + " ".repeat(oversizedPadding));
     const nonRegularPath = join(repositoryPath, "contract-directory");
     await mkdir(nonRegularPath);
+    await writeFile(join(nonRegularPath, "marker"), "directory source\n");
+    expect((await stat(oversizedPath)).size).toBe(maxContractBytes + 1);
+    await execa("git", ["add", "oversized.json", "contract-directory/marker"], {
+      cwd: repositoryPath,
+    });
+    await execa("git", ["commit", "-m", "authorize oversized contract fixture"], {
+      cwd: repositoryPath,
+    });
+    expect(await git(repositoryPath, "status", "--porcelain")).toBe("");
     let executionCalls = 0;
     const server = await startUsineServer({
       environment: {
@@ -106,14 +116,17 @@ describe("CLI/server boundary", () => {
         gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
       });
 
-      for (const rejectedPath of [oversizedPath, nonRegularPath]) {
+      for (const [rejectedPath, message] of [
+        [oversizedPath, `task contract exceeds the ${maxContractBytes}-byte limit`],
+        [nonRegularPath, "task contract must be a regular file"],
+      ] as const) {
         const response = await fetch(new URL("/v1/tasks", server.url), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ contractPath: rejectedPath }),
         });
         expect(response.status).toBe(400);
-        expect(await response.json()).toMatchObject({ code: "validation" });
+        expect(await response.json()).toEqual({ code: "validation", message });
       }
       expect(await listTasks(server.url)).toEqual({ tasks: [] });
       expect(executionCalls).toBe(0);
