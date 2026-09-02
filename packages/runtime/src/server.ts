@@ -502,7 +502,7 @@ function createApiLayer(options: {
               throw new ServerValidationError(error.message);
             throw error;
           }
-          const { rawContract, contract } = contractInput;
+          const { contract } = contractInput;
           if (submission.repositoryId && submission.repositoryId !== contract.repositoryId)
             throw new ServerValidationError(
               "submitted repository ID does not match the task contract",
@@ -511,16 +511,16 @@ function createApiLayer(options: {
           if (!repository)
             throw new ServerNotFoundError(`repository is not registered: ${contract.repositoryId}`);
           const policy = runtimePolicyFromEnvironment(options.environment, repository);
-          const result = await admitTask(
+          const admitted = await admitTask(
             submission.contractPath,
-            rawContract,
             contract,
             policy,
             options.activeTaskCapacity,
             options.onEvent,
           );
+          const { result, input, contract: admittedContract } = admitted;
           if (!isTerminalState(result.state) && result.state !== "waiting")
-            options.launch({ input: { ...submission, rawContract }, contract, result });
+            options.launch({ input, contract: admittedContract, result });
           return taskResourceForApi(result);
         }),
       retry: ({ params }) =>

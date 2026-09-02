@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { MAX_TASK_CONTRACT_BYTES, startUsineServer } from "@usine/runtime";
+import { MAX_TASK_CONTRACT_BYTES, lookupTaskExecution, startUsineServer } from "@usine/runtime";
 import {
   applyMigrations,
+  hashTaskContract,
   openSqliteDatabase,
   TaskAuthority,
   type RepositorySnapshot,
@@ -26,6 +27,164 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("CLI/server boundary", () => {
+  test("admits and re-enters only the committed contract bytes across a working-tree race", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-server-committed-contract-race-"));
+    const repositoryPath = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const gitBin = join(root, "bin");
+    const contractPath = join(repositoryPath, "task.json");
+    const switchMarker = join(root, "working-tree-switched");
+    await mkdir(repositoryPath);
+    await mkdir(gitBin);
+    await execa("git", ["init", "--initial-branch=main"], { cwd: repositoryPath });
+    await execa("git", ["config", "user.name", "Test"], { cwd: repositoryPath });
+    await execa("git", ["config", "user.email", "test@example.invalid"], {
+      cwd: repositoryPath,
+    });
+    await writeFile(join(repositoryPath, "README.md"), "committed contract race\n");
+    await execa("git", ["add", "."], { cwd: repositoryPath });
+    await execa("git", ["commit", "-m", "base"], { cwd: repositoryPath });
+    const baseSha = await git(repositoryPath, "rev-parse", "HEAD");
+    const taskId = "committed-contract-race";
+    const committedContract: TaskContract = {
+      id: taskId,
+      repositoryId: taskId,
+      baseSha,
+      instructions: "Use the committed contract input.",
+      acceptance: ["The committed bytes are the admitted bytes."],
+      nonGoals: [],
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+      authorization: {
+        source: "https://github.com/example/committed-contract-race/issues/332",
+        delivery: true,
+      },
+      delivery: {
+        branch: "agent/committed-contract-race",
+        issue: 332,
+        title: "Committed contract bytes",
+        body: "Committed contract bytes",
+      },
+    };
+    const committedRawContract = JSON.stringify(committedContract);
+    await writeFile(contractPath, committedRawContract);
+    await execa("git", ["add", "task.json"], { cwd: repositoryPath });
+    await execa("git", ["commit", "-m", "authorize task"], { cwd: repositoryPath });
+
+    const workingTreeContract = {
+      ...committedContract,
+      instructions: "Working-tree bytes must not become the admitted input.",
+      budget: { ...committedContract.budget, maxElapsedMs: 1 },
+    } satisfies TaskContract;
+    const workingTreeRawContract = JSON.stringify(workingTreeContract);
+    await writeFile(contractPath, workingTreeRawContract);
+    const realGit = await execa("which", ["git"]);
+    const wrapperPath = join(gitBin, "git");
+    await writeFile(
+      wrapperPath,
+      `#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args.includes("ls-files") && !existsSync(${JSON.stringify(switchMarker)})) {
+  writeFileSync(${JSON.stringify(contractPath)}, ${JSON.stringify(committedRawContract)});
+  writeFileSync(${JSON.stringify(switchMarker)}, "switched");
+}
+const result = spawnSync(${JSON.stringify(realGit.stdout.trim())}, args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+      { mode: 0o755 },
+    );
+
+    const repository: RepositorySnapshot = {
+      id: taskId,
+      path: await realpath(repositoryPath),
+      owner: "example",
+      name: "committed-contract-race",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    };
+    const environment: NodeJS.ProcessEnv = {
+      PATH: `${gitBin}:${process.env.PATH ?? ""}`,
+      USINE_STATE_DIR: stateDirectory,
+      USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "committed-contract-app",
+      USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "committed-contract-token",
+      USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:1",
+      USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: "example/committed-contract-race",
+    };
+
+    const launched: Array<{ rawContract: string; instructions: string }> = [];
+    const server = await startUsineServer({
+      environment,
+      execute: async ({ input, contract, result }) => {
+        launched.push({ rawContract: input.rawContract, instructions: contract.instructions });
+        return result;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+
+    try {
+      await registerRepository(server.url, repository);
+      const admitted = await submitTask(server.url, { contractPath, repositoryId: taskId });
+      for (let attempt = 0; attempt < 100 && launched.length < 1; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(admitted).toMatchObject({
+        taskId,
+        contractHash: hashTaskContract(committedRawContract),
+        state: "admitted",
+      });
+      expect(launched).toEqual([
+        { rawContract: committedRawContract, instructions: committedContract.instructions },
+      ]);
+      await expect(lookupTaskExecution(stateDirectory, taskId)).resolves.toMatchObject({
+        input: { contractPath, rawContract: committedRawContract },
+      });
+      await expect(
+        submitTask(server.url, { contractPath, repositoryId: taskId }),
+      ).resolves.toMatchObject({
+        taskId,
+        contractHash: hashTaskContract(committedRawContract),
+        state: "admitted",
+      });
+      for (let attempt = 0; attempt < 100 && launched.length < 2; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(launched.every((launch) => launch.rawContract === committedRawContract)).toBe(true);
+
+      await server.close();
+      await writeFile(contractPath, workingTreeRawContract);
+      const restartedLaunches: typeof launched = [];
+      const restarted = await startUsineServer({
+        environment,
+        execute: async ({ input, contract, result }) => {
+          restartedLaunches.push({
+            rawContract: input.rawContract,
+            instructions: contract.instructions,
+          });
+          return result;
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        for (let attempt = 0; attempt < 100 && restartedLaunches.length < 1; attempt += 1)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(restartedLaunches).toEqual([
+          { rawContract: committedRawContract, instructions: committedContract.instructions },
+        ]);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      // The restart path closes the first server before it is re-entered.
+      await server.close().catch(() => undefined);
+    }
+  }, 30_000);
+
   test("bounds Task Contract ingestion before admission and accepts the exact bound", async () => {
     const maxContractBytes = MAX_TASK_CONTRACT_BYTES;
     const root = await mkdtemp(join(tmpdir(), "usine-server-contract-boundary-"));

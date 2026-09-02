@@ -44,7 +44,7 @@ import {
   type GithubReadRole,
 } from "@usine/forge-delivery";
 import { QualityGate, type ReviewAttemptObservation } from "@usine/quality-gate";
-import { verifyCommittedContract } from "./verify-committed-contract.js";
+import { readCommittedContract, verifyCommittedContract } from "./verify-committed-contract.js";
 import {
   sessionArchiveOptionsFromEnvironment,
   stateDirectoryFromEnvironment,
@@ -55,6 +55,9 @@ import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./priva
 
 /** Maximum UTF-8 bytes read from one submitted Task Contract file. */
 export const MAX_TASK_CONTRACT_BYTES = 1_048_576;
+
+/** Host-owned deadline for resolving one committed Task Contract object. */
+const TASK_CONTRACT_INGESTION_TIMEOUT_MS = 30_000;
 
 export class TaskContractInputError extends Error {
   readonly code = "validation";
@@ -475,32 +478,44 @@ export async function recordRecoveryObservation(
 
 export async function admitTask(
   contractPath: string,
-  rawContract: string,
-  contract: TaskContract,
+  provisionalContract: TaskContract,
   suppliedPolicy: RuntimePolicy,
   activeTaskCapacity?: number,
   onEvent?: (event: TaskEvent) => void,
-): Promise<TaskResult> {
+): Promise<{ result: TaskResult; input: TaskExecutionInput; contract: TaskContract }> {
   const policy = suppliedPolicy;
   const stateDirectory = policy.stateDirectory;
   await mkdir(stateDirectory, { recursive: true });
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   await applyMigrations(databasePath);
-  const contractHash = hashTaskContract(rawContract);
   const handle = openSqliteDatabase(databasePath);
   const database = handle.database;
   const authority = new TaskAuthority(database, { onEvent });
   try {
-    const existing = await authority.lookupExisting(contract.id, contractHash);
-    const registeredRepository = await authority.lookupRepository(contract.repositoryId);
-    const repository = existing?.repository ?? registeredRepository;
-    if (!repository) throw new Error(`repository is not registered: ${contract.repositoryId}`);
+    const registeredRepository = await authority.lookupRepository(provisionalContract.repositoryId);
     if (!registeredRepository)
-      throw new Error(`repository is not registered: ${contract.repositoryId}`);
+      throw new Error(`repository is not registered: ${provisionalContract.repositoryId}`);
+    const readDeadlineEpochMs = Date.now() + TASK_CONTRACT_INGESTION_TIMEOUT_MS;
+    const committed = await readCommittedContract(
+      contractPath,
+      registeredRepository.path,
+      readDeadlineEpochMs,
+      policy.credentialFreeGitEnvironment,
+      MAX_TASK_CONTRACT_BYTES,
+    );
+    const contract = parseTaskContract(committed.rawContract);
+    if (contract.repositoryId !== provisionalContract.repositoryId)
+      throw new Error(
+        "committed task contract repository ID does not match the submitted contract",
+      );
+    const contractHash = hashTaskContract(committed.rawContract);
+    const existing = await authority.lookupExisting(contract.id, contractHash);
+    const repository = existing?.repository ?? registeredRepository;
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
     const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
-    if (existing && isTerminalState(existing.state)) return existing;
+    const input = { contractPath, rawContract: committed.rawContract };
+    if (existing && isTerminalState(existing.state)) return { result: existing, input, contract };
     const blockExpiredExisting = async (): Promise<TaskResult> => {
       if (!existing) throw new Error("cannot expire a task before admission");
       const blocked = await authority.block(
@@ -509,17 +524,18 @@ export async function admitTask(
       );
       return blocked;
     };
-    if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
+    if (existing && deadlineExpired(deadlineEpochMs))
+      return { result: await blockExpiredExisting(), input, contract };
     try {
       await verifyCommittedContract(
-        contractPath,
-        repository.path,
+        committed,
         resolvedContract,
         deadlineEpochMs,
         policy.credentialFreeGitEnvironment,
       );
     } catch (error) {
-      if (existing && deadlineExpired(deadlineEpochMs)) return await blockExpiredExisting();
+      if (existing && deadlineExpired(deadlineEpochMs))
+        return { result: await blockExpiredExisting(), input, contract };
       throw error;
     }
     // Admission is the single source of the first deadline.  On recovery this
@@ -534,7 +550,7 @@ export async function admitTask(
         repositoryIdentity: writerIdentity,
         deadlineEpochMs,
       },
-      { contractPath, rawContract },
+      input,
       activeTaskCapacity,
     );
     if (deadlineExpired(admitted.deadlineEpochMs)) {
@@ -542,9 +558,9 @@ export async function admitTask(
         { taskId: admitted.taskId, revision: admitted.revision },
         "elapsed budget exhausted",
       );
-      return blocked;
+      return { result: blocked, input, contract };
     }
-    return admitted;
+    return { result: admitted, input, contract };
   } finally {
     handle.close();
   }
@@ -575,9 +591,17 @@ export async function executeAdmittedTask(
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
     const resolvedContract = resolveTaskContract(contract, existing.repository);
     const forgePolicy = policy.forge;
-    await verifyCommittedContract(
+    const committed = await readCommittedContract(
       input.contractPath,
       existing.repository.path,
+      existing.deadlineEpochMs,
+      policy.credentialFreeGitEnvironment,
+      MAX_TASK_CONTRACT_BYTES,
+    );
+    if (committed.rawContract !== input.rawContract)
+      throw new Error("persisted task contract bytes do not match the committed contract");
+    await verifyCommittedContract(
+      committed,
       resolvedContract,
       existing.deadlineEpochMs,
       policy.credentialFreeGitEnvironment,
