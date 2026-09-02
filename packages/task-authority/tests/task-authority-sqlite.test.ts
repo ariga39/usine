@@ -189,7 +189,7 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
-  test("rejects Repository profile switches while its writer lease is active", async () => {
+  test("rejects Repository capability-policy changes while its writer lease is active", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
     const registration = {
@@ -201,7 +201,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       implementerProfile: "baseline-profile",
       reviewerProfile: "reviewer-profile",
       forgeProfile: "forge-profile",
-      githubReadProfile: null,
+      githubReadProfile: "read-profile",
       projectCheck: { command: "true", timeoutMs: 1_000 },
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     };
@@ -214,15 +214,60 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       deadlineEpochMs: Date.now() + 30_000,
     });
 
-    await expect(
-      authority.registerRepository({ ...registration, implementerProfile: "candidate-profile" }),
-    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
-    await expect(
-      authority.registerRepository({ ...registration, reviewerProfile: "other-reviewer" }),
-    ).rejects.toThrow("cannot switch repository profiles while a Task is active");
+    for (const changed of [
+      { owner: "other-owner" },
+      { name: "other-name" },
+      { implementerProfile: "candidate-profile" },
+      { reviewerProfile: "other-reviewer" },
+      { forgeProfile: "other-forge" },
+      { githubReadProfile: "other-read" },
+    ]) {
+      await expect(authority.registerRepository({ ...registration, ...changed })).rejects.toThrow(
+        "cannot change repository capability policy while a Task is active",
+      );
+    }
   });
 
-  test("allows unrelated registration updates and profile switches after terminal lease release", async () => {
+  test("normalizes omitted and null GitHub read profiles during an active lease", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const registration = {
+      id: "read-profile-normalization",
+      path: "/repositories/read-profile-normalization",
+      owner: "example",
+      name: "read-profile-normalization",
+      baseBranch: "main",
+      implementerProfile: "baseline-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "forge-profile",
+      githubReadProfile: null,
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    };
+    await expect(authority.registerRepository(registration)).resolves.toMatchObject({
+      githubReadProfile: null,
+    });
+    const admitted = await authority.admit({
+      contract: {
+        ...makeContract("read-profile-normalization-task"),
+        repositoryId: registration.id,
+      },
+      contractHash: "read-profile-normalization-hash",
+      repositoryIdentity: "example/read-profile-normalization",
+      repository: { ...registration, githubReadProfile: null },
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    await expect(
+      authority.registerRepository({ ...registration, githubReadProfile: null }),
+    ).resolves.toMatchObject({ githubReadProfile: null });
+    await expect(
+      authority.registerRepository({ ...registration, githubReadProfile: undefined }),
+    ).resolves.toMatchObject({ githubReadProfile: null });
+    expect(admitted.repository).not.toHaveProperty("githubReadProfile");
+  });
+
+  test("allows unrelated updates while active and capability-policy changes after lease release", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
     const registration = {
@@ -234,7 +279,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       implementerProfile: "baseline-profile",
       reviewerProfile: "reviewer-profile",
       forgeProfile: "forge-profile",
-      githubReadProfile: null,
+      githubReadProfile: "read-profile",
       projectCheck: { command: "true", timeoutMs: 1_000 },
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     };
@@ -262,12 +307,20 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     await expect(
       authority.registerRepository({
         ...registration,
+        owner: "other-owner",
+        name: "other-name",
         implementerProfile: "candidate-profile",
         reviewerProfile: "other-reviewer",
+        forgeProfile: "other-forge",
+        githubReadProfile: "other-read",
       }),
     ).resolves.toMatchObject({
       implementerProfile: "candidate-profile",
       reviewerProfile: "other-reviewer",
+      forgeProfile: "other-forge",
+      githubReadProfile: "other-read",
+      owner: "other-owner",
+      name: "other-name",
     });
   });
 
