@@ -3177,7 +3177,12 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
-      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
+      },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       {
@@ -3186,7 +3191,12 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
-      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
+      },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       {
@@ -3195,7 +3205,12 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
-      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
+      },
     ]);
     const archives = await listSessionArchives(stateDirectory, contract.id);
     expect(archives).toHaveLength(3);
