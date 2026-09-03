@@ -141,7 +141,8 @@ async function fakeAppServerEnvironment(
     | "thread-failure"
     | "schema-invalid"
     | "stderr"
-    | "wait" = "success",
+    | "wait"
+    | "descendant-stdio" = "success",
   expectedMcpConfig: unknown = null,
   expectedModel = "fixture-model",
   expectedReasoning = "minimal",
@@ -151,6 +152,7 @@ async function fakeAppServerEnvironment(
   stateDirectory: string;
   protocolLogPath: string;
   pidPath: string;
+  descendantPidPath: string;
   runtimePath: string;
   close: () => Promise<void>;
 }> {
@@ -163,6 +165,7 @@ async function fakeAppServerEnvironment(
   await mkdir(codexHome, { recursive: true });
   const protocolLogPath = join(codexHome, "protocol.log");
   const pidPath = join(codexHome, "app-server.pid");
+  const descendantPidPath = join(codexHome, "descendant.pid");
   const runtimePath = resolve(tmpdir(), "usine-app-server-runtime-path");
   await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
   await writeFile(protocolLogPath, "");
@@ -175,6 +178,7 @@ async function fakeAppServerEnvironment(
     executable,
     `#!/usr/bin/env node
 const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
 const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
 const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
 const expectedModel = ${JSON.stringify(expectedModel)};
@@ -189,6 +193,12 @@ if (process.env.USINE_CODING_SESSION_IDENTITY_PATH || process.env.USINE_CODING_S
   process.exit(4);
 }
 writeFileSync(process.env.CODEX_HOME + "/app-server.pid", String(process.pid));
+if (mode === "descendant-stdio") {
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], {
+    stdio: "inherit",
+  });
+  writeFileSync(process.env.CODEX_HOME + "/descendant.pid", String(descendant.pid));
+}
 if (mode === "stderr") {
   process.stderr.write("profile configuration failed secret=should-not-escape\\n");
   process.exit(1);
@@ -258,6 +268,7 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   record("transport-release");
+  if (mode === "descendant-stdio") record("direct-exit");
   process.exit(0);
 });
 process.stdin.resume();
@@ -274,6 +285,7 @@ setInterval(() => undefined, 1_000);
     stateDirectory,
     protocolLogPath,
     pidPath,
+    descendantPidPath,
     runtimePath,
     close: async () => undefined,
   };
@@ -1237,6 +1249,53 @@ describe("Coding Session", () => {
     await expectAppServerChildSettled(fixture);
   });
 
+  test("settles an app-server child after exit while a descendant holds inherited stdio", async () => {
+    const fixture = await fakeAppServerEnvironment("descendant-stdio");
+    try {
+      const session = new CodexCodingSession(undefined, {
+        environment: fixture.environment,
+        executionStateDirectory: fixture.stateDirectory,
+        adapterSelectionEnvironment: {
+          USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+        },
+      });
+      const startedAt = Date.now();
+      const observation = await session.run({
+        role: "reviewer",
+        workspace: join(fixture.stateDirectory, "reviewer"),
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        execution: reviewerExecution,
+      });
+      expect(Date.now() - startedAt).toBeLessThan(2_500);
+      expect(observation).toMatchObject({
+        status: "completed",
+        output: { verdict: "approved", summary: "app-server" },
+      });
+      expect((await readFile(fixture.protocolLogPath, "utf8")).trim().split("\n")).toContain(
+        "direct-exit",
+      );
+      const descendantPid = Number(await readFile(fixture.descendantPidPath, "utf8"));
+      expect(Number.isInteger(descendantPid)).toBe(true);
+      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+      await expectAppServerChildSettled(fixture);
+      await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
+        [],
+      );
+    } finally {
+      try {
+        const descendantPid = Number(await readFile(fixture.descendantPidPath, "utf8"));
+        if (Number.isInteger(descendantPid)) process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The descendant may not have started or may already have exited.
+      }
+    }
+  });
+
   test("applies the shared schema-invalid terminal output behavior to app-server", async () => {
     const fixture = await fakeAppServerEnvironment("schema-invalid");
     const session = new CodexCodingSession(undefined, {
@@ -1416,6 +1475,7 @@ describe("Coding Session", () => {
     ).resolves.toMatchObject({
       completeness: "partial",
     });
+    await expectAppServerChildSettled(fixture);
   });
 
   test("fails closed on an app-server identity mismatch and does not retry", async () => {

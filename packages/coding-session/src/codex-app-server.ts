@@ -197,18 +197,20 @@ class AppServerClient {
   ) {
     this.lines = createInterface({ input: child.stdout });
     this.lines.on("line", (line) => this.enqueue({ type: "line", line }));
-    child.once("error", () =>
-      this.enqueue({
-        type: "failure",
-        error: classifiedFailure("app-server process failed", this.stderrClassification()),
-      }),
-    );
-    child.once("close", () =>
-      this.enqueue({
-        type: "failure",
-        error: classifiedFailure("app-server transport closed", this.stderrClassification()),
-      }),
-    );
+    child.once("error", () => {
+      if (!this.closed)
+        this.enqueue({
+          type: "failure",
+          error: classifiedFailure("app-server process failed", this.stderrClassification()),
+        });
+    });
+    child.once("close", () => {
+      if (!this.closed)
+        this.enqueue({
+          type: "failure",
+          error: classifiedFailure("app-server transport closed", this.stderrClassification()),
+        });
+    });
     child.stdin.on("error", () => {
       if (!this.closed)
         this.enqueue({
@@ -280,7 +282,16 @@ async function runCodexAppServer({
   } catch (error) {
     throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
   }
-  const childClosed = new Promise<void>((resolve) => child.once("close", resolve));
+  const childSettled = new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    child.once("exit", settle);
+    child.once("close", settle);
+  });
   const stderr = new BoundedStderrClassifier();
   child.stderr.on("data", (chunk) => stderr.observe(chunk));
   child.stderr.resume();
@@ -555,37 +566,37 @@ async function runCodexAppServer({
         safeAppServerFailure(error, classification, failureClass),
       );
     })
-    .finally(() => settleChild(child, childClosed));
+    .finally(() => settleChild(child, childSettled));
   return result;
 }
 
 async function settleChild(
   child: ChildProcessWithoutNullStreams,
-  childClosed: Promise<void>,
+  childSettled: Promise<void>,
 ): Promise<void> {
-  if (await waitForChildClose(childClosed, 0)) return;
+  if (await waitForChildSettlement(childSettled, 0)) return;
   try {
     child.stdin.end();
   } catch {
     // The child may already have closed its transport.
   }
-  if (await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)) return;
+  if (await waitForChildSettlement(childSettled, CHILD_CLOSE_WAIT_MS)) return;
   try {
     child.kill("SIGTERM");
   } catch {
     // The close event or an earlier termination may have won the race.
   }
-  if (await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)) return;
+  if (await waitForChildSettlement(childSettled, CHILD_CLOSE_WAIT_MS)) return;
   try {
     child.kill("SIGKILL");
   } catch {
     // The process may have exited between the bounded waits.
   }
-  if (!(await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)))
+  if (!(await waitForChildSettlement(childSettled, CHILD_CLOSE_WAIT_MS)))
     throw new Error("app-server child did not settle after SIGKILL");
 }
 
-function waitForChildClose(childClosed: Promise<void>, timeoutMs: number): Promise<boolean> {
+function waitForChildSettlement(childSettled: Promise<void>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -596,7 +607,7 @@ function waitForChildClose(childClosed: Promise<void>, timeoutMs: number): Promi
       resolve(closed);
     };
     timer = setTimeout(() => finish(false), timeoutMs);
-    void childClosed.then(() => finish(true));
+    void childSettled.then(() => finish(true));
   });
 }
 
