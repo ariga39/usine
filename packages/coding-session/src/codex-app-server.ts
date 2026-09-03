@@ -2,7 +2,6 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Deferred, Effect, Queue } from "effect";
 import { codexAdapterConfig, type CodexNativeConfig } from "./codex-adapter-config.js";
-import { createCodexLauncher } from "./codex-execution.js";
 import {
   classifyAdapterFailure,
   CodingSessionInterruption,
@@ -29,26 +28,23 @@ interface AppServerRunResult {
 
 type AppServerRunOptions = Omit<
   CodingSessionAdapterRequest,
-  "executionStateDirectory" | "onUsage" | "profile" | "mcpServer"
+  "execution" | "executionStateDirectory" | "onUsage" | "profile" | "mcpServer"
 > & {
-  executionStateDirectory: string;
   config: CodexNativeConfig;
   onUsage?: (observation: ProviderNeutralUsageObservation) => Promise<void> | void;
 };
+
+const CHILD_CLOSE_WAIT_MS = 1_000;
 
 /** The bounded local App Server lifecycle, peer to the official SDK adapter. */
 export class CodexAppServerAdapter implements CodingSessionAdapter {
   readonly name = "app-server" as const;
 
   async run(context: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult> {
-    const executionStateDirectory = context.executionStateDirectory;
-    if (!executionStateDirectory)
-      throw new Error("app-server execution state directory is unavailable");
-    const { onUsage, ...adapterContext } = context;
+    const { mcpServer, onUsage, profile, ...adapterContext } = context;
     return runCodexAppServer({
       ...adapterContext,
-      executionStateDirectory,
-      config: codexAdapterConfig(context.profile, context.mcpServer),
+      config: codexAdapterConfig(profile, mcpServer),
       onUsage,
     });
   }
@@ -213,6 +209,16 @@ class AppServerClient {
         error: classifiedFailure("app-server transport closed", this.stderrClassification()),
       }),
     );
+    child.stdin.on("error", () => {
+      if (!this.closed)
+        this.enqueue({
+          type: "failure",
+          error: classifiedFailure(
+            "app-server transport write failed",
+            this.stderrClassification(),
+          ),
+        });
+    });
   }
 
   request(method: string, params: unknown): JsonRpcId {
@@ -257,8 +263,6 @@ async function runCodexAppServer({
   config,
   outputSchema,
   environment,
-  executionStateDirectory,
-  execution,
   signal,
   onObservation,
   onItemCompleted,
@@ -266,22 +270,17 @@ async function runCodexAppServer({
   onPhase,
   onUsage,
 }: AppServerRunOptions): Promise<AppServerRunResult> {
-  let launcher: Awaited<ReturnType<typeof createCodexLauncher>>;
   let child: ChildProcessWithoutNullStreams;
   try {
-    launcher = await createCodexLauncher(executionStateDirectory, workspace, execution);
-    child = spawn(launcher.launcherPath, ["app-server", "--stdio"], {
+    child = spawn("codex", ["app-server", "--stdio"], {
       cwd: workspace,
-      env: {
-        ...environment,
-        USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODING_SESSION_WORKSPACE: workspace,
-      },
+      env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {
     throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
   }
+  const childClosed = new Promise<void>((resolve) => child.once("close", resolve));
   const stderr = new BoundedStderrClassifier();
   child.stderr.on("data", (chunk) => stderr.observe(chunk));
   child.stderr.resume();
@@ -321,7 +320,17 @@ async function runCodexAppServer({
                 },
               ),
           ),
-          (clientTransport) => Effect.sync(() => clientTransport.closeTransport()),
+          (clientTransport) =>
+            Effect.sync(() => {
+              if (signal?.aborted && turnActive && threadId && turnId) {
+                try {
+                  clientTransport.notify("turn/interrupt", { threadId, turnId });
+                } catch {
+                  // Closing the transport still owns process cleanup.
+                }
+              }
+              clientTransport.closeTransport();
+            }),
         );
         client = transport;
 
@@ -496,18 +505,6 @@ async function runCodexAppServer({
           }
         });
         yield* processMessages.pipe(Effect.forkScoped);
-        yield* Effect.addFinalizer(() => {
-          if (!signal?.aborted || !turnActive) return Effect.void;
-          return Effect.sync(() => {
-            if (!threadId || !turnId) return;
-            try {
-              transport.notify("turn/interrupt", { threadId, turnId });
-            } catch {
-              // The transport release finalizer still owns process cleanup.
-            }
-          });
-        });
-
         yield* requestAppServer("initialize", {
           clientInfo: { name: "usine-coding-session", version: "0.1.0" },
           capabilities: null,
@@ -545,19 +542,62 @@ async function runCodexAppServer({
       }),
     ),
     { signal },
-  ).catch((error) => {
-    if (error instanceof CodingSessionInterruption) throw error;
-    if (error instanceof AppServerCancelled || signal?.aborted)
-      throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
-    const classification = stderr.classification();
-    const failureClass = appServerFailureClass(classification ?? classifyAdapterFailure(error));
-    throw new CodingSessionInterruption(
-      phase,
-      failureClass,
-      safeAppServerFailure(error, classification, failureClass),
-    );
-  });
+  )
+    .catch((error) => {
+      if (error instanceof CodingSessionInterruption) throw error;
+      if (error instanceof AppServerCancelled || signal?.aborted)
+        throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
+      const classification = stderr.classification();
+      const failureClass = appServerFailureClass(classification ?? classifyAdapterFailure(error));
+      throw new CodingSessionInterruption(
+        phase,
+        failureClass,
+        safeAppServerFailure(error, classification, failureClass),
+      );
+    })
+    .finally(() => settleChild(child, childClosed));
   return result;
+}
+
+async function settleChild(
+  child: ChildProcessWithoutNullStreams,
+  childClosed: Promise<void>,
+): Promise<void> {
+  if (await waitForChildClose(childClosed, 0)) return;
+  try {
+    child.stdin.end();
+  } catch {
+    // The child may already have closed its transport.
+  }
+  if (await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)) return;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // The close event or an earlier termination may have won the race.
+  }
+  if (await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The process may have exited between the bounded waits.
+  }
+  if (!(await waitForChildClose(childClosed, CHILD_CLOSE_WAIT_MS)))
+    throw new Error("app-server child did not settle after SIGKILL");
+}
+
+function waitForChildClose(childClosed: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(closed);
+    };
+    timer = setTimeout(() => finish(false), timeoutMs);
+    void childClosed.then(() => finish(true));
+  });
 }
 
 function asError(error: unknown): Error {

@@ -150,6 +150,7 @@ async function fakeAppServerEnvironment(
   environment: NodeJS.ProcessEnv;
   stateDirectory: string;
   protocolLogPath: string;
+  pidPath: string;
   runtimePath: string;
   close: () => Promise<void>;
 }> {
@@ -161,6 +162,7 @@ async function fakeAppServerEnvironment(
   await mkdir(bin, { recursive: true });
   await mkdir(codexHome, { recursive: true });
   const protocolLogPath = join(codexHome, "protocol.log");
+  const pidPath = join(codexHome, "app-server.pid");
   const runtimePath = resolve(tmpdir(), "usine-app-server-runtime-path");
   await writeFile(join(codexHome, "fixture-mode"), `${mode}\n`);
   await writeFile(protocolLogPath, "");
@@ -172,7 +174,7 @@ async function fakeAppServerEnvironment(
   await writeFile(
     executable,
     `#!/usr/bin/env node
-const { appendFileSync, readFileSync } = require("node:fs");
+const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");
 const mode = readFileSync(process.env.CODEX_HOME + "/fixture-mode", "utf8").trim();
 const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
 const expectedModel = ${JSON.stringify(expectedModel)};
@@ -182,6 +184,11 @@ if (process.argv[2] !== "app-server") {
   process.stderr.write("unexpected Codex transport arguments\\n");
   process.exit(2);
 }
+if (process.env.USINE_CODING_SESSION_IDENTITY_PATH || process.env.USINE_CODING_SESSION_WORKSPACE) {
+  process.stderr.write("unexpected execution identity environment\\n");
+  process.exit(4);
+}
+writeFileSync(process.env.CODEX_HOME + "/app-server.pid", String(process.pid));
 if (mode === "stderr") {
   process.stderr.write("profile configuration failed secret=should-not-escape\\n");
   process.exit(1);
@@ -249,7 +256,10 @@ process.stdin.on("data", (chunk) => {
   for (const line of buffer.split("\\n").slice(0, -1)) handle(JSON.parse(line));
   buffer = buffer.slice(buffer.lastIndexOf("\\n") + 1);
 });
-process.stdin.on("end", () => record("transport-release"));
+process.stdin.on("end", () => {
+  record("transport-release");
+  process.exit(0);
+});
 process.stdin.resume();
 setInterval(() => undefined, 1_000);
 `,
@@ -263,9 +273,22 @@ setInterval(() => undefined, 1_000);
     },
     stateDirectory,
     protocolLogPath,
+    pidPath,
     runtimePath,
     close: async () => undefined,
   };
+}
+
+async function expectAppServerChildSettled(fixture: {
+  pidPath: string;
+  stateDirectory: string;
+}): Promise<void> {
+  const pid = Number(await readFile(fixture.pidPath, "utf8"));
+  expect(Number.isInteger(pid)).toBe(true);
+  expect(() => process.kill(pid, 0)).toThrow();
+  await expect(access(join(fixture.stateDirectory, "codex-executions"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 }
 
 async function startFakeGithubHost(): Promise<{
@@ -1011,7 +1034,7 @@ describe("Coding Session", () => {
     ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
-  test("executes an app-server reviewer through the shared typed lifecycle and reaps its process", async () => {
+  test("executes an app-server reviewer and settles its direct child without an identity", async () => {
     const mcpServer: CodingSessionMcpServer = {
       name: "github_read",
       url: "https://github.example.test/mcp?task=session-test",
@@ -1102,6 +1125,7 @@ describe("Coding Session", () => {
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    await expectAppServerChildSettled(fixture);
     const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
     const archive = completeArchive(
       await readSessionArchive(fixture.stateDirectory, archives[0]!.archiveId),
@@ -1155,7 +1179,7 @@ describe("Coding Session", () => {
     expect(JSON.stringify(archive)).toContain(fixture.runtimePath);
   });
 
-  test("interrupts an app-server turn and truthfully reaps the exact owned process", async () => {
+  test("interrupts an app-server turn and settles its direct child after notification", async () => {
     const fixture = await fakeAppServerEnvironment("interrupt");
     const controller = new AbortController();
     const started = deferred<void>();
@@ -1210,6 +1234,7 @@ describe("Coding Session", () => {
     await Promise.resolve();
     expect(observations).toHaveLength(observationCount);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    await expectAppServerChildSettled(fixture);
   });
 
   test("applies the shared schema-invalid terminal output behavior to app-server", async () => {
@@ -1250,6 +1275,7 @@ describe("Coding Session", () => {
       completeness: "complete",
     });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    await expectAppServerChildSettled(fixture);
   });
 
   test("cancels an app-server startup at its shared deadline", async () => {
@@ -1289,6 +1315,7 @@ describe("Coding Session", () => {
       completeness: "partial",
     });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    await expectAppServerChildSettled(fixture);
   });
 
   test.each(["malformed", "transport", "capability"] as const)(
@@ -1323,6 +1350,7 @@ describe("Coding Session", () => {
       await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
         [],
       );
+      await expectAppServerChildSettled(fixture);
     },
   );
 
@@ -1353,6 +1381,7 @@ describe("Coding Session", () => {
       failureClass: "configuration",
     });
     expect(observation.failure).not.toContain("should-not-escape");
+    await expectAppServerChildSettled(fixture);
   });
 
   test("keeps an App Server thread-start failure out of the turn phase", async () => {
@@ -1411,6 +1440,7 @@ describe("Coding Session", () => {
     });
     expect(observation).toMatchObject({ status: "failed", output: null });
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
+    await expectAppServerChildSettled(fixture);
   });
 
   test("pre-approves exactly the enabled MCP tools", () => {
