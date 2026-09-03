@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
+import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
-  applyMigrations,
   campaigns,
   campaignResourceFromContract,
   campaignIdFor,
+  contractIssues,
   decodeCampaignStatus,
-  goalContractIssues,
   goalContractSchema,
   openSqliteDatabase,
   type CampaignResource,
@@ -52,7 +52,7 @@ export function parseGoalContract(rawContract: string): GoalContract {
   }
   const parsed = goalContractSchema.safeParse(input);
   if (!parsed.success) {
-    const issues = goalContractIssues(parsed.error);
+    const issues = contractIssues(parsed.error);
     throw new GoalContractInputError(`invalid goal contract: ${JSON.stringify(issues)}`, issues);
   }
   return parsed.data;
@@ -60,13 +60,10 @@ export function parseGoalContract(rawContract: string): GoalContract {
 
 export async function readGoalContract(
   contractPath: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<{ readonly rawContract: string; readonly contract: GoalContract }> {
   const deadlineEpochMs = Date.now() + GOAL_CONTRACT_INGESTION_TIMEOUT_MS;
-  const gitEnvironment = {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TERMINAL_PROMPT: "0",
-  };
+  const gitEnvironment = credentialFreeGitEnvironment(environment);
   let repositoryPath: string;
   try {
     repositoryPath = (
@@ -92,7 +89,9 @@ export async function readGoalContract(
     ).rawContract;
   } catch (error) {
     throw new GoalContractInputError(
-      error instanceof Error ? error.message : "goal contract is not committed",
+      error instanceof Error
+        ? error.message.replaceAll("task contract", "goal contract")
+        : "goal contract is not committed",
     );
   }
   return { rawContract, contract: parseGoalContract(rawContract) };
@@ -105,7 +104,6 @@ export async function publishCampaign(
   const contract = parseGoalContract(rawContract);
   const contractHash = createHash("sha256").update(rawContract, "utf8").digest("hex");
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
-  await applyMigrations(databasePath);
   const handle = openSqliteDatabase(databasePath);
   try {
     return await handle.exclusiveTransaction(async () => {

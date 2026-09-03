@@ -83,61 +83,53 @@ export const goalContractSchema = z
       }
     }
 
-    const parentCycles = new Set<string>();
-    for (const outcome of contract.outcomes) {
-      const path: string[] = [outcome.id];
-      let parentId = outcome.parentId;
-      while (parentId !== null && outcomesById.has(parentId)) {
-        const cycleStart = path.indexOf(parentId);
-        if (cycleStart >= 0) {
-          const cycleKey = path.slice(cycleStart).toSorted().join("\u0000");
-          if (!parentCycles.has(cycleKey)) {
-            parentCycles.add(cycleKey);
-            const parentIndex = outcomeIndexes.get(parentId);
-            if (parentIndex === undefined) break;
-            context.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ["outcomes", parentIndex, "parentId"],
-              message: "parent relationships must not contain a cycle",
-            });
-          }
-          break;
+    const findCycles = (
+      nextIds: (outcome: (typeof contract.outcomes)[number]) => readonly string[],
+    ): string[] => {
+      const states = new Map<string, "visiting" | "visited">();
+      const cycles: string[] = [];
+      const visit = (outcomeId: string): void => {
+        const state = states.get(outcomeId);
+        if (state === "visited") return;
+        if (state === "visiting") {
+          cycles.push(outcomeId);
+          return;
         }
-        path.push(parentId);
-        parentId = outcomesById.get(parentId)!.parentId;
+        states.set(outcomeId, "visiting");
+        for (const nextId of nextIds(outcomesById.get(outcomeId)!)) {
+          if (outcomesById.has(nextId)) visit(nextId);
+        }
+        states.set(outcomeId, "visited");
+      };
+      for (const outcome of contract.outcomes) visit(outcome.id);
+      return cycles;
+    };
+
+    for (const outcomeId of findCycles((outcome) =>
+      outcome.parentId !== null && outcome.parentId !== outcome.id ? [outcome.parentId] : [],
+    )) {
+      const outcomeIndex = outcomeIndexes.get(outcomeId);
+      if (outcomeIndex !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["outcomes", outcomeIndex, "parentId"],
+          message: "parent relationships must not contain a cycle",
+        });
       }
     }
 
-    const dependencyStates = new Map<string, "visiting" | "visited">();
-    const dependencyPath: string[] = [];
-    const dependencyCycles = new Set<string>();
-    const visitDependencies = (outcomeId: string): void => {
-      const state = dependencyStates.get(outcomeId);
-      if (state === "visited") return;
-      if (state === "visiting") {
-        const cycleStart = dependencyPath.indexOf(outcomeId);
-        const cycleKey = dependencyPath.slice(cycleStart).toSorted().join("\u0000");
-        if (!dependencyCycles.has(cycleKey)) {
-          dependencyCycles.add(cycleKey);
-          const outcomeIndex = outcomeIndexes.get(outcomeId);
-          if (outcomeIndex === undefined) return;
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["outcomes", outcomeIndex, "dependsOn"],
-            message: "dependencies must not contain a cycle",
-          });
-        }
-        return;
+    for (const outcomeId of findCycles((outcome) =>
+      outcome.dependsOn.filter((dependencyId) => dependencyId !== outcome.id),
+    )) {
+      const outcomeIndex = outcomeIndexes.get(outcomeId);
+      if (outcomeIndex !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["outcomes", outcomeIndex, "dependsOn"],
+          message: "dependencies must not contain a cycle",
+        });
       }
-      dependencyStates.set(outcomeId, "visiting");
-      dependencyPath.push(outcomeId);
-      for (const dependencyId of outcomesById.get(outcomeId)!.dependsOn) {
-        if (outcomesById.has(dependencyId)) visitDependencies(dependencyId);
-      }
-      dependencyPath.pop();
-      dependencyStates.set(outcomeId, "visited");
-    };
-    for (const outcome of contract.outcomes) visitDependencies(outcome.id);
+    }
   });
 
 export type GoalContract = z.infer<typeof goalContractSchema>;
@@ -211,11 +203,4 @@ export function campaignResourceFromContract(
 
 export function campaignIdFor(goalId: string, version: number): string {
   return `${goalId}:v${version}`;
-}
-
-export function goalContractIssues(error: z.ZodError): Array<{ path: string; message: string }> {
-  return error.issues.map((issue) => ({
-    path: issue.path.join("."),
-    message: issue.message,
-  }));
 }

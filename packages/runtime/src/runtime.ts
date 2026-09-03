@@ -166,7 +166,6 @@ export {
   MAX_GOAL_CONTRACT_BYTES,
   lookupCampaign,
   parseGoalContract,
-  publishCampaign,
   readGoalContract,
 } from "./campaign.js";
 export type { CampaignResource, GoalContract } from "@usine/task-authority";

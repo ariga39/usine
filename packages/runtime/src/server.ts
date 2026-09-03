@@ -555,7 +555,7 @@ function createApiLayer(options: {
         apiEffect(async () => {
           let contract: Awaited<ReturnType<typeof readGoalContract>>;
           try {
-            contract = await readGoalContract(payload.contractPath);
+            contract = await readGoalContract(payload.contractPath, options.environment);
           } catch (error) {
             if (error instanceof GoalContractInputError)
               throw new ServerValidationError(error.message);
