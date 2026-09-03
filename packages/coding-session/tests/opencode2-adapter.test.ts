@@ -3,15 +3,16 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
 import { z } from "zod";
 import { readSessionArchive, reviewerOutputSchema } from "@usine/coding-session";
@@ -22,7 +23,6 @@ import type {
   ProviderNeutralUsageObservation,
 } from "../src/coding-session-adapter.js";
 import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/coding-session.js";
-import { executionIdentityPath, discoverOwnedExecutions } from "../src/codex-execution.js";
 import { OpenCode2Adapter, opencodeConfig } from "../src/opencode2-adapter.js";
 import {
   DarwinOpenCode2Sandbox,
@@ -57,7 +57,10 @@ const facadeContract = {
     body: "Fixture review contract",
   },
 } satisfies TaskContract;
-const launchRecordSchema = z.object({ processId: z.number().int().positive() });
+const launchRecordSchema = z.object({
+  processId: z.number().int().positive(),
+  environment: z.object({ OPENCODE_CONFIG_DIR: z.string().min(1) }),
+});
 
 function fixtureAdapter(): OpenCode2Adapter {
   const sandbox: OpenCode2Sandbox = {
@@ -356,32 +359,25 @@ function editPermission(requestValue: CodingSessionAdapterRequest): unknown {
   return Object.fromEntries(Object.entries(permission)).edit;
 }
 
-async function assertOwnedExecutionGone(testFixture: {
+async function assertPrivateRunGone(testFixture: {
   stateDirectory: string;
   protocolLog: string;
 }): Promise<void> {
-  await expect(
-    discoverOwnedExecutions(testFixture.stateDirectory, execution.taskId),
-  ).resolves.toEqual([]);
-  const identityPath = executionIdentityPath(testFixture.stateDirectory, execution);
-  await expect(access(identityPath)).rejects.toMatchObject({ code: "ENOENT" });
-  await expect(access(`${identityPath}.mjs`)).rejects.toMatchObject({ code: "ENOENT" });
   const launch = launchRecordSchema.parse(
     JSON.parse((await readFile(testFixture.protocolLog, "utf8")).split("\n")[0]),
   );
-  expect(processGroupHasLiveProcess(launch.processId)).toBe(false);
-}
-
-function processGroupHasLiveProcess(pid: number): boolean {
-  try {
-    const output = execFileSync("ps", ["-o", "stat=", "-g", String(pid)], { encoding: "utf8" });
-    return output
-      .trim()
-      .split("\n")
-      .some((state) => state.trim() !== "" && !/^[ZX]/.test(state.trim()));
-  } catch {
-    return false;
-  }
+  expect(() => process.kill(launch.processId, 0)).toThrow();
+  await expect(access(dirname(launch.environment.OPENCODE_CONFIG_DIR))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  await expect(
+    readdir(testFixture.stateDirectory).then((entries) =>
+      entries.filter((entry) => entry.startsWith("opencode-private-")),
+    ),
+  ).resolves.toEqual([]);
+  await expect(access(join(testFixture.stateDirectory, "codex-executions"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 }
 
 async function waitForProtocolFact(protocolLog: string, fact: string): Promise<void> {
@@ -673,7 +669,7 @@ describe("OpenCode2 bounded adapter", () => {
       .map((line) => JSON.parse(line));
     expect(protocol).toContainEqual({ sessionEventsConnected: true });
     expect(protocol).toContainEqual({ wait: true });
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await expect(new Promise((resolve) => setTimeout(resolve, 10))).resolves.toBeUndefined();
     await testFixture.close();
   });
@@ -717,11 +713,11 @@ describe("OpenCode2 bounded adapter", () => {
         outputTokens: 5,
       },
     ]);
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
-  test("fails closed on a V2 event identity mismatch and reaps the owned process", async () => {
+  test("fails closed on a V2 event identity mismatch and settles the direct child", async () => {
     const testFixture = await fixture("malformed");
     await expect(
       fixtureAdapter().run(
@@ -733,7 +729,7 @@ describe("OpenCode2 bounded adapter", () => {
         ),
       ),
     ).rejects.toMatchObject({ phase: "turn", failureClass: "transport" });
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
@@ -756,11 +752,11 @@ describe("OpenCode2 bounded adapter", () => {
     await expect(readFile(testFixture.protocolLog, "utf8")).resolves.toContain(
       '"interrupted":true',
     );
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
-  test("fails as a typed startup transport error and removes an unowned identity", async () => {
+  test("fails as a typed startup transport error and settles the direct child", async () => {
     const testFixture = await fixture("startup-failure");
     await expect(
       fixtureAdapter().run(
@@ -772,11 +768,11 @@ describe("OpenCode2 bounded adapter", () => {
         ),
       ),
     ).rejects.toMatchObject({ phase: "startup", failureClass: "transport" });
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
-  test("preserves typed startup cancellation and reaps the launcher-owned child", async () => {
+  test("preserves typed startup cancellation and settles the direct child", async () => {
     const testFixture = await fixture("startup-abort");
     const controller = new AbortController();
     const run = fixtureAdapter().run(
@@ -790,7 +786,7 @@ describe("OpenCode2 bounded adapter", () => {
     await waitForProtocolFact(testFixture.protocolLog, '"startupBlocked":true');
     controller.abort();
     await expect(run).rejects.toMatchObject({ phase: "startup", failureClass: "cancellation" });
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
@@ -812,7 +808,7 @@ describe("OpenCode2 bounded adapter", () => {
           ),
         ),
       ).rejects.toMatchObject({ phase: "turn", failureClass: "unknown" });
-      await assertOwnedExecutionGone(testFixture);
+      await assertPrivateRunGone(testFixture);
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(unhandledRejections).toEqual([]);
     } finally {
@@ -826,7 +822,7 @@ describe("OpenCode2 bounded adapter", () => {
     ["out-of-order", "transport"],
     ["step-failure", "unknown"],
   ] as const)(
-    "maps %s as a typed failure and reaps its owned process",
+    "maps %s as a typed failure and settles its direct child",
     async (mode, failureClass) => {
       const testFixture = await fixture(mode);
       await expect(
@@ -839,7 +835,7 @@ describe("OpenCode2 bounded adapter", () => {
           ),
         ),
       ).rejects.toMatchObject({ phase: "turn", failureClass });
-      await assertOwnedExecutionGone(testFixture);
+      await assertPrivateRunGone(testFixture);
       await testFixture.close();
     },
   );
@@ -859,7 +855,7 @@ describe("OpenCode2 bounded adapter", () => {
     await expect(readFile(testFixture.protocolLog, "utf8")).resolves.toContain(
       '"permissionReply":true',
     );
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
@@ -925,7 +921,7 @@ describe("OpenCode2 bounded adapter", () => {
     });
     expect(JSON.stringify(archive)).not.toContain("hostile");
     expect(JSON.stringify(archive)).not.toContain("session.next");
-    await assertOwnedExecutionGone(testFixture);
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 
@@ -964,7 +960,9 @@ describe("OpenCode2 bounded adapter", () => {
     });
     await expect(readFile(testFixture.protocolLog, "utf8")).resolves.not.toContain('"args"');
     await expect(
-      discoverOwnedExecutions(testFixture.stateDirectory, execution.taskId),
+      readdir(testFixture.stateDirectory).then((entries) =>
+        entries.filter((entry) => entry.startsWith("opencode-private-")),
+      ),
     ).resolves.toEqual([]);
     await testFixture.close();
   });
