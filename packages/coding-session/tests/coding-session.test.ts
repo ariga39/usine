@@ -1790,6 +1790,100 @@ describe("Coding Session", () => {
     expect(requestOptions).not.toHaveProperty("env");
   });
 
+  test("accounts for a role-output normalizer as a separate invocation", async () => {
+    const observations: CodingSessionObservation[] = [];
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () =>
+            sdkTurn("provider prose", {
+              input_tokens: 12,
+              cached_input_tokens: 4,
+              cache_write_input_tokens: 2,
+              output_tokens: 7,
+              reasoning_output_tokens: 3,
+            }),
+          "normalizer-provider-session",
+        ),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async ({ onUsage }) => {
+          await onUsage?.({
+            inputTokens: 5,
+            cachedInputTokens: 2,
+            uncachedInputTokens: 3,
+            outputTokens: 2,
+            reasoningOutputTokens: 1,
+          });
+          return { status: "proposed", summary: "normalized" };
+        },
+      },
+    );
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      onObservation: (event) => {
+        observations.push(event);
+      },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: { summary: "normalized" },
+      usage: {
+        inputTokens: 12,
+        cachedInputTokens: 4,
+        uncachedInputTokens: 8,
+        cacheWriteInputTokens: 2,
+        outputTokens: 7,
+        reasoningOutputTokens: 3,
+      },
+      normalizer: {
+        status: "succeeded",
+        usage: {
+          inputTokens: 5,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 3,
+          outputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
+      },
+    });
+    expect(observations.filter((event) => event.type === "usage_observed")).toEqual([
+      {
+        type: "usage_observed",
+        source: "provider",
+        usage: {
+          inputTokens: 12,
+          cachedInputTokens: 4,
+          uncachedInputTokens: 8,
+          cacheWriteInputTokens: 2,
+          outputTokens: 7,
+          reasoningOutputTokens: 3,
+        },
+      },
+      {
+        type: "usage_observed",
+        source: "role_output_normalizer",
+        usage: {
+          inputTokens: 5,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 3,
+          outputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
+      },
+    ]);
+  });
+
   test("normalizes one prose-wrapped reviewer response through the coordinator transform", async () => {
     const reviewer = {
       sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",

@@ -336,7 +336,9 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                   ? {}
                   : {
                       cachedInputTokens: data.tokens.cache.read,
-                      uncachedInputTokens: data.tokens.input - data.tokens.cache.read,
+                      ...(data.tokens.input >= data.tokens.cache.read
+                        ? { uncachedInputTokens: data.tokens.input - data.tokens.cache.read }
+                        : {}),
                     }),
                 ...(data.tokens.cache?.write === undefined
                   ? {}

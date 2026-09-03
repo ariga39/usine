@@ -1,11 +1,10 @@
-import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, gte, inArray, lt, sql } from "drizzle-orm";
 import { taskEvents, taskRuns } from "./schema.js";
 import { decodeRawPersistedTaskResult } from "./task-state-schema.js";
 import { decodeTaskEvent, type TaskEvent } from "./task-event.js";
 import type { TaskResult } from "./task-state.js";
-import type { RuntimeDatabase } from "./sqlite-database.js";
-
 import { Schema } from "effect";
+import type { RuntimeDatabase } from "./sqlite-database.js";
 
 export const MAX_USAGE_REPORT_EVENTS = 100_000;
 const USAGE_DIMENSION_UNAVAILABLE = "unavailable" as const;
@@ -262,7 +261,7 @@ export async function listUsageReportSources(
   return {
     complete,
     sources: [...grouped.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
+      .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([taskId, events]) => ({ task: tasks.get(taskId)!, events })),
   };
 }
@@ -462,7 +461,7 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
         usage: aggregateUsage(group.map((row) => row.usage)),
       } satisfies UsageAggregate;
     })
-    .sort((left, right) => aggregateKey(left).localeCompare(aggregateKey(right)));
+    .toSorted((left, right) => aggregateKey(left).localeCompare(aggregateKey(right)));
 }
 
 function aggregateUsage(values: readonly UsageAmounts[]): UsageAmounts {

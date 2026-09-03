@@ -777,7 +777,7 @@ export function createCodexCodingSessionForTesting(
 
 function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObservation["usage"] {
   if (usage == null) return null;
-  return {
+  const normalized = {
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.cachedInputTokens === undefined
       ? {}
@@ -793,6 +793,7 @@ function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObser
       ? {}
       : { reasoningOutputTokens: usage.reasoningOutputTokens }),
   };
+  return Object.keys(normalized).length === 0 ? null : normalized;
 }
 
 function mergeUsage(

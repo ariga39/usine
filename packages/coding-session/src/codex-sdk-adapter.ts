@@ -149,7 +149,9 @@ function sdkUsage(usage: {
   return {
     inputTokens: usage.input_tokens,
     cachedInputTokens: usage.cached_input_tokens,
-    uncachedInputTokens: usage.input_tokens - usage.cached_input_tokens,
+    ...(usage.input_tokens >= usage.cached_input_tokens
+      ? { uncachedInputTokens: usage.input_tokens - usage.cached_input_tokens }
+      : {}),
     cacheWriteInputTokens: usage.cache_write_input_tokens,
     outputTokens: usage.output_tokens,
     reasoningOutputTokens: usage.reasoning_output_tokens,
