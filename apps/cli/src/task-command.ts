@@ -5,7 +5,7 @@ import { readTaskContract, TaskContractInputError } from "@usine/runtime";
 import {
   followTask,
   getTask,
-  listTasks,
+  listAllTasks,
   retryTask,
   submitTask,
   taskEvidence,
@@ -136,7 +136,7 @@ export async function runTaskListCommand(
   serverUrl: string,
 ): Promise<void> {
   return runCommand("task_list_failed", async () => {
-    const page = await listTasks(serverUrl, options.limit);
+    const page = await listAllTasks(serverUrl, options.limit);
     process.stdout.write(renderTaskList(page, options.json));
   });
 }

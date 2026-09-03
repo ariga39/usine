@@ -11,12 +11,15 @@ import {
   resolveTaskContract,
   repositoryIdentity,
   TaskAuthority,
+  TaskIdCursorError,
   type TaskContract,
   type TaskExecutionInput,
   type RepositorySnapshot,
   type RepositoryResource,
   type ResolvedTaskContract,
   type TaskEvent,
+  type TaskListPage,
+  type TaskListPageRequest,
   type TaskListItem,
   type TaskResult,
   deriveUsageReport,
@@ -342,6 +345,29 @@ export async function lookupTasks(stateDirectory: string, limit = 100): Promise<
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).listTasks(limit);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupTaskPage(
+  stateDirectory: string,
+  request: TaskListPageRequest,
+): Promise<TaskListPage> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (request.cursor !== null) throw new TaskIdCursorError();
+      return { tasks: [], cursor: request.cursor, nextCursor: null };
+    }
+    throw error;
+  }
+
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    return await new TaskAuthority(handle.database).listTaskPage(request);
   } finally {
     handle.close();
   }

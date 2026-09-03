@@ -155,10 +155,32 @@ export async function taskStatus(serverUrl: string, taskId: string): Promise<Tas
 
 export const getTask = taskStatus;
 
-export async function listTasks(serverUrl: string, limit = 100): Promise<TaskListPage> {
+export async function listTasks(
+  serverUrl: string,
+  limit = 100,
+  cursor: string | null = null,
+): Promise<TaskListPage> {
   validateLimit(limit);
   const client = await clientFor(serverUrl);
-  return runRequest(client.tasks.list({ query: { limit } }));
+  return runRequest(
+    client.tasks.list({ query: { limit, ...(cursor === null ? {} : { cursor }) } }),
+  );
+}
+
+export async function listAllTasks(serverUrl: string, limit = 100): Promise<TaskListPage> {
+  const tasks: TaskListPage["tasks"][number][] = [];
+  let cursor: string | null = null;
+  const seenCursors = new Set<string>();
+  while (true) {
+    const page = await listTasks(serverUrl, limit, cursor);
+    tasks.push(...page.tasks);
+    const nextCursor = page.nextCursor ?? null;
+    if (nextCursor === null) return { tasks };
+    if (nextCursor === cursor || seenCursors.has(nextCursor))
+      throw new ServerClientError("task list cursor did not advance", 500);
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
 }
 
 export async function usageReport(

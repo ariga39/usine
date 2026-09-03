@@ -77,6 +77,10 @@ const eventPageQuery = {
   after: Schema.optional(Schema.NumberFromString),
   limit: Schema.optional(Schema.NumberFromString),
 };
+const taskListQuery = {
+  cursor: Schema.optional(Schema.String),
+  limit: Schema.optional(Schema.NumberFromString),
+};
 const usageQuery = {
   taskId: Schema.optional(Schema.String),
   repositoryId: Schema.optional(Schema.String),
@@ -177,7 +181,7 @@ const RepositoryApi = HttpApiGroup.make("repositories").add(
 
 const TaskApi = HttpApiGroup.make("tasks").add(
   HttpApiEndpoint.get("list", "/v1/tasks", {
-    query: limitQuery,
+    query: taskListQuery,
     success: taskListPageSchema,
     error: allErrors,
   }),

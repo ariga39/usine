@@ -268,6 +268,8 @@ node apps/cli/dist/cli.mjs task evidence "<TASK_ID>" --json
 
 Human-readable output is the default for resource reads; add `--json` for the stable machine-readable projection. `server health` returns `status` and `revision`. `server snapshot` includes the server, registered Repository resources, Task list items, and coding-session resources. `task get` returns the Task state, exact-SHA evidence projections, delivery, blocker classification, waiting/retry flags, writer identity, and evidence counters without private policy facts.
 
+`task list` drains the complete set of bounded Task pages before completing. A raw `GET /v1/tasks` returns one page; pass its `nextCursor` as `cursor` to continue until it is `null`.
+
 `task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. `task evidence` drains paginated history, rereads the current Task, and reports separate implementer/reviewer Role Runs joined to the current bounded Candidate, check, review, repair, and delivery facts. It has no live-event cursor to resume: start with `task history`, `task watch --after <LAST_SEQUENCE>`, or `task evidence` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get`, `task watch`, and `task evidence` are the canonical Task reads.
 
 ### Usage export

@@ -2,6 +2,8 @@ import { describe, expect, test } from "vite-plus/test";
 import type { TaskEvent, TaskResource } from "@usine/task-authority";
 import {
   followTask,
+  listAllTasks,
+  listTasks,
   ServerClientError,
   serverUrlFromEnvironment,
   taskEvents,
@@ -40,7 +42,61 @@ function event(taskId: string, sequence: number, data: TaskEvent["data"]): TaskE
   return { taskId, sequence, eventId: `event-${sequence}`, occurredAtEpochMs: sequence, data };
 }
 
+function taskListItem(taskId: string) {
+  return {
+    taskId,
+    revision: 1,
+    deadlineEpochMs: 1,
+    state: "admitted" as const,
+    candidateSha: null,
+    activeActivation: null,
+    retryable: false,
+    writer: { repositoryIdentity: "example/repository" },
+    evidence: {
+      implementerActivations: 0,
+      reviewCycles: 0,
+      changesRequestedBatches: 0,
+      restartRecoveries: 0,
+    },
+  };
+}
+
 describe("server client follow", () => {
+  test("exposes one Task page and drains all pages separately", async () => {
+    const originalFetch = globalThis.fetch;
+    const requestedCursors: Array<string | null> = [];
+    const allTaskIds = Array.from(
+      { length: 205 },
+      (_, index) => `task-${String(index).padStart(3, "0")}`,
+    );
+    globalThis.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+      const cursor = new URL(url).searchParams.get("cursor");
+      requestedCursors.push(cursor);
+      const pageTaskIds = cursor === null ? allTaskIds.slice(0, 200) : allTaskIds.slice(200);
+      return new Response(
+        JSON.stringify({
+          tasks: pageTaskIds.map(taskListItem),
+          cursor,
+          nextCursor: cursor === null ? "page-2" : null,
+        }),
+        { status: 200 },
+      );
+    };
+    try {
+      await expect(listTasks("http://server.test", 200)).resolves.toMatchObject({
+        tasks: allTaskIds.slice(0, 200).map(taskListItem),
+        nextCursor: "page-2",
+      });
+      await expect(listAllTasks("http://server.test", 200)).resolves.toEqual({
+        tasks: allTaskIds.map(taskListItem),
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requestedCursors).toEqual([null, null, "page-2"]);
+  });
+
   test("derives the client URL from the configured server host and port", () => {
     expect(serverUrlFromEnvironment({ USINE_SERVER_HOST: "::1", USINE_SERVER_PORT: "4321" })).toBe(
       "http://[::1]:4321",

@@ -5,6 +5,12 @@ import { decodeTaskEvent, type TaskEvent } from "./task-event.js";
 import type { TaskResult } from "./task-state.js";
 import { Schema } from "effect";
 import type { RuntimeDatabase } from "./sqlite-database.js";
+import {
+  decodeTaskIdCursor,
+  encodeTaskIdCursor,
+  pageTaskIds,
+  type TaskIdCursor,
+} from "./task-id-cursor.js";
 
 export const MAX_USAGE_REPORT_PAGE_SIZE = 200;
 const MAX_USAGE_REPORT_CURSOR_LENGTH = 4096;
@@ -216,12 +222,8 @@ export function mergeProviderNeutralUsage(
 const usageCursorSchema = Schema.Struct({
   version: Schema.Literal(1),
   scope: usageScopeSchema,
-  upperTaskId: Schema.NullOr(
-    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
-  ),
-  afterTaskId: Schema.NullOr(
-    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
-  ),
+  upperTaskId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
+  afterTaskId: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
 });
 type UsageReportCursor = Schema.Schema.Type<typeof usageCursorSchema>;
 
@@ -325,20 +327,14 @@ export async function listUsageReportSources(
       });
   }
   taskIds = taskIds.toSorted(compareTaskIds);
-  const upperTaskId = cursor?.upperTaskId ?? taskIds.at(-1) ?? null;
-  const afterTaskId = cursor?.afterTaskId ?? null;
-  const pageTaskIds = taskIds
-    .filter(
-      (taskId) =>
-        (afterTaskId === null || compareTaskIds(taskId, afterTaskId) > 0) &&
-        (upperTaskId === null || compareTaskIds(taskId, upperTaskId) <= 0),
-    )
-    .slice(0, request.limit);
-  if (pageTaskIds.length === 0) return { cursor: request.cursor, nextCursor: null, sources: [] };
+  const page = pageTaskIds(taskIds, cursor, request.limit, scope);
+  const selectedTaskIds = page.taskIds;
+  if (selectedTaskIds.length === 0)
+    return { cursor: request.cursor, nextCursor: null, sources: [] };
   const rows = await database
     .select()
     .from(taskEvents)
-    .where(inArray(taskEvents.taskId, pageTaskIds))
+    .where(inArray(taskEvents.taskId, selectedTaskIds))
     .orderBy(asc(taskEvents.taskId), asc(taskEvents.sequence));
   const grouped = new Map<string, TaskEvent[]>();
   for (const row of rows) {
@@ -349,22 +345,9 @@ export async function listUsageReportSources(
     events.push(event);
     grouped.set(row.taskId, events);
   }
-  const lastTaskId = pageTaskIds.at(-1)!;
-  const hasNext = taskIds.some(
-    (taskId) =>
-      compareTaskIds(taskId, lastTaskId) > 0 &&
-      (upperTaskId === null || compareTaskIds(taskId, upperTaskId) <= 0),
-  );
   return {
     cursor: request.cursor,
-    nextCursor: hasNext
-      ? encodeUsageReportCursor({
-          version: 1,
-          scope,
-          upperTaskId,
-          afterTaskId: lastTaskId,
-        })
-      : null,
+    nextCursor: page.nextCursor === null ? null : encodeUsageReportCursor(page.nextCursor),
     sources: [...grouped.entries()]
       .toSorted(([left], [right]) => compareTaskIds(left, right))
       .map(([taskId, events]) => ({ task: tasks.get(taskId)!, events })),
@@ -375,23 +358,15 @@ function compareTaskIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function encodeUsageReportCursor(cursor: UsageReportCursor): string {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+function encodeUsageReportCursor(cursor: TaskIdCursor<UsageReportScope>): string {
+  return encodeTaskIdCursor(cursor);
 }
 
 function decodeUsageReportCursor(value: string, scope: UsageReportScope): UsageReportCursor {
   try {
-    if (value.length > MAX_USAGE_REPORT_CURSOR_LENGTH || value.length === 0)
-      throw new Error("cursor is out of bounds");
-    const decoded = Schema.decodeUnknownSync(usageCursorSchema, { onExcessProperty: "error" })(
-      JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
-    );
-    if (JSON.stringify(decoded.scope) !== JSON.stringify(scope)) throw new Error("scope mismatch");
-    if (decoded.upperTaskId === null || decoded.afterTaskId === null)
-      throw new Error("cursor bounds are missing");
-    if (compareTaskIds(decoded.afterTaskId, decoded.upperTaskId) > 0)
-      throw new Error("cursor is beyond its upper bound");
-    return decoded;
+    if (value.length > MAX_USAGE_REPORT_CURSOR_LENGTH) throw new Error("cursor is out of bounds");
+    const decoded = decodeTaskIdCursor(value, scope);
+    return Schema.decodeUnknownSync(usageCursorSchema, { onExcessProperty: "error" })(decoded);
   } catch {
     throw new UsageReportCursorError();
   }

@@ -177,6 +177,8 @@ export const taskListItemSchema = Schema.Struct({
 
 export const taskListPageSchema = Schema.Struct({
   tasks: Schema.Array(taskListItemSchema),
+  cursor: Schema.optional(Schema.NullOr(Schema.String)),
+  nextCursor: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const publicCheckResult = Schema.Struct({

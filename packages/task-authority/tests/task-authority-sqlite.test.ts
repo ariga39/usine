@@ -8,6 +8,7 @@ import { migrate } from "drizzle-orm/sqlite-proxy/migrator";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
+  encodeTaskIdCursor,
   openSqliteDatabase,
   taskResourceFromResult,
   TaskAuthority,
@@ -189,6 +190,88 @@ async function terminalResult(
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
+  test("lists every admitted Task through a stable bounded Task-ID cursor", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const contractFor = (taskId: string): TaskContract => ({
+      ...makeContract(taskId),
+      repositoryId: `repository-${taskId}`,
+    });
+
+    for (let index = 0; index < 205; index += 1) {
+      const taskId = `paged-task-${String(index).padStart(3, "0")}`;
+      await authority.admit({
+        contract: contractFor(taskId),
+        contractHash: "a".repeat(64),
+        repositoryIdentity: `example/${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+    }
+
+    const first = await authority.listTaskPage({ cursor: null, limit: 200 });
+    expect(first.tasks.map((task) => task.taskId)).toEqual(
+      Array.from({ length: 200 }, (_, index) => `paged-task-${String(index).padStart(3, "0")}`),
+    );
+    expect(first.cursor).toBeNull();
+    expect(first.nextCursor).toEqual(expect.any(String));
+    if (first.nextCursor === undefined || first.nextCursor === null)
+      throw new Error("first Task page did not provide a continuation cursor");
+
+    await authority.admit({
+      contract: contractFor("paged-task-999"),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: "example/paged-task-999",
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const second = await authority.listTaskPage({ cursor: first.nextCursor, limit: 200 });
+    expect(second.tasks.map((task) => task.taskId)).toEqual([
+      "paged-task-200",
+      "paged-task-201",
+      "paged-task-202",
+      "paged-task-203",
+      "paged-task-204",
+    ]);
+    expect(second.nextCursor).toBeNull();
+    expect(new Set([...first.tasks, ...second.tasks].map((task) => task.taskId)).size).toBe(205);
+  });
+
+  test("rejects invalid and stale Task list cursors", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = "paged-cursor-task";
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: `example/${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+
+    await expect(
+      authority.listTaskPage({ cursor: "not-a-cursor", limit: 1 }),
+    ).rejects.toMatchObject({ code: "task_list_cursor_invalid" });
+    const staleCursor = encodeTaskIdCursor({
+      version: 1,
+      scope: "task-list",
+      upperTaskId: "missing-upper",
+      afterTaskId: taskId,
+    });
+    await expect(authority.listTaskPage({ cursor: staleCursor, limit: 1 })).rejects.toMatchObject({
+      code: "task_list_cursor_invalid",
+    });
+    const cursor = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        scope: "other-resource",
+        upperTaskId: taskId,
+        afterTaskId: taskId,
+      }),
+      "utf8",
+    ).toString("base64url");
+    await expect(authority.listTaskPage({ cursor, limit: 1 })).rejects.toMatchObject({
+      code: "task_list_cursor_invalid",
+    });
+  });
+
   test("rejects Repository capability-policy changes while its writer lease is active", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);

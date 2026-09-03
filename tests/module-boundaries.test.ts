@@ -218,6 +218,7 @@ test("server returns typed validation for invalid cursor and limit inputs", asyn
   try {
     for (const path of [
       "/v1/tasks?limit=0",
+      "/v1/tasks?cursor=not-a-cursor",
       "/v1/repositories?limit=201",
       "/v1/tasks/example/events?after=not-a-number",
       "/v1/events/wait?after=0",
