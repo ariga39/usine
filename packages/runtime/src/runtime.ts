@@ -39,7 +39,6 @@ import {
   CodexCodingSession,
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
-  type CodingSessionCleanup,
   type CodingSessionMcpServerResolution,
   type CodingSessionObservation,
 } from "@usine/coding-session";
@@ -174,16 +173,6 @@ export {
   type SessionArchiveManifest,
 } from "@usine/coding-session";
 
-export function createRuntimeCodingSession(environment: NodeJS.ProcessEnv): CodingSessionCleanup {
-  const stateDirectory = stateDirectoryFromEnvironment(environment);
-  return new CodexCodingSession(undefined, {
-    environment: explicitWorkerEnvironment(environment),
-    adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(environment),
-    executionStateDirectory: stateDirectory,
-    sessionArchive: sessionArchiveOptionsFromEnvironment(environment, stateDirectory),
-  });
-}
-
 export interface ReviewerQualityGateInput {
   readonly contract: ResolvedTaskContract;
   readonly candidateSha: string;
@@ -213,7 +202,7 @@ export async function reviewCandidateWithProfile(
   const session = new CodexCodingSession(undefined, {
     environment: explicitWorkerEnvironment(input.environment),
     adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(input.environment),
-    executionStateDirectory: stateDirectory,
+    openCode2StateDirectory: stateDirectory,
     sessionArchive: sessionArchiveOptionsFromEnvironment(input.environment, stateDirectory),
   });
   return new QualityGate({
@@ -526,7 +515,7 @@ export async function retryTask(
 export async function recordRecoveryObservation(
   stateDirectory: string,
   taskId: string,
-  kind: "server_restart" | "execution_owner_changed",
+  kind: "server_restart",
   onEvent?: (event: TaskEvent) => void,
 ): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
@@ -736,7 +725,7 @@ async function executeWithServices(options: {
     environment: policy.workerEnvironment,
     adapterSelectionEnvironment: policy.adapterSelectionEnvironment,
     codexPathOverride: policy.codexPathOverride,
-    executionStateDirectory: policy.stateDirectory,
+    openCode2StateDirectory: policy.stateDirectory,
     roleOutputTransform: policy.roleOutputTransform,
     sessionArchive: policy.sessionArchive,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {

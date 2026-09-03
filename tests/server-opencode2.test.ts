@@ -1,9 +1,8 @@
-import { access, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { execa } from "execa";
-import { codexExecutionIdentityPath } from "@usine/coding-session";
-import { createRuntimeCodingSession, startUsineServer } from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 import {
   registerRepository,
@@ -32,7 +31,7 @@ async function waitForTerminalTask(serverUrl: string, taskId: string) {
 }
 
 describe("server-owned OpenCode2 execution", () => {
-  test("selects an opaque OpenCode2 role through the normal Task path and cleans owned identities on shutdown", async () => {
+  test("selects an opaque OpenCode2 role through the normal Task path", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-opencode2-path-"));
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
@@ -87,27 +86,12 @@ describe("server-owned OpenCode2 execution", () => {
       USINE_FORGE_PROFILE_DEFAULT_PRIVATE_KEY_PATH: "server-opencode2-private-key.pem",
       USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${taskId}`,
     };
-    const runtimeCodingSession = createRuntimeCodingSession(environment);
-    let cleanupOwnedCalls = 0;
     const server = await startUsineServer({
       environment,
-      codingSession: {
-        cleanupTask: runtimeCodingSession.cleanupTask.bind(runtimeCodingSession),
-        cleanupOwned: async (directory) => {
-          cleanupOwnedCalls += 1;
-          await runtimeCodingSession.cleanupOwned(directory);
-        },
-      },
       host: "127.0.0.1",
       port: 0,
     });
 
-    const identityReference = {
-      taskId: `${taskId}-legacy`,
-      role: "implementer" as const,
-      attempt: "1",
-    };
-    const identityPath = codexExecutionIdentityPath(stateDirectory, identityReference);
     try {
       const trustedPath = await realpath(repository);
       await registerRepository(server.url, {
@@ -127,7 +111,6 @@ describe("server-owned OpenCode2 execution", () => {
       const terminal = await waitForTerminalTask(server.url, admitted.taskId);
       expect(terminal.state).toBe("blocked");
       expect(terminal.blocker).toEqual({ classification: "provider_failure" });
-
       const events = (await taskEvents(server.url, taskId, 0, 100)).events;
       const completed = events.find((event) => event.data.type === "coding_session_completed");
       expect(completed?.data).toMatchObject({
@@ -148,22 +131,7 @@ describe("server-owned OpenCode2 execution", () => {
         }),
       );
 
-      await mkdir(dirname(identityPath), { recursive: true });
-      await writeFile(
-        identityPath,
-        JSON.stringify({
-          version: 2,
-          state: "running",
-          reference: identityReference,
-          pid: 2_000_000_000,
-          startedAt: "Thu Jan 01 00:00:00 1970",
-          workspace: trustedPath,
-        }) + "\n",
-      );
-      await expect(access(identityPath)).resolves.toBeUndefined();
       await server.close();
-      expect(cleanupOwnedCalls).toBe(1);
-      await expect(access(identityPath)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await server.close().catch(() => undefined);
     }

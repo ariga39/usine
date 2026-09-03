@@ -429,23 +429,14 @@ process.exit(result.status ?? 1);
     await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
     const address = blocker.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind");
-    let cleanupCalls = 0;
-
     try {
       await expect(
         startUsineServer({
           environment: { USINE_STATE_DIR: join(tmpdir(), "usine-server-startup-failure") },
-          codingSession: {
-            cleanupTask: async () => undefined,
-            cleanupOwned: async () => {
-              cleanupCalls += 1;
-            },
-          },
           host: "127.0.0.1",
           port: address.port,
         }),
       ).rejects.toThrow("listen");
-      expect(cleanupCalls).toBe(1);
     } finally {
       await new Promise<void>((resolve, reject) =>
         blocker.close((error) => (error ? reject(error) : resolve())),

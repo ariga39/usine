@@ -1,4 +1,4 @@
-import { createRuntimeCodingSession, startUsineServer } from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
 import { Cause, Effect } from "effect";
 import { Command } from "effect/unstable/cli";
 import { CliFailure, reportCommandFailure } from "./cli-failure.js";
@@ -16,7 +16,6 @@ export function runServerCommand(environment: NodeJS.ProcessEnv) {
     Effect.promise(() =>
       startUsineServer({
         environment,
-        codingSession: createRuntimeCodingSession(environment),
         host: environment.USINE_SERVER_HOST?.trim() || "127.0.0.1",
         port: Number(environment.USINE_SERVER_PORT || 8787),
       }),

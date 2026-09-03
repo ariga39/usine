@@ -9,13 +9,11 @@ import {
   type TaskContract,
 } from "@usine/task-authority";
 import { z } from "zod";
-import { executionLifecycle, listExecutionTaskIds, reapOwnedExecution } from "./codex-execution.js";
 import {
   codingSessionAdapterForProfile,
   codingSessionAdapterProfilesFromEnvironment,
   type CodingSessionAdapterProfiles,
 } from "./coding-session-config.js";
-import type { ExecutionReference } from "./coding-session-types.js";
 import { CodexAppServerAdapter } from "./codex-app-server.js";
 import { OpenCode2Adapter } from "./opencode2-adapter.js";
 import {
@@ -105,6 +103,7 @@ export interface CodingSessionMcpServer {
 
 export interface SessionRequest<Output = unknown> {
   role: SessionRole;
+  attempt: string;
   workspace: string;
   contract: TaskContract;
   prompt: string;
@@ -113,7 +112,6 @@ export interface SessionRequest<Output = unknown> {
   deadlineEpochMs: number;
   outputSchema: z.ZodType<Output>;
   mcpServer?: CodingSessionMcpServer;
-  execution: ExecutionReference;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
@@ -242,7 +240,8 @@ export interface CodingSessionOptions {
   adapterSelectionEnvironment?: NodeJS.ProcessEnv;
   /** Host-private SDK executable override for a direct public Codex client. */
   codexPathOverride?: string;
-  executionStateDirectory?: string;
+  /** Host-private storage configured only for the concrete OpenCode2 adapter. */
+  openCode2StateDirectory?: string;
   sessionArchive?: SessionArchiveOptions;
   profileResolver?: CodexProfileResolver;
   roleOutputTransform?: RoleOutputTransform;
@@ -286,11 +285,6 @@ export interface RoleOutputNormalizerObservation {
 
 interface CapturedSessionObservation<T = unknown> extends SessionObservation<T> {
   sessionId: string | null;
-}
-
-export interface CodingSessionCleanup {
-  cleanupTask(stateDirectory: string, taskId: string): Promise<void>;
-  cleanupOwned(stateDirectory: string): Promise<void>;
 }
 
 export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
@@ -340,67 +334,26 @@ export class CodexCodingSession {
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
     this.sdkAdapter = new CodexSdkAdapter({ codexPathOverride: options.codexPathOverride });
     this.appServerAdapter = new CodexAppServerAdapter();
-    this.openCode2Adapter = new OpenCode2Adapter();
+    this.openCode2Adapter = new OpenCode2Adapter(options.openCode2StateDirectory);
   }
 
   async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
-    const executionStateDirectory = this.options.executionStateDirectory;
-    const execution = { reference: request.execution, workspace: request.workspace };
     return Effect.runPromise(
-      Effect.scoped(
-        Effect.acquireUseRelease(
-          Effect.void,
-          () => Effect.tryPromise({ try: () => this.runProvider(request), catch: identityError }),
-          () =>
-            executionStateDirectory
-              ? Effect.tryPromise({
-                  try: () => reapOwnedExecution(executionStateDirectory, execution),
-                  catch: identityError,
-                }).pipe(Effect.asVoid)
-              : Effect.void,
-        ),
-      ),
+      Effect.tryPromise({ try: () => this.runProvider(request), catch: identityError }),
     );
-  }
-
-  async cleanupTask(stateDirectory: string, taskId: string): Promise<void> {
-    const handles = await executionLifecycle.discover(stateDirectory, taskId);
-    const cleanup = await Promise.allSettled(
-      handles.flatMap((handle) => [
-        executionLifecycle.interrupt(stateDirectory, handle),
-        executionLifecycle.reap(stateDirectory, handle),
-      ]),
-    );
-    const failure = cleanup.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failure) throw failure.reason;
-  }
-
-  async cleanupOwned(stateDirectory: string): Promise<void> {
-    const results = await Promise.allSettled(
-      (await listExecutionTaskIds(stateDirectory)).map((taskId) =>
-        this.cleanupTask(stateDirectory, taskId),
-      ),
-    );
-    const failure = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failure) throw failure.reason;
   }
 
   private async runProvider<T = unknown>(
     request: SessionRequest<T>,
   ): Promise<SessionObservation<T>> {
-    const archiveDirectory =
-      this.options.sessionArchive?.stateDirectory ?? this.options.executionStateDirectory;
+    const archiveDirectory = this.options.sessionArchive?.stateDirectory;
     const archive = archiveDirectory
       ? new SessionArchiveWriter(
           this.options.sessionArchive ?? { stateDirectory: archiveDirectory },
           {
             taskId: request.contract.id,
             role: request.role,
-            attempt: request.execution.attempt,
+            attempt: request.attempt,
             contract: request.contract,
             prompt: request.prompt,
           },
@@ -573,6 +526,7 @@ export class CodexCodingSession {
         await onObservation?.({ type: "usage_observed", source, ...observation });
       };
       const result = await adapter.run({
+        role: effectiveRequest.role,
         workspace: effectiveRequest.workspace,
         prompt: effectiveRequest.prompt,
         sandbox: effectiveRequest.sandbox,
@@ -583,8 +537,6 @@ export class CodexCodingSession {
         environment: explicitWorkerEnvironment(
           effectiveRequest.environment ?? this.options.environment,
         ),
-        executionStateDirectory: this.options.executionStateDirectory,
-        execution: effectiveRequest.execution,
         signal: abortSignal,
         onObservation,
         onItemCompleted: async (item) => {

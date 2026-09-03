@@ -18,7 +18,6 @@ describe.skipIf(!enabled)("private GitHub read characterization", () => {
     const apiUrl = required("USINE_PRIVATE_GITHUB_READ_API_URL");
     const codexHome = required("USINE_PRIVATE_GITHUB_READ_CODEX_HOME");
     const profile = required("USINE_PRIVATE_GITHUB_READ_CODEX_PROFILE");
-    const stateDirectory = required("USINE_PRIVATE_GITHUB_READ_STATE_DIR");
     const workspace = required("USINE_PRIVATE_GITHUB_READ_WORKSPACE");
     const taskId = required("USINE_PRIVATE_GITHUB_READ_TASK_ID");
     const attempt = required("USINE_PRIVATE_GITHUB_READ_ATTEMPT");
@@ -73,7 +72,6 @@ describe.skipIf(!enabled)("private GitHub read characterization", () => {
       expect(JSON.stringify(explicitWorkerEnvironment(environment))).not.toContain(token);
       const observation = await new CodexCodingSession(undefined, {
         environment,
-        executionStateDirectory: stateDirectory,
       }).run({
         role: "implementer",
         workspace,
@@ -84,7 +82,7 @@ describe.skipIf(!enabled)("private GitHub read characterization", () => {
         deadlineEpochMs: Date.now() + 120_000,
         outputSchema: implementerOutputSchema,
         mcpServer,
-        execution: { taskId, role: "implementer", attempt },
+        attempt,
         environment,
         onObservation: (event) => {
           observations.push(event);

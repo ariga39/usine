@@ -167,6 +167,7 @@ export class QualityGate {
         ].join("\n");
         const observation = await this.options.session.run({
           role: this.options.reviewer.role,
+          attempt: `${cycle}-${sha}`,
           workspace: path,
           contract: taskContract,
           prompt,
@@ -174,11 +175,6 @@ export class QualityGate {
           sandbox: this.options.reviewer.sandbox,
           deadlineEpochMs: this.options.deadlineEpochMs,
           outputSchema: reviewerOutputSchema,
-          execution: {
-            taskId: contract.id,
-            role: this.options.reviewer.role,
-            attempt: `${cycle}-${sha}`,
-          },
           environment: this.options.environment,
           signal: this.options.signal,
           onObservation,
