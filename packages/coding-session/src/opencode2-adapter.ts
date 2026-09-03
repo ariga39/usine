@@ -39,10 +39,13 @@ function noOpGracefulInterrupt(): Promise<void> {
 export class OpenCode2Adapter implements CodingSessionAdapter {
   readonly name = "opencode2" as const;
 
-  constructor(private readonly sandbox: OpenCode2Sandbox = new DarwinOpenCode2Sandbox()) {}
+  constructor(
+    private readonly stateDirectory: string | undefined,
+    private readonly sandbox: OpenCode2Sandbox = new DarwinOpenCode2Sandbox(),
+  ) {}
 
   async run(context: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult> {
-    if (!context.executionStateDirectory)
+    if (!this.stateDirectory)
       throw new CodingSessionInterruption(
         "startup",
         "configuration",
@@ -64,8 +67,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
 
     try {
       const port = await availablePort();
-      await mkdir(context.executionStateDirectory, { recursive: true });
-      privateDirectory = await mkdtemp(join(context.executionStateDirectory, "opencode-private-"));
+      await mkdir(this.stateDirectory, { recursive: true });
+      privateDirectory = await mkdtemp(join(this.stateDirectory, "opencode-private-"));
       configDirectory = join(privateDirectory, "config");
       await Promise.all([
         mkdir(configDirectory, { recursive: true }),
@@ -78,7 +81,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       const sandbox = await this.sandbox.prepare({
         workspace: context.workspace,
         privateDirectory,
-        role: context.execution.role,
+        role: context.role,
         environment: context.environment,
         signal: context.signal,
       });
@@ -451,7 +454,7 @@ export function opencodeConfig(context: CodingSessionAdapterRequest): Config {
     permission: {
       "*": "deny",
       read: "allow",
-      edit: context.execution.role === "implementer" ? "allow" : "deny",
+      edit: context.role === "implementer" ? "allow" : "deny",
       glob: "allow",
       grep: "allow",
       list: "allow",

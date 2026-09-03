@@ -26,7 +26,6 @@ import {
   taskResourceFromResult,
   isTerminalState,
 } from "@usine/task-authority";
-import type { CodingSessionCleanup } from "@usine/coding-session";
 import {
   admitTask,
   executeAdmittedTask,
@@ -84,7 +83,6 @@ export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskR
 export interface UsineServerOptions {
   environment: NodeJS.ProcessEnv;
   execute?: ServerExecution;
-  codingSession?: CodingSessionCleanup;
   host?: string;
   port?: number;
 }
@@ -239,15 +237,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
 
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {
-    yield* Effect.acquireRelease(Effect.void, () =>
-      options.codingSession
-        ? Effect.tryPromise({
-            try: () => options.codingSession!.cleanupOwned(stateDirectory),
-            catch: (cause) => new Error(`server execution cleanup failed: ${String(cause)}`),
-          }).pipe(Effect.orDie)
-        : Effect.void,
-    );
-
     const runTask = yield* FiberMap.makeRuntime<never, string>();
     let launchTask: (task: AdmittedTask, mode?: LaunchMode) => void = () => undefined;
     const api = yield* HttpRouter.toHttpEffect(
@@ -287,18 +276,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     for (const task of restartable) {
       yield* Effect.tryPromise({
         try: async () => {
-          if (options.codingSession)
-            await options.codingSession.cleanupTask(stateDirectory, task.result.taskId);
           await recordRecoveryObservation(
             stateDirectory,
             task.result.taskId,
             "server_restart",
-            onEvent,
-          );
-          await recordRecoveryObservation(
-            stateDirectory,
-            task.result.taskId,
-            "execution_owner_changed",
             onEvent,
           );
           const contract = parseTaskContract(task.input.rawContract);

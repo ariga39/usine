@@ -175,57 +175,12 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
 }
 
 describe("server-owned execution", () => {
-  test("shares repeated close completion across task interruption and cleanup", async () => {
+  test("shares repeated close completion across task interruption and leaves the server closed", async () => {
     const { submission, stateDirectory, repositoryName } = await fixture();
     const started = deferred<void>();
     const lifecycle: string[] = [];
     const server = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
-      codingSession: {
-        cleanupTask: async () => undefined,
-        cleanupOwned: async () => {
-          lifecycle.push("cleanup");
-        },
-      },
-      execute: async ({ result, signal }) => {
-        lifecycle.push("started");
-        started.resolve();
-        await new Promise<void>((resolve) =>
-          signal.addEventListener(
-            "abort",
-            () => {
-              lifecycle.push("interrupted");
-              resolve();
-            },
-            { once: true },
-          ),
-        );
-        return result;
-      },
-      host: "127.0.0.1",
-      port: 0,
-    });
-
-    await submitTask(server.url, submission);
-    await started.promise;
-    await Promise.all([server.close(), server.close(), server.close()]);
-
-    expect(lifecycle).toEqual(["started", "interrupted", "cleanup"]);
-  });
-
-  test("rejects close when owned cleanup fails after releasing server resources", async () => {
-    const { submission, stateDirectory, repositoryName } = await fixture();
-    const started = deferred<void>();
-    const lifecycle: string[] = [];
-    const server = await startUsineServer({
-      environment: environment(stateDirectory, repositoryName),
-      codingSession: {
-        cleanupTask: async () => undefined,
-        cleanupOwned: async () => {
-          lifecycle.push("cleanup");
-          throw new Error("owned cleanup failed");
-        },
-      },
       execute: async ({ result, signal }) => {
         lifecycle.push("started");
         started.resolve();
@@ -250,9 +205,10 @@ describe("server-owned execution", () => {
 
     const close = server.close();
     expect(server.close()).toBe(close);
-    await expect(close).rejects.toThrow("owned cleanup failed");
+    expect(server.close()).toBe(close);
+    await close;
 
-    expect(lifecycle).toEqual(["started", "interrupted", "cleanup"]);
+    expect(lifecycle).toEqual(["started", "interrupted"]);
     await expect(fetch(server.url)).rejects.toThrow();
   });
 
@@ -899,9 +855,27 @@ describe("server-owned execution", () => {
     handle.close();
 
     await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
-    await recordRecoveryObservation(stateDirectory, admitted.taskId, "execution_owner_changed");
-    await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
-    await recordRecoveryObservation(stateDirectory, admitted.taskId, "execution_owner_changed");
+    const historicalHandle = openSqliteDatabase(databasePath);
+    try {
+      const historicalAuthority = new TaskAuthority(historicalHandle.database);
+      await historicalAuthority.appendObservation(admitted.taskId, {
+        eventId: "historical-execution-owner-changed-1",
+        occurredAtEpochMs: Date.now(),
+        data: { type: "recovery_observed", kind: "execution_owner_changed" },
+      });
+      await historicalAuthority.appendObservation(admitted.taskId, {
+        eventId: "historical-execution-owner-changed-2",
+        occurredAtEpochMs: Date.now(),
+        data: { type: "recovery_observed", kind: "execution_owner_changed" },
+      });
+      await historicalAuthority.appendObservation(admitted.taskId, {
+        eventId: "historical-server-restart-2",
+        occurredAtEpochMs: Date.now(),
+        data: { type: "recovery_observed", kind: "server_restart" },
+      });
+    } finally {
+      historicalHandle.close();
+    }
 
     const status = await lookupTaskStatus(stateDirectory, admitted.taskId);
     expect(status).toEqual(admitted);
@@ -909,8 +883,8 @@ describe("server-owned execution", () => {
     expect(events.events.map((event) => event.data)).toEqual([
       { type: "recovery_observed", kind: "server_restart" },
       { type: "recovery_observed", kind: "execution_owner_changed" },
-      { type: "recovery_observed", kind: "server_restart" },
       { type: "recovery_observed", kind: "execution_owner_changed" },
+      { type: "recovery_observed", kind: "server_restart" },
     ]);
     expect(new Set(events.events.map((event) => event.eventId)).size).toBe(4);
     expect(events.events.map((event) => event.eventId)).toEqual(
@@ -968,18 +942,8 @@ describe("server-owned execution", () => {
     const firstStarted = deferred<void>();
     const firstAborted = deferred<void>();
     const firstSeen: string[] = [];
-    const cleanupCalls = { taskIds: [] as string[], owned: 0 };
-    const codingSession = {
-      cleanupTask: async (_stateDirectory: string, taskId: string) => {
-        cleanupCalls.taskIds.push(taskId);
-      },
-      cleanupOwned: async (_stateDirectory: string) => {
-        cleanupCalls.owned += 1;
-      },
-    };
     const first = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
-      codingSession,
       execute: async ({ authority, contract, result, signal }) => {
         firstSeen.push(result.taskId);
         await authority.reserveActivation(result.taskId, contract.budget.maxImplementerActivations);
@@ -1007,7 +971,6 @@ describe("server-owned execution", () => {
     const restartedSeen: string[] = [];
     const second = await startUsineServer({
       environment: environment(stateDirectory, repositoryName),
-      codingSession,
       execute: blockedExecutor(restartedSeen),
       host: "127.0.0.1",
       port: 0,
@@ -1021,11 +984,9 @@ describe("server-owned execution", () => {
       expect(firstSeen).toEqual([admitted.taskId]);
       expect(restartedSeen).toEqual([admitted.taskId]);
       expect(completed.evidence.restartRecoveries).toBe(1);
-      expect(cleanupCalls.taskIds).toEqual([admitted.taskId]);
     } finally {
       await second.close();
     }
-    expect(cleanupCalls.owned).toBeGreaterThan(0);
   });
 
   test("restarts an admitted task with its original Forge and GitHub read policy", async () => {

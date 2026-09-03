@@ -2,7 +2,6 @@ export {
   CodexCodingSession,
   createOpenAICompatibleRoleOutputTransform,
   type CodingSessionOptions,
-  type CodingSessionCleanup,
   type CodingSessionMcpServer,
   type CodingSessionMcpServerFactory,
   type CodingSessionMcpServerResolution,
@@ -44,18 +43,6 @@ export {
   type CodexProfileResolver,
   type CodexProfileSelection,
 } from "./codex-profile.js";
-export {
-  codexExecutionIdentityPath,
-  createCodexLauncher,
-  discoverOwnedExecutions,
-  executionLifecycle,
-  removeCodexExecutionIdentity,
-  CodexExecutionOwnershipError,
-  type ExecutionHandle,
-  type ExecutionLifecycle,
-  type ExecutionObservation,
-  type ExecutionReference,
-} from "./codex-execution.js";
 export {
   ROLE_RESULT_LIMITS,
   implementerOutputSchema,

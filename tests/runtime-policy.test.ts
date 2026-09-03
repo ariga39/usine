@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
 import {
-  createRuntimeCodingSession,
   ForgeProfileResolutionError,
   forgePolicyFromEnvironment,
   githubReadPolicyFromEnvironment,
@@ -107,16 +106,6 @@ describe("runtime composition", () => {
       USINE_CODEX_APP_SERVER_PROFILES: "app-server-profile",
       USINE_OPENCODE2_PROFILES: "opencode2-profile",
     });
-  });
-
-  test("rejects a profile selected for more than one adapter before execution", () => {
-    expect(() =>
-      createRuntimeCodingSession({
-        ...forgeEnvironment,
-        USINE_CODEX_APP_SERVER_PROFILES: "shared-profile",
-        USINE_OPENCODE2_PROFILES: "shared-profile",
-      }),
-    ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
   test("validates deployment inputs once and derives capability-safe values", () => {

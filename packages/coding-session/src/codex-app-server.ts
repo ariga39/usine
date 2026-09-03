@@ -28,7 +28,7 @@ interface AppServerRunResult {
 
 type AppServerRunOptions = Omit<
   CodingSessionAdapterRequest,
-  "execution" | "executionStateDirectory" | "onUsage" | "profile" | "mcpServer"
+  "onUsage" | "profile" | "mcpServer"
 > & {
   config: CodexNativeConfig;
   onUsage?: (observation: ProviderNeutralUsageObservation) => Promise<void> | void;

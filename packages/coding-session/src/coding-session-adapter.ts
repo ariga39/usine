@@ -1,6 +1,5 @@
 import type { CodingSessionObservation } from "./coding-session.js";
 import type { CodingSessionPhase } from "./coding-session-interruption.js";
-import type { ExecutionReference } from "./coding-session-types.js";
 
 export type ProviderNeutralJsonValue =
   | null
@@ -89,6 +88,7 @@ export type PreparedOutputSchema = object;
  * applied profile, MCP, deadline, environment, and cancellation policy.
  */
 export interface CodingSessionAdapterRequest {
+  readonly role: "implementer" | "reviewer";
   readonly workspace: string;
   readonly prompt: string;
   readonly sandbox: "workspace-write" | "read-only";
@@ -97,8 +97,6 @@ export interface CodingSessionAdapterRequest {
   readonly mcpServer?: CodingSessionAdapterMcpServer;
   readonly outputSchema: PreparedOutputSchema;
   readonly environment: Record<string, string>;
-  readonly executionStateDirectory?: string;
-  readonly execution: ExecutionReference;
   readonly signal: AbortSignal;
   readonly onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
   readonly onItemCompleted?: (item: ProviderNeutralCompletedEvidence) => Promise<void> | void;

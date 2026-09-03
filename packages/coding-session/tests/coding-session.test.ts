@@ -1,5 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
-import { execFileSync, spawn } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -22,14 +21,9 @@ import {
   type CodingSessionMcpServer,
   type CodingSessionObservation,
   createOpenAICompatibleRoleOutputTransform,
-  createCodexLauncher,
-  discoverOwnedExecutions,
-  executionLifecycle,
   explicitWorkerEnvironment,
   implementerOutputSchema,
   ROLE_RESULT_LIMITS,
-  codexExecutionIdentityPath,
-  removeCodexExecutionIdentity,
   readSessionArchive,
   readSessionArchiveManifest,
   listSessionArchives,
@@ -51,9 +45,8 @@ import { z } from "zod";
 
 const sha = "a".repeat(40);
 const contract = { id: "session-test" } as TaskContract;
-const implementerExecution = { taskId: contract.id, role: "implementer" as const, attempt: "1" };
-const reviewerExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-a" };
-const opencodeExecution = { taskId: contract.id, role: "reviewer" as const, attempt: "1-b" };
+const implementerAttempt = "1";
+const reviewerAttempt = "1-a";
 const syntheticProfileResolver: CodexProfileResolver = async (profile) => {
   const selection = {
     model: profile === "reviewer-profile" ? "reviewer-model" : "implementer-model",
@@ -188,10 +181,6 @@ if (process.argv[2] !== "app-server") {
   process.stderr.write("unexpected Codex transport arguments\\n");
   process.exit(2);
 }
-if (process.env.USINE_CODING_SESSION_IDENTITY_PATH || process.env.USINE_CODING_SESSION_WORKSPACE) {
-  process.stderr.write("unexpected execution identity environment\\n");
-  process.exit(4);
-}
 writeFileSync(process.env.CODEX_HOME + "/app-server.pid", String(process.pid));
 if (mode === "descendant-stdio") {
   const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], {
@@ -298,9 +287,6 @@ async function expectAppServerChildSettled(fixture: {
   const pid = Number(await readFile(fixture.pidPath, "utf8"));
   expect(Number.isInteger(pid)).toBe(true);
   expect(() => process.kill(pid, 0)).toThrow();
-  await expect(access(join(fixture.stateDirectory, "codex-executions"))).rejects.toMatchObject({
-    code: "ENOENT",
-  });
 }
 
 async function startFakeGithubHost(): Promise<{
@@ -388,227 +374,7 @@ function textContent(value: unknown): string | undefined {
 }
 
 describe("Coding Session", () => {
-  test("retains starting and live execution identities and removes a confirmed-stopped identity", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-identity-"));
-    const workspace = join(stateDirectory, "workspace");
-    const identityPath = codexExecutionIdentityPath(stateDirectory, implementerExecution);
-    await mkdir(join(stateDirectory, "codex-executions"), { recursive: true });
-
-    await writeFile(
-      identityPath,
-      JSON.stringify({
-        version: 2,
-        state: "starting",
-        reference: implementerExecution,
-        workspace,
-      }) + "\n",
-    );
-    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(false);
-    await expect(access(identityPath)).resolves.toBeUndefined();
-
-    const liveChild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
-      detached: true,
-      stdio: "ignore",
-    });
-    if (!liveChild.pid) throw new Error("live child has no PID");
-    const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(liveChild.pid)], {
-      encoding: "utf8",
-    }).trim();
-    await writeFile(
-      identityPath,
-      JSON.stringify({
-        version: 2,
-        state: "running",
-        reference: implementerExecution,
-        pid: liveChild.pid,
-        startedAt,
-        workspace,
-      }) + "\n",
-    );
-    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(false);
-    await expect(readFile(identityPath, "utf8")).resolves.toContain('"state":"running"');
-    process.kill(-liveChild.pid, "SIGKILL");
-    await new Promise<void>((resolve) => liveChild.once("exit", () => resolve()));
-
-    const stoppedChild = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-    if (!stoppedChild.pid) throw new Error("stopped child has no PID");
-    await new Promise<void>((resolve, reject) => {
-      stoppedChild.once("error", reject);
-      stoppedChild.once("exit", () => resolve());
-    });
-    await writeFile(
-      identityPath,
-      JSON.stringify({
-        version: 2,
-        state: "running",
-        reference: implementerExecution,
-        pid: stoppedChild.pid,
-        startedAt: "confirmed-stopped",
-        workspace,
-      }) + "\n",
-    );
-    expect(await removeCodexExecutionIdentity(stateDirectory, implementerExecution)).toBe(true);
-    await expect(access(identityPath)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  test("discovers valid implementer and reviewer launcher identities by task ownership", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-discovery-"));
-    const implementer = await createCodexLauncher(
-      stateDirectory,
-      join(stateDirectory, "writer"),
-      implementerExecution,
-    );
-    const reviewerReference = {
-      taskId: "review-task",
-      role: "reviewer" as const,
-      attempt: "1-a" + sha,
-    };
-    const reviewer = await createCodexLauncher(
-      stateDirectory,
-      join(stateDirectory, "reviewer"),
-      reviewerReference,
-    );
-
-    await expect(discoverOwnedExecutions(stateDirectory, contract.id)).resolves.toEqual([
-      { reference: implementerExecution, workspace: join(stateDirectory, "writer") },
-    ]);
-    await expect(
-      discoverOwnedExecutions(stateDirectory, reviewerReference.taskId),
-    ).resolves.toEqual([
-      { reference: reviewerReference, workspace: join(stateDirectory, "reviewer") },
-    ]);
-    await expect(readFile(implementer.launcherPath, "utf8")).resolves.toContain(
-      'reference: {"taskId":"session-test","role":"implementer","attempt":"1"}',
-    );
-    await expect(readFile(reviewer.identityPath, "utf8")).resolves.toContain('"role":"reviewer"');
-  });
-
-  test("fails closed when a launcher has no companion identity", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-incomplete-"));
-    const launcher = await createCodexLauncher(
-      stateDirectory,
-      join(stateDirectory, "workspace"),
-      implementerExecution,
-    );
-    await unlink(launcher.identityPath);
-    await expect(discoverOwnedExecutions(stateDirectory, contract.id)).rejects.toThrow(
-      "Codex execution launcher has no durable identity",
-    );
-  });
-
-  test("converges concurrent reviewer interrupt and reap on one owned execution", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-race-"));
-    const workspace = join(stateDirectory, "reviewer");
-    const reference = {
-      taskId: "review-race",
-      role: "reviewer" as const,
-      attempt: `1-${sha}`,
-    };
-    const launcher = await createCodexLauncher(stateDirectory, workspace, reference);
-    const child = spawn(
-      process.execPath,
-      ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
-      { detached: true, stdio: "ignore" },
-    );
-    if (!child.pid) throw new Error("reviewer child has no PID");
-    try {
-      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
-        encoding: "utf8",
-      }).trim();
-      await writeFile(
-        launcher.identityPath,
-        JSON.stringify({
-          version: 2,
-          state: "running",
-          reference,
-          pid: child.pid,
-          startedAt,
-          workspace,
-        }) + "\n",
-      );
-      const handle = { reference, workspace };
-      const results = await Promise.allSettled([
-        executionLifecycle.interrupt(stateDirectory, handle),
-        executionLifecycle.reap(stateDirectory, handle),
-      ]);
-      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
-      await expect(discoverOwnedExecutions(stateDirectory, reference.taskId)).resolves.toEqual([]);
-      await expect(access(launcher.identityPath)).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(access(launcher.launcherPath)).rejects.toMatchObject({ code: "ENOENT" });
-      let states: string[] = [];
-      try {
-        states = execFileSync("ps", ["-o", "stat=", "-g", String(child.pid)], {
-          encoding: "utf8",
-        })
-          .trim()
-          .split("\n")
-          .filter(Boolean);
-      } catch (error) {
-        if (!(error instanceof Error && "status" in error && error.status === 1)) throw error;
-      }
-      expect(states.every((state) => /^[ZX]/.test(state.trim()))).toBe(true);
-    } finally {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // The shared termination transition may already have removed the group.
-      }
-      if (child.exitCode === null && child.signalCode === null)
-        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    }
-  });
-
-  test("owns task cleanup behind the Coding Session boundary", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-session-cleanup-"));
-    const workspace = join(stateDirectory, "reviewer");
-    const reference = {
-      taskId: "session-cleanup",
-      role: "reviewer" as const,
-      attempt: `1-${sha}`,
-    };
-    const launcher = await createCodexLauncher(stateDirectory, workspace, reference);
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-      detached: true,
-      stdio: "ignore",
-    });
-    if (!child.pid) throw new Error("reviewer child has no PID");
-    try {
-      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
-        encoding: "utf8",
-      }).trim();
-      await writeFile(
-        launcher.identityPath,
-        JSON.stringify({
-          version: 2,
-          state: "running",
-          reference,
-          pid: child.pid,
-          startedAt,
-          workspace,
-        }) + "\n",
-      );
-
-      const session = new CodexCodingSession(undefined, {
-        environment: {},
-        executionStateDirectory: stateDirectory,
-      });
-      await session.cleanupTask(stateDirectory, reference.taskId);
-
-      await expect(discoverOwnedExecutions(stateDirectory, reference.taskId)).resolves.toEqual([]);
-      await expect(access(launcher.identityPath)).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(access(launcher.launcherPath)).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // The Coding Session cleanup may already have removed the group.
-      }
-      if (child.exitCode === null && child.signalCode === null)
-        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    }
-  });
-
-  test("uses the SDK public lifecycle without creating an execution identity", async () => {
+  test("uses the SDK public lifecycle", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-sdk-lifecycle-"));
     const fakeClient = testClient(
       async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "sdk" })),
@@ -623,7 +389,7 @@ describe("Coding Session", () => {
     try {
       const session = new CodexCodingSession(undefined, {
         environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
+        sessionArchive: { stateDirectory: stateDirectory },
         profileResolver: syntheticProfileResolver,
       });
       await expect(
@@ -636,7 +402,7 @@ describe("Coding Session", () => {
           sandbox: "workspace-write",
           deadlineEpochMs: Date.now() + 10_000,
           outputSchema: implementerOutputSchema,
-          execution: implementerExecution,
+          attempt: implementerAttempt,
         }),
       ).resolves.toMatchObject({
         status: "completed",
@@ -646,10 +412,6 @@ describe("Coding Session", () => {
     } finally {
       startThread.mockRestore();
     }
-
-    await expect(access(join(stateDirectory, "codex-executions"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
   });
 
   test("selects the app-server by profile while preserving the SDK path for other roles", async () => {
@@ -675,7 +437,7 @@ describe("Coding Session", () => {
         ),
       {
         environment: fixture.environment,
-        executionStateDirectory: fixture.stateDirectory,
+        sessionArchive: { stateDirectory: fixture.stateDirectory },
         adapterSelectionEnvironment: {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
         },
@@ -693,7 +455,7 @@ describe("Coding Session", () => {
         sandbox: "workspace-write",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: implementerOutputSchema,
-        execution: implementerExecution,
+        attempt: implementerAttempt,
       }),
     ).resolves.toMatchObject({
       status: "completed",
@@ -709,7 +471,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
       }),
     ).resolves.toMatchObject({
       status: "completed",
@@ -748,7 +510,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
       }),
     ).resolves.toMatchObject({
       status: "completed",
@@ -787,7 +549,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
     });
 
     expect(observation.effectiveProfile).toMatchObject({ model: null, modelProvider: null });
@@ -886,7 +648,7 @@ describe("Coding Session", () => {
         ),
       {
         environment: fixture.environment,
-        executionStateDirectory: fixture.stateDirectory,
+        sessionArchive: { stateDirectory: fixture.stateDirectory },
         adapterSelectionEnvironment: {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
         },
@@ -904,7 +666,7 @@ describe("Coding Session", () => {
         sandbox: "workspace-write",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: implementerOutputSchema,
-        execution: implementerExecution,
+        attempt: implementerAttempt,
       }),
     ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk" } });
     expect(sdkThreadOptions).toMatchObject({
@@ -924,7 +686,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
       }),
     ).resolves.toMatchObject({ status: "completed", output: { summary: "app-server" } });
   });
@@ -967,7 +729,7 @@ describe("Coding Session", () => {
           sandbox: "workspace-write",
           deadlineEpochMs: Date.now() + 10_000,
           outputSchema: implementerOutputSchema,
-          execution: implementerExecution,
+          attempt: implementerAttempt,
         }),
       ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk-implementer" } });
       await expect(
@@ -980,7 +742,7 @@ describe("Coding Session", () => {
           sandbox: "read-only",
           deadlineEpochMs: Date.now() + 10_000,
           outputSchema: reviewerOutputSchema,
-          execution: reviewerExecution,
+          attempt: reviewerAttempt,
         }),
       ).resolves.toMatchObject({ status: "completed", output: { summary: "sdk-review" } });
     } finally {
@@ -1046,7 +808,7 @@ describe("Coding Session", () => {
     ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
-  test("executes an app-server reviewer and settles its direct child without an identity", async () => {
+  test("executes an app-server reviewer and settles its direct child", async () => {
     const mcpServer: CodingSessionMcpServer = {
       name: "github_read",
       url: "https://github.example.test/mcp?task=session-test",
@@ -1071,7 +833,7 @@ describe("Coding Session", () => {
     const releaseFinalObservation = deferred<void>();
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1086,7 +848,7 @@ describe("Coding Session", () => {
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
       mcpServer,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       onObservation: async (event) => {
         observations.push(event);
         if (event.type === "turn_completed") {
@@ -1136,7 +898,6 @@ describe("Coding Session", () => {
       },
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
-    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
     await expectAppServerChildSettled(fixture);
     const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
     const archive = completeArchive(
@@ -1198,7 +959,7 @@ describe("Coding Session", () => {
     const observations: CodingSessionObservation[] = [];
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1212,7 +973,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       signal: controller.signal,
       onObservation: (event) => {
         observations.push(event);
@@ -1242,11 +1003,10 @@ describe("Coding Session", () => {
       "turn/interrupt",
       "transport-release",
     ]);
+    await expectAppServerChildSettled(fixture);
     const observationCount = observations.length;
     await Promise.resolve();
     expect(observations).toHaveLength(observationCount);
-    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
-    await expectAppServerChildSettled(fixture);
   });
 
   test("settles an app-server child after exit while a descendant holds inherited stdio", async () => {
@@ -1254,7 +1014,7 @@ describe("Coding Session", () => {
     try {
       const session = new CodexCodingSession(undefined, {
         environment: fixture.environment,
-        executionStateDirectory: fixture.stateDirectory,
+        sessionArchive: { stateDirectory: fixture.stateDirectory },
         adapterSelectionEnvironment: {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
         },
@@ -1269,7 +1029,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
       });
       expect(Date.now() - startedAt).toBeLessThan(2_500);
       expect(observation).toMatchObject({
@@ -1283,9 +1043,6 @@ describe("Coding Session", () => {
       expect(Number.isInteger(descendantPid)).toBe(true);
       expect(() => process.kill(descendantPid, 0)).not.toThrow();
       await expectAppServerChildSettled(fixture);
-      await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
-        [],
-      );
     } finally {
       try {
         const descendantPid = Number(await readFile(fixture.descendantPidPath, "utf8"));
@@ -1300,7 +1057,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("schema-invalid");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1315,7 +1072,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -1333,7 +1090,6 @@ describe("Coding Session", () => {
       normalizedOutput: { invalid: true },
       completeness: "complete",
     });
-    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
     await expectAppServerChildSettled(fixture);
   });
 
@@ -1341,7 +1097,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("wait");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1355,7 +1111,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 500,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "cancelled",
@@ -1373,7 +1129,6 @@ describe("Coding Session", () => {
       status: "cancelled",
       completeness: "partial",
     });
-    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
     await expectAppServerChildSettled(fixture);
   });
 
@@ -1383,7 +1138,7 @@ describe("Coding Session", () => {
       const fixture = await fakeAppServerEnvironment(mode);
       const session = new CodexCodingSession(undefined, {
         environment: fixture.environment,
-        executionStateDirectory: fixture.stateDirectory,
+        sessionArchive: { stateDirectory: fixture.stateDirectory },
         adapterSelectionEnvironment: {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
         },
@@ -1397,7 +1152,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
       });
       expect(observation).toMatchObject({ status: "failed", output: null });
       const archives = await listSessionArchives(fixture.stateDirectory, contract.id);
@@ -1406,9 +1161,6 @@ describe("Coding Session", () => {
       ).resolves.toMatchObject({
         completeness: "partial",
       });
-      await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual(
-        [],
-      );
       await expectAppServerChildSettled(fixture);
     },
   );
@@ -1417,7 +1169,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("stderr");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1431,7 +1183,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -1447,7 +1199,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("thread-failure");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1461,7 +1213,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -1482,7 +1234,7 @@ describe("Coding Session", () => {
     const fixture = await fakeAppServerEnvironment("mismatch");
     const session = new CodexCodingSession(undefined, {
       environment: fixture.environment,
-      executionStateDirectory: fixture.stateDirectory,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
       adapterSelectionEnvironment: {
         USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
       },
@@ -1496,10 +1248,9 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({ status: "failed", output: null });
-    await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
     await expectAppServerChildSettled(fixture);
   });
 
@@ -1641,7 +1392,7 @@ describe("Coding Session", () => {
           toolTimeoutMs: 5_000,
           required: true,
         },
-        execution: implementerExecution,
+        attempt: implementerAttempt,
         environment: { GITHUB_TOKEN: "worker-github-secret" },
         onObservation: (event) => {
           observations.push(event);
@@ -1704,7 +1455,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       onObservation: (event) => {
         observations.push(event);
       },
@@ -1740,7 +1491,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
     });
     expect(created).toBe(false);
     expect(observation).toMatchObject({
@@ -1761,7 +1512,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -1790,7 +1541,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
     expect(observation).toMatchObject({
       status: "failed",
@@ -1859,7 +1610,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -1924,7 +1675,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       onObservation: (event) => {
         observations.push(event);
       },
@@ -2021,7 +1772,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2120,7 +1871,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
       signal: controller.signal,
     });
@@ -2166,7 +1917,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
       signal: controller.signal,
     });
@@ -2211,7 +1962,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 250,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2241,7 +1992,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 50,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
     });
     expect(started).toBe(false);
@@ -2277,7 +2028,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -2306,7 +2057,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -2339,7 +2090,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
     expect(observation).toMatchObject({
@@ -2373,7 +2124,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2403,7 +2154,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2452,7 +2203,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2488,7 +2239,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2514,7 +2265,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2545,7 +2296,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2579,7 +2330,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2614,7 +2365,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
       environment: { CI: "true" },
     });
 
@@ -2673,7 +2424,7 @@ describe("Coding Session", () => {
         ),
       {
         environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
+        sessionArchive: { stateDirectory: stateDirectory },
         profileResolver: syntheticProfileResolver,
       },
     );
@@ -2687,7 +2438,7 @@ describe("Coding Session", () => {
       sandbox: "workspace-write",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+      attempt: implementerAttempt,
     });
 
     expect(observation).toMatchObject({
@@ -2771,7 +2522,7 @@ describe("Coding Session", () => {
         sandbox: "workspace-write",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: implementerOutputSchema,
-        execution: implementerExecution,
+        attempt: implementerAttempt,
       }),
     ).resolves.toMatchObject({
       status: "completed",
@@ -2786,7 +2537,7 @@ describe("Coding Session", () => {
       async () => testClient(async () => sdkTurn("provider response"), "undefined-output-thread"),
       {
         environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
+        sessionArchive: { stateDirectory: stateDirectory },
         profileResolver: syntheticProfileResolver,
         roleOutputTransform: async () => undefined,
       },
@@ -2800,7 +2551,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
 
     expect(observation).toMatchObject({
@@ -2836,7 +2587,7 @@ describe("Coding Session", () => {
         ]),
       {
         environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
+        sessionArchive: { stateDirectory: stateDirectory },
         profileResolver: syntheticProfileResolver,
         roleOutputTransform: async () => circular,
       },
@@ -2850,7 +2601,7 @@ describe("Coding Session", () => {
       sandbox: "read-only",
       deadlineEpochMs: Date.now() + 10_000,
       outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
+      attempt: reviewerAttempt,
     });
 
     expect(observation).toMatchObject({
@@ -2930,7 +2681,7 @@ describe("Coding Session", () => {
           USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
           USINE_OPENCODE2_PROFILES: "opencode-profile",
         },
-        executionStateDirectory: stateDirectory,
+        sessionArchive: { stateDirectory: stateDirectory },
         profileResolver: syntheticProfileResolver,
       },
       {
@@ -2958,7 +2709,7 @@ describe("Coding Session", () => {
           toolTimeoutMs: 5_000,
           required: true,
         },
-        execution: implementerExecution,
+        attempt: implementerAttempt,
         onObservation: (observation) => {
           observations.push(observation);
         },
@@ -2974,7 +2725,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
         onObservation: (observation) => {
           observations.push(observation);
         },
@@ -2990,7 +2741,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: opencodeExecution,
+        attempt: reviewerAttempt,
         onObservation: (observation) => {
           observations.push(observation);
         },
@@ -3151,7 +2902,7 @@ describe("Coding Session", () => {
               testClient(async () => sdkTurn(mode === "schema-invalid" ? "not an output" : "{}")),
         {
           environment: { CI: "true" },
-          executionStateDirectory: stateDirectory,
+          sessionArchive: { stateDirectory: stateDirectory },
           profileResolver: syntheticProfileResolver,
         },
       );
@@ -3166,7 +2917,7 @@ describe("Coding Session", () => {
         sandbox: "read-only",
         deadlineEpochMs: Date.now() + 10_000,
         outputSchema: reviewerOutputSchema,
-        execution: reviewerExecution,
+        attempt: reviewerAttempt,
         signal: controller.signal,
       });
 

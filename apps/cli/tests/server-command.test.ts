@@ -3,7 +3,6 @@ import { afterEach, beforeAll, describe, expect, test, vi } from "vite-plus/test
 import { CliFailure } from "../src/cli-failure.js";
 
 const runtime = {
-  createRuntimeCodingSession: vi.fn(() => undefined),
   startUsineServer: vi.fn(),
 };
 

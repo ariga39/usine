@@ -87,6 +87,7 @@ async function runCodingAttempt(
   });
   const observation = await services.session.run({
     role: input.implementer.role,
+    attempt: String(reservation.activation),
     workspace: workspace.path,
     contract: originalTaskContract(input.contract),
     prompt: implementerPrompt(input, previousSha, check, findings),
@@ -94,11 +95,6 @@ async function runCodingAttempt(
     sandbox: input.implementer.sandbox,
     deadlineEpochMs: reservation.result.deadlineEpochMs,
     outputSchema: implementerOutputSchema,
-    execution: {
-      taskId: reservation.result.taskId,
-      role: input.implementer.role,
-      attempt: String(reservation.activation),
-    },
     signal: input.signal,
     onObservation: emitSessionObservation,
   });
