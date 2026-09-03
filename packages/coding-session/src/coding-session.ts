@@ -240,6 +240,8 @@ export interface CodingSessionOptions {
   environment: NodeJS.ProcessEnv;
   /** Host-private static adapter selection input; never sent to an adapter. */
   adapterSelectionEnvironment?: NodeJS.ProcessEnv;
+  /** Host-private SDK executable override for a direct public Codex client. */
+  codexPathOverride?: string;
   executionStateDirectory?: string;
   sessionArchive?: SessionArchiveOptions;
   profileResolver?: CodexProfileResolver;
@@ -336,7 +338,7 @@ export class CodexCodingSession {
       options.adapterSelectionEnvironment ?? {},
     );
     this.profileResolver = options.profileResolver ?? resolveCodexProfile;
-    this.sdkAdapter = new CodexSdkAdapter();
+    this.sdkAdapter = new CodexSdkAdapter({ codexPathOverride: options.codexPathOverride });
     this.appServerAdapter = new CodexAppServerAdapter();
     this.openCode2Adapter = new OpenCode2Adapter();
   }
@@ -547,7 +549,7 @@ export class CodexCodingSession {
             ? (adapterOverrides?.["app-server"] ?? this.appServerAdapter)
             : (adapterOverrides?.sdk ??
               (clientFactory
-                ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
+                ? new CodexSdkAdapter({ clientFactory: () => clientFactory(effectiveRequest) })
                 : this.sdkAdapter));
       effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);

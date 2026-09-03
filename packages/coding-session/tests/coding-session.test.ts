@@ -130,21 +130,6 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-function observeExecutionPollSchedule(): {
-  scheduled: Promise<void>;
-  restore: () => void;
-} {
-  const scheduled = deferred<void>();
-  const schedule = globalThis.setTimeout;
-  const timerSpy = vi
-    .spyOn(globalThis, "setTimeout")
-    .mockImplementation((handler, timeout, ...args) => {
-      if (timeout === 10) scheduled.resolve();
-      return schedule(handler, timeout, ...args);
-    });
-  return { scheduled: scheduled.promise, restore: () => timerSpy.mockRestore() };
-}
-
 async function fakeAppServerEnvironment(
   mode:
     | "success"
@@ -588,57 +573,48 @@ describe("Coding Session", () => {
     }
   });
 
-  test("keeps role sandboxes local while the launcher forwards transport argv", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-profile-"));
-    const implementer = await createCodexLauncher(
-      stateDirectory,
-      "fixtures/writer",
-      implementerExecution,
+  test("uses the SDK public lifecycle without creating an execution identity", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-sdk-lifecycle-"));
+    const fakeClient = testClient(
+      async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "sdk" })),
+      "sdk-thread",
     );
-    const reviewer = await createCodexLauncher(
-      stateDirectory,
-      "fixtures/reviewer",
-      reviewerExecution,
-    );
-    for (const launcher of [implementer, reviewer]) {
-      const source = await readFile(launcher.launcherPath, "utf8");
-      expect(source).toContain('spawn("codex", [...process.argv.slice(2)]');
-      expect(source).not.toContain("--profile");
+    const fakeThread = fakeClient.startThread();
+    const startThread = vi.spyOn(Codex.prototype, "startThread").mockImplementation(function (
+      _options: ThreadOptions = {},
+    ) {
+      return fakeThread;
+    });
+    try {
+      const session = new CodexCodingSession(undefined, {
+        environment: { CI: "true" },
+        executionStateDirectory: stateDirectory,
+        profileResolver: syntheticProfileResolver,
+      });
+      await expect(
+        session.run({
+          role: "implementer",
+          workspace: "fixtures/writer",
+          contract,
+          prompt: "work",
+          profile: "implementer-profile",
+          sandbox: "workspace-write",
+          deadlineEpochMs: Date.now() + 10_000,
+          outputSchema: implementerOutputSchema,
+          execution: implementerExecution,
+        }),
+      ).resolves.toMatchObject({
+        status: "completed",
+        output: { status: "proposed", summary: "sdk" },
+        effectiveProfile: { adapter: "sdk" },
+      });
+    } finally {
+      startThread.mockRestore();
     }
 
-    const sandboxes: string[] = [];
-    const session = new CodexCodingSession(
-      async (request) =>
-        testClient(
-          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: request.profile })),
-          request.profile,
-          (options) => sandboxes.push(String(options.sandboxMode)),
-        ),
-      { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
-    );
-    await session.run({
-      role: "implementer",
-      workspace: "fixtures/writer",
-      contract,
-      prompt: "work",
-      profile: "writer-profile",
-      sandbox: "workspace-write",
-      deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
+    await expect(access(join(stateDirectory, "codex-executions"))).rejects.toMatchObject({
+      code: "ENOENT",
     });
-    await session.run({
-      role: "reviewer",
-      workspace: "fixtures/reviewer",
-      contract,
-      prompt: "review",
-      profile: "reviewer-profile",
-      sandbox: "read-only",
-      deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: reviewerOutputSchema,
-      execution: reviewerExecution,
-    });
-    expect(sandboxes).toEqual(["workspace-write", "read-only"]);
   });
 
   test("selects the app-server by profile while preserving the SDK path for other roles", async () => {
@@ -2069,162 +2045,6 @@ describe("Coding Session", () => {
       phase: "turn",
       failureClass: "cancellation",
     });
-  });
-
-  test("reaps the exact process when cancellation crosses launcher ownership recording", async () => {
-    vi.useFakeTimers();
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-starting-cancellation-"));
-    const launcher = await createCodexLauncher(
-      stateDirectory,
-      join(stateDirectory, "writer"),
-      implementerExecution,
-    );
-    const controller = new AbortController();
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], {
-      detached: true,
-      stdio: "ignore",
-    });
-    if (!child.pid) throw new Error("Codex child has no PID");
-    const session = new CodexCodingSession(
-      async () => {
-        controller.abort();
-        return testClient(async (_prompt, options) => {
-          if (options?.signal?.aborted) throw new Error("SDK turn aborted");
-          return new Promise<RunResult>((_resolve, reject) => {
-            options?.signal?.addEventListener(
-              "abort",
-              () => reject(new Error("SDK turn aborted")),
-              { once: true },
-            );
-          });
-        });
-      },
-      {
-        environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
-        profileResolver: syntheticProfileResolver,
-      },
-    );
-
-    const executionPoll = observeExecutionPollSchedule();
-    const pending = session.run({
-      role: "implementer",
-      workspace: join(stateDirectory, "writer"),
-      contract,
-      prompt: "work",
-      profile: "writer-profile",
-      sandbox: "workspace-write",
-      deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
-      environment: { CI: "true" },
-      signal: controller.signal,
-    });
-
-    try {
-      await executionPoll.scheduled;
-      const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(child.pid)], {
-        encoding: "utf8",
-      }).trim();
-      await writeFile(
-        launcher.identityPath,
-        JSON.stringify({
-          version: 2,
-          state: "running",
-          reference: implementerExecution,
-          pid: child.pid,
-          startedAt,
-          workspace: join(stateDirectory, "writer"),
-        }) + "\n",
-      );
-      await vi.advanceTimersByTimeAsync(10);
-      await vi.runAllTimersAsync();
-      await expect(pending).resolves.toMatchObject({
-        status: "cancelled",
-        output: null,
-      });
-      await expect(discoverOwnedExecutions(stateDirectory, contract.id)).resolves.toEqual([]);
-      if (child.exitCode === null && child.signalCode === null)
-        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
-      expect(child.signalCode).toBe("SIGKILL");
-    } finally {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // The shared termination transition may already have removed the group.
-      }
-      if (child.exitCode === null && child.signalCode === null)
-        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
-      executionPoll.restore();
-      vi.useRealTimers();
-    }
-  });
-
-  test("fails closed after a bounded starting wait and retains ownership evidence", async () => {
-    vi.useFakeTimers();
-    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-codex-starting-timeout-"));
-    const launcher = await createCodexLauncher(
-      stateDirectory,
-      join(stateDirectory, "writer"),
-      implementerExecution,
-    );
-    const controller = new AbortController();
-    const providerStarted = deferred<void>();
-    const session = new CodexCodingSession(
-      async () => {
-        providerStarted.resolve();
-        controller.abort();
-        return testClient(async (_prompt, options) => {
-          if (options?.signal?.aborted) throw new Error("SDK turn aborted");
-          return new Promise<RunResult>((_resolve, reject) => {
-            options?.signal?.addEventListener(
-              "abort",
-              () => reject(new Error("SDK turn aborted")),
-              { once: true },
-            );
-          });
-        });
-      },
-      {
-        environment: { CI: "true" },
-        executionStateDirectory: stateDirectory,
-        profileResolver: syntheticProfileResolver,
-      },
-    );
-
-    const executionPoll = observeExecutionPollSchedule();
-    const pending = session.run({
-      role: "implementer",
-      workspace: join(stateDirectory, "writer"),
-      contract,
-      prompt: "work",
-      profile: "writer-profile",
-      sandbox: "workspace-write",
-      deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: implementerOutputSchema,
-      execution: implementerExecution,
-      environment: { CI: "true" },
-      signal: controller.signal,
-    });
-
-    try {
-      await providerStarted.promise;
-      await executionPoll.scheduled;
-      await vi.advanceTimersByTimeAsync(2_000);
-      await expect(pending).rejects.toMatchObject({
-        code: "codex_execution_ownership_error",
-        reason: "incomplete",
-      });
-      await expect(readFile(launcher.identityPath, "utf8")).resolves.toContain(
-        '"state":"starting"',
-      );
-      await expect(readFile(launcher.launcherPath, "utf8")).resolves.toContain(
-        "const child = spawn",
-      );
-    } finally {
-      executionPoll.restore();
-      vi.useRealTimers();
-    }
   });
 
   test("propagates caller cancellation to the bounded output transform", async () => {
