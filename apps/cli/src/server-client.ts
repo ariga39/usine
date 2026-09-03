@@ -23,7 +23,6 @@ import {
   isWaitingState,
   type UsageReport,
   type UsageReportPage,
-  type UsageCoverage,
   type UsageReportScope,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
@@ -175,7 +174,6 @@ export async function usageReport(
   };
   const invocations: UsageReport["invocations"][number][] = [];
   let cursor: string | null = null;
-  let sourceCoverage: UsageCoverage = "complete";
   while (true) {
     const pageRequest = client.usage.report({
       query: {
@@ -186,15 +184,12 @@ export async function usageReport(
     });
     const page: UsageReportPage = await runRequest<UsageReportPage>(pageRequest);
     invocations.push(...page.invocations);
-    if (page.coverage === "unavailable") sourceCoverage = "unavailable";
-    else if (page.coverage === "partial" && sourceCoverage === "complete")
-      sourceCoverage = "partial";
     if (page.nextCursor === null) break;
     if (page.nextCursor === cursor)
       throw new ServerClientError("usage report cursor did not advance", 500);
     cursor = page.nextCursor;
   }
-  return deriveUsageReportFromInvocations(invocations, scope, sourceCoverage);
+  return deriveUsageReportFromInvocations(invocations, scope);
 }
 
 export async function taskEvents(

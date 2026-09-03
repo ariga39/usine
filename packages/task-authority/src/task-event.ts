@@ -1,4 +1,4 @@
-import { Predicate, Schema } from "effect";
+import { Schema } from "effect";
 import { TASK_BLOCKER_CLASSIFICATIONS } from "./task-state.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
@@ -413,140 +413,9 @@ export type TaskEvent = Schema.Schema.Type<typeof taskEventSchema>;
 export type TaskEventPage = Schema.Schema.Type<typeof taskEventPageSchema>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
-  assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
-  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
-  return Schema.decodeUnknownSync(taskObservationEventInput)(input);
+  return Schema.decodeUnknownSync(taskObservationEventInput, { onExcessProperty: "error" })(input);
 }
 
 export function decodeTaskEvent(input: unknown): TaskEvent {
-  assertExactKeys(input, ["taskId", "sequence", "eventId", "occurredAtEpochMs", "data"]);
-  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
-  return Schema.decodeUnknownSync(taskEventSchema)(input);
-}
-
-const dataFields: Record<string, readonly string[]> = {
-  task_admitted: ["type", "contractHash"],
-  activation_reserved: ["type", "activation", "recovery"],
-  coding_session_started: [
-    "type",
-    "role",
-    "activation",
-    "reviewCycle",
-    "sessionId",
-    "requestedProfile",
-  ],
-  coding_thread_started: ["type", "role", "activation", "sessionId"],
-  coding_usage_observed: [
-    "type",
-    "role",
-    "activation",
-    "reviewCycle",
-    "sessionId",
-    "source",
-    "semantics",
-    "actualModel",
-    "usage",
-  ],
-  coding_sandbox_verified: [
-    "type",
-    "role",
-    "activation",
-    "sessionId",
-    "host",
-    "workspaceRead",
-    "workspaceWrite",
-    "externalRead",
-    "externalWrite",
-    "subprocess",
-  ],
-  coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
-  coding_tool_completed: [
-    "type",
-    "role",
-    "activation",
-    "tool",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_mcp_tool_completed: [
-    "type",
-    "role",
-    "activation",
-    "server",
-    "tool",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_mcp_unavailable: ["type", "role", "activation", "server", "reason", "sessionId"],
-  coding_turn_completed: [
-    "type",
-    "role",
-    "activation",
-    "turn",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_session_completed: [
-    "type",
-    "role",
-    "activation",
-    "reviewCycle",
-    "outcome",
-    "sessionId",
-    "requestedProfile",
-    "effectiveProfile",
-    "usage",
-    "normalizer",
-    "archive",
-  ],
-  coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
-  candidate_frozen: ["type", "sha", "fence"],
-  project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
-  review_completed: ["type", "sha", "cycle", "verdict"],
-  repair_batch_recorded: ["type", "cycle"],
-  delivery_completed: ["type", "sha", "prNumber", "merged"],
-  recovery_observed: ["type", "kind"],
-  task_blocked: ["type", "reason"],
-  task_waiting: ["type", "reason", "activation"],
-  task_retry_accepted: ["type", "reason", "activation"],
-  task_terminal: ["type", "state"],
-  legacy_observation: ["type", "kind", "outcome", "complete"],
-  legacy_import_incomplete: ["type", "importedCount", "complete"],
-};
-
-function assertExactKeys(input: unknown, expected: readonly string[]): void {
-  if (!Predicate.isObject(input)) throw new Error("event must be an object");
-  const actual = Object.keys(input).sort();
-  const allowed = [...expected].sort();
-  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index]))
-    throw new Error("event contains fields outside its allowlist");
-}
-
-function assertExactDataKeys(input: Record<string, unknown>): void {
-  if (typeof input.type !== "string") throw new Error("event data type is invalid");
-  const expected = dataFields[input.type];
-  if (!expected) throw new Error("event data type is invalid");
-  const actual = Object.keys(input);
-  const optional =
-    input.type === "coding_session_started"
-      ? new Set(["reviewCycle", "requestedProfile"])
-      : input.type === "coding_usage_observed"
-        ? new Set(["reviewCycle", "actualModel"])
-        : input.type === "coding_session_completed"
-          ? new Set([
-              "reviewCycle",
-              "requestedProfile",
-              "effectiveProfile",
-              "usage",
-              "normalizer",
-              "archive",
-            ])
-          : new Set<string>();
-  assertExactKeys(
-    input,
-    expected.filter((key) => !optional.has(key) || actual.includes(key)),
-  );
+  return Schema.decodeUnknownSync(taskEventSchema, { onExcessProperty: "error" })(input);
 }

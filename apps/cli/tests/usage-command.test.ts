@@ -55,7 +55,7 @@ describe("usage command", () => {
   test("drains every bounded usage page without repeating or omitting rows", async () => {
     const output: string[] = [];
     const requests: URL[] = [];
-    const row = (taskId: string) => ({
+    const row = (taskId: string, coverage: "complete" | "unavailable" = "complete") => ({
       invocationId: `${taskId}:implementer:1:session`,
       taskId,
       pullRequest: null,
@@ -76,20 +76,21 @@ describe("usage command", () => {
       occurredAtEpochMs: 100,
       elapsedMs: 1,
       usage: {
-        inputTokens: 10,
-        cachedInputTokens: 2,
-        uncachedInputTokens: 8,
+        inputTokens: coverage === "complete" ? 10 : null,
+        cachedInputTokens: coverage === "complete" ? 2 : null,
+        uncachedInputTokens: coverage === "complete" ? 8 : null,
         cacheWriteInputTokens: null,
-        outputTokens: 1,
+        outputTokens: coverage === "complete" ? 1 : null,
         reasoningOutputTokens: null,
-        coverage: "complete",
+        coverage,
       },
     });
     globalThis.fetch = async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       requests.push(url);
       const cursor = url.searchParams.get("cursor");
-      const invocations = cursor === null ? [row("task-001"), row("task-002")] : [row("task-003")];
+      const invocations =
+        cursor === null ? [row("task-001", "unavailable"), row("task-002")] : [row("task-003")];
       return new Response(
         JSON.stringify({
           schemaVersion: 1,
@@ -135,5 +136,6 @@ describe("usage command", () => {
       "task-002",
       "task-003",
     ]);
+    expect(JSON.parse(output.join("")).coverage).toBe("partial");
   });
 });

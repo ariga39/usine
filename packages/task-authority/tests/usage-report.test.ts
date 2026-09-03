@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
   deriveUsageReport,
+  deriveUsageReportFromInvocations,
   listUsageReportSources,
   openSqliteDatabase,
   TaskAuthority,
@@ -262,6 +263,265 @@ describe("usage report projection", () => {
     });
     expect(report.coverage).toBe("partial");
     expect(report.aggregates).toHaveLength(4);
+    expect(
+      report.aggregates.find((aggregate) => aggregate.taskId === partialTaskId)?.usage,
+    ).toEqual({
+      inputTokens: 4,
+      cachedInputTokens: null,
+      uncachedInputTokens: null,
+      cacheWriteInputTokens: null,
+      outputTokens: 2,
+      reasoningOutputTokens: null,
+      coverage: "partial",
+    });
+  });
+
+  test("poisons missing dimensions across multiple deltas for providers and normalizers", () => {
+    const taskId = "delta-poisoning-task";
+    const report = deriveUsageReport(
+      [
+        {
+          task: task(taskId),
+          events: [
+            event(taskId, 1, 100, {
+              type: "coding_session_started",
+              role: "implementer",
+              activation: 1,
+              sessionId: "delta-provider",
+            }),
+            event(taskId, 2, 101, {
+              type: "coding_usage_observed",
+              role: "implementer",
+              activation: 1,
+              sessionId: "delta-provider",
+              source: "provider",
+              semantics: "delta",
+              usage: { inputTokens: 10, cachedInputTokens: 2, outputTokens: 3 },
+            }),
+            event(taskId, 3, 102, {
+              type: "coding_usage_observed",
+              role: "implementer",
+              activation: 1,
+              sessionId: "delta-provider",
+              source: "provider",
+              semantics: "delta",
+              usage: { inputTokens: 5, outputTokens: 4 },
+            }),
+            event(taskId, 4, 103, {
+              type: "coding_usage_observed",
+              role: "implementer",
+              activation: 1,
+              sessionId: "delta-normalizer",
+              source: "role_output_normalizer",
+              semantics: "delta",
+              usage: { inputTokens: 2, cachedInputTokens: 1, outputTokens: 1 },
+            }),
+            event(taskId, 5, 104, {
+              type: "coding_usage_observed",
+              role: "implementer",
+              activation: 1,
+              sessionId: "delta-normalizer",
+              source: "role_output_normalizer",
+              semantics: "delta",
+              usage: { inputTokens: 3, outputTokens: 2 },
+            }),
+          ],
+        },
+      ],
+      { taskId: null, repositoryId: "usage-repository", fromEpochMs: null, toEpochMs: null },
+    );
+
+    expect(report.invocations).toHaveLength(3);
+    expect(
+      report.invocations.find((row) => row.invocationId.endsWith("delta-provider"))?.usage,
+    ).toEqual(
+      expect.objectContaining({
+        inputTokens: 15,
+        cachedInputTokens: null,
+        outputTokens: 7,
+      }),
+    );
+    expect(
+      report.invocations.find((row) => row.invocationId.endsWith(":role-output-normalizer"))?.usage,
+    ).toEqual(
+      expect.objectContaining({
+        inputTokens: 5,
+        cachedInputTokens: null,
+        outputTokens: 3,
+      }),
+    );
+  });
+
+  test("replacement snapshots select the latest snapshot without accumulation", () => {
+    const taskId = "replacement-snapshot-task";
+    const report = deriveUsageReport(
+      [
+        {
+          task: task(taskId),
+          events: [
+            event(taskId, 1, 100, {
+              type: "coding_session_started",
+              role: "reviewer",
+              activation: 0,
+              reviewCycle: 1,
+              sessionId: "replacement-session",
+            }),
+            event(taskId, 2, 101, {
+              type: "coding_usage_observed",
+              role: "reviewer",
+              activation: 0,
+              reviewCycle: 1,
+              sessionId: "replacement-session",
+              source: "provider",
+              semantics: "replacement",
+              usage: {
+                inputTokens: 10,
+                cachedInputTokens: 2,
+                uncachedInputTokens: 8,
+                outputTokens: 3,
+              },
+            }),
+            event(taskId, 3, 102, {
+              type: "coding_usage_observed",
+              role: "reviewer",
+              activation: 0,
+              reviewCycle: 1,
+              sessionId: "replacement-session",
+              source: "provider",
+              semantics: "replacement",
+              usage: {
+                inputTokens: 20,
+                cachedInputTokens: 5,
+                uncachedInputTokens: 15,
+                outputTokens: 6,
+              },
+            }),
+          ],
+        },
+      ],
+      { taskId: null, repositoryId: "usage-repository", fromEpochMs: null, toEpochMs: null },
+    );
+    expect(report.invocations[0]?.usage).toEqual(
+      expect.objectContaining({ inputTokens: 20, cachedInputTokens: 5, outputTokens: 6 }),
+    );
+  });
+
+  test("keeps activations and review cycles distinct while associating current delivery", () => {
+    const taskId = "activation-review-task";
+    const sessions = [
+      {
+        role: "implementer" as const,
+        activation: 1,
+        sessionId: "implementer-1",
+        reviewCycle: undefined,
+      },
+      {
+        role: "implementer" as const,
+        activation: 2,
+        sessionId: "implementer-2",
+        reviewCycle: undefined,
+      },
+      { role: "reviewer" as const, activation: 0, sessionId: "reviewer-1", reviewCycle: 1 },
+      { role: "reviewer" as const, activation: 0, sessionId: "reviewer-2", reviewCycle: 2 },
+    ];
+    const events = sessions.flatMap((session, index) => {
+      const startedAt = 100 + index * 2;
+      const usage = {
+        inputTokens: 10 + index,
+        cachedInputTokens: 1,
+        uncachedInputTokens: 9 + index,
+        outputTokens: 2,
+      };
+      return [
+        event(taskId, index * 2 + 1, startedAt, {
+          type: "coding_session_started",
+          role: session.role,
+          activation: session.activation,
+          ...(session.reviewCycle === undefined ? {} : { reviewCycle: session.reviewCycle }),
+          sessionId: session.sessionId,
+        }),
+        event(taskId, index * 2 + 2, startedAt + 1, {
+          type: "coding_session_completed",
+          role: session.role,
+          activation: session.activation,
+          ...(session.reviewCycle === undefined ? {} : { reviewCycle: session.reviewCycle }),
+          outcome: "succeeded",
+          sessionId: session.sessionId,
+          usage,
+        }),
+      ];
+    });
+    const scope = {
+      taskId: null,
+      repositoryId: "usage-repository",
+      fromEpochMs: null,
+      toEpochMs: null,
+    };
+    const deliveredTask = {
+      ...task(taskId),
+      delivery: {
+        sha: "a".repeat(40),
+        effect: "github" as const,
+        prNumber: 345,
+        url: "https://github.com/example/repository/pull/345",
+        attestationId: "attestation-345",
+      },
+    };
+    const delivered = deriveUsageReport([{ task: deliveredTask, events }], scope);
+    const beforeDelivery = deriveUsageReport([{ task: task(taskId), events }], scope);
+
+    expect(delivered.invocations).toHaveLength(4);
+    expect(new Set(delivered.invocations.map((row) => row.invocationId)).size).toBe(4);
+    expect(delivered.invocations.map((row) => [row.role, row.activation, row.reviewCycle])).toEqual(
+      [
+        ["implementer", 1, null],
+        ["implementer", 2, null],
+        ["reviewer", 0, 1],
+        ["reviewer", 0, 2],
+      ],
+    );
+    expect(delivered.invocations.every((row) => row.pullRequest === 345)).toBe(true);
+    expect(delivered.invocations.map((row) => row.invocationId)).toEqual(
+      beforeDelivery.invocations.map((row) => row.invocationId),
+    );
+    expect(beforeDelivery.invocations.every((row) => row.pullRequest === null)).toBe(true);
+    expect(
+      delivered.aggregates.map((aggregate) => aggregate.invocations).sort((a, b) => a - b),
+    ).toEqual([2, 2]);
+    expect(
+      delivered.aggregates
+        .map((aggregate) => aggregate.usage.inputTokens)
+        .sort((a, b) => (a ?? 0) - (b ?? 0)),
+    ).toEqual([21, 25]);
+  });
+
+  test("reports coverage from selected invocation rows", () => {
+    const scope = {
+      taskId: null,
+      repositoryId: "usage-repository",
+      fromEpochMs: null,
+      toEpochMs: null,
+    };
+    const unavailable = deriveUsageReport(
+      [
+        {
+          task: task("all-unavailable"),
+          events: [
+            event("all-unavailable", 1, 100, {
+              type: "coding_session_completed",
+              role: "implementer",
+              activation: 1,
+              outcome: "failed",
+              sessionId: "unavailable-session",
+              usage: null,
+            }),
+          ],
+        },
+      ],
+      scope,
+    );
+    expect(unavailable.coverage).toBe("unavailable");
+    expect(deriveUsageReportFromInvocations([], scope).coverage).toBe("complete");
   });
 
   test("uses persisted Task events beyond the capped task list and reloads complete streams for ranges", async () => {
@@ -340,5 +600,48 @@ describe("usage report projection", () => {
       taskId: expectedTaskIds.at(-1),
       usage: { inputTokens: 1, outputTokens: 1 },
     });
+
+    const encodeTestCursor = (value: Record<string, unknown>) =>
+      Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+    const cursorBase = {
+      version: 1,
+      scope,
+      upperTaskId: "usage-many-100",
+      afterTaskId: "usage-many-099",
+    };
+    await expect(
+      listUsageReportSources(handle.database, scope, {
+        cursor: encodeTestCursor({ ...cursorBase, extra: true }),
+        limit: 100,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      listUsageReportSources(handle.database, scope, {
+        cursor: encodeTestCursor({ ...cursorBase, scope: { ...scope, repositoryId: "other" } }),
+        limit: 100,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      listUsageReportSources(handle.database, scope, {
+        cursor: encodeTestCursor({ ...cursorBase, upperTaskId: "", afterTaskId: "usage-many-099" }),
+        limit: 100,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      listUsageReportSources(handle.database, scope, {
+        cursor: encodeTestCursor({
+          ...cursorBase,
+          upperTaskId: "usage-many-100",
+          afterTaskId: "usage-many-999",
+        }),
+        limit: 100,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      listUsageReportSources(handle.database, scope, {
+        cursor: "x".repeat(4097),
+        limit: 100,
+      }),
+    ).rejects.toThrow();
   });
 });

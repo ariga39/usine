@@ -20,6 +20,7 @@ import {
   type ProviderNeutralCompletedEvidence,
   type ProviderNeutralUsage,
   type ProviderNeutralUsageObservation,
+  mergeProviderNeutralUsage,
 } from "./coding-session-adapter.js";
 import { CodexSdkAdapter } from "./codex-sdk-adapter.js";
 import { normalizeCodingSessionMcpServer, safeObservationLabel } from "./coding-session-policy.js";
@@ -554,13 +555,13 @@ export class CodexCodingSession {
           observedUsage =
             observation.semantics === "replacement"
               ? observation.usage
-              : mergeUsage(observedUsage, observation.usage);
+              : mergeProviderNeutralUsage(observedUsage, observation.usage);
         else {
           if (observation.actualModel) normalizerActualModel = observation.actualModel;
           normalizerUsage =
             observation.semantics === "replacement"
               ? observation.usage
-              : mergeUsage(normalizerUsage, observation.usage);
+              : mergeProviderNeutralUsage(normalizerUsage, observation.usage);
         }
         if (source === "provider") archive?.setUsage(usageFrom(observedUsage));
         await onObservation?.({ type: "usage_observed", source, ...observation });
@@ -833,23 +834,6 @@ function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObser
       : { reasoningOutputTokens: usage.reasoningOutputTokens }),
   };
   return Object.keys(normalized).length === 0 ? null : normalized;
-}
-
-function mergeUsage(
-  previous: ProviderNeutralUsage | null,
-  next: ProviderNeutralUsage,
-): ProviderNeutralUsage {
-  if (previous === null) return next;
-  const add = (left: number | undefined, right: number | undefined): number | undefined =>
-    left === undefined || right === undefined ? undefined : left + right;
-  return {
-    inputTokens: add(previous?.inputTokens, next.inputTokens),
-    cachedInputTokens: add(previous?.cachedInputTokens, next.cachedInputTokens),
-    uncachedInputTokens: add(previous?.uncachedInputTokens, next.uncachedInputTokens),
-    cacheWriteInputTokens: add(previous?.cacheWriteInputTokens, next.cacheWriteInputTokens),
-    outputTokens: add(previous?.outputTokens, next.outputTokens),
-    reasoningOutputTokens: add(previous?.reasoningOutputTokens, next.reasoningOutputTokens),
-  };
 }
 
 function normalizerObservation(

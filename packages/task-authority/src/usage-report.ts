@@ -7,6 +7,7 @@ import { Schema } from "effect";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 
 export const MAX_USAGE_REPORT_PAGE_SIZE = 200;
+const MAX_USAGE_REPORT_CURSOR_LENGTH = 4096;
 const USAGE_DIMENSION_UNAVAILABLE = "unavailable" as const;
 
 export type UsageDimension = string;
@@ -189,8 +190,12 @@ type SessionUsage = NonNullable<CompletedSession["usage"]>;
 const usageCursorSchema = Schema.Struct({
   version: Schema.Literal(1),
   scope: usageScopeSchema,
-  upperTaskId: Schema.NullOr(Schema.String),
-  afterTaskId: Schema.NullOr(Schema.String),
+  upperTaskId: Schema.NullOr(
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
+  ),
+  afterTaskId: Schema.NullOr(
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)),
+  ),
 });
 type UsageReportCursor = Schema.Schema.Type<typeof usageCursorSchema>;
 
@@ -219,16 +224,14 @@ interface MutableInvocation {
 export function deriveUsageReport(
   sources: readonly UsageReportSource[],
   scope: UsageReportScope,
-  sourceCoverage: UsageCoverage = "complete",
 ): UsageReport {
   const invocations = sources.flatMap((source) => invocationsForSource(source));
-  return deriveUsageReportFromInvocations(invocations, scope, sourceCoverage);
+  return deriveUsageReportFromInvocations(invocations, scope);
 }
 
 export function deriveUsageReportFromInvocations(
   invocations: readonly UsageInvocation[],
   scope: UsageReportScope,
-  sourceCoverage: UsageCoverage = "complete",
 ): UsageReport {
   const selected = invocations.filter((invocation) => inScope(invocation, scope));
   selected.sort(
@@ -241,14 +244,7 @@ export function deriveUsageReportFromInvocations(
   return {
     schemaVersion: 1,
     scope,
-    coverage:
-      sourceCoverage === "unavailable" || selected.some((row) => row.usage.coverage !== "complete")
-        ? selected.length === 0 && sourceCoverage === "complete"
-          ? "complete"
-          : sourceCoverage === "unavailable"
-            ? "unavailable"
-            : "partial"
-        : "complete",
+    coverage: reportCoverage(selected),
     invocations: selected,
     aggregates,
   };
@@ -359,12 +355,16 @@ function encodeUsageReportCursor(cursor: UsageReportCursor): string {
 
 function decodeUsageReportCursor(value: string, scope: UsageReportScope): UsageReportCursor {
   try {
-    const decoded = Schema.decodeUnknownSync(usageCursorSchema)(
+    if (value.length > MAX_USAGE_REPORT_CURSOR_LENGTH || value.length === 0)
+      throw new Error("cursor is out of bounds");
+    const decoded = Schema.decodeUnknownSync(usageCursorSchema, { onExcessProperty: "error" })(
       JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
     );
     if (JSON.stringify(decoded.scope) !== JSON.stringify(scope)) throw new Error("scope mismatch");
     if (decoded.upperTaskId === null || decoded.afterTaskId === null)
       throw new Error("cursor bounds are missing");
+    if (compareTaskIds(decoded.afterTaskId, decoded.upperTaskId) > 0)
+      throw new Error("cursor is beyond its upper bound");
     return decoded;
   } catch {
     throw new UsageReportCursorError();
@@ -630,8 +630,10 @@ function aggregateUsage(values: readonly UsageAmounts[]): UsageAmounts {
 }
 
 function addUsage(left: SessionUsage | null, right: SessionUsage): SessionUsage {
+  if (left === null) return right;
+
   const add = (a: number | undefined, b: number | undefined): number | undefined =>
-    a === undefined ? b : b === undefined ? a : a + b;
+    a === undefined || b === undefined ? undefined : a + b;
   return {
     inputTokens: add(left?.inputTokens, right.inputTokens),
     cachedInputTokens: add(left?.cachedInputTokens, right.cachedInputTokens),
@@ -640,6 +642,13 @@ function addUsage(left: SessionUsage | null, right: SessionUsage): SessionUsage 
     outputTokens: add(left?.outputTokens, right.outputTokens),
     reasoningOutputTokens: add(left?.reasoningOutputTokens, right.reasoningOutputTokens),
   };
+}
+
+function reportCoverage(selected: readonly UsageInvocation[]): UsageCoverage {
+  if (selected.length === 0) return "complete";
+  if (selected.every((row) => row.usage.coverage === "complete")) return "complete";
+  if (selected.every((row) => row.usage.coverage === "unavailable")) return "unavailable";
+  return "partial";
 }
 
 function inScope(row: UsageInvocation, scope: UsageReportScope): boolean {
