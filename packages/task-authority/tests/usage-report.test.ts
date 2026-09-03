@@ -7,6 +7,7 @@ import {
   deriveUsageReport,
   deriveUsageReportFromInvocations,
   listUsageReportSources,
+  mergeProviderNeutralUsage,
   openSqliteDatabase,
   TaskAuthority,
   type TaskContract,
@@ -37,6 +38,19 @@ const repositoryRegistration = {
   forgeProfile: "forge-profile",
   githubReadProfile: null,
 };
+
+const encodeTestCursor = (value: Record<string, unknown>) =>
+  Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+
+function sortedValues<T>(values: readonly T[], compare: (left: T, right: T) => number): T[] {
+  const sorted: T[] = [];
+  for (const value of values) {
+    const index = sorted.findIndex((existing) => compare(value, existing) < 0);
+    if (index === -1) sorted.push(value);
+    else sorted.splice(index, 0, value);
+  }
+  return sorted;
+}
 
 function task(taskId = "usage-task"): TaskResult {
   return {
@@ -276,6 +290,50 @@ describe("usage report projection", () => {
     });
   });
 
+  test("shares delta merging across all six usage dimensions", () => {
+    expect(mergeProviderNeutralUsage(null, { inputTokens: 3, outputTokens: 4 })).toEqual({
+      inputTokens: 3,
+      outputTokens: 4,
+    });
+    expect(
+      mergeProviderNeutralUsage(
+        {
+          inputTokens: 3,
+          cachedInputTokens: 1,
+          uncachedInputTokens: 2,
+          cacheWriteInputTokens: 4,
+          outputTokens: 4,
+          reasoningOutputTokens: 1,
+        },
+        {
+          inputTokens: 5,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 3,
+          cacheWriteInputTokens: 1,
+          outputTokens: 6,
+          reasoningOutputTokens: 2,
+        },
+      ),
+    ).toEqual({
+      inputTokens: 8,
+      cachedInputTokens: 3,
+      uncachedInputTokens: 5,
+      cacheWriteInputTokens: 5,
+      outputTokens: 10,
+      reasoningOutputTokens: 3,
+    });
+    expect(
+      mergeProviderNeutralUsage({ inputTokens: 3, cachedInputTokens: 1 }, { inputTokens: 5 }),
+    ).toEqual({
+      inputTokens: 8,
+      cachedInputTokens: undefined,
+      uncachedInputTokens: undefined,
+      cacheWriteInputTokens: undefined,
+      outputTokens: undefined,
+      reasoningOutputTokens: undefined,
+    });
+  });
+
   test("poisons missing dimensions across multiple deltas for providers and normalizers", () => {
     const taskId = "delta-poisoning-task";
     const report = deriveUsageReport(
@@ -486,12 +544,16 @@ describe("usage report projection", () => {
     );
     expect(beforeDelivery.invocations.every((row) => row.pullRequest === null)).toBe(true);
     expect(
-      delivered.aggregates.map((aggregate) => aggregate.invocations).sort((a, b) => a - b),
+      sortedValues(
+        delivered.aggregates.map((aggregate) => aggregate.invocations),
+        (a, b) => a - b,
+      ),
     ).toEqual([2, 2]);
     expect(
-      delivered.aggregates
-        .map((aggregate) => aggregate.usage.inputTokens)
-        .sort((a, b) => (a ?? 0) - (b ?? 0)),
+      sortedValues(
+        delivered.aggregates.map((aggregate) => aggregate.usage.inputTokens),
+        (a, b) => (a ?? 0) - (b ?? 0),
+      ),
     ).toEqual([21, 25]);
   });
 
@@ -590,7 +652,10 @@ describe("usage report projection", () => {
     const sources = pages.flatMap((page) => page.sources);
     const report = deriveUsageReport(sources, scope);
     const taskIds = report.invocations.map((invocation) => invocation.taskId);
-    const expectedTaskIds = Array.from({ length: 205 }, (_, index) => `usage-many-${index}`).sort();
+    const expectedTaskIds = sortedValues(
+      Array.from({ length: 205 }, (_, index) => `usage-many-${index}`),
+      (a, b) => (a < b ? -1 : a > b ? 1 : 0),
+    );
     expect(pages).toHaveLength(3);
     expect(pages.map((page) => page.sources.length)).toEqual([100, 100, 5]);
     expect(report.invocations).toHaveLength(205);
@@ -601,8 +666,6 @@ describe("usage report projection", () => {
       usage: { inputTokens: 1, outputTokens: 1 },
     });
 
-    const encodeTestCursor = (value: Record<string, unknown>) =>
-      Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
     const cursorBase = {
       version: 1,
       scope,

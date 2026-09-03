@@ -17,7 +17,10 @@ import { z } from "zod";
 import { readSessionArchive, reviewerOutputSchema } from "@usine/coding-session";
 import type { TaskContract } from "@usine/task-authority";
 import type { CodingSessionAdapterRequest } from "../src/coding-session-adapter.js";
-import type { ProviderNeutralCompletedEvidence } from "../src/coding-session-adapter.js";
+import type {
+  ProviderNeutralCompletedEvidence,
+  ProviderNeutralUsageObservation,
+} from "../src/coding-session-adapter.js";
 import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { executionIdentityPath, discoverOwnedExecutions } from "../src/codex-execution.js";
 import { OpenCode2Adapter, opencodeConfig } from "../src/opencode2-adapter.js";
@@ -83,6 +86,7 @@ async function fixture(
     | "startup-failure"
     | "startup-abort"
     | "no-response"
+    | "no-reasoning"
     | "out-of-order"
     | "step-failure"
     | "permission-ask",
@@ -244,6 +248,16 @@ const server = createServer((req, res) => {
         writeEvent({ id: "text-started-2", type: "session.next.text.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2" } });
         writeEvent({ id: "text-2", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2", text: ${JSON.stringify(finalResponse)} } });
         writeEvent({ id: "step-2", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", finish: "stop", cost: 0, tokens: { input: 100, output: 5, reasoning: 7, cache: { read: 40, write: 60 } } } });
+      }
+      if (${JSON.stringify(mode)} === "no-reasoning") {
+        writeEvent({ id: "step-started-1", type: "session.next.step.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", agent: "usine", model: { providerID: "fixture-provider", id: "fixture-model" } } });
+        writeEvent({ id: "text-started-1", type: "session.next.text.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", textID: "text-fixture-1" } });
+        writeEvent({ id: "text-1", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", textID: "text-fixture-1", text: ${JSON.stringify(finalResponse)} } });
+        writeEvent({ id: "step-1", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-1", finish: "tool-calls", cost: 0, tokens: { input: 11, output: 13, cache: { read: 2, write: 3 } } } });
+        writeEvent({ id: "step-started-2", type: "session.next.step.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", agent: "usine", model: { providerID: "fixture-provider", id: "fixture-model" } } });
+        writeEvent({ id: "text-started-2", type: "session.next.text.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2" } });
+        writeEvent({ id: "text-2", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2", text: ${JSON.stringify(finalResponse)} } });
+        writeEvent({ id: "step-2", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", finish: "stop", cost: 0, tokens: { input: 7, output: 5, cache: { read: 1, write: 0 } } } });
       }
       if (${JSON.stringify(mode)} === "no-response")
         writeEvent({ id: "step-without-text", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
@@ -661,6 +675,49 @@ describe("OpenCode2 bounded adapter", () => {
     expect(protocol).toContainEqual({ wait: true });
     await assertOwnedExecutionGone(testFixture);
     await expect(new Promise((resolve) => setTimeout(resolve, 10))).resolves.toBeUndefined();
+    await testFixture.close();
+  });
+
+  test("preserves output when multiple OpenCode2 steps omit reasoning", async () => {
+    const testFixture = await fixture("no-reasoning");
+    const usageObservations: ProviderNeutralUsageObservation[] = [];
+    const result = await fixtureAdapter().run({
+      ...request(
+        testFixture.workspace,
+        testFixture.environment,
+        testFixture.stateDirectory,
+        AbortSignal.timeout(5000),
+      ),
+      onUsage: (observation) => {
+        usageObservations.push(observation);
+      },
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 24,
+      cachedInputTokens: 3,
+      uncachedInputTokens: 18,
+      cacheWriteInputTokens: 3,
+      outputTokens: 18,
+      reasoningOutputTokens: undefined,
+    });
+    expect(usageObservations.map(({ usage }) => usage)).toEqual([
+      {
+        inputTokens: 16,
+        cachedInputTokens: 2,
+        uncachedInputTokens: 11,
+        cacheWriteInputTokens: 3,
+        outputTokens: 13,
+      },
+      {
+        inputTokens: 8,
+        cachedInputTokens: 1,
+        uncachedInputTokens: 7,
+        cacheWriteInputTokens: 0,
+        outputTokens: 5,
+      },
+    ]);
+    await assertOwnedExecutionGone(testFixture);
     await testFixture.close();
   });
 

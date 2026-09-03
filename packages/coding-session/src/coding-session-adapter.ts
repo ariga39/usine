@@ -30,24 +30,6 @@ export interface ProviderNeutralUsageObservation {
   readonly actualModel?: { readonly model: string; readonly provider: string };
 }
 
-/** Merge provider-reported deltas without manufacturing values for missing dimensions. */
-export function mergeProviderNeutralUsage(
-  previous: ProviderNeutralUsage | null,
-  next: ProviderNeutralUsage,
-): ProviderNeutralUsage {
-  if (previous === null) return next;
-  const add = (left: number | undefined, right: number | undefined): number | undefined =>
-    left === undefined || right === undefined ? undefined : left + right;
-  return {
-    inputTokens: add(previous.inputTokens, next.inputTokens),
-    cachedInputTokens: add(previous.cachedInputTokens, next.cachedInputTokens),
-    uncachedInputTokens: add(previous.uncachedInputTokens, next.uncachedInputTokens),
-    cacheWriteInputTokens: add(previous.cacheWriteInputTokens, next.cacheWriteInputTokens),
-    outputTokens: add(previous.outputTokens, next.outputTokens),
-    reasoningOutputTokens: add(previous.reasoningOutputTokens, next.reasoningOutputTokens),
-  };
-}
-
 export interface CodingSessionAdapterProfile {
   readonly model: string;
   readonly reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";

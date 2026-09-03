@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createOpencodeClient, type Config } from "@opencode-ai/sdk/v2";
 import { z } from "zod";
+import { mergeProviderNeutralUsage } from "@usine/task-authority";
 import {
   createOwnedProcessLauncher,
   discardStartingOwnedExecution,
@@ -16,7 +17,6 @@ import {
 } from "./coding-session-interruption.js";
 import {
   providerNeutralJsonValue,
-  mergeProviderNeutralUsage,
   type CodingSessionAdapter,
   type CodingSessionAdapterRequest,
   type CodingSessionAdapterResult,
@@ -342,9 +342,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                 ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
                 uncachedInputTokens,
                 ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
-                ...(data.tokens.reasoning === undefined
-                  ? {}
-                  : { outputTokens: data.tokens.output + data.tokens.reasoning }),
+                outputTokens: data.tokens.output + (data.tokens.reasoning ?? 0),
                 ...(data.tokens.reasoning === undefined
                   ? {}
                   : { reasoningOutputTokens: data.tokens.reasoning }),

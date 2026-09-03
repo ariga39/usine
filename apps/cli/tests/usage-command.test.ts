@@ -2,6 +2,39 @@ import { Option } from "effect";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { runUsageCommand } from "../src/usage-command.js";
 
+function usageReportRow(taskId: string, coverage: "complete" | "unavailable" = "complete") {
+  return {
+    invocationId: `${taskId}:implementer:1:session`,
+    taskId,
+    pullRequest: null,
+    repositoryId: "repo-1",
+    repository: "owner/repository",
+    role: "implementer",
+    activation: 1,
+    reviewCycle: null,
+    profile: "profile-1",
+    configuredModel: "alias-1",
+    configuredProvider: "provider-configured",
+    provider: "provider-reported",
+    adapter: "sdk",
+    model: "provider/gpt-5",
+    serviceTier: "unavailable",
+    reasoningEffort: "minimal",
+    outcome: "succeeded",
+    occurredAtEpochMs: 100,
+    elapsedMs: 1,
+    usage: {
+      inputTokens: coverage === "complete" ? 10 : null,
+      cachedInputTokens: coverage === "complete" ? 2 : null,
+      uncachedInputTokens: coverage === "complete" ? 8 : null,
+      cacheWriteInputTokens: null,
+      outputTokens: coverage === "complete" ? 1 : null,
+      reasoningOutputTokens: null,
+      coverage,
+    },
+  };
+}
+
 describe("usage command", () => {
   const originalFetch = globalThis.fetch;
   const originalWrite = process.stdout.write.bind(process.stdout);
@@ -29,10 +62,10 @@ describe("usage command", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     };
-    process.stdout.write = ((chunk: string | Uint8Array) => {
+    process.stdout.write = (chunk: string | Uint8Array) => {
       output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
       return true;
-    }) as typeof process.stdout.write;
+    };
 
     await runUsageCommand(
       {
@@ -55,42 +88,14 @@ describe("usage command", () => {
   test("drains every bounded usage page without repeating or omitting rows", async () => {
     const output: string[] = [];
     const requests: URL[] = [];
-    const row = (taskId: string, coverage: "complete" | "unavailable" = "complete") => ({
-      invocationId: `${taskId}:implementer:1:session`,
-      taskId,
-      pullRequest: null,
-      repositoryId: "repo-1",
-      repository: "owner/repository",
-      role: "implementer",
-      activation: 1,
-      reviewCycle: null,
-      profile: "profile-1",
-      configuredModel: "alias-1",
-      configuredProvider: "provider-configured",
-      provider: "provider-reported",
-      adapter: "sdk",
-      model: "provider/gpt-5",
-      serviceTier: "unavailable",
-      reasoningEffort: "minimal",
-      outcome: "succeeded",
-      occurredAtEpochMs: 100,
-      elapsedMs: 1,
-      usage: {
-        inputTokens: coverage === "complete" ? 10 : null,
-        cachedInputTokens: coverage === "complete" ? 2 : null,
-        uncachedInputTokens: coverage === "complete" ? 8 : null,
-        cacheWriteInputTokens: null,
-        outputTokens: coverage === "complete" ? 1 : null,
-        reasoningOutputTokens: null,
-        coverage,
-      },
-    });
     globalThis.fetch = async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       requests.push(url);
       const cursor = url.searchParams.get("cursor");
       const invocations =
-        cursor === null ? [row("task-001", "unavailable"), row("task-002")] : [row("task-003")];
+        cursor === null
+          ? [usageReportRow("task-001", "unavailable"), usageReportRow("task-002")]
+          : [usageReportRow("task-003")];
       return new Response(
         JSON.stringify({
           schemaVersion: 1,
@@ -104,10 +109,10 @@ describe("usage command", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     };
-    process.stdout.write = ((chunk: string | Uint8Array) => {
+    process.stdout.write = (chunk: string | Uint8Array) => {
       output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
       return true;
-    }) as typeof process.stdout.write;
+    };
 
     await runUsageCommand(
       {

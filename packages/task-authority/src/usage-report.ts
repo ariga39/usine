@@ -187,6 +187,32 @@ type InterruptedSession = Extract<TaskEvent["data"], { type: "coding_session_int
 type UsageObserved = Extract<TaskEvent["data"], { type: "coding_usage_observed" }>;
 type SessionUsage = NonNullable<CompletedSession["usage"]>;
 
+function addUsageDimension(a: number | undefined, b: number | undefined): number | undefined {
+  return a === undefined || b === undefined ? undefined : a + b;
+}
+
+/** Merge provider-neutral deltas without manufacturing values for missing dimensions. */
+export function mergeProviderNeutralUsage(
+  previous: SessionUsage | null,
+  next: SessionUsage,
+): SessionUsage {
+  if (previous === null) return next;
+  return {
+    inputTokens: addUsageDimension(previous.inputTokens, next.inputTokens),
+    cachedInputTokens: addUsageDimension(previous.cachedInputTokens, next.cachedInputTokens),
+    uncachedInputTokens: addUsageDimension(previous.uncachedInputTokens, next.uncachedInputTokens),
+    cacheWriteInputTokens: addUsageDimension(
+      previous.cacheWriteInputTokens,
+      next.cacheWriteInputTokens,
+    ),
+    outputTokens: addUsageDimension(previous.outputTokens, next.outputTokens),
+    reasoningOutputTokens: addUsageDimension(
+      previous.reasoningOutputTokens,
+      next.reasoningOutputTokens,
+    ),
+  };
+}
+
 const usageCursorSchema = Schema.Struct({
   version: Schema.Literal(1),
   scope: usageScopeSchema,
@@ -394,18 +420,21 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
       }
       if (data.source === "provider")
         run.providerUsage =
-          data.semantics === "replacement" ? data.usage : addUsage(run.providerUsage, data.usage);
+          data.semantics === "replacement"
+            ? data.usage
+            : mergeProviderNeutralUsage(run.providerUsage, data.usage);
       else {
         run.normalizerAttempted = true;
         run.normalizerUsage =
-          data.semantics === "replacement" ? data.usage : addUsage(run.normalizerUsage, data.usage);
+          data.semantics === "replacement"
+            ? data.usage
+            : mergeProviderNeutralUsage(run.normalizerUsage, data.usage);
         run.normalizerStatus ??= "unknown";
       }
     } else if (data.type === "coding_session_interrupted") {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
       run.interrupted = data;
       run.completedAtEpochMs ??= event.occurredAtEpochMs;
-      run.normalizerStatus = run.normalizerStatus ?? null;
     } else if (data.type === "coding_session_completed") {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
       run.session = data;
@@ -626,21 +655,6 @@ function aggregateUsage(values: readonly UsageAmounts[]): UsageAmounts {
     outputTokens: sum((value) => value.outputTokens),
     reasoningOutputTokens: sum((value) => value.reasoningOutputTokens),
     coverage,
-  };
-}
-
-function addUsage(left: SessionUsage | null, right: SessionUsage): SessionUsage {
-  if (left === null) return right;
-
-  const add = (a: number | undefined, b: number | undefined): number | undefined =>
-    a === undefined || b === undefined ? undefined : a + b;
-  return {
-    inputTokens: add(left?.inputTokens, right.inputTokens),
-    cachedInputTokens: add(left?.cachedInputTokens, right.cachedInputTokens),
-    uncachedInputTokens: add(left?.uncachedInputTokens, right.uncachedInputTokens),
-    cacheWriteInputTokens: add(left?.cacheWriteInputTokens, right.cacheWriteInputTokens),
-    outputTokens: add(left?.outputTokens, right.outputTokens),
-    reasoningOutputTokens: add(left?.reasoningOutputTokens, right.reasoningOutputTokens),
   };
 }
 

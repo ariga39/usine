@@ -3,7 +3,11 @@ import { Codex, type ModelReasoningEffort } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
 import { Effect } from "effect";
-import { remainingUntil, type TaskContract } from "@usine/task-authority";
+import {
+  mergeProviderNeutralUsage,
+  remainingUntil,
+  type TaskContract,
+} from "@usine/task-authority";
 import { z } from "zod";
 import { executionLifecycle, listExecutionTaskIds, reapOwnedExecution } from "./codex-execution.js";
 import {
@@ -20,7 +24,6 @@ import {
   type ProviderNeutralCompletedEvidence,
   type ProviderNeutralUsage,
   type ProviderNeutralUsageObservation,
-  mergeProviderNeutralUsage,
 } from "./coding-session-adapter.js";
 import { CodexSdkAdapter } from "./codex-sdk-adapter.js";
 import { normalizeCodingSessionMcpServer, safeObservationLabel } from "./coding-session-policy.js";

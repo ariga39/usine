@@ -21,7 +21,6 @@ import {
   type TaskResult,
   deriveUsageReport,
   MAX_USAGE_REPORT_PAGE_SIZE,
-  type UsageReport,
   type UsageReportPage,
   type UsageReportPageRequest,
   type UsageReportScope,
