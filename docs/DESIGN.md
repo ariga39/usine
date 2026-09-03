@@ -130,7 +130,7 @@ The following invariants are product rules:
 
 ### 4.1 Campaign facts
 
-The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the goal-publication entry path; its downstream caller is the Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
+The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the goal-publication entry path; its downstream consumer is the Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
 
 The minimum durable meanings are:
 
