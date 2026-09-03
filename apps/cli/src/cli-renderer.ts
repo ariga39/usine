@@ -6,6 +6,7 @@ import type {
   TaskEventPage,
   TaskListPage,
   TaskResource,
+  UsageReport,
 } from "@usine/task-authority";
 import type { SessionArchiveManifest } from "@usine/runtime";
 
@@ -77,6 +78,15 @@ export function renderServerSnapshot(snapshot: ServerSnapshot, json: boolean): s
     `Repositories: ${snapshot.repositories.length}`,
     `Tasks: ${snapshot.tasks.length}`,
     `Coding sessions: ${snapshot.codingSessions.length}`,
+    "",
+  ].join("\n");
+}
+
+export function renderUsageReport(report: UsageReport, json: boolean): string {
+  if (json) return renderJson(report);
+  return [
+    `Usage: ${report.coverage} (${report.invocations.length} invocations)`,
+    `Aggregates: ${report.aggregates.length}`,
     "",
   ].join("\n");
 }

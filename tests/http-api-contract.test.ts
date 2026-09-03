@@ -40,6 +40,32 @@ test("the generated client round-trips the shared server health contract", async
   expect(result).toEqual({ status: "ok", revision: 7 });
 });
 
+test("the generated client round-trips the durable usage report contract", async () => {
+  const report = {
+    schemaVersion: 1 as const,
+    scope: { taskId: null, repositoryId: "repo-1", fromEpochMs: 100, toEpochMs: 200 },
+    cursor: null,
+    nextCursor: null,
+    coverage: "partial" as const,
+    invocations: [],
+    aggregates: [],
+  };
+  const handlers = HttpApiBuilder.group(UsineApi, "usage", (group) =>
+    group.handleAll({ report: () => Effect.succeed(report) }),
+  );
+  const result = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(UsineApi, ["usage"]);
+        return yield* client.usage.report({
+          query: { repositoryId: "repo-1", fromEpochMs: 100, toEpochMs: 200, limit: 2 },
+        });
+      }).pipe(Effect.provide(Layer.mergeAll(handlers, HttpServer.layerServices))),
+    ),
+  );
+  expect(result).toEqual(report);
+});
+
 test("the shared event envelope preserves exact fields and Task identity", () => {
   const event = {
     taskId: "task-1",

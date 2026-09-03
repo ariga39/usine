@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createOpencodeClient, type Config } from "@opencode-ai/sdk/v2";
 import { z } from "zod";
+import { mergeProviderNeutralUsage } from "@usine/task-authority";
 import {
   createOwnedProcessLauncher,
   discardStartingOwnedExecution,
@@ -170,6 +171,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       });
       let finalResponse = "";
       let usage: ProviderNeutralUsage | null = null;
+      let actualModel: { model: string; provider: string } | undefined;
       let promptAdmitted = false;
       let currentStepID: string | undefined;
       let currentStepHasText = false;
@@ -312,6 +314,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
               const data = stepStartedDataSchema.parse(event.data);
               currentStepID = data.assistantMessageID;
               currentStepHasText = false;
+              if (data.model)
+                actualModel = { model: data.model.id, provider: data.model.providerID };
             } else if (event.type === "session.next.step.ended") {
               const data = stepEndedDataSchema.parse(event.data);
               if (currentStepID !== data.assistantMessageID)
@@ -326,11 +330,29 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                 );
                 return;
               }
-              usage = {
-                inputTokens: data.tokens.input,
-                outputTokens: data.tokens.output,
+              const uncachedInputTokens = data.tokens.input;
+              const cachedInputTokens = data.tokens.cache?.read;
+              const cacheWriteInputTokens = data.tokens.cache?.write;
+              const stepUsage: ProviderNeutralUsage = {
+                ...(cachedInputTokens === undefined || cacheWriteInputTokens === undefined
+                  ? {}
+                  : {
+                      inputTokens: uncachedInputTokens + cachedInputTokens + cacheWriteInputTokens,
+                    }),
+                ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+                uncachedInputTokens,
+                ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
+                outputTokens: data.tokens.output + (data.tokens.reasoning ?? 0),
+                ...(data.tokens.reasoning === undefined
+                  ? {}
+                  : { reasoningOutputTokens: data.tokens.reasoning }),
               };
-              context.onUsage?.(usage);
+              usage = mergeProviderNeutralUsage(usage, stepUsage);
+              await context.onUsage?.({
+                usage: stepUsage,
+                semantics: "delta",
+                ...(actualModel ? { actualModel } : {}),
+              });
               if (data.finish === "stop") {
                 terminalStepCompleted = true;
                 complete();
@@ -403,7 +425,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       await context.onObservation?.({ type: "turn_completed", turn: 1, outcome: "succeeded" });
       phase = "output";
       context.onPhase?.("output");
-      result = { finalResponse, usage, sessionId: createdSessionID };
+      result = { finalResponse, usage, sessionId: createdSessionID, actualModel };
     } catch (error) {
       if (error instanceof CodingSessionInterruption) {
         primaryFailure = error;
@@ -613,11 +635,22 @@ const reasoningEndedDataSchema = sessionEventDataSchema.extend({
 });
 const stepStartedDataSchema = sessionEventDataSchema.extend({
   assistantMessageID: z.string().min(1),
+  model: z.object({ providerID: z.string().min(1), id: z.string().min(1) }).optional(),
 });
 const stepEndedDataSchema = sessionEventDataSchema.extend({
   assistantMessageID: z.string().min(1),
   finish: z.string().min(1),
-  tokens: z.object({ input: z.number(), output: z.number() }),
+  tokens: z.object({
+    input: z.number().int().nonnegative(),
+    output: z.number().int().nonnegative(),
+    reasoning: z.number().int().nonnegative().optional(),
+    cache: z
+      .object({
+        read: z.number().int().nonnegative().optional(),
+        write: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+  }),
 });
 const stepFailedDataSchema = sessionEventDataSchema.extend({ error: z.unknown() });
 const sessionEventPayloadSchema = z.union([

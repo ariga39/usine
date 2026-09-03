@@ -1,4 +1,4 @@
-import { Predicate, Schema } from "effect";
+import { Schema } from "effect";
 import { TASK_BLOCKER_CLASSIFICATIONS } from "./task-state.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
@@ -28,18 +28,50 @@ const effectiveProfile = Schema.Struct({
   adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server", "opencode2"])),
   model: Schema.NullOr(safeEvidenceValue),
   modelProvider: Schema.NullOr(safeEvidenceValue),
+  actualModel: Schema.optional(Schema.NullOr(safeEvidenceValue)),
+  actualModelProvider: Schema.optional(Schema.NullOr(safeEvidenceValue)),
   reasoningEffort: Schema.NullOr(Schema.Literals(["minimal", "low", "medium", "high", "xhigh"])),
   developerInstructionsSha256: Schema.NullOr(exactHash),
+  serviceTier: Schema.optional(Schema.NullOr(safeEvidenceValue)),
 });
 const usage = Schema.Struct({
   inputTokens: Schema.optional(Schema.Natural),
+  cachedInputTokens: Schema.optional(Schema.Natural),
+  uncachedInputTokens: Schema.optional(Schema.Natural),
+  cacheWriteInputTokens: Schema.optional(Schema.Natural),
   outputTokens: Schema.optional(Schema.Natural),
+  reasoningOutputTokens: Schema.optional(Schema.Natural),
+});
+const usageObservationSource = Schema.Literals(["provider", "role_output_normalizer"]);
+const normalizer = Schema.Struct({
+  status: outcome,
+  adapter: Schema.Literal("role-output-normalizer"),
+  model: Schema.NullOr(safeEvidenceValue),
+  modelProvider: Schema.NullOr(safeEvidenceValue),
+  actualModel: Schema.optional(Schema.NullOr(safeEvidenceValue)),
+  actualModelProvider: Schema.optional(Schema.NullOr(safeEvidenceValue)),
+  usage: Schema.NullOr(usage),
 });
 
 function isSafeEvidenceIdentity(value: string): boolean {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return false;
-  const labels = value.split(".");
-  return labels.length < 2 || !/^[A-Za-z]+$/.test(labels.at(-1)!);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$/.test(value)) return false;
+  if (
+    value.includes("://") ||
+    value.includes("\\") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.split("/").some((segment) => segment === "." || segment === "..") ||
+    /(?:api[_-]?key|secret|token|password|credential|bearer)/i.test(value)
+  )
+    return false;
+  const firstSegment = value.split("/")[0]!;
+  if (
+    firstSegment.includes(".") &&
+    /^[A-Za-z0-9.-]+$/.test(firstSegment) &&
+    /^[A-Za-z]/.test(firstSegment.split(".").at(-1)!)
+  )
+    return false;
+  return !/:[0-9]+(?:\/|$)/.test(value);
 }
 
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
@@ -75,6 +107,22 @@ const eventData = Schema.Union([
     role,
     activation: Schema.Natural,
     sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_usage_observed"),
+    role,
+    activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
+    sessionId: safeObservationId,
+    source: usageObservationSource,
+    semantics: Schema.Literals(["delta", "replacement"]),
+    actualModel: Schema.optional(
+      Schema.Struct({
+        model: safeEvidenceValue,
+        provider: safeEvidenceValue,
+      }),
+    ),
+    usage,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_sandbox_verified"),
@@ -141,6 +189,7 @@ const eventData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -239,6 +288,22 @@ const observationData = Schema.Union([
     sessionId: safeObservationId,
   }),
   Schema.Struct({
+    type: Schema.Literal("coding_usage_observed"),
+    role,
+    activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
+    sessionId: safeObservationId,
+    source: usageObservationSource,
+    semantics: Schema.Literals(["delta", "replacement"]),
+    actualModel: Schema.optional(
+      Schema.Struct({
+        model: safeEvidenceValue,
+        provider: safeEvidenceValue,
+      }),
+    ),
+    usage,
+  }),
+  Schema.Struct({
     type: Schema.Literal("coding_sandbox_verified"),
     role,
     activation: Schema.Natural,
@@ -303,6 +368,7 @@ const observationData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -347,119 +413,9 @@ export type TaskEvent = Schema.Schema.Type<typeof taskEventSchema>;
 export type TaskEventPage = Schema.Schema.Type<typeof taskEventPageSchema>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
-  assertExactKeys(input, ["eventId", "occurredAtEpochMs", "data"]);
-  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
-  return Schema.decodeUnknownSync(taskObservationEventInput)(input);
+  return Schema.decodeUnknownSync(taskObservationEventInput, { onExcessProperty: "error" })(input);
 }
 
 export function decodeTaskEvent(input: unknown): TaskEvent {
-  assertExactKeys(input, ["taskId", "sequence", "eventId", "occurredAtEpochMs", "data"]);
-  if (Predicate.isObject(input) && Predicate.isObject(input.data)) assertExactDataKeys(input.data);
-  return Schema.decodeUnknownSync(taskEventSchema)(input);
-}
-
-const dataFields: Record<string, readonly string[]> = {
-  task_admitted: ["type", "contractHash"],
-  activation_reserved: ["type", "activation", "recovery"],
-  coding_session_started: [
-    "type",
-    "role",
-    "activation",
-    "reviewCycle",
-    "sessionId",
-    "requestedProfile",
-  ],
-  coding_thread_started: ["type", "role", "activation", "sessionId"],
-  coding_sandbox_verified: [
-    "type",
-    "role",
-    "activation",
-    "sessionId",
-    "host",
-    "workspaceRead",
-    "workspaceWrite",
-    "externalRead",
-    "externalWrite",
-    "subprocess",
-  ],
-  coding_turn_started: ["type", "role", "activation", "turn", "sessionId"],
-  coding_tool_completed: [
-    "type",
-    "role",
-    "activation",
-    "tool",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_mcp_tool_completed: [
-    "type",
-    "role",
-    "activation",
-    "server",
-    "tool",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_mcp_unavailable: ["type", "role", "activation", "server", "reason", "sessionId"],
-  coding_turn_completed: [
-    "type",
-    "role",
-    "activation",
-    "turn",
-    "outcome",
-    "sessionId",
-    "outcomeId",
-  ],
-  coding_session_completed: [
-    "type",
-    "role",
-    "activation",
-    "reviewCycle",
-    "outcome",
-    "sessionId",
-    "requestedProfile",
-    "effectiveProfile",
-    "usage",
-    "archive",
-  ],
-  coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
-  candidate_frozen: ["type", "sha", "fence"],
-  project_check_completed: ["type", "sha", "cycle", "outcome", "exitCode"],
-  review_completed: ["type", "sha", "cycle", "verdict"],
-  repair_batch_recorded: ["type", "cycle"],
-  delivery_completed: ["type", "sha", "prNumber", "merged"],
-  recovery_observed: ["type", "kind"],
-  task_blocked: ["type", "reason"],
-  task_waiting: ["type", "reason", "activation"],
-  task_retry_accepted: ["type", "reason", "activation"],
-  task_terminal: ["type", "state"],
-  legacy_observation: ["type", "kind", "outcome", "complete"],
-  legacy_import_incomplete: ["type", "importedCount", "complete"],
-};
-
-function assertExactKeys(input: unknown, expected: readonly string[]): void {
-  if (!Predicate.isObject(input)) throw new Error("event must be an object");
-  const actual = Object.keys(input).sort();
-  const allowed = [...expected].sort();
-  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index]))
-    throw new Error("event contains fields outside its allowlist");
-}
-
-function assertExactDataKeys(input: Record<string, unknown>): void {
-  if (typeof input.type !== "string") throw new Error("event data type is invalid");
-  const expected = dataFields[input.type];
-  if (!expected) throw new Error("event data type is invalid");
-  const actual = Object.keys(input);
-  const optional =
-    input.type === "coding_session_started"
-      ? new Set(["reviewCycle", "requestedProfile"])
-      : input.type === "coding_session_completed"
-        ? new Set(["reviewCycle", "requestedProfile", "effectiveProfile", "usage", "archive"])
-        : new Set<string>();
-  assertExactKeys(
-    input,
-    expected.filter((key) => !optional.has(key) || actual.includes(key)),
-  );
+  return Schema.decodeUnknownSync(taskEventSchema, { onExcessProperty: "error" })(input);
 }

@@ -9,6 +9,8 @@ import {
   type ApiTaskSubmission,
 } from "@usine/runtime";
 import {
+  deriveUsageReportFromInvocations,
+  MAX_USAGE_REPORT_PAGE_SIZE,
   type TaskEvent,
   type TaskEventPage,
   type TaskListPage,
@@ -19,6 +21,9 @@ import {
   type ServerSnapshot,
   isTerminalState,
   isWaitingState,
+  type UsageReport,
+  type UsageReportPage,
+  type UsageReportScope,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
@@ -154,6 +159,37 @@ export async function listTasks(serverUrl: string, limit = 100): Promise<TaskLis
   validateLimit(limit);
   const client = await clientFor(serverUrl);
   return runRequest(client.tasks.list({ query: { limit } }));
+}
+
+export async function usageReport(
+  serverUrl: string,
+  scope: UsageReportScope,
+): Promise<UsageReport> {
+  const client = await clientFor(serverUrl);
+  const scopeQuery = {
+    ...(scope.taskId === null ? {} : { taskId: scope.taskId }),
+    ...(scope.repositoryId === null ? {} : { repositoryId: scope.repositoryId }),
+    ...(scope.fromEpochMs === null ? {} : { fromEpochMs: scope.fromEpochMs }),
+    ...(scope.toEpochMs === null ? {} : { toEpochMs: scope.toEpochMs }),
+  };
+  const invocations: UsageReport["invocations"][number][] = [];
+  let cursor: string | null = null;
+  while (true) {
+    const pageRequest = client.usage.report({
+      query: {
+        ...scopeQuery,
+        limit: MAX_USAGE_REPORT_PAGE_SIZE,
+        ...(cursor === null ? {} : { cursor }),
+      },
+    });
+    const page: UsageReportPage = await runRequest<UsageReportPage>(pageRequest);
+    invocations.push(...page.invocations);
+    if (page.nextCursor === null) break;
+    if (page.nextCursor === cursor)
+      throw new ServerClientError("usage report cursor did not advance", 500);
+    cursor = page.nextCursor;
+  }
+  return deriveUsageReportFromInvocations(invocations, scope);
 }
 
 export async function taskEvents(

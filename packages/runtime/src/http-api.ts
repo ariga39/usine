@@ -7,6 +7,7 @@ import {
   taskEventSchema,
   taskListPageSchema,
   taskResourceSchema,
+  usageReportPageSchema,
   type RepositoryResource,
   type ServerHealth,
   type ServerSnapshot,
@@ -14,6 +15,7 @@ import {
   type TaskEventPage,
   type TaskListPage,
   type TaskResource,
+  type UsageReportPage,
 } from "@usine/task-authority";
 import {
   HttpApi,
@@ -75,6 +77,15 @@ const eventPageQuery = {
   after: Schema.optional(Schema.NumberFromString),
   limit: Schema.optional(Schema.NumberFromString),
 };
+const usageQuery = {
+  taskId: Schema.optional(Schema.String),
+  repositoryId: Schema.optional(Schema.String),
+  fromEpochMs: Schema.optional(Schema.NumberFromString),
+  toEpochMs: Schema.optional(Schema.NumberFromString),
+  cursor: Schema.optional(Schema.String),
+  limit: Schema.optional(Schema.NumberFromString),
+};
+const usageQuerySchema = Schema.Struct(usageQuery);
 
 const repositoryRegistrationSchema = Schema.Struct({
   id: Schema.String,
@@ -193,6 +204,14 @@ const TaskApi = HttpApiGroup.make("tasks").add(
   }),
 );
 
+const UsageApi = HttpApiGroup.make("usage").add(
+  HttpApiEndpoint.get("report", "/v1/usage", {
+    query: usageQuery,
+    success: usageReportPageSchema,
+    error: allErrors,
+  }),
+);
+
 const EventApi = HttpApiGroup.make("events").add(
   HttpApiEndpoint.get("wait", "/v1/events/wait", {
     query: waitQuery,
@@ -215,6 +234,7 @@ export const UsineApi = HttpApi.make("usine-loopback-api")
   .add(ServerApi)
   .add(RepositoryApi)
   .add(TaskApi)
+  .add(UsageApi)
   .add(EventApi);
 
 export type ApiEventScope = Schema.Schema.Type<typeof scopeSchema>;
@@ -224,6 +244,8 @@ export type ApiTaskSubmission = Schema.Schema.Type<typeof taskSubmissionSchema>;
 export type ApiTaskResource = Schema.Schema.Type<typeof taskResourceSchema>;
 export type ApiError = Schema.Schema.Type<(typeof allErrors)[number]>;
 export type ApiEventStreamValue = Schema.Schema.Type<typeof eventStreamDataSchema>;
+export type ApiUsageQuery = Schema.Schema.Type<typeof usageQuerySchema>;
+export type ApiUsageReport = UsageReportPage;
 
 export function encodeApiWaitResponse(value: ApiEventEnvelope | null): string {
   return JSON.stringify(Schema.encodeUnknownSync(Schema.NullOr(eventEnvelopeSchema))(value));

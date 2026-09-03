@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
+  decodeTaskObservationEventInput,
   openSqliteDatabase,
   TaskAuthority,
   taskResourceFromResult,
@@ -157,6 +158,109 @@ describe("Task event stream", () => {
 
     await expect(authority.appendObservation(taskId, unsafe)).rejects.toThrow();
     await expect(authority.appendObservation(taskId, oversized)).rejects.toThrow();
+    await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
+  });
+
+  test("rejects unknown nested fields and secret-like usage identities", async () => {
+    const taskId = `events-nested-invalid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    const completed = {
+      type: "coding_session_completed" as const,
+      role: "implementer" as const,
+      activation: 1,
+      outcome: "succeeded" as const,
+      sessionId: "coding-session:1:implementer",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+    const invalidEvents: unknown[] = [
+      {
+        eventId: "nested-usage",
+        occurredAtEpochMs: 200,
+        data: {
+          type: "coding_usage_observed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          source: "provider",
+          semantics: "replacement",
+          usage: { inputTokens: 1, unexpected: true },
+        },
+      },
+      {
+        eventId: "nested-model",
+        occurredAtEpochMs: 201,
+        data: {
+          type: "coding_usage_observed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          source: "provider",
+          semantics: "replacement",
+          actualModel: { model: "provider/model", provider: "provider", unexpected: true },
+          usage: { inputTokens: 1 },
+        },
+      },
+      {
+        eventId: "nested-profile",
+        occurredAtEpochMs: 202,
+        data: {
+          ...completed,
+          effectiveProfile: {
+            profileName: null,
+            configSha256: null,
+            adapter: null,
+            model: null,
+            modelProvider: null,
+            reasoningEffort: null,
+            developerInstructionsSha256: null,
+            unexpected: true,
+          },
+        },
+      },
+      {
+        eventId: "nested-normalizer",
+        occurredAtEpochMs: 203,
+        data: {
+          ...completed,
+          normalizer: {
+            status: "succeeded",
+            adapter: "role-output-normalizer",
+            model: null,
+            modelProvider: null,
+            usage: null,
+            unexpected: true,
+          },
+        },
+      },
+      {
+        eventId: "nested-archive",
+        occurredAtEpochMs: 204,
+        data: {
+          ...completed,
+          archive: {
+            archiveId: "archive_00000000-0000-0000-0000-000000000001",
+            status: "stored",
+            unexpected: true,
+          },
+        },
+      },
+      {
+        eventId: "secret-model",
+        occurredAtEpochMs: 205,
+        data: {
+          type: "coding_usage_observed",
+          role: "implementer",
+          activation: 1,
+          sessionId: "coding-session:1:implementer",
+          source: "provider",
+          semantics: "replacement",
+          actualModel: { model: "provider/api-key", provider: "provider" },
+          usage: { inputTokens: 1 },
+        },
+      },
+    ];
+    for (const input of invalidEvents)
+      expect(() => decodeTaskObservationEventInput(input)).toThrow();
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
   });
 

@@ -126,6 +126,7 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
     throw new Error("task execution cancelled");
@@ -152,6 +153,7 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
     return {
@@ -176,6 +178,7 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
     return {
@@ -194,6 +197,7 @@ async function runCodingAttempt(
     requestedProfile: observation.requestedProfile ?? input.implementer.profile,
     ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
     usage: observation.usage ?? null,
+    ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
     ...archiveReference(observation),
   });
   try {

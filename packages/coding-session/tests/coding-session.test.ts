@@ -215,7 +215,7 @@ const emitTurn = () => {
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "commandExecution", id: "command-fixture", status: "completed" } } });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "mcpToolCall", id: "mcp-fixture", server: "github_read?token=host-secret", tool: "github_issue_get?token=host-secret", arguments: { issue: 285, workspace: ${JSON.stringify(runtimePath)} }, result: { content: [{ type: "text", text: ${JSON.stringify("app-server tool output " + runtimePath)} }] }, status: "completed" } } });
   send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { type: "agentMessage", id: "message-fixture", text: output } } });
-  send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 7, outputTokens: 9 } } } });
+  send({ method: "thread/tokenUsage/updated", params: { threadId: "thread-fixture", turnId: "turn-fixture", tokenUsage: { last: { inputTokens: 200, cachedInputTokens: 40, cacheWriteInputTokens: 60, outputTokens: 7, reasoningOutputTokens: 3 } } } });
   send({ method: "turn/completed", params: { threadId: mode === "mismatch" ? "wrong-thread" : "thread-fixture", turn: { id: "turn-fixture", status: "completed", error: null } } });
 };
 const handle = (message) => {
@@ -1085,13 +1085,20 @@ describe("Coding Session", () => {
       },
     });
     await finalObservationEntered.promise;
-    expect(observations).toHaveLength(5);
+    expect(observations).toHaveLength(6);
     releaseFinalObservation.resolve();
     const observation = await pending;
     expect(observation).toMatchObject({
       status: "completed",
       output: { verdict: "approved", summary: "app-server" },
-      usage: { inputTokens: 7, outputTokens: 9 },
+      usage: {
+        inputTokens: 200,
+        cachedInputTokens: 40,
+        uncachedInputTokens: 100,
+        cacheWriteInputTokens: 60,
+        outputTokens: 7,
+        reasoningOutputTokens: 3,
+      },
     });
     expect(observations).toEqual([
       { type: "thread_started" },
@@ -1102,6 +1109,19 @@ describe("Coding Session", () => {
         server: "unknown",
         tool: "unknown",
         outcome: "succeeded",
+      },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "replacement",
+        usage: {
+          inputTokens: 200,
+          cachedInputTokens: 40,
+          uncachedInputTokens: 100,
+          cacheWriteInputTokens: 60,
+          outputTokens: 7,
+          reasoningOutputTokens: 3,
+        },
       },
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
@@ -1123,7 +1143,14 @@ describe("Coding Session", () => {
         findings: [],
       }),
       normalizedOutput: { sha, verdict: "approved", summary: "app-server", findings: [] },
-      usage: { inputTokens: 7, outputTokens: 9 },
+      usage: {
+        inputTokens: 200,
+        cachedInputTokens: 40,
+        uncachedInputTokens: 100,
+        cacheWriteInputTokens: 60,
+        outputTokens: 7,
+        reasoningOutputTokens: 3,
+      },
       completeness: "complete",
       profile: {
         name: "reviewer-profile",
@@ -1787,6 +1814,105 @@ describe("Coding Session", () => {
       },
     });
     expect(requestOptions).not.toHaveProperty("env");
+  });
+
+  test("accounts for a role-output normalizer as a separate invocation", async () => {
+    const observations: CodingSessionObservation[] = [];
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () =>
+            sdkTurn("provider prose", {
+              input_tokens: 100,
+              cached_input_tokens: 40,
+              cache_write_input_tokens: 60,
+              output_tokens: 7,
+              reasoning_output_tokens: 3,
+            }),
+          "normalizer-provider-session",
+        ),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async ({ onUsage }) => {
+          await onUsage?.({
+            semantics: "replacement",
+            usage: {
+              inputTokens: 5,
+              cachedInputTokens: 2,
+              uncachedInputTokens: 3,
+              outputTokens: 2,
+              reasoningOutputTokens: 1,
+            },
+          });
+          return { status: "proposed", summary: "normalized" };
+        },
+      },
+    );
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      execution: implementerExecution,
+      onObservation: (event) => {
+        observations.push(event);
+      },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: { summary: "normalized" },
+      usage: {
+        inputTokens: 100,
+        cachedInputTokens: 40,
+        uncachedInputTokens: 0,
+        cacheWriteInputTokens: 60,
+        outputTokens: 7,
+        reasoningOutputTokens: 3,
+      },
+      normalizer: {
+        status: "succeeded",
+        usage: {
+          inputTokens: 5,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 3,
+          outputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
+      },
+    });
+    expect(observations.filter((event) => event.type === "usage_observed")).toEqual([
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "replacement",
+        usage: {
+          inputTokens: 100,
+          cachedInputTokens: 40,
+          uncachedInputTokens: 0,
+          cacheWriteInputTokens: 60,
+          outputTokens: 7,
+          reasoningOutputTokens: 3,
+        },
+      },
+      {
+        type: "usage_observed",
+        source: "role_output_normalizer",
+        semantics: "replacement",
+        usage: {
+          inputTokens: 5,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 3,
+          outputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
+      },
+    ]);
   });
 
   test("normalizes one prose-wrapped reviewer response through the coordinator transform", async () => {
@@ -2868,7 +2994,10 @@ describe("Coding Session", () => {
           output: { ok: true },
           status: "completed",
         });
-        context.onUsage?.({ inputTokens: 3, outputTokens: 4 });
+        await context.onUsage?.({
+          semantics: "delta",
+          usage: { inputTokens: 3, outputTokens: 4 },
+        });
         return {
           finalResponse:
             name === "sdk"
@@ -3048,13 +3177,11 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
-      { type: "thread_started" },
-      { type: "turn_started", turn: 1 },
       {
-        type: "mcp_tool_completed",
-        server: "github_read",
-        tool: "github_issue_get",
-        outcome: "succeeded",
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
       },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
@@ -3063,6 +3190,26 @@ describe("Coding Session", () => {
         server: "github_read",
         tool: "github_issue_get",
         outcome: "succeeded",
+      },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
+      },
+      { type: "thread_started" },
+      { type: "turn_started", turn: 1 },
+      {
+        type: "mcp_tool_completed",
+        server: "github_read",
+        tool: "github_issue_get",
+        outcome: "succeeded",
+      },
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "delta",
+        usage: { inputTokens: 3, outputTokens: 4 },
       },
     ]);
     const archives = await listSessionArchives(stateDirectory, contract.id);

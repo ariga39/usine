@@ -270,6 +270,19 @@ Human-readable output is the default for resource reads; add `--json` for the st
 
 `task history` reads persisted Task-local events after a non-negative sequence cursor; its limit is from 1 through 200. `task watch` repeatedly reads the current Task and durable event history, writes each observed event as one JSON line to stderr, and writes the final Task resource to stdout when the Task reaches a terminal state or `waiting`. `task evidence` drains paginated history, rereads the current Task, and reports separate implementer/reviewer Role Runs joined to the current bounded Candidate, check, review, repair, and delivery facts. It has no live-event cursor to resume: start with `task history`, `task watch --after <LAST_SEQUENCE>`, or `task evidence` when recovering an operator view. The compatibility aliases `status` and `follow` remain available, but `task get`, `task watch`, and `task evidence` are the canonical Task reads.
 
+### Usage export
+
+Export all persisted usage as JSON, or narrow it by Task, Repository, and an inclusive/exclusive epoch-millisecond range:
+
+```sh
+node apps/cli/dist/cli.mjs usage --json
+node apps/cli/dist/cli.mjs usage --task-id "<TASK_ID>" --json
+node apps/cli/dist/cli.mjs usage --repository-id "<REPOSITORY_ID>" --json
+node apps/cli/dist/cli.mjs usage --from-epoch-ms 1710000000000 --to-epoch-ms 1710086400000 --json
+```
+
+The CLI drains all bounded `/v1/usage` pages and recomputes complete selected-scope aggregates. `occurredAtEpochMs` is completion/interruption time, falling back to session start; unavailable dimensions remain `null` and the report remains incomplete rather than presenting zero.
+
 ### Controlled implementer-profile evaluation
 
 The operator can run one committed, bounded paired evaluation through the CLI:

@@ -17,7 +17,17 @@ type CompletedEvidenceBase = {
 
 export interface ProviderNeutralUsage {
   readonly inputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly uncachedInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
   readonly outputTokens?: number;
+  readonly reasoningOutputTokens?: number;
+}
+
+export interface ProviderNeutralUsageObservation {
+  readonly usage: ProviderNeutralUsage;
+  readonly semantics: "delta" | "replacement";
+  readonly actualModel?: { readonly model: string; readonly provider: string };
 }
 
 export interface CodingSessionAdapterProfile {
@@ -94,13 +104,14 @@ export interface CodingSessionAdapterRequest {
   readonly onItemCompleted?: (item: ProviderNeutralCompletedEvidence) => Promise<void> | void;
   readonly onSessionId?: (sessionId: string) => void;
   readonly onPhase?: (phase: CodingSessionPhase) => void;
-  readonly onUsage?: (usage: ProviderNeutralUsage) => void;
+  readonly onUsage?: (observation: ProviderNeutralUsageObservation) => Promise<void> | void;
 }
 
 export interface CodingSessionAdapterResult {
   readonly finalResponse: string;
   readonly usage: ProviderNeutralUsage | null;
   readonly sessionId: string | null;
+  readonly actualModel?: { readonly model: string; readonly provider: string };
 }
 
 export interface CodingSessionAdapter {
