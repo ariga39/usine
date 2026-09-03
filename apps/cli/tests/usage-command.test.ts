@@ -120,22 +120,13 @@ describe("usage command", () => {
       "http://server.test",
     );
 
-    const report = JSON.parse(output.join("")) as {
-      invocations: Array<{ taskId: string }>;
-      aggregates: Array<{ taskId: string }>;
-    };
+    const report = JSON.parse(output.join(""));
+    expect(report).toMatchObject({
+      invocations: [{ taskId: "task-001" }, { taskId: "task-002" }, { taskId: "task-003" }],
+      aggregates: [{ taskId: "task-001" }, { taskId: "task-002" }, { taskId: "task-003" }],
+      coverage: "partial",
+    });
     expect(requests.map((url) => url.searchParams.get("cursor"))).toEqual([null, "page-1"]);
     expect(requests.every((url) => url.searchParams.get("limit") === "200")).toBe(true);
-    expect(report.invocations.map(({ taskId }) => taskId)).toEqual([
-      "task-001",
-      "task-002",
-      "task-003",
-    ]);
-    expect(report.aggregates.map(({ taskId }) => taskId)).toEqual([
-      "task-001",
-      "task-002",
-      "task-003",
-    ]);
-    expect(JSON.parse(output.join("")).coverage).toBe("partial");
   });
 });

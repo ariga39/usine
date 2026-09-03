@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import {
   applyMigrations,
+  decodeTaskObservationEventInput,
   openSqliteDatabase,
   TaskAuthority,
   taskResourceFromResult,
@@ -171,7 +172,7 @@ describe("Task event stream", () => {
       sessionId: "coding-session:1:implementer",
       usage: { inputTokens: 1, outputTokens: 1 },
     };
-    const invalidEvents: TaskObservationEventInput[] = [
+    const invalidEvents: unknown[] = [
       {
         eventId: "nested-usage",
         occurredAtEpochMs: 200,
@@ -183,7 +184,7 @@ describe("Task event stream", () => {
           source: "provider",
           semantics: "replacement",
           usage: { inputTokens: 1, unexpected: true },
-        } as never,
+        },
       },
       {
         eventId: "nested-model",
@@ -197,7 +198,7 @@ describe("Task event stream", () => {
           semantics: "replacement",
           actualModel: { model: "provider/model", provider: "provider", unexpected: true },
           usage: { inputTokens: 1 },
-        } as never,
+        },
       },
       {
         eventId: "nested-profile",
@@ -214,7 +215,7 @@ describe("Task event stream", () => {
             developerInstructionsSha256: null,
             unexpected: true,
           },
-        } as never,
+        },
       },
       {
         eventId: "nested-normalizer",
@@ -229,7 +230,7 @@ describe("Task event stream", () => {
             usage: null,
             unexpected: true,
           },
-        } as never,
+        },
       },
       {
         eventId: "nested-archive",
@@ -241,7 +242,7 @@ describe("Task event stream", () => {
             status: "stored",
             unexpected: true,
           },
-        } as never,
+        },
       },
       {
         eventId: "secret-model",
@@ -255,11 +256,11 @@ describe("Task event stream", () => {
           semantics: "replacement",
           actualModel: { model: "provider/api-key", provider: "provider" },
           usage: { inputTokens: 1 },
-        } as never,
+        },
       },
     ];
     for (const input of invalidEvents)
-      await expect(authority.appendObservation(taskId, input)).rejects.toThrow();
+      expect(() => decodeTaskObservationEventInput(input)).toThrow();
     await expect(authority.listEvents(taskId)).resolves.toHaveLength(1);
   });
 
