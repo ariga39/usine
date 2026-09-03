@@ -1,16 +1,10 @@
-import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:net";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createOpencodeClient, type Config } from "@opencode-ai/sdk/v2";
 import { z } from "zod";
 import { mergeProviderNeutralUsage } from "@usine/task-authority";
-import {
-  createOwnedProcessLauncher,
-  discardStartingOwnedExecution,
-  reapOwnedExecution,
-} from "./codex-execution.js";
 import {
   classifyAdapterFailure,
   CodingSessionInterruption,
@@ -32,6 +26,7 @@ import {
 
 const STARTUP_POLL_MS = 20;
 const GRACEFUL_INTERRUPT_WAIT_MS = 1_000;
+const CHILD_CLOSE_WAIT_MS = 1_000;
 const sessionInfoSchema = z.object({ id: z.string().min(1) });
 const promptAdmissionSchema = z.object({ sessionID: z.string().min(1) });
 const PERMISSION_REPLY_TIMEOUT_MS = 1_000;
@@ -55,11 +50,10 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       );
 
     let phase: "startup" | "thread" | "turn" | "output" = "startup";
-    let launcher: Awaited<ReturnType<typeof createOwnedProcessLauncher>> | undefined;
     let privateDirectory: string | undefined;
     let configDirectory: string | undefined;
     let server: ReturnType<typeof spawn> | undefined;
-    let launchFailed = false;
+    let childSettled: Promise<void> | undefined;
     let sessionID: string | undefined;
     let interruptRequest: Promise<void> | undefined;
     let client: ReturnType<typeof createOpencodeClient> | undefined;
@@ -70,15 +64,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
 
     try {
       const port = await availablePort();
-      privateDirectory = join(
-        context.executionStateDirectory,
-        "opencode-private",
-        createHash("sha256")
-          .update(
-            `${context.execution.taskId}\0${context.execution.role}\0${context.execution.attempt}`,
-          )
-          .digest("hex"),
-      );
+      await mkdir(context.executionStateDirectory, { recursive: true });
+      privateDirectory = await mkdtemp(join(context.executionStateDirectory, "opencode-private-"));
       configDirectory = join(privateDirectory, "config");
       await Promise.all([
         mkdir(configDirectory, { recursive: true }),
@@ -96,17 +83,11 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         signal: context.signal,
       });
       await context.onObservation?.({ type: "sandbox_verified", ...sandbox.evidence });
-      launcher = await createOwnedProcessLauncher(
-        context.executionStateDirectory,
-        context.workspace,
-        context.execution,
-        sandbox.launch.command,
-      );
       const childEnvironment = Object.fromEntries(
         Object.entries(context.environment).filter(([key]) => !key.startsWith("OPENCODE_")),
       );
       server = spawn(
-        launcher.launcherPath,
+        sandbox.launch.command,
         [...sandbox.launch.args, "serve", "--hostname=127.0.0.1", `--port=${port}`, "--pure"],
         {
           cwd: context.workspace,
@@ -122,15 +103,12 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
             XDG_DATA_HOME: join(privateDirectory, "xdg-data"),
             XDG_STATE_HOME: join(privateDirectory, "xdg-state"),
             XDG_CACHE_HOME: join(privateDirectory, "xdg-cache"),
-            USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
-            USINE_CODING_SESSION_WORKSPACE: context.workspace,
           },
           stdio: "ignore",
         },
       );
-      server.once("error", () => {
-        launchFailed = true;
-      });
+      server.once("error", () => undefined);
+      childSettled = childSettlement(server);
       client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
       gracefulInterrupt = async (): Promise<void> => {
         if (!sessionID || !client) return;
@@ -448,18 +426,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     } finally {
       try {
         if (context.signal.aborted) await gracefulInterrupt();
-        if (server && !sessionID && server.exitCode === null && server.signalCode === null) {
-          server.kill("SIGTERM");
-          await waitForProcessExit(server);
-        }
-        if (launcher) {
-          if (launchFailed || !server || (server.exitCode !== null && !sessionID))
-            await discardStartingOwnedExecution(context.executionStateDirectory, context.execution);
-          await reapOwnedExecution(context.executionStateDirectory, {
-            reference: context.execution,
-            workspace: context.workspace,
-          });
-        }
+        if (server && childSettled) await settleChild(server, childSettled);
       } catch (error) {
         cleanupFailure = error;
       }
@@ -774,9 +741,49 @@ async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T>
   ]);
 }
 
-function waitForProcessExit(process: ReturnType<typeof spawn>): Promise<void> {
-  if (process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => process.once("close", () => resolve()));
+function childSettlement(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    child.once("exit", settle);
+    child.once("close", settle);
+  });
+}
+
+async function settleChild(child: ChildProcess, childSettled: Promise<void>): Promise<void> {
+  if (await waitForChildSettlement(childSettled, 0)) return;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // The child may have exited between the settlement check and the signal.
+  }
+  if (await waitForChildSettlement(childSettled, CHILD_CLOSE_WAIT_MS)) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The child may have exited between the bounded waits.
+  }
+  if (!(await waitForChildSettlement(childSettled, CHILD_CLOSE_WAIT_MS)))
+    throw new Error("OpenCode2 server child did not settle after SIGKILL");
+}
+
+function waitForChildSettlement(childSettled: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (closed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(closed);
+    };
+    timer = setTimeout(() => finish(false), timeoutMs);
+    void childSettled.then(() => finish(true));
+  });
 }
 
 async function availablePort(): Promise<number> {
