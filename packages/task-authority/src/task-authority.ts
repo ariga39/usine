@@ -40,8 +40,13 @@ import {
   type RepositorySnapshot,
 } from "./repository.js";
 
-import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
+import {
+  taskListItemFromResult,
+  type TaskListItem,
+  type TaskListPage,
+} from "./task-state-schema.js";
 import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
+import { decodeTaskIdCursor, encodeTaskIdCursor, pageTaskIds } from "./task-id-cursor.js";
 import {
   listUsageReportSources,
   type UsageReportScope,
@@ -52,6 +57,8 @@ import {
 type AuthorityDatabase = RuntimeDatabase;
 
 const MAX_EVENT_LIMIT = 200;
+export const MAX_TASK_LIST_PAGE_SIZE = 200;
+const TASK_LIST_CURSOR_SCOPE = "task-list" as const;
 const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
 
 function repositoryPolicySelectionChanged(
@@ -70,6 +77,11 @@ function repositoryPolicySelectionChanged(
 
 export interface TaskAuthorityOptions {
   onEvent?: (event: TaskEvent) => void;
+}
+
+export interface TaskListPageRequest {
+  readonly cursor: string | null;
+  readonly limit: number;
 }
 
 export class TaskCapacityError extends Error {
@@ -361,7 +373,17 @@ export class TaskAuthority {
   }
 
   async listTasks(limit = 100): Promise<TaskListItem[]> {
-    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), 200);
+    const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_TASK_LIST_PAGE_SIZE);
+    return [...(await this.listTaskPage({ cursor: null, limit: boundedLimit })).tasks];
+  }
+
+  async listTaskPage(request: TaskListPageRequest): Promise<TaskListPage> {
+    if (
+      !Number.isSafeInteger(request.limit) ||
+      request.limit < 1 ||
+      request.limit > MAX_TASK_LIST_PAGE_SIZE
+    )
+      throw new RangeError("task list page limit is out of range");
     const quarantined = await this.database
       .select({ taskId: taskQuarantines.taskId })
       .from(taskQuarantines)
@@ -371,16 +393,32 @@ export class TaskAuthority {
       .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
       .from(taskRuns)
       .orderBy(asc(taskRuns.taskId));
+    const taskIds = rows.map((row) => row.taskId);
+    const cursor =
+      request.cursor === null ? null : decodeTaskIdCursor(request.cursor, TASK_LIST_CURSOR_SCOPE);
+    const page = pageTaskIds(taskIds, cursor, request.limit, TASK_LIST_CURSOR_SCOPE);
+    const selectedTaskIds = new Set(page.taskIds);
     const tasks: TaskListItem[] = [];
     for (const row of rows) {
       try {
-        tasks.push(taskListItemFromResult(decodeRawPersistedTaskResult(row.rawResult)));
+        const task = taskListItemFromResult(decodeRawPersistedTaskResult(row.rawResult));
+        if (selectedTaskIds.has(row.taskId)) tasks.push(task);
       } catch (error) {
         if (isTaskStateQuarantinedError(error)) throw new TaskStateQuarantinedError(row.taskId);
         throw error;
       }
     }
-    return tasks.slice(0, boundedLimit);
+    return {
+      tasks,
+      cursor: request.cursor,
+      nextCursor:
+        page.nextCursor === null
+          ? null
+          : encodeTaskIdCursor({
+              ...page.nextCursor,
+              scope: TASK_LIST_CURSOR_SCOPE,
+            }),
+    };
   }
 
   async lookupExisting(taskId: string, contractHash: string): Promise<TaskResult | null> {

@@ -12,6 +12,7 @@ import {
   openSqliteDatabase,
   TaskAuthority,
   TaskCapacityError,
+  TaskIdCursorError,
   TaskRetryConflictError,
   UsageReportCursorError,
   MAX_USAGE_REPORT_PAGE_SIZE,
@@ -38,8 +39,8 @@ import {
   retryTask,
   lookupTaskStatus,
   lookupTaskEvents,
+  lookupTaskPage,
   lookupUsageReport,
-  lookupTasks,
   lookupServerHealth,
   lookupServerSnapshot,
   recordRecoveryObservation,
@@ -475,9 +476,12 @@ function createApiLayer(options: {
   const taskHandlers = HttpApiBuilder.group(UsineApi, "tasks", (handlers) =>
     handlers.handleAll({
       list: ({ query }) =>
-        apiEffect(async () => ({
-          tasks: await lookupTasks(stateDirectory, validLimit(query.limit, 100)),
-        })),
+        apiEffect(() =>
+          lookupTaskPage(stateDirectory, {
+            cursor: query.cursor ?? null,
+            limit: validLimit(query.limit, 100),
+          }),
+        ),
       get: ({ params }) =>
         apiEffect(async () => {
           const result = await lookupTaskStatus(stateDirectory, params.taskId);
@@ -586,6 +590,7 @@ function apiError(error: unknown): ApiError {
   if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
   if (error instanceof UsageReportCursorError)
     return { code: "validation", message: error.message };
+  if (error instanceof TaskIdCursorError) return { code: "validation", message: error.message };
   if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof TaskCapacityError)
     return { code: "active_task_capacity", message: error.message, retryable: true };

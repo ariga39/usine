@@ -12,6 +12,13 @@ export {
 } from "./task-state-schema.js";
 export { taskResourceSchema, taskListPageSchema } from "./task-state-schema.js";
 export type { TaskListItem, TaskListPage } from "./task-state-schema.js";
+export {
+  decodeTaskIdCursor,
+  encodeTaskIdCursor,
+  pageTaskIds,
+  TaskIdCursorError,
+} from "./task-id-cursor.js";
+export type { TaskIdCursor, TaskIdPage } from "./task-id-cursor.js";
 export { applyMigrations } from "./apply-migrations.js";
 export { openSqliteDatabase } from "./sqlite-database.js";
 export { deadlineExpired, ElapsedBudgetError, remainingUntil } from "./remaining-until.js";

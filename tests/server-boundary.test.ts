@@ -15,6 +15,7 @@ import {
 } from "@usine/task-authority";
 import {
   inspectRepository,
+  listAllTasks,
   listRepositories,
   listTasks,
   registerRepository,
@@ -27,6 +28,64 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("CLI/server boundary", () => {
+  test("traverses more than 200 admitted Tasks through the paged HTTP client", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-server-task-pages-"));
+    const stateDirectory = join(root, "state");
+    const databasePath = join(stateDirectory, "usine.sqlite");
+    await mkdir(stateDirectory);
+    await applyMigrations(databasePath);
+    const handle = openSqliteDatabase(databasePath);
+    const authority = new TaskAuthority(handle.database);
+    const taskIds = Array.from(
+      { length: 205 },
+      (_, index) => `http-paged-task-${String(index).padStart(3, "0")}`,
+    );
+    for (const taskId of taskIds) {
+      const admitted = await authority.admit({
+        contract: {
+          id: taskId,
+          repositoryId: taskId,
+          baseSha: "a".repeat(40),
+          instructions: "Exercise HTTP Task paging.",
+          acceptance: ["Every admitted Task is traversable."],
+          nonGoals: [],
+          budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+          authorization: {
+            source: `https://github.com/example/${taskId}/issues/346`,
+            delivery: true,
+          },
+          delivery: {
+            branch: `agent/${taskId}`,
+            issue: 346,
+            title: "HTTP Task paging",
+            body: "HTTP Task paging",
+          },
+        },
+        contractHash: "a".repeat(64),
+        repositoryIdentity: `example/${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      await authority.block(
+        { taskId: admitted.taskId, revision: admitted.revision },
+        "paging test terminal Task",
+      );
+    }
+    handle.close();
+
+    const server = await startUsineServer({
+      environment: { USINE_STATE_DIR: stateDirectory },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const listed = await listAllTasks(server.url, 200);
+      expect(listed.tasks.map((task) => task.taskId)).toEqual(taskIds);
+      expect(new Set(listed.tasks.map((task) => task.taskId)).size).toBe(205);
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
   test("admits and re-enters only the committed contract bytes across a working-tree race", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-committed-contract-race-"));
     const repositoryPath = join(root, "repository");
@@ -287,7 +346,7 @@ process.exit(result.status ?? 1);
         expect(response.status).toBe(400);
         expect(await response.json()).toEqual({ code: "validation", message });
       }
-      expect(await listTasks(server.url)).toEqual({ tasks: [] });
+      expect(await listTasks(server.url)).toMatchObject({ tasks: [] });
       expect(executionCalls).toBe(0);
 
       await expect(submitTask(server.url, { contractPath })).resolves.toMatchObject({
