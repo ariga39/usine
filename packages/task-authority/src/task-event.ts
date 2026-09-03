@@ -28,6 +28,8 @@ const effectiveProfile = Schema.Struct({
   adapter: Schema.NullOr(Schema.Literals(["sdk", "app-server", "opencode2"])),
   model: Schema.NullOr(safeEvidenceValue),
   modelProvider: Schema.NullOr(safeEvidenceValue),
+  actualModel: Schema.optional(Schema.NullOr(safeEvidenceValue)),
+  actualModelProvider: Schema.optional(Schema.NullOr(safeEvidenceValue)),
   reasoningEffort: Schema.NullOr(Schema.Literals(["minimal", "low", "medium", "high", "xhigh"])),
   developerInstructionsSha256: Schema.NullOr(exactHash),
   serviceTier: Schema.optional(Schema.NullOr(safeEvidenceValue)),
@@ -46,13 +48,30 @@ const normalizer = Schema.Struct({
   adapter: Schema.Literal("role-output-normalizer"),
   model: Schema.NullOr(safeEvidenceValue),
   modelProvider: Schema.NullOr(safeEvidenceValue),
+  actualModel: Schema.optional(Schema.NullOr(safeEvidenceValue)),
+  actualModelProvider: Schema.optional(Schema.NullOr(safeEvidenceValue)),
   usage: Schema.NullOr(usage),
 });
 
 function isSafeEvidenceIdentity(value: string): boolean {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return false;
-  const labels = value.split(".");
-  return labels.length < 2 || !/^[A-Za-z]+$/.test(labels.at(-1)!);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$/.test(value)) return false;
+  if (
+    value.includes("://") ||
+    value.includes("\\") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.split("/").some((segment) => segment === "." || segment === "..") ||
+    /(?:api[_-]?key|secret|token|password|credential|bearer)/i.test(value)
+  )
+    return false;
+  const firstSegment = value.split("/")[0]!;
+  if (
+    firstSegment.includes(".") &&
+    /^[A-Za-z0-9.-]+$/.test(firstSegment) &&
+    /^[A-Za-z]/.test(firstSegment.split(".").at(-1)!)
+  )
+    return false;
+  return !/:[0-9]+(?:\/|$)/.test(value);
 }
 
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
@@ -96,6 +115,13 @@ const eventData = Schema.Union([
     reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
     source: usageObservationSource,
+    semantics: Schema.Literals(["delta", "replacement"]),
+    actualModel: Schema.optional(
+      Schema.Struct({
+        model: safeEvidenceValue,
+        provider: safeEvidenceValue,
+      }),
+    ),
     usage,
   }),
   Schema.Struct({
@@ -268,6 +294,13 @@ const observationData = Schema.Union([
     reviewCycle: Schema.optional(Schema.Natural),
     sessionId: safeObservationId,
     source: usageObservationSource,
+    semantics: Schema.Literals(["delta", "replacement"]),
+    actualModel: Schema.optional(
+      Schema.Struct({
+        model: safeEvidenceValue,
+        provider: safeEvidenceValue,
+      }),
+    ),
     usage,
   }),
   Schema.Struct({
@@ -410,6 +443,8 @@ const dataFields: Record<string, readonly string[]> = {
     "reviewCycle",
     "sessionId",
     "source",
+    "semantics",
+    "actualModel",
     "usage",
   ],
   coding_sandbox_verified: [
@@ -496,18 +531,20 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
   if (!expected) throw new Error("event data type is invalid");
   const actual = Object.keys(input);
   const optional =
-    input.type === "coding_session_started" || input.type === "coding_usage_observed"
+    input.type === "coding_session_started"
       ? new Set(["reviewCycle", "requestedProfile"])
-      : input.type === "coding_session_completed"
-        ? new Set([
-            "reviewCycle",
-            "requestedProfile",
-            "effectiveProfile",
-            "usage",
-            "normalizer",
-            "archive",
-          ])
-        : new Set<string>();
+      : input.type === "coding_usage_observed"
+        ? new Set(["reviewCycle", "actualModel"])
+        : input.type === "coding_session_completed"
+          ? new Set([
+              "reviewCycle",
+              "requestedProfile",
+              "effectiveProfile",
+              "usage",
+              "normalizer",
+              "archive",
+            ])
+          : new Set<string>();
   assertExactKeys(
     input,
     expected.filter((key) => !optional.has(key) || actual.includes(key)),

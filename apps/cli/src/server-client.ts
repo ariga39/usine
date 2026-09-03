@@ -9,6 +9,8 @@ import {
   type ApiTaskSubmission,
 } from "@usine/runtime";
 import {
+  deriveUsageReportFromInvocations,
+  MAX_USAGE_REPORT_PAGE_SIZE,
   type TaskEvent,
   type TaskEventPage,
   type TaskListPage,
@@ -20,6 +22,8 @@ import {
   isTerminalState,
   isWaitingState,
   type UsageReport,
+  type UsageReportPage,
+  type UsageCoverage,
   type UsageReportScope,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
@@ -163,13 +167,34 @@ export async function usageReport(
   scope: UsageReportScope,
 ): Promise<UsageReport> {
   const client = await clientFor(serverUrl);
-  const query = {
+  const scopeQuery = {
     ...(scope.taskId === null ? {} : { taskId: scope.taskId }),
     ...(scope.repositoryId === null ? {} : { repositoryId: scope.repositoryId }),
     ...(scope.fromEpochMs === null ? {} : { fromEpochMs: scope.fromEpochMs }),
     ...(scope.toEpochMs === null ? {} : { toEpochMs: scope.toEpochMs }),
   };
-  return runRequest(client.usage.report({ query }));
+  const invocations: UsageReport["invocations"][number][] = [];
+  let cursor: string | null = null;
+  let sourceCoverage: UsageCoverage = "complete";
+  while (true) {
+    const pageRequest = client.usage.report({
+      query: {
+        ...scopeQuery,
+        limit: MAX_USAGE_REPORT_PAGE_SIZE,
+        ...(cursor === null ? {} : { cursor }),
+      },
+    });
+    const page: UsageReportPage = await runRequest<UsageReportPage>(pageRequest);
+    invocations.push(...page.invocations);
+    if (page.coverage === "unavailable") sourceCoverage = "unavailable";
+    else if (page.coverage === "partial" && sourceCoverage === "complete")
+      sourceCoverage = "partial";
+    if (page.nextCursor === null) break;
+    if (page.nextCursor === cursor)
+      throw new ServerClientError("usage report cursor did not advance", 500);
+    cursor = page.nextCursor;
+  }
+  return deriveUsageReportFromInvocations(invocations, scope, sourceCoverage);
 }
 
 export async function taskEvents(

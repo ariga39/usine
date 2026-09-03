@@ -15,6 +15,7 @@ import type {
   CodingSessionAdapterResult,
   ProviderNeutralCompletedEvidence,
   ProviderNeutralUsage,
+  ProviderNeutralUsageObservation,
 } from "./coding-session-adapter.js";
 import { providerNeutralJsonValue } from "./coding-session-adapter.js";
 import { safeObservationLabel } from "./coding-session-policy.js";
@@ -32,7 +33,7 @@ type AppServerRunOptions = Omit<
 > & {
   executionStateDirectory: string;
   config: CodexNativeConfig;
-  onUsage?: (usage: ProviderNeutralUsage) => Promise<void> | void;
+  onUsage?: (observation: ProviderNeutralUsageObservation) => Promise<void> | void;
 };
 
 /** The bounded local App Server lifecycle, peer to the official SDK adapter. */
@@ -115,7 +116,10 @@ const tokenUsageSchema = z.object({
   tokenUsage: z.object({
     last: z.object({
       inputTokens: z.number().int().nonnegative(),
+      cachedInputTokens: z.number().int().nonnegative().optional(),
+      cacheWriteInputTokens: z.number().int().nonnegative().optional(),
       outputTokens: z.number().int().nonnegative(),
+      reasoningOutputTokens: z.number().int().nonnegative().optional(),
     }),
   }),
 });
@@ -421,15 +425,32 @@ async function runCodexAppServer({
                   }
                   case "thread/tokenUsage/updated": {
                     const event = tokenUsageSchema.parse(incoming.params);
+                    const last = event.tokenUsage.last;
+                    const uncachedInputTokens =
+                      last.cachedInputTokens !== undefined &&
+                      last.cacheWriteInputTokens !== undefined &&
+                      last.inputTokens >= last.cachedInputTokens + last.cacheWriteInputTokens
+                        ? last.inputTokens - last.cachedInputTokens - last.cacheWriteInputTokens
+                        : undefined;
                     assertIdentity(event.threadId, event.turnId);
                     usage = {
-                      inputTokens: event.tokenUsage.last.inputTokens,
-                      outputTokens: event.tokenUsage.last.outputTokens,
+                      inputTokens: last.inputTokens,
+                      ...(last.cachedInputTokens === undefined
+                        ? {}
+                        : { cachedInputTokens: last.cachedInputTokens }),
+                      ...(uncachedInputTokens === undefined ? {} : { uncachedInputTokens }),
+                      ...(last.cacheWriteInputTokens === undefined
+                        ? {}
+                        : { cacheWriteInputTokens: last.cacheWriteInputTokens }),
+                      outputTokens: last.outputTokens,
+                      ...(last.reasoningOutputTokens === undefined
+                        ? {}
+                        : { reasoningOutputTokens: last.reasoningOutputTokens }),
                     };
                     if (usage)
                       yield* Effect.tryPromise({
                         try: async () => {
-                          await onUsage?.(usage!);
+                          await onUsage?.({ usage: usage!, semantics: "replacement" });
                         },
                         catch: asError,
                       });

@@ -6,7 +6,7 @@ import type { TaskResult } from "./task-state.js";
 import { Schema } from "effect";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 
-export const MAX_USAGE_REPORT_EVENTS = 100_000;
+export const MAX_USAGE_REPORT_PAGE_SIZE = 200;
 const USAGE_DIMENSION_UNAVAILABLE = "unavailable" as const;
 
 export type UsageDimension = string;
@@ -42,6 +42,8 @@ export interface UsageInvocation {
   readonly activation: number | null;
   readonly reviewCycle: number | null;
   readonly profile: UsageDimension;
+  readonly configuredModel: UsageDimension;
+  readonly configuredProvider: UsageDimension;
   readonly provider: UsageDimension;
   readonly adapter: UsageDimension;
   readonly model: UsageDimension;
@@ -60,6 +62,8 @@ export interface UsageAggregate {
   readonly repository: UsageDimension;
   readonly role: "implementer" | "reviewer";
   readonly profile: UsageDimension;
+  readonly configuredModel: UsageDimension;
+  readonly configuredProvider: UsageDimension;
   readonly provider: UsageDimension;
   readonly adapter: UsageDimension;
   readonly model: UsageDimension;
@@ -76,6 +80,21 @@ export interface UsageReport {
   readonly coverage: UsageCoverage;
   readonly invocations: readonly UsageInvocation[];
   readonly aggregates: readonly UsageAggregate[];
+}
+
+export interface UsageReportPage {
+  readonly schemaVersion: 1;
+  readonly scope: UsageReportScope;
+  readonly cursor: string | null;
+  readonly nextCursor: string | null;
+  readonly coverage: UsageCoverage;
+  readonly invocations: readonly UsageInvocation[];
+  readonly aggregates: readonly UsageAggregate[];
+}
+
+export interface UsageReportPageRequest {
+  readonly cursor: string | null;
+  readonly limit: number;
 }
 
 const usageAmountsSchema = Schema.Struct({
@@ -103,6 +122,8 @@ const usageInvocationSchema = Schema.Struct({
   activation: Schema.NullOr(Schema.Natural),
   reviewCycle: Schema.NullOr(Schema.Natural),
   profile: Schema.String,
+  configuredModel: Schema.String,
+  configuredProvider: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
   model: Schema.String,
@@ -120,6 +141,8 @@ const usageAggregateSchema = Schema.Struct({
   repository: Schema.String,
   role: Schema.Literals(["implementer", "reviewer"]),
   profile: Schema.String,
+  configuredModel: Schema.String,
+  configuredProvider: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
   model: Schema.String,
@@ -129,9 +152,11 @@ const usageAggregateSchema = Schema.Struct({
   invocations: Schema.Natural,
   usage: usageAmountsSchema,
 });
-export const usageReportSchema = Schema.Struct({
+export const usageReportPageSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   scope: usageScopeSchema,
+  cursor: Schema.NullOr(Schema.String),
+  nextCursor: Schema.NullOr(Schema.String),
   coverage: Schema.Literals(["complete", "partial", "unavailable"]),
   invocations: Schema.Array(usageInvocationSchema),
   aggregates: Schema.Array(usageAggregateSchema),
@@ -144,7 +169,15 @@ export interface UsageReportSource {
 
 export interface UsageReportSourcesPage {
   readonly sources: readonly UsageReportSource[];
-  readonly complete: boolean;
+  readonly cursor: string | null;
+  readonly nextCursor: string | null;
+}
+
+export class UsageReportCursorError extends Error {
+  constructor() {
+    super("usage report cursor is invalid");
+    this.name = "UsageReportCursorError";
+  }
 }
 
 type CompletedSession = Extract<TaskEvent["data"], { type: "coding_session_completed" }>;
@@ -152,6 +185,14 @@ type StartedSession = Extract<TaskEvent["data"], { type: "coding_session_started
 type InterruptedSession = Extract<TaskEvent["data"], { type: "coding_session_interrupted" }>;
 type UsageObserved = Extract<TaskEvent["data"], { type: "coding_usage_observed" }>;
 type SessionUsage = NonNullable<CompletedSession["usage"]>;
+
+const usageCursorSchema = Schema.Struct({
+  version: Schema.Literal(1),
+  scope: usageScopeSchema,
+  upperTaskId: Schema.NullOr(Schema.String),
+  afterTaskId: Schema.NullOr(Schema.String),
+});
+type UsageReportCursor = Schema.Schema.Type<typeof usageCursorSchema>;
 
 interface MutableInvocation {
   readonly invocationId: string;
@@ -164,6 +205,10 @@ interface MutableInvocation {
   session: CompletedSession | null;
   interrupted: InterruptedSession | null;
   providerUsage: SessionUsage | null;
+  actualModel: string | null;
+  actualModelProvider: string | null;
+  normalizerActualModel: string | null;
+  normalizerActualModelProvider: string | null;
   normalizerUsage: SessionUsage | null;
   normalizerAttempted: boolean;
   normalizerStatus: UsageOutcome | null;
@@ -177,12 +222,20 @@ export function deriveUsageReport(
   sourceCoverage: UsageCoverage = "complete",
 ): UsageReport {
   const invocations = sources.flatMap((source) => invocationsForSource(source));
+  return deriveUsageReportFromInvocations(invocations, scope, sourceCoverage);
+}
+
+export function deriveUsageReportFromInvocations(
+  invocations: readonly UsageInvocation[],
+  scope: UsageReportScope,
+  sourceCoverage: UsageCoverage = "complete",
+): UsageReport {
   const selected = invocations.filter((invocation) => inScope(invocation, scope));
   selected.sort(
     (left, right) =>
-      left.taskId.localeCompare(right.taskId) ||
+      compareTaskIds(left.taskId, right.taskId) ||
       left.occurredAtEpochMs - right.occurredAtEpochMs ||
-      left.invocationId.localeCompare(right.invocationId),
+      compareTaskIds(left.invocationId, right.invocationId),
   );
   const aggregates = aggregateInvocations(selected);
   return {
@@ -204,7 +257,15 @@ export function deriveUsageReport(
 export async function listUsageReportSources(
   database: RuntimeDatabase,
   scope: UsageReportScope,
+  request: UsageReportPageRequest = { cursor: null, limit: MAX_USAGE_REPORT_PAGE_SIZE },
 ): Promise<UsageReportSourcesPage> {
+  if (
+    !Number.isSafeInteger(request.limit) ||
+    request.limit < 1 ||
+    request.limit > MAX_USAGE_REPORT_PAGE_SIZE
+  )
+    throw new RangeError("usage report page limit is out of range");
+  const cursor = request.cursor === null ? null : decodeUsageReportCursor(request.cursor, scope);
   const tasks = new Map<string, TaskResult>();
   const taskRows = await database
     .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
@@ -241,16 +302,24 @@ export async function listUsageReportSources(
         return task !== undefined && repositoryMatches(task, scope.repositoryId);
       });
   }
-  if (taskIds.length === 0) return { complete: true, sources: [] };
+  taskIds = taskIds.toSorted(compareTaskIds);
+  const upperTaskId = cursor?.upperTaskId ?? taskIds.at(-1) ?? null;
+  const afterTaskId = cursor?.afterTaskId ?? null;
+  const pageTaskIds = taskIds
+    .filter(
+      (taskId) =>
+        (afterTaskId === null || compareTaskIds(taskId, afterTaskId) > 0) &&
+        (upperTaskId === null || compareTaskIds(taskId, upperTaskId) <= 0),
+    )
+    .slice(0, request.limit);
+  if (pageTaskIds.length === 0) return { cursor: request.cursor, nextCursor: null, sources: [] };
   const rows = await database
     .select()
     .from(taskEvents)
-    .where(inArray(taskEvents.taskId, taskIds))
-    .orderBy(asc(taskEvents.occurredAtEpochMs), asc(taskEvents.taskId), asc(taskEvents.sequence))
-    .limit(MAX_USAGE_REPORT_EVENTS + 1);
-  const complete = rows.length <= MAX_USAGE_REPORT_EVENTS;
+    .where(inArray(taskEvents.taskId, pageTaskIds))
+    .orderBy(asc(taskEvents.taskId), asc(taskEvents.sequence));
   const grouped = new Map<string, TaskEvent[]>();
-  for (const row of rows.slice(0, MAX_USAGE_REPORT_EVENTS)) {
+  for (const row of rows) {
     const task = tasks.get(row.taskId);
     if (!task || !repositoryMatches(task, scope.repositoryId)) continue;
     const event = decodeTaskEventRow(row);
@@ -258,12 +327,48 @@ export async function listUsageReportSources(
     events.push(event);
     grouped.set(row.taskId, events);
   }
+  const lastTaskId = pageTaskIds.at(-1)!;
+  const hasNext = taskIds.some(
+    (taskId) =>
+      compareTaskIds(taskId, lastTaskId) > 0 &&
+      (upperTaskId === null || compareTaskIds(taskId, upperTaskId) <= 0),
+  );
   return {
-    complete,
+    cursor: request.cursor,
+    nextCursor: hasNext
+      ? encodeUsageReportCursor({
+          version: 1,
+          scope,
+          upperTaskId,
+          afterTaskId: lastTaskId,
+        })
+      : null,
     sources: [...grouped.entries()]
-      .toSorted(([left], [right]) => left.localeCompare(right))
+      .toSorted(([left], [right]) => compareTaskIds(left, right))
       .map(([taskId, events]) => ({ task: tasks.get(taskId)!, events })),
   };
+}
+
+function compareTaskIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function encodeUsageReportCursor(cursor: UsageReportCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeUsageReportCursor(value: string, scope: UsageReportScope): UsageReportCursor {
+  try {
+    const decoded = Schema.decodeUnknownSync(usageCursorSchema)(
+      JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
+    );
+    if (JSON.stringify(decoded.scope) !== JSON.stringify(scope)) throw new Error("scope mismatch");
+    if (decoded.upperTaskId === null || decoded.afterTaskId === null)
+      throw new Error("cursor bounds are missing");
+    return decoded;
+  } catch {
+    throw new UsageReportCursorError();
+  }
 }
 
 function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
@@ -279,10 +384,21 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
     } else if (data.type === "coding_usage_observed") {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
-      if (data.source === "provider") run.providerUsage = addUsage(run.providerUsage, data.usage);
+      if (data.actualModel && data.source === "provider") {
+        run.actualModel = data.actualModel.model;
+        run.actualModelProvider = data.actualModel.provider;
+      }
+      if (data.actualModel && data.source === "role_output_normalizer") {
+        run.normalizerActualModel = data.actualModel.model;
+        run.normalizerActualModelProvider = data.actualModel.provider;
+      }
+      if (data.source === "provider")
+        run.providerUsage =
+          data.semantics === "replacement" ? data.usage : addUsage(run.providerUsage, data.usage);
       else {
         run.normalizerAttempted = true;
-        run.normalizerUsage = addUsage(run.normalizerUsage, data.usage);
+        run.normalizerUsage =
+          data.semantics === "replacement" ? data.usage : addUsage(run.normalizerUsage, data.usage);
         run.normalizerStatus ??= "unknown";
       }
     } else if (data.type === "coding_session_interrupted") {
@@ -295,10 +411,16 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
       run.session = data;
       run.completedAtEpochMs = event.occurredAtEpochMs;
       if (data.usage !== undefined) run.providerUsage = data.usage;
+      if (data.effectiveProfile?.actualModel) run.actualModel = data.effectiveProfile.actualModel;
+      if (data.effectiveProfile?.actualModelProvider)
+        run.actualModelProvider = data.effectiveProfile.actualModelProvider;
       if (data.normalizer) {
         run.normalizerAttempted = true;
         run.normalizer = data.normalizer;
         run.normalizerStatus = data.normalizer.status;
+        if (data.normalizer.actualModel) run.normalizerActualModel = data.normalizer.actualModel;
+        if (data.normalizer.actualModelProvider)
+          run.normalizerActualModelProvider = data.normalizer.actualModelProvider;
         if (data.normalizer.usage !== null) run.normalizerUsage = data.normalizer.usage;
       }
     }
@@ -332,6 +454,10 @@ function getOrCreateRun(
     session: null,
     interrupted: null,
     providerUsage: null,
+    actualModel: null,
+    actualModelProvider: null,
+    normalizerActualModel: null,
+    normalizerActualModelProvider: null,
     normalizerUsage: null,
     normalizerAttempted: false,
     normalizerStatus: null,
@@ -377,15 +503,21 @@ function invocationFromRun(
     profile: normalizer
       ? USAGE_DIMENSION_UNAVAILABLE
       : (effective?.profileName ?? run.requestedProfile ?? USAGE_DIMENSION_UNAVAILABLE),
-    provider: normalizer
+    configuredModel: normalizer
+      ? (run.normalizer?.model ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.model ?? USAGE_DIMENSION_UNAVAILABLE),
+    configuredProvider: normalizer
       ? (run.normalizer?.modelProvider ?? USAGE_DIMENSION_UNAVAILABLE)
       : (effective?.modelProvider ?? USAGE_DIMENSION_UNAVAILABLE),
+    provider: normalizer
+      ? (run.normalizerActualModelProvider ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (run.actualModelProvider ?? USAGE_DIMENSION_UNAVAILABLE),
     adapter: normalizer
       ? (run.normalizer?.adapter ?? "role-output-normalizer")
       : (effective?.adapter ?? USAGE_DIMENSION_UNAVAILABLE),
     model: normalizer
-      ? (run.normalizer?.model ?? USAGE_DIMENSION_UNAVAILABLE)
-      : (effective?.model ?? USAGE_DIMENSION_UNAVAILABLE),
+      ? (run.normalizerActualModel ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.actualModel ?? run.actualModel ?? USAGE_DIMENSION_UNAVAILABLE),
     serviceTier: normalizer
       ? USAGE_DIMENSION_UNAVAILABLE
       : (effective?.serviceTier ?? USAGE_DIMENSION_UNAVAILABLE),
@@ -408,7 +540,13 @@ function usageAmounts(usage: SessionUsage | null): UsageAmounts {
     outputTokens: usage?.outputTokens,
     reasoningOutputTokens: usage?.reasoningOutputTokens,
   };
-  const known = Object.values(values).filter((value) => value !== undefined).length;
+  const required = [
+    values.inputTokens,
+    values.cachedInputTokens,
+    values.uncachedInputTokens,
+    values.outputTokens,
+  ];
+  const known = required.filter((value) => value !== undefined).length;
   return {
     inputTokens: values.inputTokens ?? null,
     cachedInputTokens: values.cachedInputTokens ?? null,
@@ -416,7 +554,7 @@ function usageAmounts(usage: SessionUsage | null): UsageAmounts {
     cacheWriteInputTokens: values.cacheWriteInputTokens ?? null,
     outputTokens: values.outputTokens ?? null,
     reasoningOutputTokens: values.reasoningOutputTokens ?? null,
-    coverage: usage === null || known === 0 ? "unavailable" : known === 6 ? "complete" : "partial",
+    coverage: usage === null || known === 0 ? "unavailable" : known === 4 ? "complete" : "partial",
   };
 }
 
@@ -430,6 +568,8 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
       row.repository,
       row.role,
       row.profile,
+      row.configuredModel,
+      row.configuredProvider,
       row.provider,
       row.adapter,
       row.model,
@@ -451,6 +591,8 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
         repository: first.repository,
         role: first.role,
         profile: first.profile,
+        configuredModel: first.configuredModel,
+        configuredProvider: first.configuredProvider,
         provider: first.provider,
         adapter: first.adapter,
         model: first.model,
@@ -461,13 +603,13 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
         usage: aggregateUsage(group.map((row) => row.usage)),
       } satisfies UsageAggregate;
     })
-    .toSorted((left, right) => aggregateKey(left).localeCompare(aggregateKey(right)));
+    .toSorted((left, right) => compareTaskIds(aggregateKey(left), aggregateKey(right)));
 }
 
 function aggregateUsage(values: readonly UsageAmounts[]): UsageAmounts {
   const sum = (selector: (value: UsageAmounts) => number | null): number | null => {
     const selected = values.map(selector);
-    return selected.every((value) => value === null)
+    return selected.some((value) => value === null)
       ? null
       : selected.reduce<number>((total, value) => total + (value ?? 0), 0);
   };
@@ -531,6 +673,8 @@ function aggregateKey(value: UsageAggregate): string {
     value.repository,
     value.role,
     value.profile,
+    value.configuredModel,
+    value.configuredProvider,
     value.provider,
     value.adapter,
     value.model,

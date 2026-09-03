@@ -243,7 +243,7 @@ const server = createServer((req, res) => {
         writeEvent({ id: "reasoning", type: "session.next.reasoning.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", reasoningID: "reasoning-fixture", text: "checking" } });
         writeEvent({ id: "text-started-2", type: "session.next.text.started", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2" } });
         writeEvent({ id: "text-2", type: "session.next.text.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", textID: "text-fixture-2", text: ${JSON.stringify(finalResponse)} } });
-        writeEvent({ id: "step-2", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
+        writeEvent({ id: "step-2", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture-2", finish: "stop", cost: 0, tokens: { input: 100, output: 5, reasoning: 7, cache: { read: 40, write: 60 } } } });
       }
       if (${JSON.stringify(mode)} === "no-response")
         writeEvent({ id: "step-without-text", type: "session.next.step.ended", data: { sessionID: "session-fixture", assistantMessageID: "message-fixture", finish: "stop", cost: 0, tokens: { input: 11, output: 13, reasoning: 0, cache: { read: 0, write: 0 } } } });
@@ -544,14 +544,15 @@ describe("OpenCode2 bounded adapter", () => {
     expect(result).toEqual({
       finalResponse: '{"verdict":"approved"}',
       usage: {
-        inputTokens: 16,
-        cachedInputTokens: 0,
-        uncachedInputTokens: 16,
-        cacheWriteInputTokens: 0,
-        outputTokens: 20,
-        reasoningOutputTokens: 0,
+        inputTokens: 205,
+        cachedInputTokens: 40,
+        uncachedInputTokens: 105,
+        cacheWriteInputTokens: 60,
+        outputTokens: 19,
+        reasoningOutputTokens: 7,
       },
       sessionId: "session-fixture",
+      actualModel: { model: "fixture-model", provider: "fixture-provider" },
     });
     expect(observations).toEqual([
       {

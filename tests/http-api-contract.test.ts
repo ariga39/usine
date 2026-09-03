@@ -44,6 +44,8 @@ test("the generated client round-trips the durable usage report contract", async
   const report = {
     schemaVersion: 1 as const,
     scope: { taskId: null, repositoryId: "repo-1", fromEpochMs: 100, toEpochMs: 200 },
+    cursor: null,
+    nextCursor: null,
     coverage: "partial" as const,
     invocations: [],
     aggregates: [],
@@ -56,7 +58,7 @@ test("the generated client round-trips the durable usage report contract", async
       Effect.gen(function* () {
         const client = yield* HttpApiTest.groups(UsineApi, ["usage"]);
         return yield* client.usage.report({
-          query: { repositoryId: "repo-1", fromEpochMs: 100, toEpochMs: 200 },
+          query: { repositoryId: "repo-1", fromEpochMs: 100, toEpochMs: 200, limit: 2 },
         });
       }).pipe(Effect.provide(Layer.mergeAll(handlers, HttpServer.layerServices))),
     ),

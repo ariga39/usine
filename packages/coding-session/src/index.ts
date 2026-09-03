@@ -20,7 +20,10 @@ export {
   type SessionRole,
   type RoleOutputNormalizerObservation,
 } from "./coding-session.js";
-export type { ProviderNeutralUsage } from "./coding-session-adapter.js";
+export type {
+  ProviderNeutralUsage,
+  ProviderNeutralUsageObservation,
+} from "./coding-session-adapter.js";
 export {
   codingSessionAdapterForProfile,
   CodingSessionAdapterConfigurationError,

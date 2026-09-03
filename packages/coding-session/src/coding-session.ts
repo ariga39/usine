@@ -19,6 +19,7 @@ import {
   type CodingSessionAdapterRequest,
   type ProviderNeutralCompletedEvidence,
   type ProviderNeutralUsage,
+  type ProviderNeutralUsageObservation,
 } from "./coding-session-adapter.js";
 import { CodexSdkAdapter } from "./codex-sdk-adapter.js";
 import { normalizeCodingSessionMcpServer, safeObservationLabel } from "./coding-session-policy.js";
@@ -82,6 +83,8 @@ export interface EffectiveSessionProfile {
   adapter: "sdk" | "app-server" | "opencode2" | null;
   model: string | null;
   modelProvider: string | null;
+  actualModel?: string | null;
+  actualModelProvider?: string | null;
   reasoningEffort: ModelReasoningEffort | null;
   developerInstructionsSha256: string | null;
   serviceTier?: string | null;
@@ -129,6 +132,8 @@ export type CodingSessionObservation =
       type: "usage_observed";
       source: "provider" | "role_output_normalizer";
       usage: ProviderNeutralUsage;
+      semantics: ProviderNeutralUsageObservation["semantics"];
+      actualModel?: ProviderNeutralUsageObservation["actualModel"];
     }
   | {
       type: "sandbox_verified";
@@ -159,7 +164,7 @@ export interface RoleOutputTransformRequest {
   finalResponse: string;
   outputSchema: z.ZodTypeAny;
   signal: AbortSignal;
-  onUsage?: (usage: ProviderNeutralUsage) => Promise<void> | void;
+  onUsage?: (observation: ProviderNeutralUsageObservation) => Promise<void> | void;
 }
 
 export interface RoleOutputTransform {
@@ -206,12 +211,16 @@ export function createOpenAICompatibleRoleOutputTransform(
       abortSignal: signal,
     });
     await onUsage?.({
-      inputTokens: result.usage.inputTokens,
-      uncachedInputTokens: result.usage.inputTokenDetails.noCacheTokens,
-      cachedInputTokens: result.usage.inputTokenDetails.cacheReadTokens,
-      cacheWriteInputTokens: result.usage.inputTokenDetails.cacheWriteTokens,
-      outputTokens: result.usage.outputTokens,
-      reasoningOutputTokens: result.usage.outputTokenDetails.reasoningTokens,
+      semantics: "replacement",
+      actualModel: { model: result.response.modelId, provider: "openai-compatible" },
+      usage: {
+        inputTokens: result.usage.inputTokens,
+        uncachedInputTokens: result.usage.inputTokenDetails.noCacheTokens,
+        cachedInputTokens: result.usage.inputTokenDetails.cacheReadTokens,
+        cacheWriteInputTokens: result.usage.inputTokenDetails.cacheWriteTokens,
+        outputTokens: result.usage.outputTokens,
+        reasoningOutputTokens: result.usage.outputTokenDetails.reasoningTokens,
+      },
     });
     return result.output;
   };
@@ -265,6 +274,8 @@ export interface RoleOutputNormalizerObservation {
   readonly adapter: "role-output-normalizer";
   readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly actualModel: string | null;
+  readonly actualModelProvider: string | null;
 }
 
 interface CapturedSessionObservation<T = unknown> extends SessionObservation<T> {
@@ -457,6 +468,7 @@ export class CodexCodingSession {
     let effectiveProfile = unavailableEffectiveProfile();
     let observedUsage: ProviderNeutralUsage | null = null;
     let normalizerUsage: ProviderNeutralUsage | null = null;
+    let normalizerActualModel: { model: string; provider: string } | undefined;
     let normalizerAttempted = false;
     try {
       const profileName = validateCodexProfile(request.profile);
@@ -533,16 +545,25 @@ export class CodexCodingSession {
               (clientFactory
                 ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
                 : this.sdkAdapter));
-      effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);
       const observeUsage = async (
         source: "provider" | "role_output_normalizer",
-        usage: ProviderNeutralUsage,
+        observation: ProviderNeutralUsageObservation,
       ) => {
-        if (source === "provider") observedUsage = mergeUsage(observedUsage, usage);
-        else normalizerUsage = mergeUsage(normalizerUsage, usage);
+        if (source === "provider")
+          observedUsage =
+            observation.semantics === "replacement"
+              ? observation.usage
+              : mergeUsage(observedUsage, observation.usage);
+        else {
+          if (observation.actualModel) normalizerActualModel = observation.actualModel;
+          normalizerUsage =
+            observation.semantics === "replacement"
+              ? observation.usage
+              : mergeUsage(normalizerUsage, observation.usage);
+        }
         if (source === "provider") archive?.setUsage(usageFrom(observedUsage));
-        await onObservation?.({ type: "usage_observed", source, usage });
+        await onObservation?.({ type: "usage_observed", source, ...observation });
       };
       const result = await adapter.run({
         workspace: effectiveRequest.workspace,
@@ -568,8 +589,16 @@ export class CodexCodingSession {
           phase = nextPhase;
           archive?.setPhase(nextPhase);
         },
-        onUsage: (usage) => observeUsage("provider", usage),
+        onUsage: (observation) => observeUsage("provider", observation),
       });
+      effectiveProfile = {
+        ...effectiveProfile,
+        adapter: adapter.name,
+        actualModel: result.actualModel ? safeModelIdentity(result.actualModel.model) : null,
+        actualModelProvider: result.actualModel
+          ? safeModelIdentity(result.actualModel.provider)
+          : null,
+      };
       phase = "output";
       archive?.setPhase("output");
       archive?.setSessionId(result.sessionId);
@@ -599,7 +628,7 @@ export class CodexCodingSession {
             finalResponse: result.finalResponse,
             outputSchema: effectiveRequest.outputSchema,
             signal: abortSignal,
-            onUsage: (usage) => observeUsage("role_output_normalizer", usage),
+            onUsage: (observation) => observeUsage("role_output_normalizer", observation),
           });
         } catch (error) {
           if (abortSignal.aborted)
@@ -614,6 +643,8 @@ export class CodexCodingSession {
                 this.options.roleOutputTransform,
                 normalizerUsage,
                 "cancelled",
+                normalizerActualModel?.model ?? null,
+                normalizerActualModel?.provider ?? null,
               ),
               summary: "coding session cancelled",
               failure: "coding session cancelled",
@@ -636,6 +667,8 @@ export class CodexCodingSession {
               this.options.roleOutputTransform,
               normalizerUsage,
               "failed",
+              normalizerActualModel?.model ?? null,
+              normalizerActualModel?.provider ?? null,
             ),
           };
         }
@@ -658,6 +691,8 @@ export class CodexCodingSession {
               this.options.roleOutputTransform,
               normalizerUsage,
               "succeeded",
+              normalizerActualModel?.model ?? null,
+              normalizerActualModel?.provider ?? null,
             ),
           };
         }
@@ -680,6 +715,8 @@ export class CodexCodingSession {
                 this.options.roleOutputTransform,
                 normalizerUsage,
                 "succeeded",
+                normalizerActualModel?.model ?? null,
+                normalizerActualModel?.provider ?? null,
               ),
             }
           : {}),
@@ -715,6 +752,8 @@ export class CodexCodingSession {
                 this.options.roleOutputTransform,
                 normalizerUsage,
                 abortSignal.aborted ? "cancelled" : "failed",
+                normalizerActualModel?.model ?? null,
+                normalizerActualModel?.provider ?? null,
               ),
             }
           : {}),
@@ -800,8 +839,9 @@ function mergeUsage(
   previous: ProviderNeutralUsage | null,
   next: ProviderNeutralUsage,
 ): ProviderNeutralUsage {
+  if (previous === null) return next;
   const add = (left: number | undefined, right: number | undefined): number | undefined =>
-    left === undefined ? right : right === undefined ? left : left + right;
+    left === undefined || right === undefined ? undefined : left + right;
   return {
     inputTokens: add(previous?.inputTokens, next.inputTokens),
     cachedInputTokens: add(previous?.cachedInputTokens, next.cachedInputTokens),
@@ -816,6 +856,8 @@ function normalizerObservation(
   transform: RoleOutputTransform | undefined,
   usage: ProviderNeutralUsage | null,
   status: RoleOutputNormalizerObservation["status"],
+  actualModel: string | null = null,
+  actualModelProvider: string | null = null,
 ): RoleOutputNormalizerObservation {
   return {
     status,
@@ -823,6 +865,8 @@ function normalizerObservation(
     adapter: "role-output-normalizer",
     model: safeEvidenceIdentity(transform?.profile?.model) ?? null,
     modelProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
+    actualModel: safeModelIdentity(actualModel),
+    actualModelProvider: safeModelIdentity(actualModelProvider),
   };
 }
 
@@ -831,9 +875,30 @@ function hashText(value: string): string {
 }
 
 function safeEvidenceIdentity(value: unknown): string | null {
-  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) return null;
-  const labels = value.split(".");
-  return labels.length > 1 && /^[A-Za-z]+$/.test(labels.at(-1)!) ? null : value;
+  return safeModelIdentity(value);
+}
+
+function safeModelIdentity(value: unknown): string | null {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$/.test(value))
+    return null;
+  if (
+    value.includes("://") ||
+    value.includes("\\") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.split("/").some((segment) => segment === "." || segment === "..") ||
+    /(?:api[_-]?key|secret|token|password|credential|bearer)/i.test(value)
+  )
+    return null;
+  const firstSegment = value.split("/")[0]!;
+  if (
+    firstSegment.includes(".") &&
+    /^[A-Za-z0-9.-]+$/.test(firstSegment) &&
+    /^[A-Za-z]/.test(firstSegment.split(".").at(-1)!)
+  )
+    return null;
+  if (/:[0-9]+(?:\/|$)/.test(value)) return null;
+  return value;
 }
 
 function unavailableEffectiveProfile(): EffectiveSessionProfile {
@@ -846,6 +911,8 @@ function unavailableEffectiveProfile(): EffectiveSessionProfile {
     reasoningEffort: null,
     developerInstructionsSha256: null,
     serviceTier: null,
+    actualModel: null,
+    actualModelProvider: null,
   };
 }
 

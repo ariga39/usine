@@ -170,6 +170,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       });
       let finalResponse = "";
       let usage: ProviderNeutralUsage | null = null;
+      let actualModel: { model: string; provider: string } | undefined;
       let promptAdmitted = false;
       let currentStepID: string | undefined;
       let currentStepHasText = false;
@@ -312,6 +313,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
               const data = stepStartedDataSchema.parse(event.data);
               currentStepID = data.assistantMessageID;
               currentStepHasText = false;
+              if (data.model)
+                actualModel = { model: data.model.id, provider: data.model.providerID };
             } else if (event.type === "session.next.step.ended") {
               const data = stepEndedDataSchema.parse(event.data);
               if (currentStepID !== data.assistantMessageID)
@@ -326,26 +329,31 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                 );
                 return;
               }
+              const uncachedInputTokens = data.tokens.input;
+              const cachedInputTokens = data.tokens.cache?.read;
+              const cacheWriteInputTokens = data.tokens.cache?.write;
               const stepUsage: ProviderNeutralUsage = {
-                inputTokens: data.tokens.input,
-                outputTokens: data.tokens.output,
+                ...(cachedInputTokens === undefined || cacheWriteInputTokens === undefined
+                  ? {}
+                  : {
+                      inputTokens: uncachedInputTokens + cachedInputTokens + cacheWriteInputTokens,
+                    }),
+                ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+                uncachedInputTokens,
+                ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
+                ...(data.tokens.reasoning === undefined
+                  ? {}
+                  : { outputTokens: data.tokens.output + data.tokens.reasoning }),
                 ...(data.tokens.reasoning === undefined
                   ? {}
                   : { reasoningOutputTokens: data.tokens.reasoning }),
-                ...(data.tokens.cache?.read === undefined
-                  ? {}
-                  : {
-                      cachedInputTokens: data.tokens.cache.read,
-                      ...(data.tokens.input >= data.tokens.cache.read
-                        ? { uncachedInputTokens: data.tokens.input - data.tokens.cache.read }
-                        : {}),
-                    }),
-                ...(data.tokens.cache?.write === undefined
-                  ? {}
-                  : { cacheWriteInputTokens: data.tokens.cache.write }),
               };
               usage = mergeUsage(usage, stepUsage);
-              await context.onUsage?.(stepUsage);
+              await context.onUsage?.({
+                usage: stepUsage,
+                semantics: "delta",
+                ...(actualModel ? { actualModel } : {}),
+              });
               if (data.finish === "stop") {
                 terminalStepCompleted = true;
                 complete();
@@ -418,7 +426,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       await context.onObservation?.({ type: "turn_completed", turn: 1, outcome: "succeeded" });
       phase = "output";
       context.onPhase?.("output");
-      result = { finalResponse, usage, sessionId: createdSessionID };
+      result = { finalResponse, usage, sessionId: createdSessionID, actualModel };
     } catch (error) {
       if (error instanceof CodingSessionInterruption) {
         primaryFailure = error;
@@ -628,6 +636,7 @@ const reasoningEndedDataSchema = sessionEventDataSchema.extend({
 });
 const stepStartedDataSchema = sessionEventDataSchema.extend({
   assistantMessageID: z.string().min(1),
+  model: z.object({ providerID: z.string().min(1), id: z.string().min(1) }).optional(),
 });
 const stepEndedDataSchema = sessionEventDataSchema.extend({
   assistantMessageID: z.string().min(1),
@@ -657,8 +666,9 @@ function mergeUsage(
   previous: ProviderNeutralUsage | null,
   next: ProviderNeutralUsage,
 ): ProviderNeutralUsage {
+  if (previous === null) return next;
   const add = (left: number | undefined, right: number | undefined): number | undefined =>
-    left === undefined ? right : right === undefined ? left : left + right;
+    left === undefined || right === undefined ? undefined : left + right;
   return {
     inputTokens: add(previous?.inputTokens, next.inputTokens),
     cachedInputTokens: add(previous?.cachedInputTokens, next.cachedInputTokens),

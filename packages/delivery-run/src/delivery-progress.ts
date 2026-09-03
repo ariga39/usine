@@ -41,6 +41,8 @@ export function emitCodingObservation(
           sessionId,
           ...(reviewCycle === undefined ? {} : { reviewCycle }),
           source: observation.source,
+          semantics: observation.semantics,
+          ...(observation.actualModel ? { actualModel: observation.actualModel } : {}),
           usage: observation.usage,
         };
       case "sandbox_verified":

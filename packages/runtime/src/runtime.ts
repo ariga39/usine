@@ -20,7 +20,10 @@ import {
   type TaskListItem,
   type TaskResult,
   deriveUsageReport,
+  MAX_USAGE_REPORT_PAGE_SIZE,
   type UsageReport,
+  type UsageReportPage,
+  type UsageReportPageRequest,
   type UsageReportScope,
   taskContractSchema,
   type ServerHealth,
@@ -409,10 +412,13 @@ export async function lookupTaskEvents(
 export async function lookupUsageReport(
   stateDirectory: string,
   scope: UsageReportScope,
-): Promise<UsageReport> {
-  const empty = (): UsageReport => ({
+  request: UsageReportPageRequest = { cursor: null, limit: MAX_USAGE_REPORT_PAGE_SIZE },
+): Promise<UsageReportPage> {
+  const empty = (): UsageReportPage => ({
     schemaVersion: 1,
     scope,
+    cursor: request.cursor,
+    nextCursor: null,
     coverage: "complete",
     invocations: [],
     aggregates: [],
@@ -426,8 +432,13 @@ export async function lookupUsageReport(
   }
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
-    const page = await new TaskAuthority(handle.database).listUsageReportSources(scope);
-    return deriveUsageReport(page.sources, scope, page.complete ? "complete" : "partial");
+    const page = await new TaskAuthority(handle.database).listUsageReportSources(scope, request);
+    const report = deriveUsageReport(page.sources, scope);
+    return {
+      ...report,
+      cursor: page.cursor,
+      nextCursor: page.nextCursor,
+    };
   } finally {
     handle.close();
   }

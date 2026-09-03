@@ -13,6 +13,8 @@ import {
   TaskAuthority,
   TaskCapacityError,
   TaskRetryConflictError,
+  UsageReportCursorError,
+  MAX_USAGE_REPORT_PAGE_SIZE,
   isTaskStateQuarantinedError,
   repositoryRegistrationSchema,
   type RepositorySnapshot,
@@ -548,7 +550,10 @@ function createApiLayer(options: {
         apiEffect(async () => {
           const scope = usageScopeFromQuery(query);
           await validateUsageScope(stateDirectory, scope);
-          return lookupUsageReport(stateDirectory, scope);
+          return lookupUsageReport(stateDirectory, scope, {
+            cursor: query.cursor ?? null,
+            limit: validLimit(query.limit, MAX_USAGE_REPORT_PAGE_SIZE),
+          });
         }),
     }),
   );
@@ -579,6 +584,8 @@ function apiEffect<A>(thunk: () => Promise<A>): Effect.Effect<A, ApiError> {
 
 function apiError(error: unknown): ApiError {
   if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
+  if (error instanceof UsageReportCursorError)
+    return { code: "validation", message: error.message };
   if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof TaskCapacityError)
     return { code: "active_task_capacity", message: error.message, retryable: true };

@@ -120,7 +120,7 @@ async function runStreamedTurn(
           break;
         case "turn.completed":
           usage = sdkUsage(event.usage);
-          await onUsage?.(usage);
+          await onUsage?.({ usage, semantics: "replacement" });
           await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
           break;
         case "turn.failed":
@@ -141,18 +141,26 @@ async function runStreamedTurn(
 
 function sdkUsage(usage: {
   input_tokens: number;
-  cached_input_tokens: number;
-  cache_write_input_tokens: number;
+  cached_input_tokens?: number;
+  cache_write_input_tokens?: number;
   output_tokens: number;
   reasoning_output_tokens: number;
 }): ProviderNeutralUsage {
+  const uncachedInputTokens =
+    usage.cached_input_tokens !== undefined && usage.cache_write_input_tokens !== undefined
+      ? usage.input_tokens >= usage.cached_input_tokens + usage.cache_write_input_tokens
+        ? usage.input_tokens - usage.cached_input_tokens - usage.cache_write_input_tokens
+        : undefined
+      : undefined;
   return {
     inputTokens: usage.input_tokens,
-    cachedInputTokens: usage.cached_input_tokens,
-    ...(usage.input_tokens >= usage.cached_input_tokens
-      ? { uncachedInputTokens: usage.input_tokens - usage.cached_input_tokens }
-      : {}),
-    cacheWriteInputTokens: usage.cache_write_input_tokens,
+    ...(usage.cached_input_tokens === undefined
+      ? {}
+      : { cachedInputTokens: usage.cached_input_tokens }),
+    ...(uncachedInputTokens === undefined ? {} : { uncachedInputTokens }),
+    ...(usage.cache_write_input_tokens === undefined
+      ? {}
+      : { cacheWriteInputTokens: usage.cache_write_input_tokens }),
     outputTokens: usage.output_tokens,
     reasoningOutputTokens: usage.reasoning_output_tokens,
   };

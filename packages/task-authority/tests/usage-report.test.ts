@@ -99,6 +99,8 @@ function successfulSource(): UsageReportSource {
         activation: 1,
         sessionId: "session-1",
         source: "provider",
+        semantics: "replacement",
+        actualModel: { model: "provider/gpt-5", provider: "provider:actual" },
         usage: {
           inputTokens: 10,
           cachedInputTokens: 3,
@@ -114,6 +116,7 @@ function successfulSource(): UsageReportSource {
         activation: 1,
         sessionId: "session-1",
         source: "role_output_normalizer",
+        semantics: "replacement",
         usage: { inputTokens: 2, outputTokens: 1 },
       }),
       event(taskId, 4, 103, {
@@ -176,6 +179,7 @@ describe("usage report projection", () => {
             reviewCycle: 1,
             sessionId: "review-1",
             source: "provider",
+            semantics: "delta",
             usage: { inputTokens: 4, outputTokens: 2 },
           }),
           event(partialTaskId, 3, 202, {
@@ -225,9 +229,11 @@ describe("usage report projection", () => {
     expect(providerRow).toMatchObject({
       role: "implementer",
       profile: "profile-1",
-      provider: "provider-1",
+      configuredModel: "model-1",
+      configuredProvider: "provider-1",
+      provider: "provider:actual",
       adapter: "sdk",
-      model: "model-1",
+      model: "provider/gpt-5",
       usage: {
         inputTokens: 10,
         cachedInputTokens: 3,
@@ -240,7 +246,9 @@ describe("usage report projection", () => {
     });
     expect(normalizerRow).toMatchObject({
       adapter: "role-output-normalizer",
-      model: "normalizer-model",
+      configuredModel: "normalizer-model",
+      configuredProvider: "normalizer-provider",
+      model: "unavailable",
       usage: { inputTokens: 2, outputTokens: 1, coverage: "partial" },
     });
     expect(partialRow).toMatchObject({
@@ -306,22 +314,30 @@ describe("usage report projection", () => {
         },
       });
     }
-    const page = await listUsageReportSources(handle.database, {
+    const scope = {
       taskId: null,
       repositoryId: repository.id,
       fromEpochMs: 100,
       toEpochMs: 102,
-    });
-    const report = deriveUsageReport(page.sources, {
-      taskId: null,
-      repositoryId: repository.id,
-      fromEpochMs: 100,
-      toEpochMs: 102,
-    });
-    expect(page.complete).toBe(true);
+    } as const;
+    const pages = [];
+    let cursor: string | null = null;
+    do {
+      const page = await listUsageReportSources(handle.database, scope, { cursor, limit: 100 });
+      pages.push(page);
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    const sources = pages.flatMap((page) => page.sources);
+    const report = deriveUsageReport(sources, scope);
+    const taskIds = report.invocations.map((invocation) => invocation.taskId);
+    const expectedTaskIds = Array.from({ length: 205 }, (_, index) => `usage-many-${index}`).sort();
+    expect(pages).toHaveLength(3);
+    expect(pages.map((page) => page.sources.length)).toEqual([100, 100, 5]);
     expect(report.invocations).toHaveLength(205);
-    expect(report.invocations[204]).toMatchObject({
-      taskId: "usage-many-99",
+    expect(taskIds).toEqual(expectedTaskIds);
+    expect(new Set(taskIds).size).toBe(205);
+    expect(report.invocations.at(-1)).toMatchObject({
+      taskId: expectedTaskIds.at(-1),
       usage: { inputTokens: 1, outputTokens: 1 },
     });
   });

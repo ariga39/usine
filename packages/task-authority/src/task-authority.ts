@@ -45,6 +45,7 @@ import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
 import {
   listUsageReportSources,
   type UsageReportScope,
+  type UsageReportPageRequest,
   type UsageReportSourcesPage,
 } from "./usage-report.js";
 
@@ -415,8 +416,11 @@ export class TaskAuthority {
     return rows.map(decodeTaskEvent);
   }
 
-  async listUsageReportSources(scope: UsageReportScope): Promise<UsageReportSourcesPage> {
-    return listUsageReportSources(this.database, scope);
+  async listUsageReportSources(
+    scope: UsageReportScope,
+    request?: UsageReportPageRequest,
+  ): Promise<UsageReportSourcesPage> {
+    return listUsageReportSources(this.database, scope, request);
   }
 
   async listRestartable(): Promise<{
