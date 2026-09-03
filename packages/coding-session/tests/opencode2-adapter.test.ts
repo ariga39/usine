@@ -543,7 +543,14 @@ describe("OpenCode2 bounded adapter", () => {
 
     expect(result).toEqual({
       finalResponse: '{"verdict":"approved"}',
-      usage: { inputTokens: 11, outputTokens: 13 },
+      usage: {
+        inputTokens: 16,
+        cachedInputTokens: 0,
+        uncachedInputTokens: 16,
+        cacheWriteInputTokens: 0,
+        outputTokens: 20,
+        reasoningOutputTokens: 0,
+      },
       sessionId: "session-fixture",
     });
     expect(observations).toEqual([

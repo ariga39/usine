@@ -326,11 +326,24 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                 );
                 return;
               }
-              usage = {
+              const stepUsage: ProviderNeutralUsage = {
                 inputTokens: data.tokens.input,
                 outputTokens: data.tokens.output,
+                ...(data.tokens.reasoning === undefined
+                  ? {}
+                  : { reasoningOutputTokens: data.tokens.reasoning }),
+                ...(data.tokens.cache?.read === undefined
+                  ? {}
+                  : {
+                      cachedInputTokens: data.tokens.cache.read,
+                      uncachedInputTokens: data.tokens.input - data.tokens.cache.read,
+                    }),
+                ...(data.tokens.cache?.write === undefined
+                  ? {}
+                  : { cacheWriteInputTokens: data.tokens.cache.write }),
               };
-              context.onUsage?.(usage);
+              usage = mergeUsage(usage, stepUsage);
+              await context.onUsage?.(stepUsage);
               if (data.finish === "stop") {
                 terminalStepCompleted = true;
                 complete();
@@ -617,7 +630,17 @@ const stepStartedDataSchema = sessionEventDataSchema.extend({
 const stepEndedDataSchema = sessionEventDataSchema.extend({
   assistantMessageID: z.string().min(1),
   finish: z.string().min(1),
-  tokens: z.object({ input: z.number(), output: z.number() }),
+  tokens: z.object({
+    input: z.number().int().nonnegative(),
+    output: z.number().int().nonnegative(),
+    reasoning: z.number().int().nonnegative().optional(),
+    cache: z
+      .object({
+        read: z.number().int().nonnegative().optional(),
+        write: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+  }),
 });
 const stepFailedDataSchema = sessionEventDataSchema.extend({ error: z.unknown() });
 const sessionEventPayloadSchema = z.union([
@@ -627,6 +650,22 @@ const sessionEventPayloadSchema = z.union([
 
 type SessionEvent = z.infer<typeof sessionEventSchema>;
 type ToolCompletionData = z.infer<typeof toolCompletionDataSchema>;
+
+function mergeUsage(
+  previous: ProviderNeutralUsage | null,
+  next: ProviderNeutralUsage,
+): ProviderNeutralUsage {
+  const add = (left: number | undefined, right: number | undefined): number | undefined =>
+    left === undefined ? right : right === undefined ? left : left + right;
+  return {
+    inputTokens: add(previous?.inputTokens, next.inputTokens),
+    cachedInputTokens: add(previous?.cachedInputTokens, next.cachedInputTokens),
+    uncachedInputTokens: add(previous?.uncachedInputTokens, next.uncachedInputTokens),
+    cacheWriteInputTokens: add(previous?.cacheWriteInputTokens, next.cacheWriteInputTokens),
+    outputTokens: add(previous?.outputTokens, next.outputTokens),
+    reasoningOutputTokens: add(previous?.reasoningOutputTokens, next.reasoningOutputTokens),
+  };
+}
 
 function parseSessionEvent(rawEvent: unknown): SessionEvent {
   const payload = sessionEventPayloadSchema.parse(rawEvent);

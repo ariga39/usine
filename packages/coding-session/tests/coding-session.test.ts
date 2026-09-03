@@ -1085,7 +1085,7 @@ describe("Coding Session", () => {
       },
     });
     await finalObservationEntered.promise;
-    expect(observations).toHaveLength(5);
+    expect(observations).toHaveLength(6);
     releaseFinalObservation.resolve();
     const observation = await pending;
     expect(observation).toMatchObject({
@@ -1103,6 +1103,7 @@ describe("Coding Session", () => {
         tool: "unknown",
         outcome: "succeeded",
       },
+      { type: "usage_observed", source: "provider", usage: { inputTokens: 7, outputTokens: 9 } },
       { type: "turn_completed", turn: 1, outcome: "succeeded" },
     ]);
     await expect(discoverOwnedExecutions(fixture.stateDirectory, contract.id)).resolves.toEqual([]);
@@ -2868,7 +2869,7 @@ describe("Coding Session", () => {
           output: { ok: true },
           status: "completed",
         });
-        context.onUsage?.({ inputTokens: 3, outputTokens: 4 });
+        await context.onUsage?.({ inputTokens: 3, outputTokens: 4 });
         return {
           finalResponse:
             name === "sdk"
@@ -3048,6 +3049,7 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
+      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       {
@@ -3056,6 +3058,7 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
+      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
       { type: "thread_started" },
       { type: "turn_started", turn: 1 },
       {
@@ -3064,6 +3067,7 @@ describe("Coding Session", () => {
         tool: "github_issue_get",
         outcome: "succeeded",
       },
+      { type: "usage_observed", source: "provider", usage: { inputTokens: 3, outputTokens: 4 } },
     ]);
     const archives = await listSessionArchives(stateDirectory, contract.id);
     expect(archives).toHaveLength(3);

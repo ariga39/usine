@@ -7,6 +7,7 @@ import type {
   SessionArchiveCaptureStatus,
   SessionObservation,
   SessionRequest,
+  RoleOutputNormalizerObservation,
 } from "@usine/coding-session";
 import type { ReviewAttemptObservation } from "@usine/quality-gate";
 import {
@@ -80,12 +81,13 @@ interface DeliveryRunSession {
       Pick<SessionObservation<ImplementerOutput>, "summary" | "failure"> & {
         phase?: SessionObservation<ImplementerOutput>["phase"];
         failureClass?: SessionObservation<ImplementerOutput>["failureClass"];
-        usage?: { inputTokens?: number; outputTokens?: number } | null;
+        usage?: SessionObservation<ImplementerOutput>["usage"];
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
         archiveCompleteness?: "complete" | "partial";
         requestedProfile?: string;
         effectiveProfile?: SessionObservation<ImplementerOutput>["effectiveProfile"];
+        normalizer?: RoleOutputNormalizerObservation;
       }
   >;
 }
@@ -196,6 +198,7 @@ export async function executeDeliveryRun(
       let reviewRequestedProfile: string | undefined;
       let reviewEffectiveProfile: ReviewAttemptObservation["effectiveProfile"];
       let reviewUsage: ReviewAttemptObservation["usage"] = null;
+      let reviewNormalizer: ReviewAttemptObservation["normalizer"];
       const reviewObservationCounter = { value: 0 };
       const reviewInvocationId = randomUUID();
       const reviewSessionId = `review-session:${cycle}:${reviewInvocationId}`;
@@ -229,12 +232,14 @@ export async function executeDeliveryRun(
               reviewEventPrefix,
               reviewObservationCounter,
               sessionObservation,
+              cycle,
             ),
         );
         reviewArchive = observation.archive;
         reviewRequestedProfile = observation.requestedProfile;
         reviewEffectiveProfile = observation.effectiveProfile;
         reviewUsage = observation.usage;
+        reviewNormalizer = observation.normalizer;
         if (observation.interruption)
           await emitCodingInterruption(
             services,
@@ -260,7 +265,8 @@ export async function executeDeliveryRun(
             outcome: input.signal?.aborted ? "cancelled" : "failed",
             sessionId: reviewSessionId,
             requestedProfile: input.reviewer?.profile,
-            usage: null,
+            usage: reviewUsage,
+            ...(reviewNormalizer ? { normalizer: reviewNormalizer } : {}),
           },
         });
         if (input.signal?.aborted) throw error;
@@ -279,6 +285,7 @@ export async function executeDeliveryRun(
           requestedProfile: reviewRequestedProfile ?? input.reviewer?.profile,
           ...(reviewEffectiveProfile ? { effectiveProfile: reviewEffectiveProfile } : {}),
           usage: reviewUsage,
+          ...(reviewNormalizer ? { normalizer: reviewNormalizer } : {}),
           ...(reviewArchive ? { archive: reviewArchive } : {}),
         },
       });

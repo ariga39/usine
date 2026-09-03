@@ -30,10 +30,23 @@ const effectiveProfile = Schema.Struct({
   modelProvider: Schema.NullOr(safeEvidenceValue),
   reasoningEffort: Schema.NullOr(Schema.Literals(["minimal", "low", "medium", "high", "xhigh"])),
   developerInstructionsSha256: Schema.NullOr(exactHash),
+  serviceTier: Schema.optional(Schema.NullOr(safeEvidenceValue)),
 });
 const usage = Schema.Struct({
   inputTokens: Schema.optional(Schema.Natural),
+  cachedInputTokens: Schema.optional(Schema.Natural),
+  uncachedInputTokens: Schema.optional(Schema.Natural),
+  cacheWriteInputTokens: Schema.optional(Schema.Natural),
   outputTokens: Schema.optional(Schema.Natural),
+  reasoningOutputTokens: Schema.optional(Schema.Natural),
+});
+const usageObservationSource = Schema.Literals(["provider", "role_output_normalizer"]);
+const normalizer = Schema.Struct({
+  status: outcome,
+  adapter: Schema.Literal("role-output-normalizer"),
+  model: Schema.NullOr(safeEvidenceValue),
+  modelProvider: Schema.NullOr(safeEvidenceValue),
+  usage: Schema.NullOr(usage),
 });
 
 function isSafeEvidenceIdentity(value: string): boolean {
@@ -75,6 +88,15 @@ const eventData = Schema.Union([
     role,
     activation: Schema.Natural,
     sessionId: safeObservationId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("coding_usage_observed"),
+    role,
+    activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
+    sessionId: safeObservationId,
+    source: usageObservationSource,
+    usage,
   }),
   Schema.Struct({
     type: Schema.Literal("coding_sandbox_verified"),
@@ -141,6 +163,7 @@ const eventData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -239,6 +262,15 @@ const observationData = Schema.Union([
     sessionId: safeObservationId,
   }),
   Schema.Struct({
+    type: Schema.Literal("coding_usage_observed"),
+    role,
+    activation: Schema.Natural,
+    reviewCycle: Schema.optional(Schema.Natural),
+    sessionId: safeObservationId,
+    source: usageObservationSource,
+    usage,
+  }),
+  Schema.Struct({
     type: Schema.Literal("coding_sandbox_verified"),
     role,
     activation: Schema.Natural,
@@ -303,6 +335,7 @@ const observationData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
@@ -370,6 +403,15 @@ const dataFields: Record<string, readonly string[]> = {
     "requestedProfile",
   ],
   coding_thread_started: ["type", "role", "activation", "sessionId"],
+  coding_usage_observed: [
+    "type",
+    "role",
+    "activation",
+    "reviewCycle",
+    "sessionId",
+    "source",
+    "usage",
+  ],
   coding_sandbox_verified: [
     "type",
     "role",
@@ -422,6 +464,7 @@ const dataFields: Record<string, readonly string[]> = {
     "requestedProfile",
     "effectiveProfile",
     "usage",
+    "normalizer",
     "archive",
   ],
   coding_session_interrupted: ["type", "role", "activation", "sessionId", "phase", "failureClass"],
@@ -453,10 +496,17 @@ function assertExactDataKeys(input: Record<string, unknown>): void {
   if (!expected) throw new Error("event data type is invalid");
   const actual = Object.keys(input);
   const optional =
-    input.type === "coding_session_started"
+    input.type === "coding_session_started" || input.type === "coding_usage_observed"
       ? new Set(["reviewCycle", "requestedProfile"])
       : input.type === "coding_session_completed"
-        ? new Set(["reviewCycle", "requestedProfile", "effectiveProfile", "usage", "archive"])
+        ? new Set([
+            "reviewCycle",
+            "requestedProfile",
+            "effectiveProfile",
+            "usage",
+            "normalizer",
+            "archive",
+          ])
         : new Set<string>();
   assertExactKeys(
     input,

@@ -4,7 +4,10 @@ import { chmod, lstat, mkdir, open, readdir, rename, unlink, writeFile } from "n
 import { join } from "node:path";
 import type { TaskContract } from "@usine/task-authority";
 import { z } from "zod";
-import type { ProviderNeutralCompletedEvidence } from "./coding-session-adapter.js";
+import type {
+  ProviderNeutralCompletedEvidence,
+  ProviderNeutralUsage,
+} from "./coding-session-adapter.js";
 
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const durableIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -77,7 +80,11 @@ export const sessionArchiveSchema = z
     usage: z
       .object({
         inputTokens: z.number().int().nonnegative().optional(),
+        cachedInputTokens: z.number().int().nonnegative().optional(),
+        uncachedInputTokens: z.number().int().nonnegative().optional(),
+        cacheWriteInputTokens: z.number().int().nonnegative().optional(),
         outputTokens: z.number().int().nonnegative().optional(),
+        reasoningOutputTokens: z.number().int().nonnegative().optional(),
       })
       .nullable(),
     byteLength: z.number().int().nonnegative(),
@@ -255,7 +262,7 @@ export class SessionArchiveWriter {
     void this.schedulePersist();
   }
 
-  setUsage(usage: CompleteSessionArchive["usage"]): void {
+  setUsage(usage: ProviderNeutralUsage | null): void {
     this.record.usage = usage;
     void this.schedulePersist();
   }

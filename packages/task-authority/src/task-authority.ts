@@ -42,6 +42,11 @@ import {
 
 import { taskListItemFromResult, type TaskListItem } from "./task-state-schema.js";
 import type { CodingSessionResource, ServerSnapshot } from "./resource.js";
+import {
+  listUsageReportSources,
+  type UsageReportScope,
+  type UsageReportSourcesPage,
+} from "./usage-report.js";
 
 type AuthorityDatabase = RuntimeDatabase;
 
@@ -408,6 +413,10 @@ export class TaskAuthority {
       .orderBy(taskEvents.sequence)
       .limit(boundedLimit);
     return rows.map(decodeTaskEvent);
+  }
+
+  async listUsageReportSources(scope: UsageReportScope): Promise<UsageReportSourcesPage> {
+    return listUsageReportSources(this.database, scope);
   }
 
   async listRestartable(): Promise<{

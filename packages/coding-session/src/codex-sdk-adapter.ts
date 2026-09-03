@@ -59,6 +59,7 @@ export class CodexSdkAdapter implements CodingSessionAdapter {
       { signal: context.signal, outputSchema: context.outputSchema },
       context.onObservation,
       context.onItemCompleted,
+      context.onUsage,
     );
     return { ...result, sessionId: thread.id };
   }
@@ -92,6 +93,7 @@ async function runStreamedTurn(
   options: TurnOptions,
   onObservation: CodingSessionAdapterRequest["onObservation"],
   onItemCompleted: CodingSessionAdapterRequest["onItemCompleted"],
+  onUsage: CodingSessionAdapterRequest["onUsage"],
 ): Promise<{ finalResponse: string; usage: CodingSessionAdapterResult["usage"] }> {
   try {
     const streamed = await thread.runStreamed(prompt, options);
@@ -118,6 +120,7 @@ async function runStreamedTurn(
           break;
         case "turn.completed":
           usage = sdkUsage(event.usage);
+          await onUsage?.(usage);
           await onObservation?.({ type: "turn_completed", turn, outcome: "succeeded" });
           break;
         case "turn.failed":
@@ -136,10 +139,20 @@ async function runStreamedTurn(
   }
 }
 
-function sdkUsage(usage: { input_tokens: number; output_tokens: number }): ProviderNeutralUsage {
+function sdkUsage(usage: {
+  input_tokens: number;
+  cached_input_tokens: number;
+  cache_write_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+}): ProviderNeutralUsage {
   return {
     inputTokens: usage.input_tokens,
+    cachedInputTokens: usage.cached_input_tokens,
+    uncachedInputTokens: usage.input_tokens - usage.cached_input_tokens,
+    cacheWriteInputTokens: usage.cache_write_input_tokens,
     outputTokens: usage.output_tokens,
+    reasoningOutputTokens: usage.reasoning_output_tokens,
   };
 }
 

@@ -19,6 +19,8 @@ import {
   type ServerSnapshot,
   isTerminalState,
   isWaitingState,
+  type UsageReport,
+  type UsageReportScope,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
@@ -154,6 +156,20 @@ export async function listTasks(serverUrl: string, limit = 100): Promise<TaskLis
   validateLimit(limit);
   const client = await clientFor(serverUrl);
   return runRequest(client.tasks.list({ query: { limit } }));
+}
+
+export async function usageReport(
+  serverUrl: string,
+  scope: UsageReportScope,
+): Promise<UsageReport> {
+  const client = await clientFor(serverUrl);
+  const query = {
+    ...(scope.taskId === null ? {} : { taskId: scope.taskId }),
+    ...(scope.repositoryId === null ? {} : { repositoryId: scope.repositoryId }),
+    ...(scope.fromEpochMs === null ? {} : { fromEpochMs: scope.fromEpochMs }),
+    ...(scope.toEpochMs === null ? {} : { toEpochMs: scope.toEpochMs }),
+  };
+  return runRequest(client.usage.report({ query }));
 }
 
 export async function taskEvents(

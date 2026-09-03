@@ -84,6 +84,7 @@ export interface EffectiveSessionProfile {
   modelProvider: string | null;
   reasoningEffort: ModelReasoningEffort | null;
   developerInstructionsSha256: string | null;
+  serviceTier?: string | null;
 }
 
 export interface CodingSessionMcpServer {
@@ -125,6 +126,11 @@ export type CodingSessionMcpServerFactory = (
 export type CodingSessionObservation =
   | { type: "thread_started" }
   | {
+      type: "usage_observed";
+      source: "provider" | "role_output_normalizer";
+      usage: ProviderNeutralUsage;
+    }
+  | {
       type: "sandbox_verified";
       host: "darwin-seatbelt";
       role: SessionRole;
@@ -153,9 +159,17 @@ export interface RoleOutputTransformRequest {
   finalResponse: string;
   outputSchema: z.ZodTypeAny;
   signal: AbortSignal;
+  onUsage?: (usage: ProviderNeutralUsage) => Promise<void> | void;
 }
 
-export type RoleOutputTransform = (request: RoleOutputTransformRequest) => Promise<unknown>;
+export interface RoleOutputTransform {
+  (request: RoleOutputTransformRequest): Promise<unknown>;
+  readonly profile?: {
+    readonly adapter: "role-output-normalizer";
+    readonly model: string | null;
+    readonly modelProvider: string | null;
+  };
+}
 
 export interface OpenAICompatibleRoleOutputTransformConfig {
   apiKey: string;
@@ -172,7 +186,12 @@ export function createOpenAICompatibleRoleOutputTransform(
   const model = config.model.trim();
   if (!apiKey || !baseURL || !model) throw new Error("role output transform is not configured");
   const openai = createOpenAI({ apiKey, baseURL, fetch: config.fetch });
-  return async ({ finalResponse, outputSchema, signal }) => {
+  const transform: RoleOutputTransform = async ({
+    finalResponse,
+    outputSchema,
+    signal,
+    onUsage,
+  }) => {
     const result = await generateText({
       model: openai.chat(model),
       output: Output.object({ schema: outputSchema }),
@@ -186,8 +205,21 @@ export function createOpenAICompatibleRoleOutputTransform(
       maxRetries: 0,
       abortSignal: signal,
     });
+    await onUsage?.({
+      inputTokens: result.usage.inputTokens,
+      uncachedInputTokens: result.usage.inputTokenDetails.noCacheTokens,
+      cachedInputTokens: result.usage.inputTokenDetails.cacheReadTokens,
+      cacheWriteInputTokens: result.usage.inputTokenDetails.cacheWriteTokens,
+      outputTokens: result.usage.outputTokens,
+      reasoningOutputTokens: result.usage.outputTokenDetails.reasoningTokens,
+    });
     return result.output;
   };
+  Object.defineProperty(transform, "profile", {
+    value: { adapter: "role-output-normalizer", model, modelProvider: "openai-compatible" },
+    enumerable: true,
+  });
+  return transform;
 }
 
 export interface CodingSessionOptions {
@@ -205,7 +237,7 @@ export interface CodingSessionOptions {
 export interface SessionObservation<T = unknown> {
   status: "completed" | "failed" | "cancelled";
   output: T | null;
-  usage: { inputTokens?: number; outputTokens?: number } | null;
+  usage: ProviderNeutralUsage | null;
   summary: string;
   failure: string | null;
   phase: CodingSessionPhase | null;
@@ -224,6 +256,15 @@ export interface SessionObservation<T = unknown> {
   requestedProfile?: string;
   /** Sanitized effective profile facts owned by Coding Session. */
   effectiveProfile?: EffectiveSessionProfile;
+  normalizer?: RoleOutputNormalizerObservation;
+}
+
+export interface RoleOutputNormalizerObservation {
+  readonly status: "succeeded" | "failed" | "cancelled";
+  readonly usage: ProviderNeutralUsage | null;
+  readonly adapter: "role-output-normalizer";
+  readonly model: string | null;
+  readonly modelProvider: string | null;
 }
 
 interface CapturedSessionObservation<T = unknown> extends SessionObservation<T> {
@@ -414,6 +455,9 @@ export class CodexCodingSession {
       };
     }
     let effectiveProfile = unavailableEffectiveProfile();
+    let observedUsage: ProviderNeutralUsage | null = null;
+    let normalizerUsage: ProviderNeutralUsage | null = null;
+    let normalizerAttempted = false;
     try {
       const profileName = validateCodexProfile(request.profile);
       let profileSelection: ResolvedCodexProfile;
@@ -437,6 +481,7 @@ export class CodexCodingSession {
           developerInstructionsSha256: snapshot.developerInstructions
             ? hashText(snapshot.developerInstructions)
             : null,
+          serviceTier: safeEvidenceIdentity(snapshot.serviceTier),
         };
       } catch (error) {
         if (error instanceof CodexProfileSelectionError) throw error;
@@ -490,6 +535,15 @@ export class CodexCodingSession {
                 : this.sdkAdapter));
       effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);
+      const observeUsage = async (
+        source: "provider" | "role_output_normalizer",
+        usage: ProviderNeutralUsage,
+      ) => {
+        if (source === "provider") observedUsage = mergeUsage(observedUsage, usage);
+        else normalizerUsage = mergeUsage(normalizerUsage, usage);
+        if (source === "provider") archive?.setUsage(usageFrom(observedUsage));
+        await onObservation?.({ type: "usage_observed", source, usage });
+      };
       const result = await adapter.run({
         workspace: effectiveRequest.workspace,
         prompt: effectiveRequest.prompt,
@@ -514,12 +568,13 @@ export class CodexCodingSession {
           phase = nextPhase;
           archive?.setPhase(nextPhase);
         },
-        onUsage: (usage) => archive?.setUsage(usageFrom(usage)),
+        onUsage: (usage) => observeUsage("provider", usage),
       });
       phase = "output";
       archive?.setPhase("output");
       archive?.setSessionId(result.sessionId);
-      archive?.setProviderResult(result.finalResponse, usageFrom(result.usage));
+      const providerUsage = result.usage ?? observedUsage;
+      archive?.setProviderResult(result.finalResponse, usageFrom(providerUsage));
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
@@ -529,7 +584,7 @@ export class CodexCodingSession {
             status: "failed",
             sessionId: result.sessionId,
             output: null,
-            usage: usageFrom(result.usage),
+            usage: usageFrom(providerUsage),
             summary: "coding session output normalization unavailable",
             failure: "coding session output normalization unavailable",
             phase,
@@ -537,12 +592,14 @@ export class CodexCodingSession {
             failureCode: "role_output_transform_unconfigured",
           };
         }
+        normalizerAttempted = true;
         let normalized: unknown;
         try {
           normalized = await runRoleOutputTransform(this.options.roleOutputTransform, {
             finalResponse: result.finalResponse,
             outputSchema: effectiveRequest.outputSchema,
             signal: abortSignal,
+            onUsage: (usage) => observeUsage("role_output_normalizer", usage),
           });
         } catch (error) {
           if (abortSignal.aborted)
@@ -552,7 +609,12 @@ export class CodexCodingSession {
               status: "cancelled",
               sessionId: null,
               output: null,
-              usage: null,
+              usage: usageFrom(providerUsage),
+              normalizer: normalizerObservation(
+                this.options.roleOutputTransform,
+                normalizerUsage,
+                "cancelled",
+              ),
               summary: "coding session cancelled",
               failure: "coding session cancelled",
               phase,
@@ -564,12 +626,17 @@ export class CodexCodingSession {
             status: "failed",
             sessionId: result.sessionId,
             output: null,
-            usage: usageFrom(result.usage),
+            usage: usageFrom(providerUsage),
             summary: "coding session output normalization failed",
             failure: "coding session output normalization failed",
             phase,
             failureClass: classifyAdapterFailure(error),
             failureCode: "role_output_transform_failed",
+            normalizer: normalizerObservation(
+              this.options.roleOutputTransform,
+              normalizerUsage,
+              "failed",
+            ),
           };
         }
         archive?.setNormalizedOutput(normalized);
@@ -581,12 +648,17 @@ export class CodexCodingSession {
             status: "failed",
             sessionId: result.sessionId,
             output: null,
-            usage: usageFrom(result.usage),
+            usage: usageFrom(providerUsage),
             summary: "coding session normalized output did not match role schema",
             failure: "coding session normalized output did not match role schema",
             phase,
             failureClass: "configuration",
             failureCode: "role_output_schema_invalid",
+            normalizer: normalizerObservation(
+              this.options.roleOutputTransform,
+              normalizerUsage,
+              "succeeded",
+            ),
           };
         }
       }
@@ -597,11 +669,20 @@ export class CodexCodingSession {
         status: "completed",
         sessionId: result.sessionId,
         output: parsed.data,
-        usage: usageFrom(result.usage),
+        usage: usageFrom(providerUsage),
         summary: "coding session completed",
         failure: null,
         phase: null,
         failureClass: null,
+        ...(normalizerAttempted
+          ? {
+              normalizer: normalizerObservation(
+                this.options.roleOutputTransform,
+                normalizerUsage,
+                "succeeded",
+              ),
+            }
+          : {}),
       };
     } catch (error) {
       const deadlineExpired = deadlineSignal.aborted;
@@ -622,12 +703,21 @@ export class CodexCodingSession {
         status: deadlineExpired || cancelled ? "cancelled" : "failed",
         sessionId: null,
         output: null,
-        usage: null,
+        usage: usageFrom(observedUsage),
         summary: safeFailureMessage(interruption),
         failure: safeFailureMessage(interruption),
         phase: interruption.phase,
         failureClass: interruption.failureClass,
         failureCode: error instanceof CodexProfileSelectionError ? error.code : null,
+        ...(normalizerAttempted
+          ? {
+              normalizer: normalizerObservation(
+                this.options.roleOutputTransform,
+                normalizerUsage,
+                abortSignal.aborted ? "cancelled" : "failed",
+              ),
+            }
+          : {}),
       };
     }
   }
@@ -686,12 +776,53 @@ export function createCodexCodingSessionForTesting(
 }
 
 function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObservation["usage"] {
-  return usage == null
-    ? null
-    : {
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-      };
+  if (usage == null) return null;
+  return {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.cachedInputTokens === undefined
+      ? {}
+      : { cachedInputTokens: usage.cachedInputTokens }),
+    ...(usage.uncachedInputTokens === undefined
+      ? {}
+      : { uncachedInputTokens: usage.uncachedInputTokens }),
+    ...(usage.cacheWriteInputTokens === undefined
+      ? {}
+      : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.reasoningOutputTokens === undefined
+      ? {}
+      : { reasoningOutputTokens: usage.reasoningOutputTokens }),
+  };
+}
+
+function mergeUsage(
+  previous: ProviderNeutralUsage | null,
+  next: ProviderNeutralUsage,
+): ProviderNeutralUsage {
+  const add = (left: number | undefined, right: number | undefined): number | undefined =>
+    left === undefined ? right : right === undefined ? left : left + right;
+  return {
+    inputTokens: add(previous?.inputTokens, next.inputTokens),
+    cachedInputTokens: add(previous?.cachedInputTokens, next.cachedInputTokens),
+    uncachedInputTokens: add(previous?.uncachedInputTokens, next.uncachedInputTokens),
+    cacheWriteInputTokens: add(previous?.cacheWriteInputTokens, next.cacheWriteInputTokens),
+    outputTokens: add(previous?.outputTokens, next.outputTokens),
+    reasoningOutputTokens: add(previous?.reasoningOutputTokens, next.reasoningOutputTokens),
+  };
+}
+
+function normalizerObservation(
+  transform: RoleOutputTransform | undefined,
+  usage: ProviderNeutralUsage | null,
+  status: RoleOutputNormalizerObservation["status"],
+): RoleOutputNormalizerObservation {
+  return {
+    status,
+    usage: usageFrom(usage),
+    adapter: "role-output-normalizer",
+    model: safeEvidenceIdentity(transform?.profile?.model) ?? null,
+    modelProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
+  };
 }
 
 function hashText(value: string): string {
@@ -713,6 +844,7 @@ function unavailableEffectiveProfile(): EffectiveSessionProfile {
     modelProvider: null,
     reasoningEffort: null,
     developerInstructionsSha256: null,
+    serviceTier: null,
   };
 }
 

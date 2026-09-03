@@ -4,6 +4,7 @@ export * from "./resource.js";
 export * from "./task-state.js";
 export * from "./task-authority.js";
 export * from "./task-event.js";
+export * from "./usage-report.js";
 export {
   taskListItemFromResult,
   TaskStateQuarantinedError,

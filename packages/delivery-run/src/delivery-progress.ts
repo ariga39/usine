@@ -27,11 +27,22 @@ export function emitCodingObservation(
   eventPrefix: string,
   counter: { value: number },
   observation: CodingSessionObservation,
+  reviewCycle?: number,
 ): Promise<void> {
   const data: TaskObservationEventData = (() => {
     switch (observation.type) {
       case "thread_started":
         return { type: "coding_thread_started", role, activation, sessionId };
+      case "usage_observed":
+        return {
+          type: "coding_usage_observed",
+          role,
+          activation,
+          sessionId,
+          ...(reviewCycle === undefined ? {} : { reviewCycle }),
+          source: observation.source,
+          usage: observation.usage,
+        };
       case "sandbox_verified":
         return {
           type: "coding_sandbox_verified",

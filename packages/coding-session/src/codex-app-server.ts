@@ -32,7 +32,7 @@ type AppServerRunOptions = Omit<
 > & {
   executionStateDirectory: string;
   config: CodexNativeConfig;
-  onUsage?: (usage: ProviderNeutralUsage) => void;
+  onUsage?: (usage: ProviderNeutralUsage) => Promise<void> | void;
 };
 
 /** The bounded local App Server lifecycle, peer to the official SDK adapter. */
@@ -426,7 +426,13 @@ async function runCodexAppServer({
                       inputTokens: event.tokenUsage.last.inputTokens,
                       outputTokens: event.tokenUsage.last.outputTokens,
                     };
-                    if (usage) onUsage?.(usage);
+                    if (usage)
+                      yield* Effect.tryPromise({
+                        try: async () => {
+                          await onUsage?.(usage!);
+                        },
+                        catch: asError,
+                      });
                     break;
                   }
                   case "turn/completed": {

@@ -17,7 +17,11 @@ type CompletedEvidenceBase = {
 
 export interface ProviderNeutralUsage {
   readonly inputTokens?: number;
+  readonly cachedInputTokens?: number;
+  readonly uncachedInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
   readonly outputTokens?: number;
+  readonly reasoningOutputTokens?: number;
 }
 
 export interface CodingSessionAdapterProfile {
@@ -94,7 +98,7 @@ export interface CodingSessionAdapterRequest {
   readonly onItemCompleted?: (item: ProviderNeutralCompletedEvidence) => Promise<void> | void;
   readonly onSessionId?: (sessionId: string) => void;
   readonly onPhase?: (phase: CodingSessionPhase) => void;
-  readonly onUsage?: (usage: ProviderNeutralUsage) => void;
+  readonly onUsage?: (usage: ProviderNeutralUsage) => Promise<void> | void;
 }
 
 export interface CodingSessionAdapterResult {

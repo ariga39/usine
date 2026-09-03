@@ -18,7 +18,9 @@ export {
   type CodingSessionObservation,
   type SessionRequest,
   type SessionRole,
+  type RoleOutputNormalizerObservation,
 } from "./coding-session.js";
+export type { ProviderNeutralUsage } from "./coding-session-adapter.js";
 export {
   codingSessionAdapterForProfile,
   CodingSessionAdapterConfigurationError,

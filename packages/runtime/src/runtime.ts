@@ -19,6 +19,9 @@ import {
   type TaskEvent,
   type TaskListItem,
   type TaskResult,
+  deriveUsageReport,
+  type UsageReport,
+  type UsageReportScope,
   taskContractSchema,
   type ServerHealth,
   type ServerSnapshot,
@@ -398,6 +401,33 @@ export async function lookupTaskEvents(
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
     };
+  } finally {
+    handle.close();
+  }
+}
+
+export async function lookupUsageReport(
+  stateDirectory: string,
+  scope: UsageReportScope,
+): Promise<UsageReport> {
+  const empty = (): UsageReport => ({
+    schemaVersion: 1,
+    scope,
+    coverage: "complete",
+    invocations: [],
+    aggregates: [],
+  });
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  try {
+    await access(databasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return empty();
+    throw error;
+  }
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const page = await new TaskAuthority(handle.database).listUsageReportSources(scope);
+    return deriveUsageReport(page.sources, scope, page.complete ? "complete" : "partial");
   } finally {
     handle.close();
   }

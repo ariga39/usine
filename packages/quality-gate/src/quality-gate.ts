@@ -7,6 +7,8 @@ import {
   type EffectiveSessionProfile,
   type RolePolicy,
   type SessionArchiveCaptureStatus,
+  type ProviderNeutralUsage,
+  type RoleOutputNormalizerObservation,
 } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import {
@@ -16,7 +18,7 @@ import {
   type ReviewVerdict,
 } from "@usine/task-authority";
 
-type SessionUsage = { inputTokens?: number; outputTokens?: number };
+type SessionUsage = ProviderNeutralUsage;
 
 const CHECK_STREAM_LIMIT = 16_384;
 
@@ -40,6 +42,7 @@ export interface QualityGateOptions {
 export interface ReviewAttemptObservation {
   review: ReviewVerdict;
   usage: SessionUsage | null;
+  normalizer?: RoleOutputNormalizerObservation;
   requestedProfile?: string;
   effectiveProfile?: EffectiveSessionProfile;
   interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
@@ -66,6 +69,7 @@ interface QualityGateSession {
         archiveCompleteness?: "complete" | "partial";
         requestedProfile?: string;
         effectiveProfile?: EffectiveSessionProfile;
+        normalizer?: RoleOutputNormalizerObservation;
       }
   >;
 }
@@ -190,6 +194,7 @@ export class QualityGate {
             usage: observation.usage ?? null,
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
             effectiveProfile: observation.effectiveProfile,
+            normalizer: observation.normalizer,
             ...(observation.phase && observation.failureClass
               ? {
                   interruption: {
@@ -221,6 +226,7 @@ export class QualityGate {
             usage: observation.usage ?? null,
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
             effectiveProfile: observation.effectiveProfile,
+            normalizer: observation.normalizer,
             ...(observation.archiveId && observation.archiveStatus
               ? {
                   archive: {
@@ -238,6 +244,7 @@ export class QualityGate {
           usage: observation.usage ?? null,
           requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
           effectiveProfile: observation.effectiveProfile,
+          normalizer: observation.normalizer,
           ...(observation.archiveId && observation.archiveStatus
             ? {
                 archive: {

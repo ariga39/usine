@@ -36,6 +36,7 @@ import {
   retryTask,
   lookupTaskStatus,
   lookupTaskEvents,
+  lookupUsageReport,
   lookupTasks,
   lookupServerHealth,
   lookupServerSnapshot,
@@ -57,6 +58,7 @@ import {
   type ApiEventStreamValue,
   type ApiTaskSubmission,
   type ApiTaskResource,
+  type ApiUsageQuery,
   encodeApiWaitResponse,
 } from "./http-api.js";
 import { ensurePrivateStateDatabase } from "./private-state.js";
@@ -540,6 +542,16 @@ function createApiLayer(options: {
         }),
     }),
   );
+  const usageHandlers = HttpApiBuilder.group(UsineApi, "usage", (handlers) =>
+    handlers.handleAll({
+      report: ({ query }) =>
+        apiEffect(async () => {
+          const scope = usageScopeFromQuery(query);
+          await validateUsageScope(stateDirectory, scope);
+          return lookupUsageReport(stateDirectory, scope);
+        }),
+    }),
+  );
   const eventHandlers = HttpApiBuilder.group(UsineApi, "events", (handlers) =>
     handlers.handleAll({
       wait: ({ query }) => waitApiEventResponse(stateDirectory, options.eventHub, query),
@@ -548,7 +560,15 @@ function createApiLayer(options: {
     }),
   );
   const apiLayer = HttpApiBuilder.layer(UsineApi).pipe(
-    Layer.provide(Layer.mergeAll(serverHandlers, repositoryHandlers, taskHandlers, eventHandlers)),
+    Layer.provide(
+      Layer.mergeAll(
+        serverHandlers,
+        repositoryHandlers,
+        taskHandlers,
+        usageHandlers,
+        eventHandlers,
+      ),
+    ),
   );
   return apiLayer;
 }
@@ -599,6 +619,38 @@ function eventScopeFromQuery(query: ApiEventScope): EventScope {
   if (taskId && repositoryId)
     throw new ServerValidationError("event scope must select a Task, Repository, or whole server");
   return { taskId, repositoryId };
+}
+
+function usageScopeFromQuery(query: ApiUsageQuery) {
+  const taskId = query.taskId?.trim() || null;
+  const repositoryId = query.repositoryId?.trim() || null;
+  if (taskId && repositoryId)
+    throw new ServerValidationError("usage scope must select a Task, Repository, or whole server");
+  const fromEpochMs = validEpochBound(query.fromEpochMs, "fromEpochMs");
+  const toEpochMs = validEpochBound(query.toEpochMs, "toEpochMs");
+  if (fromEpochMs !== null && toEpochMs !== null && fromEpochMs >= toEpochMs)
+    throw new ServerValidationError("fromEpochMs must be less than toEpochMs");
+  return { taskId, repositoryId, fromEpochMs, toEpochMs } as const;
+}
+
+function validEpochBound(value: number | undefined, name: string): number | null {
+  if (value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new ServerValidationError(`${name} is out of range`);
+  return value;
+}
+
+async function validateUsageScope(
+  stateDirectory: string,
+  scope: ReturnType<typeof usageScopeFromQuery>,
+): Promise<void> {
+  if (scope.taskId !== null) {
+    if (!(await lookupTaskStatus(stateDirectory, scope.taskId)))
+      throw new ServerNotFoundError("task not found");
+    return;
+  }
+  if (scope.repositoryId !== null && !(await inspectRepository(stateDirectory, scope.repositoryId)))
+    throw new ServerNotFoundError("repository not found");
 }
 
 function waitApiEventResponse(
