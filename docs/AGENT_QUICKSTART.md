@@ -4,6 +4,8 @@ This guide is for an agent operating Usine for an authorized project task. It is
 
 Usine runs a local server. The server owns admission, execution, recovery, and public resource projections. The CLI is a client of that server. A submitting CLI process may exit after admission; the server continues the Task.
 
+This guide operates the implemented single-Task delivery leaf. It does not yet accept a Wish or published Goal Contract, invoke Requirement Proxy/Planner roles, maintain an Outcome frontier, or advance successor Tasks. Do not use repeated manual `submit` commands as a substitute for the Campaign product behavior defined in [DESIGN](DESIGN.md).
+
 ## 1. Prerequisites and build
 
 You need:

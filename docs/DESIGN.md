@@ -1,35 +1,63 @@
 ---
 status: current
-design_version: 0.9
-updated: 2026-08-24
-issue: https://github.com/ariga39/usine/issues/267
+design_version: 1.0
+updated: 2026-09-04
+issue: https://github.com/ariga39/usine/issues/363
 ---
 
 # Usine product design
 
-## 1. Problem, first useful behavior, and boundary
+## 1. Problem, product outcome, and boundary
 
-Usine coordinates a bounded software-delivery task after a user or an existing project process has supplied an authorized, reviewable Task Contract. Without a coordinator, a person must repeatedly start implementation, inspect the result, run checks, arrange independent review, request repairs, recover interrupted work, and decide whether delivery is authorized. Free-form agent-to-agent coordination makes those decisions difficult to audit and can leave no component responsible for the final outcome.
+Usine turns an authorized software wish into accepted Repository outcomes without making a person decompose, start, inspect, review, merge, and advance every delivery Task. A person supplies the wish, steering, and authority; Requirement Proxy and Planner roles perform bounded semantic work; a deterministic coordinator owns durable ordering, liveness, gates, and effects. Free-form agent conversation, a permanent guardian, and an external script that submits each Task are not the product control plane.
 
-The first useful behavior is therefore one complete, server-owned path: admit one committed Task Contract, give one Repository writer an isolated workspace, freeze an exact candidate SHA, run the project check, obtain a fresh independent review, and deliver an exact-SHA approved PR. If and only if the immutable contract grants `authorization.merge: true`, the same path revalidates the live PR and merges that exact approved head, recording `merged`; otherwise it records `reviewed_pr`. A bounded implementer retry and restart recovery are part of this path.
+The implemented Task delivery loop remains the reusable leaf: it admits one committed Task Contract, gives one Repository writer an isolated workspace, freezes an exact Candidate SHA, runs the project check, obtains a fresh independent review, and delivers or explicitly merges the approved head. The current product outcome is the enclosing Campaign: publish one versioned Goal Contract, maintain a bounded Outcome Tree and rolling Task frontier, run each Ready Task through that leaf, advance dependencies after accepted delivery, replenish useful work, and close only when the Goal Contract's outcome evidence is satisfied.
 
-The current supported boundary is:
+A Campaign is one execution of a published Goal Contract. It is not a general project-management system or an unbounded task DAG. Its boundary is:
 
-| Area | Current product boundary |
+| Area | Product boundary |
 |---|---|
 | Host | One local loopback server with a finite active-Task capacity. |
-| Work ownership | One writer lease per registered Repository; one isolated workspace per activation. |
-| Provider | One task-oriented Coding Session port, with the official Codex SDK, bounded Codex App Server, or qualified source-internal OpenCode2 adapter selected statically by named profile. |
+| Work supply | One published Goal Contract authorizes a bounded Outcome Tree; a rolling Planner supplies proposals before the Ready frontier is exhausted. |
+| Work ownership | One writer lease per registered Repository; one isolated workspace per activation; cross-Repository Tasks may run concurrently. |
+| Semantic roles | Requirement Proxy publishes or revises the Goal Contract under delegated authority; Planner proposes bounded frontier changes; neither role mutates lifecycle state. |
+| Leaf execution | The existing Task delivery loop implements, checks, independently reviews, repairs, delivers, and optionally merges one Ready Task. |
+| Provider | Host-selected profiles run bounded semantic roles behind caller-owned contracts; provider process and transcript details remain outside domain authority. |
 | Forge | GitHub for delivery and a bounded, role-scoped read surface through GitHub MCP. |
-| Authority | A committed, immutable Task Contract authorizes scope, acceptance, budget, delivery, and optional merge. Durable Task facts decide lifecycle and completion. |
-| Observation | Durable Task-local history plus best-effort process-local wait/subscribe observation. |
+| Authority | A published Goal Contract is the root Campaign authority. Admitted Task Contracts are immutable authorized projections of it; explicit merge authority still gates merge. |
+| Observation | Durable Campaign/Outcome/Task evidence plus best-effort process-local wait/subscribe observation. |
 | Session Archive | Host-local, bounded Coding Session capture retrieved only by direct CLI operations. |
 
-The product does not currently provide a planner for vague requests, a general task DAG, concurrent writers for one Repository, a distributed scheduler or runner, automatic merge without contract authority, provider routing or negotiation, another forge, a web dashboard, or a memory/vector database. It also does not claim exhaustive hostile validation of every Git or SQLite failure mode. These are deferred options, not implicit promises; their re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
+The current implementation proves only the leaf loop; it does not yet implement Campaign admission, Requirement Proxy/Planner execution, Outcome state, or automatic frontier advancement. That gap is an active product falsifier, not a supported manual operating mode. A distributed scheduler or runner, concurrent writers for one Repository, automatic merge without contract authority, provider negotiation, another forge, a web dashboard, and a memory/vector database remain outside the boundary. Re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
 
 ## 2. End-to-end lifecycle
 
-The server admits a contract only after the CLI/server boundary and the registered Repository validate it. The contract, Repository snapshot, deadline, writer identity, and merge authority are then frozen in durable state.
+The root handoff is `goal_published`: one immutable Spec version and Goal Contract whose publication is authorized by the user or a previously delegated publication policy. Draft discussion and Planner output cannot create that fact. The Campaign coordinator admits bounded Task Proposals only when they trace to a live Outcome, request a subset of the root authority and budget, and have satisfied dependencies. It resolves the exact base SHA from the durable Repository state only when the Task becomes Ready; a proposal never invents a future SHA.
+
+```text
+wish + steering
+       │
+       ▼
+Requirement Proxy → versioned Spec + Goal Contract candidate
+       │ user confirmation or delegated publish policy
+       ▼
+goal_published → Campaign + accepted Outcome Tree
+       │
+       ▼
+Planner proposal → bounded rolling frontier
+       │                ▲
+       │ Ready          │ low watermark / evidence-driven replan
+       ▼                │
+Task delivery leaf ─────┘
+       │ reviewed_pr when merge was not authorized
+       │ merged when authorized and exact-head gates pass
+       ▼
+dependency release → next Ready Task or Goal evidence closure
+```
+
+The deterministic coordinator, not the guardian or Planner, repeats the lower loop until the Campaign is accepted, abandoned under explicit authority, or stopped by a durable budget/authority blocker. Independent Tasks may continue while another branch of the Outcome Tree is blocked. Product forks and new authority are grouped into a decision request instead of turning ordinary progress into per-Task approval.
+
+Each Ready Task uses the existing leaf lifecycle. The server admits its contract only after the Campaign and registered Repository validate it. The resolved base, contract, Repository snapshot, deadline, writer identity, and merge authority are then frozen in durable Task state.
 
 ```text
 committed Task Contract
@@ -79,10 +107,13 @@ Every crossing in this path carries typed domain evidence, not provider transcri
 
 ## 3. Authority model and invariants
 
-The coordinator is deterministic TypeScript. It performs admission, lease and activation reservation, fact validation, stale-evidence rejection, retry decisions, gate reduction, effect reconciliation, and terminal-state projection. A model may propose code or a structured role result; it cannot announce a Task terminal state. The optional `ai`/`@ai-sdk/openai` integration only normalizes a final role response into its schema and has no lifecycle authority.
+The coordinator is deterministic TypeScript. At Campaign scope it owns publication identity, Outcome and proposal admission, dependency readiness, active capacity, replenishment triggers, budgets, and completion reduction. At Task scope it performs lease and activation reservation, fact validation, stale-evidence rejection, retry decisions, exact-SHA gate reduction, effect reconciliation, and terminal-state projection. A model may propose a Spec, frontier change, code, or structured review; it cannot publish authority or announce a Campaign or Task terminal state. The optional `ai`/`@ai-sdk/openai` integration only normalizes a final role response into its schema and has no lifecycle authority.
 
 The following invariants are product rules:
 
+- A Goal Contract publication is immutable and idempotent. A revised wish or accepted replan creates a new version and explicitly supersedes affected Outcomes and proposals; it does not rewrite already observed delivery facts.
+- A Task Proposal has no execution authority. Admission must trace it to one live Outcome and prove that its requested Repository, effects, budget, and merge capability are within the Goal Contract envelope.
+- Campaign coordination owns Ready selection and Planner low-watermark activation. Requirement Proxy, Planner, implementers, reviewers, guardians, hooks, and external observers cannot directly wake arbitrary roles or advance lifecycle state.
 - The admitted Task Contract and its first deadline are immutable. A same-ID submission returns the existing facts only when the contract hash, Repository identity, snapshot, and merge authority still match.
 - Task Authority is the sole owner of Task state, writer lease, activation fence, accepted facts, and terminal facts. Its transaction updates the durable result, appends the corresponding event, and releases the lease on a terminal transition.
 - A Candidate, check, review, attestation, and merge effect must identify the same full lowercase 40-character SHA. A stale revision, fence, candidate parent, or live PR head is rejected or quarantined.
@@ -90,12 +121,33 @@ The following invariants are product rules:
 - Merge authority is not implied by delivery authority. Only an admitted `authorization.merge: true` contract may produce `merged`.
 - Forge credentials are resolved and used at the host delivery boundary. They are not exposed to implementers, reviewers, project checks, public resources, durable events, prompts, or worker environment variables.
 - One Repository has at most one writer lease. Old activation workspaces are quarantined before a new writer is allowed to publish a Candidate.
+- A dependent Task resolves and records its exact base only after predecessor acceptance. The initial serial policy retains a Repository's active delivery ownership through merge so an automatically selected successor starts from the observed accepted head; later overlap requires explicit base/conflict evidence.
 - Normal execution and restart recovery use the same durable reconciliation path. An uncertain external effect is probed before retry; an ambiguous merge is not recorded as success.
+- Campaign completion requires evidence for every required live Outcome, not an empty Ready list or a Planner statement. An empty frontier while required Outcomes remain causes dependency wait, bounded replenishment, or replan.
 - Durable state is authoritative. Process state, provider transcripts, hooks, transient subscriptions, and process-local event order are observations only.
 
-## 4. Domain facts and Task lifecycle
+## 4. Domain facts and lifecycle
 
-### 4.1 Durable facts
+### 4.1 Campaign facts
+
+The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the goal-publication entry path; its downstream consumer is the Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
+
+The minimum durable meanings are:
+
+| Fact | Meaning and owner |
+|---|---|
+| Goal publication | Immutable identity of the authorized Spec version, Goal Contract, authority envelope, budgets, and publication provenance. Campaign coordination owns admission; a model cannot self-publish it. |
+| Campaign | One execution of a Goal publication, including status, cumulative budget, and current Spec version. |
+| Outcome | A required user-observable result, its acceptance evidence, dependencies, and live/superseded status. |
+| Task Proposal | Planner-authored execution suggestion with an idempotency key and Outcome trace. It has no lease, resolved base, or execution authority. |
+| Ready Task | An admitted immutable Task projection whose dependencies, authority, capacity, Repository state, and exact activation base have been resolved by the coordinator. |
+| Campaign evidence | Accepted Task delivery effects, Outcome observations, usage, human touches, replans, and terminal reason linked to the Campaign. |
+
+Rolling-wave planning freezes the accepted Outcome Tree and proposes only a bounded near-term frontier. A low watermark, an exhausted but incomplete frontier, or evidence that invalidates the plan may activate one Planner run. Dependency changes and capacity release are mechanical transitions and do not consume a Planner run. A Task may be narrowed or split within its Outcome without adding product scope; a new Outcome or material product behavior requires a versioned replan under the Goal authority.
+
+Campaign terminal meanings are deliberately small: `accepted` requires complete Outcome evidence; `blocked` requires a durable authority, product, or exhausted-budget reason that prevents every remaining useful branch; `abandoned` requires explicit authority. Running, planning, ready, active, and waiting are projections of durable facts rather than independent claims by an agent.
+
+### 4.2 Task facts
 
 `@usine/task-authority` defines the domain types in [`task-state.ts`](../packages/task-authority/src/task-state.ts), the contract boundary in [`contract.ts`](../packages/task-authority/src/contract.ts), and the persisted decode boundary in [`task-state-schema.ts`](../packages/task-authority/src/task-state-schema.ts). A `TaskResult` contains the contract hash, monotonic revision, original deadline, state, immutable merge-authority projection, Candidate SHA and fence, check, review, delivery, blocker, waiting record, active activation, writer identity, Repository snapshot, and evidence counters.
 
@@ -103,7 +155,7 @@ The main facts are:
 
 | Fact | Meaning and owner |
 |---|---|
-| Task Contract | Caller-owned scope, acceptance, non-goals, budget, Issue authorization, delivery data, and optional merge authority. Admission freezes it. |
+| Task Contract | Caller-owned scope, acceptance, non-goals, budget, root-authorization provenance, delivery data, and optional merge authority. Admission freezes it. The implemented standalone boundary still requires a matching GitHub Issue and must be revised for Campaign-derived Tasks. |
 | Run/activation | A durable implementer activation and monotonic fence. It is an attempt identity, not completion evidence. |
 | Candidate | A host-verified clean Git commit descending from the recorded parent and original base. |
 | Check Result | The registered project command's result in a disposable exact-SHA checkout, with bounded output. |
@@ -113,7 +165,7 @@ The main facts are:
 
 The persistent representation is decoded with Effect Schema at the untrusted SQLite boundary. Existing Zod validation remains the external Task Contract boundary; six behavior packages remain Promise-based unless a caller-specific change proves that Effect removes duplicated validation, error mapping, or lifecycle code.
 
-### 4.2 States and transitions
+### 4.3 Task states and transitions
 
 The legal state names are `admitted`, `waiting`, `candidate`, `checked`, `reviewed`, `reviewed_pr`, `merged`, and `blocked`. `reviewed_pr`, `merged`, and `blocked` are terminal. `waiting` is a durable pause, not a terminal result.
 
@@ -139,7 +191,9 @@ Task Authority's reducer and the Candidate Workspace enforce the following lifec
 
 ## 5. Behavioral packages and composition
 
-The six behavior packages are real pnpm workspace packages with public exports. The package manifests and export barrels are the boundary evidence: [`packages/task-authority/package.json`](../packages/task-authority/package.json), [`candidate-workspace/package.json`](../packages/candidate-workspace/package.json), [`coding-session/package.json`](../packages/coding-session/package.json), [`delivery-run/package.json`](../packages/delivery-run/package.json), [`quality-gate/package.json`](../packages/quality-gate/package.json), and [`forge-delivery/package.json`](../packages/forge-delivery/package.json). `@usine/runtime` and `@usine/cli` are composition roots, not a seventh behavior package.
+The six implemented behavior packages form the Task delivery leaf. Their package manifests and export barrels are the boundary evidence: [`packages/task-authority/package.json`](../packages/task-authority/package.json), [`candidate-workspace/package.json`](../packages/candidate-workspace/package.json), [`coding-session/package.json`](../packages/coding-session/package.json), [`delivery-run/package.json`](../packages/delivery-run/package.json), [`quality-gate/package.json`](../packages/quality-gate/package.json), and [`forge-delivery/package.json`](../packages/forge-delivery/package.json). `@usine/runtime` and `@usine/cli` are composition roots, not another behavior package.
+
+Campaign coordination is the next behavior cluster, not yet an implemented package. Its first production caller must own the published-goal-to-Ready-Task contract before a physical package boundary is selected. It may reuse Task Authority persistence and the runtime host, but must not overload `TaskResult`, fake a per-Task GitHub Issue, or teach Delivery Run about planning. The replacement target is the guardian-authored Task-list/submit loop: once Campaign admission and advancement own that behavior, an external guardian becomes an observer and exception handler only.
 
 | Package | Current caller | Policy hidden behind its port | Typed artifacts crossing the boundary |
 |---|---|---|---|
@@ -170,13 +224,19 @@ The production dependency direction is acyclic. The diagram below is the product
 
 Domain policy does not import HTTP, Git, subprocess, GitHub, SDK, or database implementation. Cross-package calls use declared package exports; they do not reach into another package's `src` or `dist`. Boundaries carry Task Contract, Candidate, Check Result, Review Verdict, Delivery Effect, and provider-neutral observations. They do not carry HTTP requests, Effect fibers, provider threads/events, panes, argv, raw provider responses, or database transactions.
 
+The Campaign boundary adds Goal Publication, Outcome, Task Proposal, readiness, and Campaign Evidence. It hands one admitted Ready Task to the existing leaf and consumes the resulting durable Task fact; it does not expose Planner transcripts, provider sessions, database transactions, or Git process details across the boundary.
+
 ## 6. Persistent server lifecycle and Coding Session lifecycle
 
 The persistent local server is the coordinator host. [`packages/runtime/src/server.ts`](../packages/runtime/src/server.ts) creates a sequential Effect Scope, applies SQLite migrations, validates loopback binding, checks the durable active-Task count, starts the typed HTTP API, owns a `FiberMap` for Task execution, and installs release cleanup. On shutdown it closes transient listeners and the Effect scope, propagates `AbortSignal` to the active Delivery Run and adapters, and each adapter owns cleanup of its current-run resources. The official Codex SDK and App Server each own their current-run child; qualified OpenCode2 directly owns its sandboxed server child and private per-run directory.
 
 At startup the server decodes durable Tasks. Nonterminal Tasks that have valid committed execution input are re-entered through the same run path, after recording a sanitized restart observation. `waiting` Tasks retain their lease and capacity slot but are not launched automatically. Persisted-state decode failures are rejected at the Task Authority boundary; invalid committed execution input is blocked during startup. A submitting CLI process may exit after admission because execution belongs to the server.
 
+Campaign recovery extends this same fact-first rule. Startup must reconcile nonterminal Campaigns, active Task facts, Repository heads, capacity, and pending Planner requests, then perform the single next mechanical action for each eligible Campaign. It does not need to recover an LLM conversation. A lost low-watermark notification is repaired by reconciliation; an already-recorded Task or Planner proposal is not duplicated. The operating-system service manager may restart the server, but no launcher process, PID file, hook, or external guardian becomes durable Campaign authority.
+
 Coding Session is a different lifecycle. [`CodexCodingSession`](../packages/coding-session/src/coding-session.ts) owns one provider run: profile resolution, static adapter selection, role policy, bounded environment, optional read-MCP setup, provider thread/turn, structured output parsing or optional final normalization, cancellation/deadline handling, adapter-specific cleanup of current-run resources, and capture of a host-local Session Archive. It returns a typed `SessionObservation`; the Delivery Run decides what durable Task fact follows. Provider thread IDs, raw events, transcripts, tool arguments, and raw error text do not cross the domain port or become Task authority.
+
+The implemented `SessionRequest` is specific to implementer and reviewer Tasks. Requirement Proxy and Planner execution must reuse the proven provider-lifecycle primitives without passing a fake Task Contract or weakening Task role policy. Their first caller owns a narrow request and structured result for Spec or frontier work; only shared lifecycle behavior proven by that caller moves behind a common internal primitive.
 
 Each implementer or reviewer run creates one versioned archive in the configured Session Archive storage, separate from SQLite. The archive records the strict caller-owned Task Contract and prompt, a whitelist-only effective profile snapshot, adapter/session identity, completed provider items, raw response, normalized output, usage, phase, failure, and outcome. Resolved Repository path/owner/name, project-check policy, and `delivery.baseBranch` are not part of the role Contract or archive. Provider maps and model catalog content are never retained in the archive. It is atomically replaced in the same directory, bounded per archive, and subject to finite retention; truncation, write failure, and pruning are explicit status/warning observations. A failed archive never changes the role result, Candidate, review, delivery, or terminal Task state. The typed Coding Session observation remains the provider-neutral result for one run; its evidence projection exposes only a sanitized requested profile and effective `{profileName, configSha256, adapter, model, modelProvider, reasoningEffort, serviceTier, developerInstructionsSha256}` fields, optional usage, and an opaque archive reference/status/completeness. `configSha256` is a digest-only identity of the full supported resolved profile and is separate from the archive profile snapshot's `sha256`, which validates only the persisted whitelist bytes. Provider thread/session identity remains archive-private. Task resources and history carry only bounded archive metadata/reference, never archive content.
 
@@ -204,7 +264,7 @@ The implementer receives a detached worktree at the contract base or the current
 
 Quality Gate runs the registered project command in a disposable exact-SHA checkout with an explicit reduced environment and bounded stdout/stderr. A passed check is required before review. The reviewer receives a fresh checkout, the Task Contract, the exact Candidate SHA, and check evidence. It does not inherit the implementer's workspace or conversation and must return an explicit schema-valid verdict. A missing/invalid/stale output is `inconclusive`, never approval.
 
-Forge Delivery requires a passing exact-SHA check and exact-SHA semantic approval. It probes for an existing branch/PR before writing, pushes with a credential-scoped GitHub capability, and creates or verifies one approval attestation tied to the Task, Issue, SHA, check, and review. Multiple, mismatched, or wrong-identity attestations quarantine delivery. A lost write response is reconciled by probing the same identity.
+Forge Delivery requires a passing exact-SHA check and exact-SHA semantic approval. It probes for an existing branch/PR before writing, pushes with a credential-scoped GitHub capability, and creates or verifies one approval attestation tied to the Task, authorization source, SHA, check, and review. Multiple, mismatched, or wrong-identity attestations quarantine delivery. A lost write response is reconciled by probing the same identity.
 
 For merge-authorized contracts, Forge Delivery re-reads the live PR and attestation immediately before calling the GitHub merge endpoint. A changed head, mismatched attestation, non-mergeable platform state, or refusal does not create a merge fact and remains blocked; an unresolved response becomes explicitly retryable without changing the approved bundle. A later probe may record `merged` only when the PR is observed merged with an exact merge commit SHA and the approved head/PR identity still matches. GitHub platform policy is the final merge gate.
 
@@ -216,6 +276,8 @@ Task Authority persists one ordered, Task-local `task_events` stream. Authority 
 
 `task list` drains the complete set from the Task Authority's bounded ordered `GET /v1/tasks` pages. A raw response is one page; pass its `nextCursor` as `cursor` to continue. `task history` reads this durable stream after a sequence cursor. `task watch` replays history and then reads the authoritative Task resource, so it can recover an operator view without treating event text as state. `task evidence` drains history, rereads the current Task resource, and reports bounded Role Run observations joined to current Candidate, check, review, repair, and delivery facts. `usage` reads persisted `task_events` directly with optional Task, Repository, and epoch-millisecond bounds (`fromEpochMs` inclusive, `toEpochMs` exclusive); `occurredAtEpochMs` is session completion or interruption time, falling back to session start when no closing observation exists. It emits per-invocation rows and deterministic aggregates as JSON through its own stable bounded Task-ID cursor. It does not use the Task list. The CLI aliases `status` and `follow` remain compatibility surfaces; canonical resource commands are `server health|snapshot`, `repository list|get`, `task list|get|history|watch|evidence|retry`, and `usage`, with `register` and `submit` as mutation entry points.
 
+Campaign evidence must reuse these Task and Role Run facts rather than copy their payloads. Each admitted Task and semantic role invocation carries a durable Campaign/Outcome association, allowing deterministic totals for uncached input, cached input, output, model/provider identity, elapsed time, review/repair rounds, accepted deliveries, replans, discarded proposals, and human touches. An episode review may propose a Project rule, skill, checker, evaluator, or routing change, but no lesson changes future authority or policy merely because a model generated it. Promotion requires versioned evidence and the applicable repository or user authority.
+
 The server also exposes process-local `wait` and `subscribe` observation through an Effect `PubSub` hub. A listener chooses exactly one scope: Task, Repository, or the whole server. `wait` returns one new sanitized envelope or `null` on bounded timeout; `subscribe` emits a ready marker and future matching envelopes. These are best-effort producer-only notifications with a bounded dropping buffer. They have no durable cursor, acknowledgement, replay, resume, backpressure, or restart-recovery protocol. If a listener disconnects, the server shuts down, or it cannot keep up, the listener closes; callers must read current state/history when correctness matters.
 
 External observers and supervisors are separate glue processes, not part of the Usine server or Task Authority. They use only existing generic loopback resources and mutations, plus process-local `subscribe` invalidations; an invalidation is not state, so correctness requires rereading current Task resources and durable history. The external bridge owns best-effort wake delivery, agent-product configuration/lifecycle, coalescing/retry, and one bounded replaceable MCP session. There is no durable cursor, ledger, replay, acknowledgement, second scheduler, agent-session store, or Hermes-specific server API/fact/event/persistence. Disconnect or restart starts fresh, and terminal transitions while offline may not produce individual wakes. Webhooks, MCP responses, and process-local state are observation evidence, not completion authority.
@@ -224,7 +286,7 @@ External observers and supervisors are separate glue processes, not part of the 
 
 Recovery is deterministic reconciliation, not replay of process operations. On re-entry the server reads the durable Task Contract, phase, revision, activation, Candidate, and effect identities; it probes Git/worktree/GitHub before repeating uncertain effects. Confirmed effects are recorded once, provably absent effects may be retried with the same stable identity, and an unresolved Forge effect remains durably waiting for explicit reconciliation. Proven identity conflicts are quarantined. A new writer receives a new activation fence and workspace; stale work cannot publish a Candidate. The first deadline is never extended by restart.
 
-The default `USINE_ACTIVE_TASK_CAPACITY` is `1`; it must be a positive finite integer. Admission counts durable nonterminal Tasks and, in the same transaction, acquires the Repository lease. Same-ID idempotent resubmission is checked before capacity rejection. A full capacity returns a retryable error but does not create a queue. On startup, a durable count above the configured capacity rejects readiness rather than launching work beyond the bound. Terminal state releases the Repository lease and the capacity slot. This is bounded process-local capacity, not fairness, dynamic resizing, or distributed scheduling.
+The default `USINE_ACTIVE_TASK_CAPACITY` is `1`; it must be a positive finite integer. Direct standalone Task admission retains its current bounded behavior: same-ID idempotency is checked before capacity rejection, and startup refuses readiness when durable active Tasks already exceed the configured limit. Campaign proposals are different: they remain durably planned or Ready without consuming active capacity, and the coordinator admits at most the available number of Ready Tasks. A Task terminal transition releases capacity and mechanically selects the next eligible Task. This is a domain frontier for one local coordinator, not a generic queue service, fairness framework, dynamic resizing mechanism, or distributed scheduler.
 
 Isolation is capability-based:
 
@@ -239,7 +301,7 @@ Codex sandbox and host permissions are the default isolation mechanism. Containe
 
 ## 11. Current evidence and limits
 
-The repository currently provides focused behavioral evidence rather than a production-scale benchmark. The most direct evidence is:
+The repository currently provides focused evidence for the Task delivery leaf rather than the complete product or a production-scale benchmark. The most direct evidence is:
 
 | Claim | Repository evidence | Limit of the evidence |
 |---|---|---|
@@ -255,5 +317,6 @@ The repository currently provides focused behavioral evidence rather than a prod
 | Disposable checks, fresh review, stale review rejection, and credential-free Git | [`packages/quality-gate/tests/quality-gate.test.ts`](../packages/quality-gate/tests/quality-gate.test.ts), [`packages/candidate-workspace/tests/candidate-workspace.test.ts`](../packages/candidate-workspace/tests/candidate-workspace.test.ts) | Check output is bounded and environment policy remains host-specific. |
 | Forge probe/retry, attestation identity, read MCP scoping, and merge effects | [`packages/forge-delivery/tests/forge-delivery.test.ts`](../packages/forge-delivery/tests/forge-delivery.test.ts), [`packages/forge-delivery/tests/github-read.test.ts`](../packages/forge-delivery/tests/github-read.test.ts), [`tests/runtime-policy.test.ts`](../tests/runtime-policy.test.ts) | Private live characterization is optional; no claim is made about every GitHub installation or ruleset. |
 | One bounded external exact-head production run | [fund-manager Issue #52](https://github.com/ariga39/fund-manager/issues/52) and [PR #53](https://github.com/ariga39/fund-manager/pull/53) | It is one one-contract run; it does not establish retry recovery, scale, broader merge policy, or provider breadth. |
+| First Repository-level factory trial | [Issue #363](https://github.com/ariga39/usine/issues/363) records the resulting direction correction. | The guardian still had to decompose the wish, author and start Tasks, and decide continuation. This falsifies the manual Task loop as the factory product but does not invalidate the leaf executor. |
 
-These limits define the current stopping boundary. A green check, PR, process exit, event stream, or agent statement is evidence for a narrower fact; none independently proves Task completion.
+These limits define current implementation evidence, not permission to redefine the product around the implemented subset. A green check, PR, process exit, event stream, or agent statement is evidence for a narrower fact; none independently proves Task or Campaign completion. Usine is not ready for another factory trial until one published goal can cause more than one dependent Task to be planned, executed through exact-SHA review, merged when authorized, and advanced without routine guardian commands while retaining Campaign usage evidence.
