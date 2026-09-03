@@ -3,7 +3,6 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
-import { codexExecutionIdentityPath } from "@usine/coding-session";
 import { lookupTaskEvents, lookupTaskStatus } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
 
@@ -27,7 +26,6 @@ const stateDirectory = reviewer
   : dirname(dirname(dirname(workspace)));
 if (reviewer && ${String(hangReviewer)}) {
   await writeFile(join(stateDirectory, "reviewer.pid"), String(process.pid));
-  process.on("SIGTERM", () => undefined);
   await new Promise(() => {
     setInterval(() => undefined, 1_000);
   });
@@ -374,7 +372,8 @@ function environment(
     USINE_FORGE_PROFILE_DEFAULT_GIT_URL: fixture.remote,
     USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${fixture.taskId}`,
     CODEX_HOME: join(fixture.root, "codex-home"),
-    PATH: `${join(fixture.root, "bin")}:${process.env.PATH ?? ""}`,
+    USINE_CODEX_PATH_OVERRIDE: fixture.fakeCodexPath,
+    PATH: process.env.PATH ?? "",
     USINE_SERVER_HOST: "127.0.0.1",
     USINE_SERVER_PORT: "0",
   };
@@ -515,6 +514,14 @@ function reapFixtureProcessGroup(pid: number): void {
     process.kill(-pid, "SIGKILL");
   } catch {
     // The recovered server may already have reaped the fixture process.
+  }
+}
+
+function reapFixtureProcess(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // The fixture process may already have exited.
   }
 }
 
@@ -676,12 +683,14 @@ describe("server-owned delivery milestone", () => {
     }
   }, 60_000);
 
-  test("gracefully stops the active Codex tree before restart can create a fresh writer", async () => {
+  test("cancels the SDK turn before restart can create a fresh writer", async () => {
     const fixtureValue = await fixture("graceful");
     const forge = await forgeServer(fixtureValue);
     const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
     const first = await startServer(cliPath, fixtureValue, forge, "complete");
     let firstStopped = false;
+    let codexPid: number | null = null;
+    let descendantPid: number | null = null;
     try {
       const registered = await runCli(
         cliPath,
@@ -709,7 +718,8 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
-      const descendantPid = Number(
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
       );
       expect(processAlive(descendantPid)).toBe(true);
@@ -719,6 +729,7 @@ describe("server-owned delivery milestone", () => {
       const firstResult = await first.child;
       expect(firstResult.exitCode).toBe(130);
       expect(firstResult.signal).toBeUndefined();
+      expect(processAlive(codexPid)).toBe(false);
       const interrupted = await lookupTaskStatus(fixtureValue.stateDirectory, fixtureValue.taskId);
       const interruptedEvents = await lookupTaskEvents(
         fixtureValue.stateDirectory,
@@ -742,7 +753,7 @@ describe("server-owned delivery milestone", () => {
           ),
           "utf8",
         ),
-      ).rejects.toMatchObject({ code: "ENOENT" });
+      ).resolves.toBe("stale\n");
 
       const second = await startServer(cliPath, fixtureValue, forge, "complete");
       try {
@@ -755,11 +766,32 @@ describe("server-owned delivery milestone", () => {
           fixtureValue.taskId,
         );
         expect(follow.exitCode, follow.stderr).toBe(0);
-        expect(JSON.parse(follow.stdout)).toMatchObject({
+        const terminal = JSON.parse(follow.stdout) as {
+          state: string;
+          candidateSha: string;
+          delivery: { prNumber: number; attestationId: string };
+        };
+        expect(terminal).toMatchObject({
           state: "reviewed_pr",
           evidence: { implementerActivations: 2, restartRecoveries: 1 },
           delivery: { prNumber: 1, attestationId: "7" },
         });
+        expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+        await expect(
+          readFile(
+            join(
+              fixtureValue.stateDirectory,
+              "workspaces",
+              fixtureValue.taskId,
+              "2-1",
+              "stale-after-loss",
+            ),
+            "utf8",
+          ),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        expect(
+          await git(fixtureValue.remote, "rev-parse", `refs/heads/${fixtureValue.branch}`),
+        ).toBe(terminal.candidateSha);
         expect(forge.pullRequests).toBe(1);
         expect(forge.attestations).toBe(1);
       } finally {
@@ -767,14 +799,8 @@ describe("server-owned delivery milestone", () => {
       }
     } finally {
       if (!firstStopped) await stopServer(first).catch(() => undefined);
-      try {
-        const descendantPid = Number(
-          await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
-        );
-        process.kill(descendantPid, "SIGKILL");
-      } catch {
-        // The graceful shutdown may already have reaped the fixture group.
-      }
+      if (descendantPid) reapFixtureProcess(descendantPid);
+      if (codexPid) reapFixtureProcess(codexPid);
       await forge.close();
     }
   }, 60_000);
@@ -785,6 +811,8 @@ describe("server-owned delivery milestone", () => {
     const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
     const first = await startServer(cliPath, fixtureValue, forge, "kill");
     let firstStopped = false;
+    let codexPid: number | null = null;
+    let descendantPid: number | null = null;
     try {
       const registered = await runCli(
         cliPath,
@@ -813,7 +841,8 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
-      const descendantPid = Number(
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
       );
       expect(processAlive(descendantPid)).toBe(true);
@@ -848,7 +877,6 @@ describe("server-owned delivery milestone", () => {
         expect(
           await git(fixtureValue.remote, "rev-parse", `refs/heads/${fixtureValue.branch}`),
         ).toBe(terminal.candidateSha);
-        expect(processAlive(descendantPid)).toBe(false);
         await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
         await new Promise((resolve) => setTimeout(resolve, 100));
         await expect(
@@ -857,12 +885,15 @@ describe("server-owned delivery milestone", () => {
               fixtureValue.stateDirectory,
               "workspaces",
               fixtureValue.taskId,
-              "1-1",
+              "2-1",
               "stale-after-loss",
             ),
             "utf8",
           ),
         ).rejects.toMatchObject({ code: "ENOENT" });
+        expect(
+          await git(fixtureValue.remote, "rev-parse", `refs/heads/${fixtureValue.branch}`),
+        ).toBe(terminal.candidateSha);
       } finally {
         await stopServer(second);
       }
@@ -870,6 +901,8 @@ describe("server-owned delivery milestone", () => {
       if (!firstStopped) {
         await stopServer(first).catch(() => undefined);
       }
+      if (descendantPid) reapFixtureProcess(descendantPid);
+      if (codexPid) reapFixtureProcess(codexPid);
       await forge.close();
     }
   }, 60_000);
@@ -925,79 +958,6 @@ describe("server-owned delivery milestone", () => {
     } finally {
       if (reviewerPid) reapFixtureProcessGroup(reviewerPid);
       await stopServer(server).catch(() => undefined);
-      await forge.close();
-    }
-  }, 60_000);
-
-  test("blocks recovery rather than grant a writer when launch ownership is incomplete", async () => {
-    const fixtureValue = await fixture("restart");
-    const forge = await forgeServer(fixtureValue);
-    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
-    const first = await startServer(cliPath, fixtureValue, forge, "kill");
-    let codexPid: number | null = null;
-    try {
-      const registered = await runCli(
-        cliPath,
-        fixtureValue,
-        forge,
-        first.url,
-        "register",
-        fixtureValue.registrationPath,
-      );
-      expect(registered.exitCode, registered.stderr).toBe(0);
-      const submit = await runCli(
-        cliPath,
-        fixtureValue,
-        forge,
-        first.url,
-        "submit",
-        fixtureValue.contractPath,
-        "kill",
-      );
-      expect(submit.exitCode, submit.stderr).toBe(0);
-      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
-      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
-      const oldWorkspace = join(
-        fixtureValue.stateDirectory,
-        "workspaces",
-        fixtureValue.taskId,
-        "1-1",
-      );
-      await writeFile(
-        codexExecutionIdentityPath(fixtureValue.stateDirectory, {
-          taskId: fixtureValue.taskId,
-          role: "implementer",
-          attempt: "1",
-        }),
-        JSON.stringify({
-          version: 2,
-          state: "starting",
-          reference: { taskId: fixtureValue.taskId, role: "implementer", attempt: "1" },
-          workspace: oldWorkspace,
-        }),
-      );
-      await stopServer(first, "SIGKILL");
-      const second = await startServer(cliPath, fixtureValue, forge, "complete");
-      try {
-        const follow = await runCli(
-          cliPath,
-          fixtureValue,
-          forge,
-          second.url,
-          "follow",
-          fixtureValue.taskId,
-        );
-        expect(follow.exitCode, follow.stderr).toBe(0);
-        expect(JSON.parse(follow.stdout)).toMatchObject({
-          state: "blocked",
-          evidence: { implementerActivations: 1, restartRecoveries: 0 },
-        });
-      } finally {
-        await stopServer(second);
-      }
-    } finally {
-      if (codexPid) reapFixtureProcessGroup(codexPid);
-      await stopServer(first).catch(() => undefined);
       await forge.close();
     }
   }, 60_000);

@@ -735,6 +735,7 @@ async function executeWithServices(options: {
   const session = new CodexCodingSession(undefined, {
     environment: policy.workerEnvironment,
     adapterSelectionEnvironment: policy.adapterSelectionEnvironment,
+    codexPathOverride: policy.codexPathOverride,
     executionStateDirectory: policy.stateDirectory,
     roleOutputTransform: policy.roleOutputTransform,
     sessionArchive: policy.sessionArchive,

@@ -123,6 +123,7 @@ describe("runtime composition", () => {
     const policy = runtimePolicyFromEnvironment(
       {
         PATH: "/portable/bin",
+        USINE_CODEX_PATH_OVERRIDE: "/portable/codex",
         LANG: "en_US.UTF-8",
         OPENAI_API_KEY: "coordinator-secret",
         GITHUB_TOKEN: "delivery-secret",
@@ -165,7 +166,9 @@ describe("runtime composition", () => {
         gitUrl: "http://127.0.0.1:8787/owner/repo.git",
       },
     });
+    expect(policy.codexPathOverride).toBe("/portable/codex");
     expect(policy.workerEnvironment).toMatchObject({ CI: "true", PATH: "/portable/bin" });
+    expect(policy.workerEnvironment).not.toHaveProperty("USINE_CODEX_PATH_OVERRIDE");
     expect(policy.workerEnvironment).not.toHaveProperty("OPENAI_API_KEY");
     expect(policy.workerEnvironment).not.toHaveProperty("GITHUB_TOKEN");
     expect(policy.workerEnvironment).not.toHaveProperty("USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN");

@@ -7,7 +7,6 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { codexAdapterConfig } from "./codex-adapter-config.js";
-import { createCodexLauncher } from "./codex-execution.js";
 import {
   classifyAdapterFailure,
   CodingSessionInterruption,
@@ -22,16 +21,23 @@ import {
 } from "./coding-session-adapter.js";
 import { safeObservationLabel } from "./coding-session-policy.js";
 
+interface CodexSdkAdapterOptions {
+  readonly clientFactory?: () => Promise<Codex>;
+  readonly codexPathOverride?: string;
+}
+
 /** The official SDK lifecycle, kept behind the Coding Session port. */
 export class CodexSdkAdapter implements CodingSessionAdapter {
   readonly name = "sdk" as const;
 
-  constructor(private readonly clientFactory?: () => Promise<Codex>) {}
+  constructor(private readonly options: CodexSdkAdapterOptions = {}) {}
 
   async run(context: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult> {
     let client: Codex;
     try {
-      client = this.clientFactory ? await this.clientFactory() : await this.createClient(context);
+      client = this.options.clientFactory
+        ? await this.options.clientFactory()
+        : await this.createClient(context);
     } catch (error) {
       throw new CodingSessionInterruption("startup", classifyAdapterFailure(error));
     }
@@ -68,22 +74,11 @@ export class CodexSdkAdapter implements CodingSessionAdapter {
     const options: CodexOptions = {
       env: context.environment,
       config: codexAdapterConfig(context.profile, context.mcpServer),
+      ...(this.options.codexPathOverride
+        ? { codexPathOverride: this.options.codexPathOverride }
+        : {}),
     };
-    if (!context.executionStateDirectory) return new Codex(options);
-    const launcher = await createCodexLauncher(
-      context.executionStateDirectory,
-      context.workspace,
-      context.execution,
-    );
-    return new Codex({
-      ...options,
-      codexPathOverride: launcher.launcherPath,
-      env: {
-        ...options.env,
-        USINE_CODING_SESSION_IDENTITY_PATH: launcher.identityPath,
-        USINE_CODING_SESSION_WORKSPACE: context.workspace,
-      },
-    });
+    return new Codex(options);
   }
 }
 

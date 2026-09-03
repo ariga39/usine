@@ -30,6 +30,8 @@ const defaultRolePolicies = {
 
 export interface RuntimePolicy {
   stateDirectory: string;
+  /** Host-private SDK executable override; never projected to provider children. */
+  codexPathOverride?: string;
   roles: {
     implementer: RolePolicy;
     reviewer: RolePolicy;
@@ -107,6 +109,7 @@ export function runtimePolicyFromEnvironment(
   const sessionArchive = sessionArchiveOptionsFromEnvironment(environment, stateDirectory);
   return {
     stateDirectory,
+    codexPathOverride: environment.USINE_CODEX_PATH_OVERRIDE,
     roles,
     forge,
     githubRead,
