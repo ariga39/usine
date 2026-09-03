@@ -1,10 +1,10 @@
 # Usine
 
-Usine is a local TypeScript and Node.js coordinator for authorized software-delivery tasks. It admits a committed Task Contract, gives one Repository writer an isolated implementation workspace, runs project checks, obtains an independent exact-SHA review, and delivers through a credential-scoped GitHub capability. Durable Task facts, rather than process state or agent prose, decide recovery and completion.
+Usine is a local TypeScript and Node.js software-delivery coordinator. Its product direction is to turn one published Goal Contract into accepted Repository outcomes without requiring a person to decompose, start, review, merge, and advance every Task. Durable Campaign and Task facts, rather than process state or agent prose, decide recovery and completion.
 
 ## Supported boundary
 
-The current product path is intentionally bounded:
+The implemented Task delivery leaf is intentionally bounded:
 
 - one local server and a finite active-Task capacity;
 - one writer lease per registered Repository;
@@ -13,7 +13,7 @@ The current product path is intentionally bounded:
 - explicit Task Contract delivery authority, with merge authority granted only by `authorization.merge: true`;
 - transient live observation plus durable Task-local event history.
 
-Usine does not currently provide a general task planner, concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, or a provider router. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+This leaf does not yet implement Campaign admission, Requirement Proxy/Planner execution, Outcome state, or automatic frontier advancement. Those are required product behavior, not an external guardian's responsibility. Concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Quick start
 
@@ -25,7 +25,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm build
 ```
 
-For host setup, Repository registration, Task Contract submission, server operation, observation, and bounded retry, follow [`docs/AGENT_QUICKSTART.md`](docs/AGENT_QUICKSTART.md).
+For host setup, Repository registration, current leaf Task submission, server operation, observation, and bounded retry, follow [`docs/AGENT_QUICKSTART.md`](docs/AGENT_QUICKSTART.md). This is not yet the wish-to-outcome Campaign entry path.
 
 ## Documentation map
 
