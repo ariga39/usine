@@ -546,6 +546,7 @@ export class CodexCodingSession {
               (clientFactory
                 ? new CodexSdkAdapter(() => clientFactory(effectiveRequest))
                 : this.sdkAdapter));
+      effectiveProfile = { ...effectiveProfile, adapter: adapter.name };
       archive?.setAdapter(adapter.name);
       const observeUsage = async (
         source: "provider" | "role_output_normalizer",
@@ -592,14 +593,12 @@ export class CodexCodingSession {
         },
         onUsage: (observation) => observeUsage("provider", observation),
       });
-      effectiveProfile = {
-        ...effectiveProfile,
-        adapter: adapter.name,
-        actualModel: result.actualModel ? safeModelIdentity(result.actualModel.model) : null,
-        actualModelProvider: result.actualModel
-          ? safeModelIdentity(result.actualModel.provider)
-          : null,
-      };
+      if (result.actualModel)
+        effectiveProfile = {
+          ...effectiveProfile,
+          actualModel: safeModelIdentity(result.actualModel.model),
+          actualModelProvider: safeModelIdentity(result.actualModel.provider),
+        };
       phase = "output";
       archive?.setPhase("output");
       archive?.setSessionId(result.sessionId);
