@@ -7,6 +7,7 @@ import {
   type ApiEventScope,
   type ApiTaskResource,
   type ApiTaskSubmission,
+  type ApiCampaignPublication,
 } from "@usine/runtime";
 import {
   deriveUsageReportFromInvocations,
@@ -24,10 +25,12 @@ import {
   type UsageReport,
   type UsageReportPage,
   type UsageReportScope,
+  type CampaignResource,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
 export type TaskSubmission = ApiTaskSubmission;
+export type CampaignPublication = ApiCampaignPublication;
 
 export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string {
   const explicit = environment.USINE_SERVER_URL?.trim();
@@ -105,6 +108,29 @@ export async function submitTask(
 ): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
   return normalizeTaskResource(await runRequest(client.tasks.submit({ payload: submission })));
+}
+
+export async function publishCampaign(
+  serverUrl: string,
+  publication: CampaignPublication,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  const campaign = await runRequest(client.campaigns.publish({ payload: publication }));
+  return campaign;
+}
+
+export async function getCampaign(
+  serverUrl: string,
+  campaignId: string,
+): Promise<CampaignResource | null> {
+  const client = await clientFor(serverUrl);
+  try {
+    const campaign = await runRequest(client.campaigns.get({ params: { campaignId } }));
+    return campaign;
+  } catch (error) {
+    if (error instanceof ServerClientError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
@@ -431,6 +457,8 @@ function statusForCode(code: string | undefined): number {
     case "active_task_capacity":
       return 429;
     case "task_retry_conflict":
+      return 409;
+    case "campaign_content_conflict":
       return 409;
     case "task_state_quarantined":
       return 503;

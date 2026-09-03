@@ -8,6 +8,8 @@ import {
   taskListPageSchema,
   taskResourceSchema,
   usageReportPageSchema,
+  campaignResourceSchema,
+  type CampaignResource,
   type RepositoryResource,
   type ServerHealth,
   type ServerSnapshot,
@@ -44,6 +46,11 @@ const retryConflictError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(false),
   state: Schema.String,
+}).pipe(HttpApiSchema.status(409));
+const campaignContentConflictError = Schema.Struct({
+  code: Schema.Literal("campaign_content_conflict"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
 }).pipe(HttpApiSchema.status(409));
 const quarantineError = Schema.Struct({
   taskId: Schema.String,
@@ -108,6 +115,7 @@ const taskSubmissionSchema = Schema.Struct({
   contractPath: Schema.String,
   repositoryId: Schema.optional(Schema.String),
 });
+const campaignPublicationSchema = Schema.Struct({ contractPath: Schema.String });
 const eventEnvelopeSchema = Schema.StructWithRest(
   Schema.Struct({
     taskId: Schema.String,
@@ -138,6 +146,7 @@ const allErrors = [
   notFoundError,
   capacityError,
   retryConflictError,
+  campaignContentConflictError,
   quarantineError,
   forgeError,
   serverError,
@@ -216,6 +225,19 @@ const UsageApi = HttpApiGroup.make("usage").add(
   }),
 );
 
+const CampaignApi = HttpApiGroup.make("campaigns").add(
+  HttpApiEndpoint.post("publish", "/v1/campaigns", {
+    payload: campaignPublicationSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.get("get", "/v1/campaigns/:campaignId", {
+    params: { campaignId: Schema.String },
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
+);
+
 const EventApi = HttpApiGroup.make("events").add(
   HttpApiEndpoint.get("wait", "/v1/events/wait", {
     query: waitQuery,
@@ -239,6 +261,7 @@ export const UsineApi = HttpApi.make("usine-loopback-api")
   .add(RepositoryApi)
   .add(TaskApi)
   .add(UsageApi)
+  .add(CampaignApi)
   .add(EventApi);
 
 export type ApiEventScope = Schema.Schema.Type<typeof scopeSchema>;
@@ -250,6 +273,8 @@ export type ApiError = Schema.Schema.Type<(typeof allErrors)[number]>;
 export type ApiEventStreamValue = Schema.Schema.Type<typeof eventStreamDataSchema>;
 export type ApiUsageQuery = Schema.Schema.Type<typeof usageQuerySchema>;
 export type ApiUsageReport = UsageReportPage;
+export type ApiCampaignPublication = Schema.Schema.Type<typeof campaignPublicationSchema>;
+export type ApiCampaignResource = Schema.Schema.Type<typeof campaignResourceSchema>;
 
 export function encodeApiWaitResponse(value: ApiEventEnvelope | null): string {
   return JSON.stringify(Schema.encodeUnknownSync(Schema.NullOr(eventEnvelopeSchema))(value));
@@ -283,6 +308,8 @@ export {
   eventStreamSchema,
   repositoryRegistrationSchema,
   taskSubmissionSchema,
+  campaignPublicationSchema,
+  campaignResourceSchema,
   validationError,
   notFoundError,
   capacityError,
@@ -300,4 +327,5 @@ export type {
   TaskEventPage,
   TaskListPage,
   TaskResource,
+  CampaignResource,
 };

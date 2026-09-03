@@ -27,6 +27,13 @@ import {
   isTerminalState,
 } from "@usine/task-authority";
 import {
+  CampaignContentConflictError,
+  GoalContractInputError,
+  lookupCampaign,
+  publishCampaign,
+  readGoalContract,
+} from "./campaign.js";
+import {
   admitTask,
   executeAdmittedTask,
   inspectRepository,
@@ -542,6 +549,28 @@ function createApiLayer(options: {
         }),
     }),
   );
+  const campaignHandlers = HttpApiBuilder.group(UsineApi, "campaigns", (handlers) =>
+    handlers.handleAll({
+      publish: ({ payload }) =>
+        apiEffect(async () => {
+          let contract: Awaited<ReturnType<typeof readGoalContract>>;
+          try {
+            contract = await readGoalContract(payload.contractPath);
+          } catch (error) {
+            if (error instanceof GoalContractInputError)
+              throw new ServerValidationError(error.message);
+            throw error;
+          }
+          return publishCampaign(stateDirectory, contract.rawContract);
+        }),
+      get: ({ params }) =>
+        apiEffect(async () => {
+          const campaign = await lookupCampaign(stateDirectory, params.campaignId);
+          if (!campaign) throw new ServerNotFoundError("campaign not found");
+          return campaign;
+        }),
+    }),
+  );
   const eventHandlers = HttpApiBuilder.group(UsineApi, "events", (handlers) =>
     handlers.handleAll({
       wait: ({ query }) => waitApiEventResponse(stateDirectory, options.eventHub, query),
@@ -556,6 +585,7 @@ function createApiLayer(options: {
         repositoryHandlers,
         taskHandlers,
         usageHandlers,
+        campaignHandlers,
         eventHandlers,
       ),
     ),
@@ -582,6 +612,8 @@ function apiError(error: unknown): ApiError {
       retryable: false,
       state: error.state,
     };
+  if (error instanceof CampaignContentConflictError)
+    return { code: error.code, message: error.message, retryable: false };
   if (isTaskStateQuarantinedError(error)) {
     if (error.taskId !== undefined)
       return { taskId: error.taskId, error: "task_state_quarantined" };

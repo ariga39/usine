@@ -4,7 +4,7 @@ This guide is for an agent operating Usine for an authorized project task. It is
 
 Usine runs a local server. The server owns admission, execution, recovery, and public resource projections. The CLI is a client of that server. A submitting CLI process may exit after admission; the server continues the Task.
 
-This guide operates the implemented single-Task delivery leaf. It does not yet accept a Wish or published Goal Contract, invoke Requirement Proxy/Planner roles, maintain an Outcome frontier, or advance successor Tasks. Do not use repeated manual `submit` commands as a substitute for the Campaign product behavior defined in [DESIGN](DESIGN.md).
+This guide operates the implemented single-Task delivery leaf and the first Campaign entry path. It does not invoke Requirement Proxy/Planner roles, maintain a Task frontier, or advance successor Tasks. Do not use repeated manual `submit` commands as a substitute for the Campaign product behavior defined in [DESIGN](DESIGN.md).
 
 ## 1. Prerequisites and build
 
@@ -148,7 +148,51 @@ export USINE_ROLE_OUTPUT_MODEL="<ROLE_OUTPUT_MODEL>"
 
 The API key remains in the coordinator host process. It is not passed to the worker or stored in Task facts.
 
-## 3. Register a Repository
+## 3. Publish a Goal Contract
+
+The Campaign entry path accepts a committed Goal Contract only when its `authority.publish` field is explicitly `true`. It reads the tracked blob from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. A role response or draft without publication authority cannot create a Campaign.
+
+The current contract shape is:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "<GOAL_ID>",
+  "version": 1,
+  "objective": "<AUTHORIZED_OBJECTIVE>",
+  "outcomes": [
+    {
+      "id": "<OUTCOME_ID>",
+      "title": "<USER_OBSERVABLE_OUTCOME>",
+      "acceptance": ["<ACCEPTANCE_EVIDENCE>"],
+      "dependsOn": [],
+      "parentId": null
+    }
+  ],
+  "authority": {
+    "source": "<AUTHORITY_SOURCE>",
+    "publish": true,
+    "delivery": false,
+    "merge": false
+  },
+  "budget": {
+    "maxElapsedMs": 3600000,
+    "maxTasks": 10,
+    "maxPlannerActivations": 1
+  }
+}
+```
+
+Commit the file, then publish and read its durable Campaign through the server:
+
+```sh
+node apps/cli/dist/cli.mjs campaign publish "<GOAL_CONTRACT_FILE>" --json
+node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
+```
+
+Repeating publication of the same tracked bytes returns the same Campaign. Reusing the Goal ID and version with different committed bytes is rejected and does not rewrite the stored facts.
+
+## 4. Register a Repository
 
 Create a host-private JSON file and replace its placeholders. The registration schema is strict; the fields below are the current CLI shape. `githubReadProfile` may be `null` when the optional read capability is not configured.
 
@@ -194,7 +238,7 @@ Registration output is JSON. Confirm the public projection without expecting pat
 node apps/cli/dist/cli.mjs repository get "<REPOSITORY_ID>" --json
 ```
 
-## 4. Write and submit a Task Contract
+## 5. Write and submit a Task Contract
 
 The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. The authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`.
 
@@ -252,7 +296,7 @@ The submitted Task Contract must be a regular file no larger than 1,048,576 byte
 
 `submit` returns the admitted Task resource as JSON. The server verifies that the contract is a committed file in the authorized Repository, is unchanged, and has an ancestor `baseSha`. Re-submitting the same Task ID returns its existing durable facts rather than creating a second Task.
 
-## 5. Check health and observe the Task
+## 6. Check health and observe the Task
 
 The canonical read commands are:
 
