@@ -38,7 +38,7 @@ export const repositories = sqliteTable("repositories", {
     .notNull(),
 });
 
-/** Durable Planner proposal facts owned by Campaign coordination. */
+/** Durable Campaign proposal facts owned by Campaign coordination. */
 export const campaignProposals = sqliteTable(
   "campaign_proposals",
   {
@@ -136,7 +136,7 @@ export const campaigns = sqliteTable(
   }),
 );
 
-/** Guardian-authored Campaign plan and decision touches. */
+/** Guardian-authored Campaign decision touches; plan touches are projected from Campaign facts. */
 export const campaignTouches = sqliteTable(
   "campaign_touches",
   {

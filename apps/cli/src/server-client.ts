@@ -9,6 +9,7 @@ import {
   type ApiTaskSubmission,
   type ApiCampaignPublication,
   type ApiCampaignProposalSubmission,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
 } from "@usine/runtime";
 import {
   deriveUsageReportFromInvocations,
@@ -148,7 +149,7 @@ export async function proposeCampaign(
 export async function campaignEvidence(
   serverUrl: string,
   campaignId: string,
-  limit = 200,
+  limit = MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
 ): Promise<CampaignEvidencePage | null> {
   validateLimit(limit);
   const client = await clientFor(serverUrl);

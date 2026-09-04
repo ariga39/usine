@@ -1,324 +1,306 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
-import { lookupCampaignEvidence } from "@usine/runtime";
 import {
-  applyMigrations,
-  campaignProposals,
-  campaignTouches,
-  campaigns,
-  goalContractSchema,
-  openSqliteDatabase,
-  TaskAuthority,
-  type TaskContract,
-} from "@usine/task-authority";
+  CampaignEvidenceCursorError,
+  lookupCampaignEvidence,
+  startUsineServer,
+} from "@usine/runtime";
+import {
+  campaignEvidence,
+  proposeCampaign,
+  publishCampaign,
+  recordCampaignDecisionTouch,
+  registerRepository,
+} from "../apps/cli/src/server-client.js";
 
-const handles: Array<{ close: () => void }> = [];
+const servers: Array<{ close: () => Promise<void> }> = [];
 
-afterEach(() => {
-  while (handles.length > 0) handles.pop()?.close();
+afterEach(async () => {
+  while (servers.length > 0) await servers.pop()?.close();
 });
 
-const goal = goalContractSchema.parse({
-  id: "evidence-goal",
-  version: 1,
-  objective: "Measure the campaign",
-  outcomes: [
-    { id: "outcome-one", title: "First outcome", acceptance: ["first"] },
-    { id: "outcome-two", title: "Second outcome", acceptance: ["second"] },
-  ],
-  authority: {
-    source: "user:evidence",
-    publish: true,
-    delivery: true,
-    merge: false,
-    repositories: ["repo-one", "repo-two"],
-    effects: ["github"],
-  },
-  budget: {
-    maxElapsedMs: 10_000,
-    maxTasks: 2,
-    maxPlannerActivations: 1,
-    maxImplementerActivations: 2,
-    maxReviewCycles: 2,
-  },
-});
-
-function contract(taskId: string, outcomeId: string, repositoryId: string): TaskContract {
+function goalContract() {
   return {
-    id: taskId,
-    repositoryId,
-    baseSha: "a".repeat(40),
-    instructions: "measure",
-    acceptance: ["measure"],
-    nonGoals: [],
-    budget: { maxImplementerActivations: 2, maxReviewCycles: 2, maxElapsedMs: 10_000 },
-    authorization: { source: "user:evidence", delivery: true },
-    delivery: { branch: `agent/${taskId}`, title: "Measure", body: "Measure" },
-    campaign: {
-      campaignId: "evidence-goal:v1",
-      goalId: "evidence-goal",
-      goalVersion: 1,
-      outcomeId,
+    schemaVersion: 1,
+    id: "evidence-goal",
+    version: 1,
+    objective: "Measure the campaign",
+    outcomes: [
+      { id: "outcome-one", title: "First outcome", acceptance: ["first"] },
+      { id: "outcome-two", title: "Second outcome", acceptance: ["second"] },
+    ],
+    authority: {
+      source: "user:evidence",
+      publish: true,
+      delivery: true,
+      merge: false,
+      repositories: ["repo-one"],
+      effects: ["github"],
+    },
+    budget: {
+      maxElapsedMs: 60_000,
+      maxTasks: 3,
+      maxPlannerActivations: 1,
+      maxImplementerActivations: 2,
+      maxReviewCycles: 2,
     },
   };
 }
 
-async function seedTask(
-  database: ReturnType<typeof openSqliteDatabase>["database"],
-  taskId: string,
-  outcomeId: string,
-  repositoryId: string,
-  usage: {
-    inputTokens: number;
-    cachedInputTokens: number;
-    uncachedInputTokens: number;
-    outputTokens: number;
-  } | null,
-): Promise<void> {
-  const taskContract = contract(taskId, outcomeId, repositoryId);
-  const authority = new TaskAuthority(database);
-  await authority.admit({
-    contract: taskContract,
-    contractHash: "b".repeat(64),
-    repositoryIdentity: `owner/${repositoryId}`,
-    repository: {
-      id: repositoryId,
-      path: "/tmp/repository",
-      owner: "owner",
-      name: repositoryId,
-      baseBranch: "main",
-      implementerProfile: "implementer",
-      reviewerProfile: "reviewer",
-      forgeProfile: "forge",
-      githubReadProfile: null,
-      projectCheck: { command: "true", timeoutMs: 1_000 },
-      gitAuthor: { name: "Usine", email: "usine@example.test" },
-    },
-    deadlineEpochMs: 10_000,
-  });
-  await authority.appendObservation(taskId, {
-    eventId: `${taskId}-implementer`,
-    occurredAtEpochMs: 100,
-    data: {
-      type: "coding_session_completed",
-      role: "implementer",
-      activation: 1,
-      outcome: "succeeded",
-      sessionId: `${taskId}-implementer`,
-      effectiveProfile: {
-        profileName: "implementer",
-        configSha256: "c".repeat(64),
-        adapter: "sdk",
-        model: "model-one",
-        modelProvider: "provider-one",
-        actualModel: "observed-one",
-        actualModelProvider: "provider-one",
-        reasoningEffort: "high",
-        developerInstructionsSha256: null,
-        serviceTier: "default",
-      },
-      usage,
-    },
-  });
-  await authority.appendObservation(taskId, {
-    eventId: `${taskId}-reviewer`,
-    occurredAtEpochMs: 120,
-    data: {
-      type: "coding_session_completed",
-      role: "reviewer",
-      activation: 1,
-      reviewCycle: 1,
-      outcome: "succeeded",
-      sessionId: `${taskId}-reviewer`,
-      effectiveProfile: {
-        profileName: "reviewer",
-        configSha256: "d".repeat(64),
-        adapter: "app-server",
-        model: "review-model",
-        modelProvider: "review-provider",
-        reasoningEffort: "medium",
-        developerInstructionsSha256: null,
-        serviceTier: "default",
-      },
-      usage: { inputTokens: 0, outputTokens: 0 },
-    },
-  });
-  const reserved = await authority.reserveActivation(taskId, 2);
-  const candidate = await authority.recordCandidate(
-    { taskId, revision: reserved.result.revision },
-    { sha: "e".repeat(40), baseSha: taskContract.baseSha, fence: reserved.activation },
-  );
-  const checked = await authority.recordCheck(
-    { taskId, revision: candidate.revision },
-    {
-      sha: candidate.candidateSha!,
-      status: "passed",
-      command: "true",
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    },
-  );
-  const requested = await authority.recordReview(
-    { taskId, revision: checked.revision },
-    { sha: checked.candidateSha!, verdict: "changes_requested", summary: "", findings: ["fix"] },
-  );
-  await authority.recordRepairBatch({ taskId, revision: requested.revision });
-  const recovered = await authority.reserveActivation(taskId, 2);
-  const repairedCandidate = await authority.recordCandidate(
-    { taskId, revision: recovered.result.revision },
-    { sha: "f".repeat(40), baseSha: candidate.candidateSha!, fence: recovered.activation },
-  );
-  const repairedCheck = await authority.recordCheck(
-    { taskId, revision: repairedCandidate.revision },
-    {
-      sha: repairedCandidate.candidateSha!,
-      status: "passed",
-      command: "true",
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    },
-  );
-  const reviewed = await authority.recordReview(
-    { taskId, revision: repairedCheck.revision },
-    { sha: repairedCheck.candidateSha!, verdict: "approved", summary: "", findings: [] },
-  );
-  await authority.recordDelivery(
-    { taskId, revision: reviewed.revision },
-    {
-      sha: reviewed.candidateSha!,
-      effect: "github",
-      prNumber: taskId === "task-one" ? 41 : 42,
-      url: `https://github.com/owner/${repositoryId}/pull/1`,
-      attestationId: "attestation",
-      merge: null,
-    },
-  );
+function proposal(proposalId: string, outcomeId: string, effects = ["github"]) {
+  return {
+    proposalId,
+    outcomeId,
+    dependsOn: [],
+    repositoryId: "repo-one",
+    instructions: `Implement ${proposalId}.`,
+    acceptance: [`${proposalId} is complete.`],
+    nonGoals: [],
+    effects,
+    budget: { maxImplementerActivations: 2, maxReviewCycles: 2, maxElapsedMs: 10_000 },
+    merge: false,
+  };
 }
 
-test("projects one deterministic Campaign evidence report across Tasks and providers", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
-  const path = join(directory, "usine.sqlite");
-  await applyMigrations(path);
-  const handle = openSqliteDatabase(path);
-  handles.push(handle);
-  await handle.database.insert(campaigns).values({
-    campaignId: "evidence-goal:v1",
-    goalId: goal.id,
-    goalVersion: goal.version,
-    contractHash: "a".repeat(64),
-    contract: goal,
-    status: "planning",
-    publicationAuthorized: true,
-    superseded: false,
-    revision: 1,
-  });
-  await handle.database.insert(campaignProposals).values([
-    {
-      campaignId: "evidence-goal:v1",
-      proposalId: "proposal-one",
-      sequence: 1,
-      outcomeId: "outcome-one",
-      proposal: {},
-      status: "ready",
-      blocker: null,
-      readyBaseSha: "a".repeat(40),
-      readyRepositoryRevision: 1,
-    },
-    {
-      campaignId: "evidence-goal:v1",
-      proposalId: "proposal-blocked",
-      sequence: 2,
-      outcomeId: "outcome-two",
-      proposal: {},
-      status: "blocked",
-      blocker: "blocked",
-      readyBaseSha: null,
-      readyRepositoryRevision: null,
-    },
-    {
-      campaignId: "evidence-goal:v1",
-      proposalId: "proposal-rejected",
-      sequence: 3,
-      outcomeId: "outcome-two",
-      proposal: {},
-      status: "rejected",
-      blocker: "proposal was rejected",
-      readyBaseSha: null,
-      readyRepositoryRevision: null,
-    },
-  ]);
-  await handle.database.insert(campaignTouches).values([
-    {
-      campaignId: "evidence-goal:v1",
-      touchId: "plan:goal",
-      goalVersion: 1,
-      type: "plan",
-      occurredAtEpochMs: 1,
-    },
-    {
-      campaignId: "evidence-goal:v1",
-      touchId: "decision:blocked",
-      goalVersion: 1,
-      type: "decision",
-      occurredAtEpochMs: 2,
-    },
-  ]);
-  await seedTask(handle.database, "task-one", "outcome-one", "repo-one", null);
-  await seedTask(handle.database, "task-two", "outcome-two", "repo-two", {
-    inputTokens: 12,
-    cachedInputTokens: 3,
-    uncachedInputTokens: 9,
-    outputTokens: 7,
-  });
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
+  const stateDirectory = join(root, "state");
+  await mkdir(stateDirectory);
+  const contractPath = join(root, "goal.json");
+  await execa("git", ["init", "--initial-branch=main"], { cwd: root });
+  await execa("git", ["config", "user.name", "Test"], { cwd: root });
+  await execa("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(contractPath, JSON.stringify(goalContract()));
+  await execa("git", ["add", "goal.json"], { cwd: root });
+  await execa("git", ["commit", "-m", "authorize campaign"], { cwd: root });
 
-  const first = await lookupCampaignEvidence(directory, "evidence-goal:v1", {
+  let executions = 0;
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const environment: NodeJS.ProcessEnv = {
+    USINE_STATE_DIR: stateDirectory,
+    USINE_GOAL_PUBLICATION_SOURCE: "user:evidence",
+    USINE_ACTIVE_TASK_CAPACITY: "1",
+    USINE_FORGE_PROFILE_FORGE_APP_SLUG: "test-app",
+    USINE_FORGE_PROFILE_FORGE_TEST_TOKEN: "test-token",
+    USINE_FORGE_PROFILE_FORGE_API_URL: "http://127.0.0.1:9",
+    USINE_FORGE_PROFILE_FORGE_REPOSITORY: "example/repo-one",
+  };
+  const server = await startUsineServer({
+    environment,
+    host: "127.0.0.1",
+    port: 0,
+    execute: async ({ authority, result, contract }) => {
+      const index = executions++;
+      const implementationUsage =
+        index === 0
+          ? { inputTokens: 12, cachedInputTokens: 3, uncachedInputTokens: 9, outputTokens: 7 }
+          : null;
+      await authority.appendObservation(result.taskId, {
+        eventId: `${result.taskId}-implementer`,
+        occurredAtEpochMs: 100 + index * 100,
+        data: {
+          type: "coding_session_completed",
+          role: "implementer",
+          activation: 1,
+          outcome: "succeeded",
+          sessionId: `${result.taskId}-implementer`,
+          effectiveProfile: {
+            profileName: "implementer",
+            configSha256: "c".repeat(64),
+            adapter: index === 0 ? "sdk" : "opencode2",
+            model: "configured-model",
+            modelProvider: "configured-provider",
+            actualModel: index === 0 ? "observed-one" : "observed-two",
+            actualModelProvider: index === 0 ? "provider-one" : "provider-two",
+            reasoningEffort: "high",
+            developerInstructionsSha256: null,
+            serviceTier: "default",
+          },
+          usage: implementationUsage,
+        },
+      });
+      await authority.appendObservation(result.taskId, {
+        eventId: `${result.taskId}-reviewer`,
+        occurredAtEpochMs: 120 + index * 100,
+        data: {
+          type: "coding_session_completed",
+          role: "reviewer",
+          activation: 1,
+          reviewCycle: 1,
+          outcome: "succeeded",
+          sessionId: `${result.taskId}-reviewer`,
+          effectiveProfile: {
+            profileName: "reviewer",
+            configSha256: "d".repeat(64),
+            adapter: index === 0 ? "app-server" : "sdk",
+            model: "review-model",
+            modelProvider: "review-provider",
+            actualModel: "review-observed",
+            actualModelProvider: "review-observed-provider",
+            reasoningEffort: "medium",
+            developerInstructionsSha256: null,
+            serviceTier: "default",
+          },
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+      });
+      const reserved = await authority.reserveActivation(
+        result.taskId,
+        contract.budget.maxImplementerActivations,
+      );
+      const firstSha = index === 0 ? "e".repeat(40) : "1".repeat(40);
+      const candidate = await authority.recordCandidate(
+        { taskId: result.taskId, revision: reserved.result.revision },
+        { sha: firstSha, baseSha: contract.baseSha, fence: reserved.activation },
+      );
+      const checked = await authority.recordCheck(
+        { taskId: result.taskId, revision: candidate.revision },
+        { sha: firstSha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+      );
+      const reviewed = await authority.recordReview(
+        { taskId: result.taskId, revision: checked.revision },
+        {
+          sha: firstSha,
+          verdict: index === 0 ? "changes_requested" : "approved",
+          summary: "fixture review",
+          findings: index === 0 ? ["repair"] : [],
+        },
+      );
+      let final = reviewed;
+      if (index === 0) {
+        await authority.recordRepairBatch({ taskId: result.taskId, revision: reviewed.revision });
+        const repaired = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        const repairedCandidate = await authority.recordCandidate(
+          { taskId: result.taskId, revision: repaired.result.revision },
+          { sha: "f".repeat(40), baseSha: firstSha, fence: repaired.activation },
+        );
+        const repairedCheck = await authority.recordCheck(
+          { taskId: result.taskId, revision: repairedCandidate.revision },
+          {
+            sha: "f".repeat(40),
+            status: "passed",
+            command: "true",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        );
+        final = await authority.recordReview(
+          { taskId: result.taskId, revision: repairedCheck.revision },
+          { sha: "f".repeat(40), verdict: "approved", summary: "repaired", findings: [] },
+        );
+      }
+      const delivered = await authority.recordDelivery(
+        { taskId: result.taskId, revision: final.revision },
+        {
+          sha: final.candidateSha!,
+          effect: "github",
+          prNumber: 41 + index,
+          url: `https://github.com/example/repo-one/pull/${41 + index}`,
+          attestationId: `attestation-${index}`,
+          merge: null,
+        },
+      );
+      if (executions === 2) finish();
+      return delivered;
+    },
+  });
+  servers.push(server);
+  await registerRepository(server.url, {
+    id: "repo-one",
+    path: root,
+    owner: "example",
+    name: "repo-one",
+    baseBranch: "main",
+    implementerProfile: "implementer",
+    reviewerProfile: "reviewer",
+    forgeProfile: "forge",
+    projectCheck: { command: "true", timeoutMs: 1_000 },
+    gitAuthor: { name: "Test", email: "test@example.invalid" },
+  });
+  return { stateDirectory, contractPath, server, finished };
+}
+
+test("projects public Campaign writes into deterministic evidence across Tasks and providers", async () => {
+  const { stateDirectory, contractPath, server, finished } = await fixture();
+  const published = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, published.campaignId, proposal("proposal-one", "outcome-one"));
+  await proposeCampaign(server.url, published.campaignId, proposal("proposal-two", "outcome-two"));
+  await proposeCampaign(
+    server.url,
+    published.campaignId,
+    proposal("proposal-blocked", "outcome-two", ["shell"]),
+  );
+  await recordCampaignDecisionTouch(server.url, published.campaignId, "blocked-review");
+  await recordCampaignDecisionTouch(server.url, published.campaignId, "blocked-review");
+  await finished;
+
+  const first = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
     cursor: null,
     limit: 1,
   });
   expect(first?.runs).toHaveLength(2);
-  expect(
-    first?.runs.map((run) => [run.goalVersion, run.outcomeId, run.taskId, run.role, run.adapter]),
-  ).toEqual([
-    [1, "outcome-one", "task-one", "implementer", "sdk"],
-    [1, "outcome-one", "task-one", "reviewer", "app-server"],
+  expect(first?.runs.map((run) => [run.role, run.model, run.provider, run.adapter])).toEqual([
+    ["implementer", "observed-one", "provider-one", "sdk"],
+    ["reviewer", "review-observed", "review-observed-provider", "app-server"],
   ]);
   expect(first?.totals).toMatchObject({
-    reviewCycles: 4,
-    repairBatches: 2,
+    invocations: 4,
+    reviewCycles: 3,
+    repairBatches: 1,
     blockedProposals: 1,
-    rejectedProposals: 1,
-    guardianTouches: 2,
+    guardianTouches: 5,
     acceptedDeliveries: 2,
     usage: { inputTokens: null, outputTokens: null, coverage: "partial" },
   });
   expect(first?.runs[0]).not.toHaveProperty("profile");
   expect(first?.runs[0]).not.toHaveProperty("configuredProvider");
   expect(first?.deliveries).toHaveLength(1);
+  expect(first?.touches.map((touch) => touch.type)).toEqual([
+    "plan",
+    "plan",
+    "plan",
+    "plan",
+    "decision",
+  ]);
   expect(first?.nextCursor).not.toBeNull();
-  const second = await lookupCampaignEvidence(directory, "evidence-goal:v1", {
+
+  const second = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
     cursor: first!.nextCursor,
     limit: 1,
   });
   expect(second?.runs).toHaveLength(2);
   expect(second?.runs[0]?.usage).toMatchObject({
-    inputTokens: 12,
-    cachedInputTokens: 3,
-    uncachedInputTokens: 9,
-    outputTokens: 7,
-  });
-  expect(second?.runs[1]?.usage).toMatchObject({
-    inputTokens: 0,
+    inputTokens: null,
     cachedInputTokens: null,
     uncachedInputTokens: null,
-    outputTokens: 0,
+    outputTokens: null,
   });
+  expect(second?.runs[1]?.usage).toMatchObject({ inputTokens: 0, outputTokens: 0 });
   expect(second?.deliveries).toHaveLength(1);
   expect(second?.touches).toEqual([]);
+
+  const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
+  expect(publicReport?.runs).toHaveLength(4);
+  expect(publicReport?.deliveries).toHaveLength(2);
+  expect(publicReport?.touches).toHaveLength(5);
+  expect(publicReport?.totals).toEqual(first?.totals);
   expect(
-    await lookupCampaignEvidence(directory, "evidence-goal:v1", { cursor: null, limit: 1 }),
+    await lookupCampaignEvidence(stateDirectory, published.campaignId, { cursor: null, limit: 1 }),
   ).toEqual(first);
+  await expect(
+    lookupCampaignEvidence(stateDirectory, published.campaignId, {
+      cursor: "x".repeat(4097),
+      limit: 1,
+    }),
+  ).rejects.toBeInstanceOf(CampaignEvidenceCursorError);
 });

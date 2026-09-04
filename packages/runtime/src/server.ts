@@ -39,7 +39,11 @@ import {
   reconcileCampaigns,
   readGoalContract,
 } from "./campaign.js";
-import { CampaignEvidenceCursorError, lookupCampaignEvidence } from "./campaign-evidence.js";
+import {
+  CampaignEvidenceCursorError,
+  lookupCampaignEvidence,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+} from "./campaign-evidence.js";
 import {
   admitTask,
   executeAdmittedTask,
@@ -629,7 +633,7 @@ function createApiLayer(options: {
         apiEffect(async () => {
           const page = await lookupCampaignEvidence(stateDirectory, params.campaignId, {
             cursor: query.cursor ?? null,
-            limit: validLimit(query.limit, 200),
+            limit: validLimit(query.limit, MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE),
           });
           if (!page) throw new ServerNotFoundError("campaign not found");
           return page;

@@ -73,7 +73,6 @@ test("the generated client round-trips the Campaign evidence contract", async ()
       reviewCycles: 0,
       repairBatches: 0,
       blockedProposals: 0,
-      rejectedProposals: 0,
       guardianTouches: 0,
       acceptedDeliveries: 0,
       usage: {

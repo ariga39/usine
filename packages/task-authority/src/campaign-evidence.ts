@@ -1,7 +1,9 @@
 import { Schema } from "effect";
-import type { UsageAmounts } from "./usage-report.js";
+import type { UsageAmounts, UsageReportSource } from "./usage-report.js";
 
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
+
+export const MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE = 200;
 
 const usageAmounts = Schema.Struct({
   inputTokens: Schema.NullOr(Schema.Natural),
@@ -82,7 +84,6 @@ export const campaignEvidencePageSchema = Schema.Struct({
     reviewCycles: Schema.Natural,
     repairBatches: Schema.Natural,
     blockedProposals: Schema.Natural,
-    rejectedProposals: Schema.Natural,
     guardianTouches: Schema.Natural,
     acceptedDeliveries: Schema.Natural,
     usage: usageAmounts,
@@ -99,3 +100,50 @@ export type CampaignEvidenceTouch = CampaignEvidencePage["touches"][number];
 export type CampaignAcceptedDelivery = CampaignEvidencePage["deliveries"][number];
 
 export type CampaignEvidenceUsage = UsageAmounts;
+
+export interface CampaignEvidenceCampaign {
+  readonly campaignId: string;
+  readonly goalId: string;
+  readonly goalVersion: number;
+  readonly publishedAtEpochMs: number;
+}
+
+export interface CampaignEvidenceProposal {
+  readonly proposalId: string;
+  readonly sequence: number;
+  readonly outcomeId: string;
+  readonly status: "planned" | "ready" | "blocked";
+  readonly blocker: string | null;
+  readonly taskId: string | null;
+  readonly admittedAtEpochMs: number;
+}
+
+export interface CampaignEvidenceDecisionTouch {
+  readonly touchId: string;
+  readonly goalVersion: number;
+  readonly type: "decision";
+  readonly occurredAtEpochMs: number;
+}
+
+export type CampaignEvidenceSource = UsageReportSource;
+
+export interface CampaignEvidenceSourcesPage {
+  readonly campaign: CampaignEvidenceCampaign;
+  readonly proposals: readonly CampaignEvidenceProposal[];
+  readonly decisionTouches: readonly CampaignEvidenceDecisionTouch[];
+  readonly sources: readonly CampaignEvidenceSource[];
+  readonly cursor: string | null;
+  readonly nextCursor: string | null;
+}
+
+export interface CampaignEvidencePageRequest {
+  readonly cursor: string | null;
+  readonly limit: number;
+}
+
+export class CampaignEvidenceCursorError extends Error {
+  constructor() {
+    super("campaign evidence cursor is invalid");
+    this.name = "CampaignEvidenceCursorError";
+  }
+}

@@ -98,7 +98,7 @@ export function renderCampaignEvidence(report: CampaignEvidencePage, json: boole
   return [
     `Campaign ${report.campaignId} evidence: ${report.coverage}`,
     `Totals: ${report.totals.invocations} runs, ${report.totals.reviewCycles} review cycles, ${report.totals.repairBatches} repair batches`,
-    `Proposals: ${report.totals.blockedProposals} blocked, ${report.totals.rejectedProposals} rejected`,
+    `Proposals: ${report.totals.blockedProposals} blocked`,
     `Guardian touches: ${report.totals.guardianTouches}; accepted deliveries: ${report.totals.acceptedDeliveries}`,
     `Tokens: input=${token(report.totals.usage.inputTokens)} cached=${token(report.totals.usage.cachedInputTokens)} uncached=${token(report.totals.usage.uncachedInputTokens)} output=${token(report.totals.usage.outputTokens)}`,
     "TASK ID\tOUTCOME\tROLE\tMODEL\tPROVIDER\tADAPTER\tINPUT\tCACHED\tUNCACHED\tOUTPUT",

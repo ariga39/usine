@@ -4,6 +4,7 @@ import { execa } from "execa";
 import { and, asc, eq, gt, max, sql } from "drizzle-orm";
 import {
   applyMigrations,
+  acceptedTaskDelivery,
   campaignIdFor,
   campaignProposals,
   campaignTouches,
@@ -298,8 +299,10 @@ function acceptedCampaignDelivery(
   proposal: TaskProposal,
 ): AcceptedCampaignDelivery | null {
   const association = result?.campaign;
+  const accepted = acceptedTaskDelivery(result);
   if (
     !result ||
+    !accepted ||
     !association ||
     result.taskId !== campaignTaskId(contract, proposal) ||
     association.campaignId !== campaign.campaignId ||
@@ -307,40 +310,10 @@ function acceptedCampaignDelivery(
     association.goalVersion !== campaign.goalVersion ||
     association.outcomeId !== proposal.outcomeId ||
     result.repository?.id !== proposal.repositoryId ||
-    result.mergeAuthorized !== proposal.merge ||
-    !result.candidateSha ||
-    !EXACT_SHA.test(result.candidateSha) ||
-    !result.check ||
-    result.check.status !== "passed" ||
-    !EXACT_SHA.test(result.check.sha) ||
-    result.check.sha !== result.candidateSha ||
-    !result.review ||
-    result.review.verdict !== "approved" ||
-    !EXACT_SHA.test(result.review.sha) ||
-    result.review.sha !== result.candidateSha ||
-    !result.delivery ||
-    result.delivery.sha !== result.candidateSha ||
-    !EXACT_SHA.test(result.delivery.sha)
+    result.mergeAuthorized !== proposal.merge
   )
     return null;
-
-  if (!result.mergeAuthorized) {
-    return result.state === "reviewed_pr" && result.delivery.merge == null
-      ? { mergedHeadSha: null }
-      : null;
-  }
-
-  const merge = result.delivery.merge;
-  return result.state === "merged" &&
-    merge !== null &&
-    merge !== undefined &&
-    merge.observedState === "merged" &&
-    merge.prNumber === result.delivery.prNumber &&
-    merge.approvedHeadSha === result.delivery.sha &&
-    EXACT_SHA.test(merge.approvedHeadSha) &&
-    EXACT_SHA.test(merge.mergeCommitSha)
-    ? { mergedHeadSha: merge.mergeCommitSha }
-    : null;
+  return { mergedHeadSha: accepted.mergedHeadSha };
 }
 
 async function dependencyResolution(
@@ -774,16 +747,6 @@ export async function publishCampaign(
       superseded: false,
       revision: 1,
     });
-    await database
-      .insert(campaignTouches)
-      .values({
-        campaignId,
-        touchId: `plan:${contractHash}`,
-        goalVersion: contract.version,
-        type: "plan",
-        occurredAtEpochMs: Date.now(),
-      })
-      .onConflictDoNothing();
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);
   });
@@ -838,16 +801,6 @@ export async function proposeCampaign(
         readyBaseSha: null,
         readyRepositoryRevision: null,
       });
-      await database
-        .insert(campaignTouches)
-        .values({
-          campaignId,
-          touchId: `plan:${proposal.proposalId}`,
-          goalVersion: campaign.goalVersion,
-          type: "plan",
-          occurredAtEpochMs: Date.now(),
-        })
-        .onConflictDoNothing();
     }
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);

@@ -63,6 +63,7 @@ import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./priva
 export {
   lookupCampaignEvidence,
   CampaignEvidenceCursorError,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   type CampaignEvidenceRequest,
 } from "./campaign-evidence.js";
 

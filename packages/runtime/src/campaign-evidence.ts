@@ -1,110 +1,68 @@
-import { asc, eq, sql } from "drizzle-orm";
 import {
+  acceptedTaskDelivery,
   campaignEvidencePageSchema,
-  campaignProposals,
-  campaignTouches,
-  campaigns,
-  decodeRawPersistedTaskResult,
   deriveUsageReport,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   openSqliteDatabase,
-  isTaskStateQuarantinedError,
-  taskEvents,
-  taskRuns,
-  decodeTaskEvent,
+  TaskAuthority,
   type CampaignAcceptedDelivery,
   type CampaignEvidenceAggregate,
   type CampaignEvidencePage,
+  type CampaignEvidencePageRequest,
   type CampaignEvidenceRun,
+  type CampaignEvidenceSource,
+  type CampaignEvidenceSourcesPage,
   type CampaignEvidenceTotals,
   type CampaignEvidenceTouch,
   type CampaignEvidenceUsage,
-  type TaskEvent,
-  type TaskResult,
   type UsageInvocation,
-  type UsageReportSource,
 } from "@usine/task-authority";
 import { Schema } from "effect";
 import { resolve } from "node:path";
 
-const MAX_PAGE_SIZE = 200;
-const EXACT_SHA = /^[0-9a-f]{40}$/;
-const CURSOR = Schema.Struct({
-  version: Schema.Literal(1),
-  campaignId: Schema.String,
-  afterTaskId: Schema.String,
-});
+export {
+  CampaignEvidenceCursorError,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+} from "@usine/task-authority";
 
-export interface CampaignEvidenceRequest {
-  readonly cursor: string | null;
-  readonly limit: number;
-}
+export interface CampaignEvidenceRequest extends CampaignEvidencePageRequest {}
 
-export class CampaignEvidenceCursorError extends Error {
-  constructor() {
-    super("campaign evidence cursor is invalid");
-    this.name = "CampaignEvidenceCursorError";
-  }
-}
-
-interface CampaignSource {
-  readonly campaign: typeof campaigns.$inferSelect;
-  readonly proposals: readonly (typeof campaignProposals.$inferSelect)[];
-  readonly touches: readonly CampaignEvidenceTouch[];
-  readonly sources: readonly UsageReportSource[];
+interface CampaignEvidenceSourceSet {
+  readonly firstPage: CampaignEvidenceSourcesPage;
+  readonly sources: readonly CampaignEvidenceSource[];
 }
 
 export async function lookupCampaignEvidence(
   stateDirectory: string,
   campaignId: string,
-  request: CampaignEvidenceRequest = { cursor: null, limit: MAX_PAGE_SIZE },
+  request: CampaignEvidenceRequest = {
+    cursor: null,
+    limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+  },
 ): Promise<CampaignEvidencePage | null> {
-  if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > MAX_PAGE_SIZE)
-    throw new RangeError("campaign evidence page limit is out of range");
-  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"), { readOnly: true });
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
-    const campaign = await handle.database.query.campaigns.findFirst({
-      where: eq(campaigns.campaignId, campaignId),
-    });
-    if (!campaign) return null;
-    const cursor = decodeCursor(request.cursor, campaignId);
-    const source = await loadCampaignSource(handle.database, campaign);
-    const allRuns = source.sources.flatMap((item) =>
-      deriveUsageReport([item], scope()).invocations.map((run) => projectRun(run, item.task)),
-    );
-    const sortedRuns = allRuns.toSorted(
-      (left, right) =>
-        compareStrings(left.taskId, right.taskId) ||
-        compareStrings(left.invocationId, right.invocationId),
-    );
-    const taskIds = source.sources.map((item) => item.task.taskId).toSorted();
-    const pageTaskIds = taskIds
-      .filter((taskId) => cursor === null || taskId > cursor.afterTaskId)
-      .slice(0, request.limit);
-    const pageTaskSet = new Set(pageTaskIds);
-    const runs = sortedRuns.filter((run) => pageTaskSet.has(run.taskId));
-    const aggregates = aggregateRuns(runs);
-    const nextTaskId = pageTaskIds.at(-1);
-    const nextCursor =
-      nextTaskId !== undefined &&
-      pageTaskIds.length < taskIds.filter((id) => cursor === null || id > cursor.afterTaskId).length
-        ? encodeCursor({ version: 1, campaignId, afterTaskId: nextTaskId })
-        : null;
-    const deliveries = source.sources
-      .filter((item) => pageTaskSet.has(item.task.taskId))
-      .flatMap((item) => acceptedDelivery(item.task));
-    const firstPage = cursor === null;
+    const authority = new TaskAuthority(handle.database);
+    const requested = await authority.listCampaignEvidenceSources(campaignId, request);
+    if (!requested) return null;
+    const sourceSet = await loadAllSources(authority, campaignId, requested, request);
+    const pageRuns = requested.sources.flatMap((source) => usageRuns(source));
+    const allRuns = sourceSet.sources.flatMap((source) => usageRuns(source));
+    const allTouches = touches(sourceSet.firstPage);
+    const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source.task));
     const report: CampaignEvidencePage = {
       schemaVersion: 1,
-      campaignId,
-      goalId: campaign.goalId,
-      goalVersion: campaign.goalVersion,
+      campaignId: requested.campaign.campaignId,
+      goalId: requested.campaign.goalId,
+      goalVersion: requested.campaign.goalVersion,
       cursor: request.cursor,
-      nextCursor,
-      coverage: coverage(runs),
-      runs,
-      aggregates,
-      totals: totals(source, allRuns),
-      touches: firstPage ? source.touches : [],
+      nextCursor: requested.nextCursor,
+      coverage: coverageForRuns(pageRuns),
+      runs: pageRuns,
+      aggregates: aggregateRuns(pageRuns),
+      totals: totals(sourceSet, allRuns, allTouches),
+      touches: request.cursor === null ? allTouches : [],
       deliveries,
     };
     return Schema.decodeUnknownSync(campaignEvidencePageSchema)(report);
@@ -113,8 +71,39 @@ export async function lookupCampaignEvidence(
   }
 }
 
-function projectRun(run: UsageInvocation, task: TaskResult): CampaignEvidenceRun {
-  const association = task.campaign;
+async function loadAllSources(
+  authority: TaskAuthority,
+  campaignId: string,
+  requested: CampaignEvidenceSourcesPage,
+  request: CampaignEvidenceRequest,
+): Promise<CampaignEvidenceSourceSet> {
+  const firstPage =
+    request.cursor === null
+      ? requested
+      : ((await authority.listCampaignEvidenceSources(campaignId, {
+          cursor: null,
+          limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+        })) ?? requested);
+  const sources = [...firstPage.sources];
+  let cursor = firstPage.nextCursor;
+  while (cursor !== null) {
+    const page = await authority.listCampaignEvidenceSources(campaignId, {
+      cursor,
+      limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+    });
+    if (!page) break;
+    sources.push(...page.sources);
+    cursor = page.nextCursor;
+  }
+  return { firstPage, sources };
+}
+
+function usageRuns(source: CampaignEvidenceSource): CampaignEvidenceRun[] {
+  return deriveUsageReport([source], scope()).invocations.map((run) => projectRun(run, source));
+}
+
+function projectRun(run: UsageInvocation, source: CampaignEvidenceSource): CampaignEvidenceRun {
+  const association = source.task.campaign;
   if (!association) throw new Error("Campaign evidence source has no Campaign association");
   return {
     invocationId: run.invocationId,
@@ -141,121 +130,42 @@ function scope() {
   return { taskId: null, repositoryId: null, fromEpochMs: null, toEpochMs: null } as const;
 }
 
-async function loadCampaignSource(
-  database: ReturnType<typeof openSqliteDatabase>["database"],
-  campaign: typeof campaigns.$inferSelect,
-): Promise<CampaignSource> {
-  const proposalRows = await database
-    .select()
-    .from(campaignProposals)
-    .where(eq(campaignProposals.campaignId, campaign.campaignId))
-    .orderBy(asc(campaignProposals.sequence));
-  const touchRows = await database
-    .select()
-    .from(campaignTouches)
-    .where(eq(campaignTouches.campaignId, campaign.campaignId))
-    .orderBy(asc(campaignTouches.occurredAtEpochMs), asc(campaignTouches.touchId));
-  const taskRows = await database
-    .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
-    .from(taskRuns)
-    .orderBy(asc(taskRuns.taskId));
-  const sources: UsageReportSource[] = [];
-  for (const row of taskRows) {
-    let result: TaskResult | null = null;
-    try {
-      result = decodeRawPersistedTaskResult(row.rawResult);
-    } catch (error) {
-      if (!isTaskStateQuarantinedError(error)) throw error;
-    }
-    if (!belongsToCampaign(result, campaign)) continue;
-    const eventRows = await database
-      .select()
-      .from(taskEvents)
-      .where(eq(taskEvents.taskId, row.taskId))
-      .orderBy(asc(taskEvents.sequence));
-    sources.push({ task: result, events: eventRows.map(decodeTaskEventRow) });
-  }
-  return {
-    campaign,
-    proposals: proposalRows,
-    touches: touchRows.flatMap((touch) =>
-      touch.type === "plan" || touch.type === "decision"
-        ? [
-            {
-              touchId: touch.touchId,
-              goalVersion: touch.goalVersion,
-              type: touch.type,
-              occurredAtEpochMs: touch.occurredAtEpochMs,
-            },
-          ]
-        : [],
-    ),
-    sources,
-  };
+function touches(source: CampaignEvidenceSourcesPage): CampaignEvidenceTouch[] {
+  const planTouches: CampaignEvidenceTouch[] = [
+    {
+      touchId: `plan:${source.campaign.campaignId}`,
+      goalVersion: source.campaign.goalVersion,
+      type: "plan",
+      occurredAtEpochMs: source.campaign.publishedAtEpochMs,
+    },
+    ...source.proposals
+      .toSorted((left, right) => left.sequence - right.sequence)
+      .map((proposal) => ({
+        touchId: `plan:${source.campaign.campaignId}:${proposal.proposalId}`,
+        goalVersion: source.campaign.goalVersion,
+        type: "plan" as const,
+        occurredAtEpochMs: proposal.admittedAtEpochMs,
+      })),
+  ];
+  return [...planTouches, ...source.decisionTouches];
 }
 
-function decodeTaskEventRow(row: typeof taskEvents.$inferSelect): TaskEvent {
-  return decodeTaskEvent({
-    taskId: row.taskId,
-    sequence: row.sequence,
-    eventId: row.eventId,
-    occurredAtEpochMs: row.occurredAtEpochMs,
-    data: row.data,
-  });
-}
-
-function belongsToCampaign(
-  task: TaskResult | null,
-  campaign: typeof campaigns.$inferSelect,
-): task is TaskResult & { campaign: NonNullable<TaskResult["campaign"]> } {
-  return (
-    task?.campaign?.campaignId === campaign.campaignId &&
-    task.campaign.goalId === campaign.goalId &&
-    task.campaign.goalVersion === campaign.goalVersion
-  );
-}
-
-function acceptedDelivery(task: TaskResult): CampaignAcceptedDelivery[] {
+function acceptedDelivery(task: CampaignEvidenceSource["task"]): CampaignAcceptedDelivery[] {
   const association = task.campaign;
-  const delivery = task.delivery;
-  if (
-    !association ||
-    !task.candidateSha ||
-    !EXACT_SHA.test(task.candidateSha) ||
-    !task.check ||
-    task.check.status !== "passed" ||
-    task.check.sha !== task.candidateSha ||
-    !task.review ||
-    task.review.verdict !== "approved" ||
-    task.review.sha !== task.candidateSha ||
-    !delivery ||
-    delivery.sha !== task.candidateSha ||
-    !EXACT_SHA.test(delivery.sha)
-  )
-    return [];
-  const merge = delivery.merge ?? null;
-  if (
-    task.mergeAuthorized &&
-    (task.state !== "merged" ||
-      !merge ||
-      merge.approvedHeadSha !== delivery.sha ||
-      merge.prNumber !== delivery.prNumber ||
-      !EXACT_SHA.test(merge.mergeCommitSha))
-  )
-    return [];
-  if (!task.mergeAuthorized && (task.state !== "reviewed_pr" || merge !== null)) return [];
+  const accepted = acceptedTaskDelivery(task);
+  if (!association || !accepted) return [];
   return [
     {
       taskId: task.taskId,
       goalVersion: association.goalVersion,
       outcomeId: association.outcomeId,
-      effect: delivery.effect,
-      pullRequest: delivery.prNumber,
-      sha: delivery.sha,
-      url: delivery.url,
-      attestationId: delivery.attestationId,
-      merged: task.mergeAuthorized,
-      mergeCommitSha: merge?.mergeCommitSha ?? null,
+      effect: accepted.delivery.effect,
+      pullRequest: accepted.delivery.prNumber,
+      sha: accepted.delivery.sha,
+      url: accepted.delivery.url,
+      attestationId: accepted.delivery.attestationId,
+      merged: accepted.mergedHeadSha !== null,
+      mergeCommitSha: accepted.mergedHeadSha,
     },
   ];
 }
@@ -306,19 +216,26 @@ function aggregateSortKey(aggregate: CampaignEvidenceAggregate): string {
 }
 
 function totals(
-  source: CampaignSource,
+  sourceSet: CampaignEvidenceSourceSet,
   runs: readonly CampaignEvidenceRun[],
+  allTouches: readonly CampaignEvidenceTouch[],
 ): CampaignEvidenceTotals {
-  const tasks = source.sources.map((item) => item.task);
-  const deliveries = tasks.flatMap(acceptedDelivery);
+  const deliveries = sourceSet.sources.flatMap((source) => acceptedDelivery(source.task));
   return {
     invocations: runs.length,
     elapsedMs: sumNullable(runs.map((run) => run.elapsedMs)),
-    reviewCycles: tasks.reduce((total, task) => total + task.evidence.reviewCycles, 0),
-    repairBatches: tasks.reduce((total, task) => total + task.evidence.changesRequestedBatches, 0),
-    blockedProposals: source.proposals.filter((proposal) => proposal.status === "blocked").length,
-    rejectedProposals: source.proposals.filter((proposal) => proposal.status === "rejected").length,
-    guardianTouches: source.touches.length,
+    reviewCycles: sourceSet.sources.reduce(
+      (total, source) => total + source.task.evidence.reviewCycles,
+      0,
+    ),
+    repairBatches: sourceSet.sources.reduce(
+      (total, source) => total + source.task.evidence.changesRequestedBatches,
+      0,
+    ),
+    blockedProposals: sourceSet.firstPage.proposals.filter(
+      (proposal) => proposal.status === "blocked",
+    ).length,
+    guardianTouches: allTouches.length,
     acceptedDeliveries: deliveries.length,
     usage: sumUsage(runs.map((run) => run.usage)),
   };
@@ -326,18 +243,14 @@ function totals(
 
 function sumNullable(values: readonly (number | null)[]): number | null {
   if (values.some((value) => value === null)) return null;
-  let total = 0;
-  for (const value of values) total += value ?? 0;
-  return total;
+  return values.reduce<number>((total, value) => total + (value ?? 0), 0);
 }
 
 function sumUsage(values: readonly CampaignEvidenceUsage[]): CampaignEvidenceUsage {
   const sum = (name: keyof Omit<CampaignEvidenceUsage, "coverage">): number | null => {
     const selected = values.map((value) => value[name]);
     if (selected.some((value) => value === null)) return null;
-    let total = 0;
-    for (const value of selected) total += value ?? 0;
-    return total;
+    return selected.reduce<number>((total, value) => total + (value ?? 0), 0);
   };
   const coverage =
     values.length === 0
@@ -358,7 +271,7 @@ function sumUsage(values: readonly CampaignEvidenceUsage[]): CampaignEvidenceUsa
   };
 }
 
-function coverage(runs: readonly CampaignEvidenceRun[]): CampaignEvidencePage["coverage"] {
+function coverageForRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidencePage["coverage"] {
   if (runs.length === 0) return "unavailable";
   if (runs.every((run) => run.usage.coverage === "unavailable")) return "unavailable";
   return runs.every((run) => run.usage.coverage === "complete") ? "complete" : "partial";
@@ -366,24 +279,4 @@ function coverage(runs: readonly CampaignEvidenceRun[]): CampaignEvidencePage["c
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function encodeCursor(cursor: Schema.Schema.Type<typeof CURSOR>): string {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-
-function decodeCursor(
-  value: string | null,
-  campaignId: string,
-): Schema.Schema.Type<typeof CURSOR> | null {
-  if (value === null) return null;
-  try {
-    const decoded = Schema.decodeUnknownSync(CURSOR)(
-      JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
-    );
-    if (decoded.campaignId !== campaignId) throw new Error("wrong campaign");
-    return decoded;
-  } catch {
-    throw new CampaignEvidenceCursorError();
-  }
 }
