@@ -10,6 +10,7 @@ import {
   campaignTouches,
   campaigns,
   campaignResourceFromContract,
+  decodeCampaignDecisionRequest,
   decodeCampaignProposalStatus,
   decodeCampaignStatus,
   goalContractSchema,
@@ -24,12 +25,15 @@ import {
   taskProposalSchema,
   isTaskStateQuarantinedError,
   type CampaignProposalResource,
+  type CampaignDecisionRequest,
+  type CampaignOutcomeEvidence,
   type CampaignResource,
   type GoalContract,
   type TaskExecutionInput,
   type TaskResult,
   type TaskContract,
   type TaskProposal,
+  isTerminalState,
 } from "@usine/task-authority";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { ensurePrivateStateDatabase } from "./private-state.js";
@@ -37,6 +41,7 @@ import { readCommittedContract } from "./verify-committed-contract.js";
 
 export const MAX_GOAL_CONTRACT_BYTES = 1_048_576;
 export const GOAL_PUBLICATION_SOURCE_ENV = "USINE_GOAL_PUBLICATION_SOURCE";
+export const CAMPAIGN_ABANDONMENT_SOURCE_ENV = "USINE_CAMPAIGN_ABANDONMENT_SOURCE";
 const GOAL_CONTRACT_INGESTION_TIMEOUT_MS = 30_000;
 const EXACT_SHA = /^[0-9a-f]{40}$/;
 const MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH = 256;
@@ -90,6 +95,24 @@ export class CampaignTouchInputError extends Error {
   constructor() {
     super("campaign touch ID is invalid");
     this.name = "CampaignTouchInputError";
+  }
+}
+
+export class CampaignHandoffError extends Error {
+  readonly code = "campaign_handoff_conflict";
+  readonly retryable = false;
+  constructor(readonly campaignId: string) {
+    super("Campaign plan has already been handed off or is terminal");
+    this.name = "CampaignHandoffError";
+  }
+}
+
+export class CampaignAbandonmentError extends Error {
+  readonly code = "campaign_abandonment_unauthorized";
+  readonly retryable = false;
+  constructor() {
+    super("Campaign abandonment requires explicit host authority");
+    this.name = "CampaignAbandonmentError";
   }
 }
 
@@ -284,6 +307,7 @@ function blockerFor(
 }
 
 interface AcceptedCampaignDelivery {
+  readonly delivery: NonNullable<ReturnType<typeof acceptedTaskDelivery>>["delivery"];
   readonly mergedHeadSha: string | null;
 }
 
@@ -313,7 +337,7 @@ function acceptedCampaignDelivery(
     result.mergeAuthorized !== proposal.merge
   )
     return null;
-  return { mergedHeadSha: accepted.mergedHeadSha };
+  return { delivery: accepted.delivery, mergedHeadSha: accepted.mergedHeadSha };
 }
 
 async function dependencyResolution(
@@ -461,6 +485,15 @@ async function reconcile(
     where: eq(campaigns.campaignId, campaignId),
   });
   if (!campaign) throw new Error("campaign not found");
+  let campaignStatus: ReturnType<typeof decodeCampaignStatus>;
+  let decisionRequest: CampaignDecisionRequest | null;
+  try {
+    campaignStatus = decodeCampaignStatus(campaign.status);
+    decisionRequest = decodeCampaignDecisionRequest(campaign.decisionRequest);
+  } catch {
+    // Preserve corrupt durable state for the owning read path to report.
+    return;
+  }
   const contract = goalContractSchema.parse(campaign.contract);
   const newerCampaign = await database
     .select({ goalVersion: max(campaigns.goalVersion) })
@@ -537,6 +570,38 @@ async function reconcile(
       changed = true;
     }
   }
+  if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
+    const results = await campaignTaskResults(database, rows);
+    const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
+    const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
+    if (liveOutcomes.every((outcome) => outcomeEvidence.has(outcome.id))) {
+      campaignStatus = "accepted";
+      decisionRequest = null;
+    } else if (!hasUsefulCampaignWork(campaign, rows, results, contract)) {
+      campaignStatus = "blocked";
+      decisionRequest ??= {
+        requestId: `decision:${campaign.campaignId}`,
+        reason:
+          rows.some((row) => row.status === "blocked") ||
+          [...results.values()].some((result) => result.state === "blocked")
+            ? "branches_blocked"
+            : "plan_exhausted",
+        outcomeIds: liveOutcomes
+          .filter((outcome) => !outcomeEvidence.has(outcome.id))
+          .map((outcome) => outcome.id),
+      };
+    }
+  }
+  if (
+    campaign.status !== campaignStatus ||
+    JSON.stringify(campaign.decisionRequest ?? null) !== JSON.stringify(decisionRequest)
+  ) {
+    await database
+      .update(campaigns)
+      .set({ status: campaignStatus, decisionRequest, updatedAt: new Date() })
+      .where(eq(campaigns.campaignId, campaignId));
+    changed = true;
+  }
   if (superseded !== campaign.superseded) {
     await database
       .update(campaigns)
@@ -548,6 +613,10 @@ async function reconcile(
       .update(campaigns)
       .set({ revision: sql`${campaigns.revision} + 1`, updatedAt: new Date() })
       .where(eq(campaigns.campaignId, campaignId));
+}
+
+function isTerminalCampaignStatus(status: ReturnType<typeof decodeCampaignStatus>): boolean {
+  return status === "accepted" || status === "blocked" || status === "abandoned";
 }
 
 async function reconcileAll(
@@ -580,6 +649,136 @@ async function reconcileWithRepositoryHeads(
   } finally {
     handle.close();
   }
+}
+
+async function campaignTaskResults(
+  database: CampaignDatabase,
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+): Promise<Map<string, TaskResult>> {
+  const authority = new TaskAuthority(database);
+  const results = new Map<string, TaskResult>();
+  for (const row of rows) {
+    if (!row.taskId) continue;
+    try {
+      const result = await authority.lookup(row.taskId);
+      if (result) results.set(row.proposalId, result);
+    } catch (error) {
+      if (!isTaskStateQuarantinedError(error)) throw error;
+    }
+  }
+  return results;
+}
+
+function campaignOutcomeEvidence(
+  campaign: typeof campaigns.$inferSelect,
+  contract: GoalContract,
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+  results: ReadonlyMap<string, TaskResult>,
+): Map<string, CampaignOutcomeEvidence> {
+  const evidence = new Map<string, CampaignOutcomeEvidence>();
+  const proposalsByOutcome = new Map<string, Array<(typeof rows)[number]>>();
+  for (const row of rows) {
+    const proposal = taskProposalSchema.parse(row.proposal);
+    const outcomeRows = proposalsByOutcome.get(proposal.outcomeId) ?? [];
+    outcomeRows.push(row);
+    proposalsByOutcome.set(proposal.outcomeId, outcomeRows);
+  }
+  for (const [outcomeId, outcomeRows] of proposalsByOutcome) {
+    let firstAccepted: AcceptedCampaignDelivery | null = null;
+    let allAccepted = true;
+    for (const row of outcomeRows) {
+      const proposal = taskProposalSchema.parse(row.proposal);
+      const accepted = acceptedCampaignDelivery(
+        results.get(row.proposalId) ?? null,
+        campaign,
+        contract,
+        proposal,
+      );
+      if (!accepted) {
+        allAccepted = false;
+        break;
+      }
+      firstAccepted ??= accepted;
+    }
+    if (!allAccepted || !firstAccepted) continue;
+    const firstRow = outcomeRows[0];
+    const delivery = firstAccepted.delivery;
+    evidence.set(outcomeId, {
+      outcomeId,
+      taskId: firstRow!.taskId!,
+      effect: delivery.effect,
+      sha: delivery.sha,
+      merged: firstAccepted.mergedHeadSha !== null,
+      mergeCommitSha: firstAccepted.mergedHeadSha,
+    });
+  }
+  return evidence;
+}
+
+function dependencyRowsFor(
+  proposal: TaskProposal,
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+  contract: GoalContract,
+): readonly (typeof campaignProposals.$inferSelect)[] | null {
+  const dependencies = new Map<string, typeof campaignProposals.$inferSelect>();
+  for (const dependencyId of proposal.dependsOn) {
+    const row = rows.find((candidate) => candidate.proposalId === dependencyId);
+    if (!row) return null;
+    dependencies.set(row.proposalId, row);
+  }
+  const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
+  for (const outcomeId of outcome?.dependsOn ?? []) {
+    const matching = rows.filter(
+      (row) => taskProposalSchema.parse(row.proposal).outcomeId === outcomeId,
+    );
+    if (matching.length === 0) return null;
+    for (const row of matching) dependencies.set(row.proposalId, row);
+  }
+  return [...dependencies.values()];
+}
+
+function hasUsefulCampaignWork(
+  campaign: typeof campaigns.$inferSelect,
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+  results: ReadonlyMap<string, TaskResult>,
+  contract: GoalContract,
+): boolean {
+  for (const row of rows) {
+    const result = results.get(row.proposalId);
+    if (result) {
+      if (!isTerminalState(result.state)) return true;
+      continue;
+    }
+    if (row.status === "ready") return true;
+    if (row.status !== "planned") continue;
+    const proposal = taskProposalSchema.parse(row.proposal);
+    const dependencies = dependencyRowsFor(proposal, rows, contract);
+    if (dependencies === null) continue;
+    let canProgress = true;
+    for (const dependency of dependencies) {
+      const dependencyProposal = taskProposalSchema.parse(dependency.proposal);
+      const dependencyResult = results.get(dependency.proposalId);
+      if (!dependencyResult) {
+        canProgress = false;
+        break;
+      }
+      const accepted = acceptedCampaignDelivery(
+        dependencyResult,
+        campaign,
+        contract,
+        dependencyProposal,
+      );
+      if (
+        !accepted ||
+        (dependencyProposal.repositoryId === proposal.repositoryId && !accepted.mergedHeadSha)
+      ) {
+        canProgress = false;
+        break;
+      }
+    }
+    if (canProgress) return true;
+  }
+  return false;
 }
 
 export async function reconcileCampaigns(
@@ -619,6 +818,14 @@ async function admitReadyCampaignTasks(
       .orderBy(asc(campaigns.campaignId));
     const authority = new TaskAuthority(handle.database);
     for (const campaignRow of campaignsRows) {
+      if (!campaignRow.planHandedOff) continue;
+      let campaignStatus: ReturnType<typeof decodeCampaignStatus>;
+      try {
+        campaignStatus = decodeCampaignStatus(campaignRow.status);
+      } catch {
+        continue;
+      }
+      if (isTerminalCampaignStatus(campaignStatus)) continue;
       const contract = goalContractSchema.parse(campaignRow.contract);
       const proposalRows = await handle.database
         .select()
@@ -699,12 +906,20 @@ async function resourceFromDatabase(
     .from(campaignProposals)
     .where(eq(campaignProposals.campaignId, campaignId))
     .orderBy(asc(campaignProposals.sequence));
+  const contract = goalContractSchema.parse(campaign.contract);
+  const results = await campaignTaskResults(database, rows);
+  const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
   return campaignResourceFromContract(
-    goalContractSchema.parse(campaign.contract),
+    contract,
     campaign.contractHash,
     decodeCampaignStatus(campaign.status),
     campaign.revision,
-    rows.length ? { proposals: rows.map(proposalResource) } : undefined,
+    {
+      proposals: rows.map(proposalResource),
+      planHandedOff: campaign.planHandedOff,
+      decisionRequest: decodeCampaignDecisionRequest(campaign.decisionRequest),
+      outcomeEvidence,
+    },
   );
 }
 
@@ -775,6 +990,8 @@ export async function proposeCampaign(
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!campaign) throw new CampaignNotFoundError();
+    if (campaign.planHandedOff || isTerminalCampaignStatus(decodeCampaignStatus(campaign.status)))
+      throw new CampaignHandoffError(campaignId);
     const existing = await database.query.campaignProposals.findFirst({
       where: and(
         eq(campaignProposals.campaignId, campaignId),
@@ -803,6 +1020,73 @@ export async function proposeCampaign(
       });
     }
     await reconcileAll(database, observed);
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
+}
+
+export async function handoffCampaign(
+  stateDirectory: string,
+  campaignId: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<CampaignResource> {
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    const campaign = await database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (!campaign) throw new CampaignNotFoundError();
+    if (
+      !campaign.planHandedOff &&
+      !isTerminalCampaignStatus(decodeCampaignStatus(campaign.status))
+    ) {
+      await database
+        .update(campaigns)
+        .set({
+          planHandedOff: true,
+          revision: sql`${campaigns.revision} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(eq(campaigns.campaignId, campaignId));
+    }
+    await reconcileAll(database, observed);
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
+}
+
+export async function abandonCampaign(
+  stateDirectory: string,
+  campaignId: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<CampaignResource> {
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database) => {
+    const campaign = await database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (!campaign) throw new CampaignNotFoundError();
+    const contract = goalContractSchema.parse(campaign.contract);
+    const configured = environment[CAMPAIGN_ABANDONMENT_SOURCE_ENV]?.trim();
+    if (!configured || configured !== contract.authority.source)
+      throw new CampaignAbandonmentError();
+    if (
+      decodeCampaignStatus(campaign.status) !== "accepted" &&
+      decodeCampaignStatus(campaign.status) !== "abandoned"
+    ) {
+      await database
+        .update(campaigns)
+        .set({ status: "abandoned", decisionRequest: null, updatedAt: new Date() })
+        .where(eq(campaigns.campaignId, campaignId));
+      await database
+        .update(campaigns)
+        .set({ revision: sql`${campaigns.revision} + 1`, updatedAt: new Date() })
+        .where(eq(campaigns.campaignId, campaignId));
+    }
     resource = await resourceFromDatabase(database, campaignId);
   });
   return resource!;

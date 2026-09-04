@@ -173,8 +173,30 @@ export function parseTaskProposal(input: unknown): TaskProposal {
   return parsed.data;
 }
 
-export const campaignStatusSchema = Schema.Literal("planning");
+export const campaignStatusSchema = Schema.Literals([
+  "planning",
+  "accepted",
+  "blocked",
+  "abandoned",
+]);
 export type CampaignStatus = Schema.Schema.Type<typeof campaignStatusSchema>;
+
+const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
+
+const campaignOutcomeEvidenceSchema = Schema.Struct({
+  outcomeId: Schema.String,
+  taskId: Schema.String,
+  effect: Schema.Literal("github"),
+  sha: exactSha,
+  merged: Schema.Boolean,
+  mergeCommitSha: Schema.NullOr(exactSha),
+});
+
+const campaignDecisionRequestSchema = Schema.Struct({
+  requestId: Schema.String,
+  reason: Schema.Literals(["plan_exhausted", "branches_blocked"]),
+  outcomeIds: Schema.Array(Schema.String),
+});
 
 const campaignOutcomeSchema = Schema.Struct({
   id: Schema.String,
@@ -182,7 +204,8 @@ const campaignOutcomeSchema = Schema.Struct({
   acceptance: Schema.Array(Schema.String),
   dependsOn: Schema.Array(Schema.String),
   parentId: Schema.NullOr(Schema.String),
-  status: Schema.Literals(["planned", "superseded"]),
+  status: Schema.Literals(["planned", "accepted", "superseded"]),
+  evidence: Schema.NullOr(campaignOutcomeEvidenceSchema),
 });
 
 const campaignProposalStatusSchema = Schema.Literals(["planned", "ready", "blocked"]);
@@ -237,6 +260,8 @@ export const campaignResourceSchema = Schema.Struct({
     maxReviewCycles: Schema.optional(Schema.Int),
   }),
   status: campaignStatusSchema,
+  planHandedOff: Schema.Boolean,
+  decisionRequest: Schema.NullOr(campaignDecisionRequestSchema),
   revision: Schema.Natural,
   proposals: Schema.optional(Schema.Array(campaignProposalSchema)),
 });
@@ -244,13 +269,22 @@ export const campaignResourceSchema = Schema.Struct({
 export type CampaignOutcome = Schema.Schema.Type<typeof campaignOutcomeSchema>;
 export type CampaignResource = Schema.Schema.Type<typeof campaignResourceSchema>;
 export type CampaignProposalResource = Schema.Schema.Type<typeof campaignProposalSchema>;
+export type CampaignOutcomeEvidence = Schema.Schema.Type<typeof campaignOutcomeEvidenceSchema>;
+export type CampaignDecisionRequest = Schema.Schema.Type<typeof campaignDecisionRequestSchema>;
 
 export interface CampaignProjection {
   readonly proposals: ReadonlyArray<CampaignProposalResource>;
+  readonly planHandedOff: boolean;
+  readonly decisionRequest: CampaignDecisionRequest | null;
+  readonly outcomeEvidence?: ReadonlyMap<string, CampaignOutcomeEvidence>;
 }
 
 export function decodeCampaignStatus(input: unknown): CampaignStatus {
   return Schema.decodeUnknownSync(campaignStatusSchema)(input);
+}
+
+export function decodeCampaignDecisionRequest(input: unknown): CampaignDecisionRequest | null {
+  return Schema.decodeUnknownSync(Schema.NullOr(campaignDecisionRequestSchema))(input);
 }
 
 export function decodeCampaignProposalStatus(input: unknown): CampaignProposalResource["status"] {
@@ -270,7 +304,13 @@ export function campaignResourceFromContract(
     acceptance: outcome.acceptance,
     dependsOn: outcome.dependsOn,
     parentId: outcome.parentId,
-    status: outcome.status === "live" ? ("planned" as const) : ("superseded" as const),
+    status:
+      outcome.status === "superseded"
+        ? ("superseded" as const)
+        : projection?.outcomeEvidence?.has(outcome.id)
+          ? ("accepted" as const)
+          : ("planned" as const),
+    evidence: projection?.outcomeEvidence?.get(outcome.id) ?? null,
   }));
   const resource: CampaignResource = {
     schemaVersion: 1,
@@ -296,6 +336,8 @@ export function campaignResourceFromContract(
       maxReviewCycles: contract.budget.maxReviewCycles,
     },
     status,
+    planHandedOff: projection?.planHandedOff ?? false,
+    decisionRequest: projection?.decisionRequest ?? null,
     revision,
   };
   return projection ? { ...resource, proposals: [...projection.proposals] } : resource;

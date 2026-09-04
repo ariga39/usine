@@ -4,7 +4,7 @@ This guide is for an agent operating Usine for an authorized project task. It is
 
 Usine runs a local server. The server owns admission, execution, recovery, and public resource projections. The CLI is a client of that server. A submitting CLI process may exit after admission; the server continues the Task.
 
-This guide operates the implemented Task delivery leaf and guardian-authored Campaign entry path. The guardian prepares and submits one complete bounded plan; the server admits eligible Ready proposals and advances successor Tasks without per-Task direction. Accepted-delivery reduction into Outcome evidence and Campaign closure remain pending. Do not use repeated standalone `submit` commands as a substitute for the Campaign behavior defined in [DESIGN](DESIGN.md).
+This guide operates the Task delivery leaf and guardian-authored Campaign entry path. The guardian prepares and submits one complete bounded plan; after handoff, the server admits eligible Ready proposals, advances successor Tasks, reduces accepted delivery into Outcome evidence, and projects the Campaign terminal state without per-Task direction. Do not use repeated standalone `submit` commands as a substitute for the Campaign behavior defined in [DESIGN](DESIGN.md).
 
 ## 1. Prerequisites and build
 
@@ -229,7 +229,24 @@ node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --j
 node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
 ```
 
-Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable. After the complete set is handed off, the guardian observes the Campaign rather than starting or advancing individual Tasks. An exhausted plan with incomplete Outcomes requires one new guardian/user decision; it must not be hidden by ad hoc standalone Task submission.
+Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable.
+
+After every initial proposal has been submitted and checked, hand the fixed plan to the factory exactly once:
+
+```sh
+node apps/cli/dist/cli.mjs campaign handoff "<GOAL_ID>:v1" --json
+```
+
+Handoff freezes proposal supply and is the durable gate for Campaign Task admission. Before handoff, `planning` is an active, incomplete Campaign and an empty or partial frontier remains open for guardian proposals. After handoff, the server alone admits and advances eligible Tasks. It continues independent useful branches, and only accepted exact-SHA Task delivery associated with this Campaign, Goal version, and Outcome supplies Outcome evidence. Same-Repository dependencies additionally require an accepted merged effect; cross-Repository reviewed delivery keeps the existing rule. Passing checks, creating a PR, model assertions, and an empty frontier do not satisfy an Outcome.
+
+The public projection remains `planning` while executable work can proceed, `accepted` only when every required live Outcome has owning accepted evidence, and `blocked` when no eligible useful branch remains. An exhausted or blocked fixed plan with live Outcomes carries one stable `decisionRequest`; it does not accept proposals after handoff or authorize ad hoc standalone Tasks. A host with the contract's explicit abandonment authority may terminate an unresolved Campaign:
+
+```sh
+export USINE_CAMPAIGN_ABANDONMENT_SOURCE="<AUTHORITY_SOURCE>"
+node apps/cli/dist/cli.mjs campaign abandon "<GOAL_ID>:v1" --json
+```
+
+The abandon command sends an empty request body; the separate host anchor is the authority. `abandoned` is terminal and cannot be replaced by handoff, new proposals, or later reconciliation. Campaign GET and restart preserve these durable statuses and decision-request identities.
 
 Read one Campaign evidence report after the plan handoff:
 

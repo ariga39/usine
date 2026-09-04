@@ -9,6 +9,7 @@ import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candida
 import { openSqliteDatabase, TaskAuthority, type TaskResult } from "@usine/task-authority";
 import {
   getCampaign,
+  handoffCampaign,
   proposeCampaign,
   publishCampaign,
   registerRepository,
@@ -236,6 +237,56 @@ async function acceptCampaignTask(
   );
 }
 
+async function reviewCampaignTask(
+  context: Parameters<NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>>[0],
+) {
+  const { authority, contract, result } = context;
+  const activation = await authority.reserveActivation(
+    result.taskId,
+    contract.budget.maxImplementerActivations,
+  );
+  const repositoryPath = result.repository?.path;
+  if (!repositoryPath) throw new Error("Campaign fixture task has no repository snapshot");
+  const sha = (
+    await execa("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { cwd: repositoryPath })
+  ).stdout.trim();
+  const candidate = await authority.recordCandidate(
+    { taskId: result.taskId, revision: activation.result.revision },
+    { sha, baseSha: contract.baseSha, fence: activation.activation },
+  );
+  const checked = await authority.recordCheck(
+    { taskId: result.taskId, revision: candidate.revision },
+    { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+  );
+  return authority.recordReview(
+    { taskId: result.taskId, revision: checked.revision },
+    { sha, verdict: "approved", summary: "fixture approved", findings: [] },
+  );
+}
+
+async function checkCampaignTask(
+  context: Parameters<NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>>[0],
+) {
+  const { authority, contract, result } = context;
+  const activation = await authority.reserveActivation(
+    result.taskId,
+    contract.budget.maxImplementerActivations,
+  );
+  const repositoryPath = result.repository?.path;
+  if (!repositoryPath) throw new Error("Campaign fixture task has no repository snapshot");
+  const sha = (
+    await execa("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { cwd: repositoryPath })
+  ).stdout.trim();
+  const candidate = await authority.recordCandidate(
+    { taskId: result.taskId, revision: activation.result.revision },
+    { sha, baseSha: contract.baseSha, fence: activation.activation },
+  );
+  return authority.recordCheck(
+    { taskId: result.taskId, revision: candidate.revision },
+    { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+  );
+}
+
 type CampaignExecutionContext = Parameters<
   NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>
 >[0];
@@ -330,8 +381,9 @@ test("admits one Ready proposal through the Task leaf without a Task submission"
     );
     const ready = proposed.proposals?.[0]?.ready;
     expect(ready).toMatchObject({ repositoryId: "campaign-repository" });
-    const taskId = ready && "taskId" in ready ? ready.taskId : undefined;
-    expect(taskId).toEqual("campaign-campaign-366-v1-automatic-admission");
+    const taskId = "campaign-campaign-366-v1-automatic-admission";
+    expect(ready?.taskId).toBeNull();
+    await handoffCampaign(server.url, published.campaignId);
 
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -428,8 +480,14 @@ test("holds the next Ready proposal at active capacity and admits it after relea
       published.campaignId,
       frontierProposal("capacity-second", "outcome-one"),
     );
-    expect(first.proposals?.[0]?.ready?.taskId).toBe("campaign-campaign-366-v1-capacity-first");
+    expect(executions).toBe(0);
+    await handoffCampaign(server.url, published.campaignId);
+    expect(first.proposals?.[0]?.ready?.taskId).toBeNull();
     expect(second.proposals?.[1]?.ready?.taskId).toBeNull();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions >= 1) break;
+    }
     expect(executions).toBe(1);
 
     releaseFirst();
@@ -480,6 +538,8 @@ test("keeps same-Repository Ready proposals serial with spare active capacity", 
       published.campaignId,
       frontierProposal("serial-second", "outcome-one"),
     );
+    expect(executions).toBe(0);
+    await handoffCampaign(server.url, published.campaignId);
     expect(second.proposals?.[1]?.ready?.taskId).toBeNull();
     expect(executions).toBe(1);
     await expect(serverSnapshot(server.url)).resolves.toMatchObject({
@@ -537,6 +597,7 @@ test("bounds generated Campaign PR titles without truncating instructions", asyn
       ...frontierProposal("bounded-title", "outcome-one"),
       instructions,
     });
+    await handoffCampaign(server.url, published.campaignId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
       if (observedTitle !== "") break;
@@ -552,28 +613,18 @@ test("bounds generated Campaign PR titles without truncating instructions", asyn
   }
 });
 
-test("does not record a restart recovery for a Campaign Task admitted during startup", async () => {
-  const seeded = await frontierFixture(undefined, "user:campaign-366", undefined, 1, false);
-  const { contractPath, root, stateDirectory, server: seededServer } = seeded;
+test("does not admit a Campaign Task during startup before plan handoff", async () => {
+  const fixtureValue = await frontierFixture(undefined, "user:campaign-366", undefined, 1, true);
+  const { contractPath, stateDirectory, server: seededServer } = fixtureValue;
   const published = await publishCampaign(seededServer.url, { contractPath });
   await proposeCampaign(
     seededServer.url,
     published.campaignId,
     frontierProposal("startup-admission", "outcome-one"),
   );
+  expect((await serverSnapshot(seededServer.url)).tasks).toEqual([]);
   await seededServer.close();
-  await registerRepositoryResource(stateDirectory, {
-    id: "campaign-repository",
-    path: root,
-    owner: "example",
-    name: "campaign-repository",
-    baseBranch: "main",
-    implementerProfile: "writer-profile",
-    reviewerProfile: "reviewer-profile",
-    forgeProfile: "default",
-    projectCheck: { command: "true", timeoutMs: 1_000 },
-    gitAuthor: { name: "Test", email: "test@example.invalid" },
-  });
+
   const environment: NodeJS.ProcessEnv = {
     USINE_STATE_DIR: stateDirectory,
     USINE_GOAL_PUBLICATION_SOURCE: "user:campaign-366",
@@ -597,12 +648,11 @@ test("does not record a restart recovery for a Campaign Task admitted during sta
     port: 0,
   });
   try {
+    expect((await serverSnapshot(server.url)).tasks).toEqual([]);
+    await handoffCampaign(server.url, published.campaignId);
     await expect(
       taskStatus(server.url, "campaign-campaign-366-v1-startup-admission"),
-    ).resolves.toMatchObject({
-      state: "blocked",
-      evidence: { restartRecoveries: 0 },
-    });
+    ).resolves.toMatchObject({ state: "blocked", evidence: { restartRecoveries: 0 } });
     expect(executions).toBe(1);
   } finally {
     await server.close();
@@ -638,8 +688,9 @@ test("restarts an admitted Campaign leaf without duplicating its Task", async ()
       published.campaignId,
       frontierProposal("restartable", "outcome-one"),
     );
-    const taskId = proposed.proposals?.[0]?.ready?.taskId;
-    expect(taskId).toBe("campaign-campaign-366-v1-restartable");
+    expect(proposed.proposals?.[0]?.ready?.taskId).toBeNull();
+    const taskId = "campaign-campaign-366-v1-restartable";
+    await handoffCampaign(server.url, published.campaignId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
       if (executions > 0) break;
@@ -803,6 +854,32 @@ describe("Campaign publication boundary", () => {
       await restarted.close();
     }
   });
+
+  test("does not accept corrupt durable decision request JSON while reading", async () => {
+    const { stateDirectory, contractPath } = await fixture();
+    const firstServer = await start(stateDirectory);
+    let published;
+    try {
+      published = await publishCampaign(firstServer.url, { contractPath });
+    } finally {
+      await firstServer.close();
+    }
+
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    database
+      .prepare("UPDATE campaigns SET decision_request = ? WHERE campaign_id = ?")
+      .run(JSON.stringify({ reason: "corrupt" }), published.campaignId);
+    database.close();
+
+    const restarted = await start(stateDirectory);
+    try {
+      await expect(getCampaign(restarted.url, published.campaignId)).rejects.toMatchObject({
+        status: 500,
+      });
+    } finally {
+      await restarted.close();
+    }
+  });
 });
 
 describe("durable Ready frontier", () => {
@@ -949,7 +1026,6 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("first", "outcome-one", [], true),
       );
-      await firstStartedPromise;
       const beforeAcceptance = await proposeCampaign(
         server.url,
         published.campaignId,
@@ -959,6 +1035,8 @@ describe("durable Ready frontier", () => {
         proposalId: "second",
         status: "planned",
       });
+      await handoffCampaign(server.url, published.campaignId);
+      await firstStartedPromise;
 
       releaseFirst();
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1073,7 +1151,6 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("cross-first", "outcome-one"),
       );
-      await firstStartedPromise;
       const beforeAcceptance = await proposeCampaign(
         server.url,
         published.campaignId,
@@ -1083,6 +1160,8 @@ describe("durable Ready frontier", () => {
         proposalId: "cross-second",
         status: "planned",
       });
+      await handoffCampaign(server.url, published.campaignId);
+      await firstStartedPromise;
       releaseFirst();
       for (let attempt = 0; attempt < 100; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1136,12 +1215,13 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("same-reviewed-first", "outcome-one"),
       );
-      await firstStartedPromise;
       await proposeCampaign(
         server.url,
         published.campaignId,
         frontierProposal("same-reviewed-second", "outcome-two", ["same-reviewed-first"]),
       );
+      await handoffCampaign(server.url, published.campaignId);
+      await firstStartedPromise;
       releaseFirst();
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(successorStarted).toBe(false);
@@ -1183,6 +1263,11 @@ describe("durable Ready frontier", () => {
           firstStarted();
           await firstGate;
           const accepted = await acceptCampaignTask(context, true);
+          await replaceRawTaskResult(
+            fixtureValue.stateDirectory,
+            context.result.taskId,
+            "{ invalid",
+          );
           firstFinished();
           return accepted;
         }
@@ -1201,23 +1286,20 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("quarantined-first", "outcome-one", [], true),
       );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("quarantined-second", "outcome-two", ["quarantined-first"], true),
+      );
+      await handoffCampaign(server.url, published.campaignId);
       await firstStartedPromise;
       releaseFirst();
       await firstFinishedPromise;
       await expect(
         taskStatus(server.url, "campaign-campaign-366-v1-quarantined-first"),
-      ).resolves.toMatchObject({ state: "merged" });
-      await replaceRawTaskResult(
-        stateDirectory,
-        "campaign-campaign-366-v1-quarantined-first",
-        "{ invalid",
-      );
-
-      const successor = await proposeCampaign(
-        server.url,
-        published.campaignId,
-        frontierProposal("quarantined-second", "outcome-two", ["quarantined-first"], true),
-      );
+      ).rejects.toMatchObject({ status: 503, diagnostic: "task_state_quarantined" });
+      const successor = await getCampaign(server.url, published.campaignId);
+      if (!successor) throw new Error("campaign disappeared during quarantine reconciliation");
       expect(successor.proposals).toMatchObject([
         expect.objectContaining({ proposalId: "quarantined-first" }),
         expect.objectContaining({
@@ -1412,6 +1494,12 @@ describe("durable Ready frontier", () => {
           published.campaignId,
           frontierProposal("negative-first", "outcome-one", [], true),
         );
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("negative-second", "outcome-two", ["negative-first"], true),
+        );
+        await handoffCampaign(server.url, published.campaignId);
         await firstStartedPromise;
         releaseFirst();
         await firstFinishedPromise;
@@ -1419,11 +1507,8 @@ describe("durable Ready frontier", () => {
           taskStatus(server.url, "campaign-campaign-366-v1-negative-first"),
         ).resolves.toMatchObject({ state: expectedState });
 
-        const successor = await proposeCampaign(
-          server.url,
-          published.campaignId,
-          frontierProposal("negative-second", "outcome-two", ["negative-first"], true),
-        );
+        const successor = await getCampaign(server.url, published.campaignId);
+        if (!successor) throw new Error("campaign disappeared during evidence reconciliation");
         expect(successor.proposals).toMatchObject([
           expect.objectContaining({ proposalId: "negative-first" }),
           expect.objectContaining({
@@ -1483,12 +1568,13 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("restart-first", "outcome-one", [], true),
       );
-      await predecessorStartedPromise;
       await proposeCampaign(
         server.url,
         published.campaignId,
         frontierProposal("restart-second", "outcome-two", ["restart-first"], true),
       );
+      await handoffCampaign(server.url, published.campaignId);
+      await predecessorStartedPromise;
       await server.close();
 
       const databasePath = join(stateDirectory, "usine.sqlite");
@@ -1739,6 +1825,432 @@ describe("durable Ready frontier", () => {
       }
     } finally {
       await server.close().catch(() => undefined);
+    }
+  });
+
+  test("runs the fixed handoff through every Outcome and accepts only accepted Task delivery", async () => {
+    let executions = 0;
+    const fixtureValue = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        executions += 1;
+        return acceptCampaignTask(context, true);
+      },
+    );
+    const { contractPath, server, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("handoff-first", "outcome-one", [], true),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("handoff-second", "outcome-two", ["handoff-first"], true),
+      );
+      expect(executions).toBe(0);
+
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "accepted",
+        planHandedOff: true,
+        outcomes: [
+          { id: "outcome-one", status: "accepted", evidence: { outcomeId: "outcome-one" } },
+          { id: "outcome-two", status: "accepted", evidence: { outcomeId: "outcome-two" } },
+        ],
+      });
+      expect(executions).toBe(2);
+      await handoffCampaign(server.url, published.campaignId);
+      await expect(
+        fetch(`${server.url}/v1/campaigns/${published.campaignId}/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(frontierProposal("after-accepted", "outcome-one", [], true)),
+        }),
+      ).resolves.toMatchObject({ status: 409 });
+      environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
+      await expect(
+        fetch(`${server.url}/v1/campaigns/${published.campaignId}/abandon`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      ).resolves.toMatchObject({ status: 200 });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "accepted",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("exhausted fixed plans persist one stable decision request without closing", async () => {
+    const fixtureValue = await frontierFixture(undefined, "user:campaign-366", async (context) =>
+      acceptCampaignTask(context),
+    );
+    const { contractPath, server, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("incomplete-plan", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      let firstRequest: unknown;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "blocked") {
+          firstRequest = current.decisionRequest;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(firstRequest).toMatchObject({
+        requestId: `decision:${published.campaignId}`,
+        reason: "plan_exhausted",
+        outcomeIds: ["outcome-two"],
+      });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: firstRequest,
+      });
+      await handoffCampaign(server.url, published.campaignId);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: firstRequest,
+      });
+      await expect(
+        fetch(`${server.url}/v1/campaigns/${published.campaignId}/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(frontierProposal("after-handoff", "outcome-two")),
+        }),
+      ).resolves.toMatchObject({ status: 409 });
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          status: "blocked",
+          decisionRequest: firstRequest,
+        });
+        await handoffCampaign(restarted.url, published.campaignId);
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          status: "blocked",
+          decisionRequest: firstRequest,
+        });
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("empty handed-off frontiers request a decision without closing", async () => {
+    const { contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await handoffCampaign(server.url, published.campaignId);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        planHandedOff: true,
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "plan_exhausted",
+          outcomeIds: ["outcome-one", "outcome-two"],
+        },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("continues an independent branch around a blocked branch", async () => {
+    const base = frontierGoal("campaign-repository");
+    const contract = {
+      ...mergeFrontierGoal("campaign-repository"),
+      outcomes: base.outcomes.map((outcome) => ({ ...outcome, dependsOn: [] })),
+    };
+    let executions = 0;
+    const { contractPath, server } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => {
+        executions += 1;
+        if (context.result.taskId.endsWith("blocked-branch"))
+          return context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "independent branch is blocked",
+          );
+        return acceptCampaignTask(context, true);
+      },
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("blocked-branch", "outcome-one", [], true),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("useful-branch", "outcome-two", [], true),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "blocked") break;
+      }
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          reason: "branches_blocked",
+          outcomeIds: ["outcome-one"],
+        },
+        outcomes: [
+          { id: "outcome-one", status: "planned", evidence: null },
+          { id: "outcome-two", status: "accepted", evidence: { outcomeId: "outcome-two" } },
+        ],
+      });
+      expect(executions).toBe(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("requires every fixed-plan proposal for an Outcome to be accepted", async () => {
+    const { contractPath, server } = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("partial-two"))
+          return context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "one required proposal is blocked",
+          );
+        return acceptCampaignTask(context, true);
+      },
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("partial-one", "outcome-one", [], true),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("partial-two", "outcome-one", [], true),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        outcomes: [
+          { id: "outcome-one", status: "planned", evidence: null },
+          { id: "outcome-two", status: "planned", evidence: null },
+        ],
+        decisionRequest: { reason: "branches_blocked", outcomeIds: ["outcome-one", "outcome-two"] },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("does not count a blocked dependency without a Task result as useful work", async () => {
+    const { contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const blocked = await proposeCampaign(server.url, published.campaignId, {
+        ...frontierProposal("blocked-predecessor", "outcome-one"),
+        effects: ["outside"],
+      });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("blocked-successor", "outcome-two", ["blocked-predecessor"]),
+      );
+      expect(blocked.proposals?.[0]).toMatchObject({
+        proposalId: "blocked-predecessor",
+        status: "blocked",
+        blocker: "proposal effect is outside the Goal authority envelope",
+        ready: null,
+      });
+      expect(blocked.proposals?.[0]?.ready?.taskId ?? null).toBeNull();
+      await expect(serverSnapshot(server.url)).resolves.toMatchObject({ tasks: [] });
+      await handoffCampaign(server.url, published.campaignId);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: { reason: "branches_blocked" },
+        proposals: [
+          {
+            proposalId: "blocked-predecessor",
+            status: "blocked",
+            blocker: "proposal effect is outside the Goal authority envelope",
+            ready: null,
+          },
+          { proposalId: "blocked-successor", status: "planned" },
+        ],
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("accepts reviewed_pr evidence for its Outcome while another Outcome remains incomplete", async () => {
+    const { contractPath, server } = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        const reviewed = await reviewCampaignTask(context);
+        if (!reviewed.candidateSha) throw new Error("fixture review has no candidate");
+        return context.authority.recordDelivery(
+          { taskId: reviewed.taskId, revision: reviewed.revision },
+          {
+            sha: reviewed.candidateSha,
+            effect: "github",
+            prNumber: 1,
+            url: "https://example.invalid/pull/1",
+            attestationId: `fixture-${reviewed.taskId}`,
+            merge: null,
+          },
+        );
+      },
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("pr-only", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const current = await taskStatus(server.url, "campaign-campaign-366-v1-pr-only");
+        if (current?.state === "reviewed_pr") break;
+      }
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        outcomes: [
+          {
+            id: "outcome-one",
+            status: "accepted",
+            evidence: { outcomeId: "outcome-one", merged: false, mergeCommitSha: null },
+          },
+          { id: "outcome-two", status: "planned", evidence: null },
+        ],
+        decisionRequest: { reason: "plan_exhausted" },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("does not accept check success or model completion without accepted delivery", async () => {
+    const base = frontierGoal("campaign-repository");
+    const contract = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: base.outcomes.map((outcome) => ({ ...outcome, dependsOn: [] })),
+    };
+    const { contractPath, server } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("check-only")) return checkCampaignTask(context);
+        return context.result;
+      },
+      2,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("check-only", "outcome-one"),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("model-only", "outcome-two"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await taskStatus(server.url, "campaign-campaign-366-v1-check-only");
+        if (current?.state === "checked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await expect(
+        taskStatus(server.url, "campaign-campaign-366-v1-check-only"),
+      ).resolves.toMatchObject({ state: "checked", check: { status: "passed" } });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "planning",
+        planHandedOff: true,
+        outcomes: [
+          { id: "outcome-one", status: "planned", evidence: null },
+          { id: "outcome-two", status: "planned", evidence: null },
+        ],
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("requires explicit host authority for abandonment", async () => {
+    const fixtureValue = await frontierFixture();
+    const { contractPath, server, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const unauthorized = await fetch(
+        `${server.url}/v1/campaigns/${published.campaignId}/abandon`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      expect(unauthorized.status).toBe(403);
+      environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
+      const response = await fetch(`${server.url}/v1/campaigns/${published.campaignId}/abandon`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(response.status).toBe(200);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "abandoned",
+      });
+      await handoffCampaign(server.url, published.campaignId);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "abandoned",
+      });
+    } finally {
+      await server.close();
     }
   });
 

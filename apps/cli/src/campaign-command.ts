@@ -3,7 +3,9 @@ import { Argument, Command } from "effect/unstable/cli";
 import { readFile } from "node:fs/promises";
 import {
   campaignEvidence,
+  abandonCampaign,
   getCampaign,
+  handoffCampaign,
   proposeCampaign,
   publishCampaign,
   recordCampaignDecisionTouch,
@@ -70,6 +72,32 @@ export function campaignCommand(serverUrl: string) {
         }),
       ),
   );
+  const handoff = Command.make(
+    "handoff",
+    { campaignId: Argument.string("campaign-id"), json: jsonFlag() },
+    ({ campaignId, json }) =>
+      Effect.promise(() =>
+        runCommand("campaign_handoff_failed", async () => {
+          const campaign = await handoffCampaign(serverUrl, campaignId);
+          process.stdout.write(
+            json ? renderJson(campaign) : `Campaign ${campaign.campaignId}: ${campaign.status}\n`,
+          );
+        }),
+      ),
+  );
+  const abandon = Command.make(
+    "abandon",
+    { campaignId: Argument.string("campaign-id"), json: jsonFlag() },
+    ({ campaignId, json }) =>
+      Effect.promise(() =>
+        runCommand("campaign_abandon_failed", async () => {
+          const campaign = await abandonCampaign(serverUrl, campaignId);
+          process.stdout.write(
+            json ? renderJson(campaign) : `Campaign ${campaign.campaignId}: ${campaign.status}\n`,
+          );
+        }),
+      ),
+  );
   const touch = Command.make(
     "touch",
     {
@@ -88,6 +116,6 @@ export function campaignCommand(serverUrl: string) {
       ),
   );
   return Command.make("campaign").pipe(
-    Command.withSubcommands([publish, get, propose, evidence, touch]),
+    Command.withSubcommands([publish, get, propose, handoff, abandon, evidence, touch]),
   );
 }

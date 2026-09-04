@@ -21,6 +21,7 @@ const campaign = {
       dependsOn: [],
       parentId: null,
       status: "planned",
+      evidence: null,
     },
   ],
   authority: {
@@ -31,6 +32,8 @@ const campaign = {
   },
   budget: { maxElapsedMs: 60_000, maxTasks: 4, maxPlannerActivations: 1 },
   status: "planning",
+  planHandedOff: false,
+  decisionRequest: null,
   revision: 1,
 } as const;
 
@@ -47,6 +50,7 @@ const frontierCampaign = {
       dependsOn: [],
       parentId: null,
       status: "planned",
+      evidence: null,
     },
     {
       id: "outcome-two",
@@ -55,6 +59,7 @@ const frontierCampaign = {
       dependsOn: ["outcome-one"],
       parentId: null,
       status: "planned",
+      evidence: null,
     },
   ],
   authority: {

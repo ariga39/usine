@@ -169,8 +169,12 @@ export type { TaskExecutionInput } from "@usine/task-authority";
 export type { ReviewAttemptObservation } from "@usine/quality-gate";
 export {
   CampaignContentConflictError,
+  CampaignHandoffError,
   GoalContractInputError,
   lookupCampaign,
+  handoffCampaign,
+  abandonCampaign,
+  CampaignAbandonmentError,
   readGoalContract,
   proposeCampaign,
 } from "./campaign.js";

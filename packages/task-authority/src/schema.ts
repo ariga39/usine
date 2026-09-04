@@ -120,6 +120,8 @@ export const campaigns = sqliteTable(
       .notNull()
       .default(false),
     superseded: integer("superseded", { mode: "boolean" }).notNull().default(false),
+    planHandedOff: integer("plan_handed_off", { mode: "boolean" }).notNull().default(false),
+    decisionRequest: text("decision_request", { mode: "json" }),
     revision: integer("revision").notNull().default(1),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(unixepoch() * 1000)`)
