@@ -222,7 +222,7 @@ Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current 
 }
 ```
 
-The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
+The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute, and the complete set must not exceed the Goal's `maxTasks`; later admission sequence entries are durably blocked when that limit is exhausted. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
 
 ```sh
 node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
