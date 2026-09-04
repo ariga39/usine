@@ -209,7 +209,7 @@ node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --j
 node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
 ```
 
-Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. An unsatisfied dependency or authority mismatch remains `planned` or `blocked`; repeated submission and server restart preserve identity, order, and the recorded Ready base.
+Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable.
 
 ## 4. Register a Repository
 

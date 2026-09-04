@@ -141,7 +141,7 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
     status: decodeCampaignProposalStatus(row.status),
     blocker: row.blocker,
     ready:
-      row.status !== "ready" || row.readyBaseSha === null || row.readyRepositoryRevision === null
+      row.readyBaseSha === null || row.readyRepositoryRevision === null
         ? null
         : {
             repositoryId: proposal.repositoryId,
@@ -183,8 +183,7 @@ function blockerFor(
     proposal.budget.maxElapsedMs > contract.budget.maxElapsedMs
   )
     return "proposal budget is outside the Goal budget envelope";
-  const hasDurableReadyBase =
-    row.status === "ready" && row.readyBaseSha !== null && row.readyRepositoryRevision !== null;
+  const hasDurableReadyBase = row.readyBaseSha !== null && row.readyRepositoryRevision !== null;
   if (!repository && !hasDurableReadyBase) return "proposal repository is not registered";
   if (!hasDurableReadyBase && (!repository?.headSha || !EXACT_SHA.test(repository.headSha)))
     return "registered repository has no exact head";
@@ -199,15 +198,11 @@ function dependencyBlocker(
   for (const dependency of proposal.dependsOn) {
     const row = rows.find((candidate) => candidate.proposalId === dependency);
     if (!row) return "proposal dependency is not admitted";
-    if (row.status !== "ready") return "proposal dependency is not ready";
+    return "proposal dependency has no accepted delivery";
   }
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
   for (const dependency of outcome?.dependsOn ?? []) {
-    const satisfied = rows.some(
-      (row) =>
-        row.status === "ready" && taskProposalSchema.parse(row.proposal).outcomeId === dependency,
-    );
-    if (!satisfied) return "outcome dependency is not ready";
+    return "outcome dependency has no accepted delivery";
   }
   return null;
 }
@@ -254,12 +249,13 @@ async function reconcile(database: CampaignDatabase, campaignId: string): Promis
       const nextStatus = blocker ? "blocked" : dependency ? "planned" : "ready";
       const nextBlocker = blocker ?? dependency;
       const repository = repositoriesById.get(proposal.repositoryId);
+      // Ready evidence is a durable fact. Once captured, it remains attached to the
+      // proposal even when current eligibility later projects it as blocked.
       const nextBaseSha =
-        nextStatus === "ready" ? (row.readyBaseSha ?? repository?.headSha ?? null) : null;
+        row.readyBaseSha ?? (nextStatus === "ready" ? (repository?.headSha ?? null) : null);
       const nextRevision =
-        nextStatus === "ready"
-          ? (row.readyRepositoryRevision ?? repository?.revision ?? null)
-          : null;
+        row.readyRepositoryRevision ??
+        (nextStatus === "ready" ? (repository?.revision ?? null) : null);
       if (
         row.status !== nextStatus ||
         row.blocker !== nextBlocker ||
@@ -474,7 +470,7 @@ export async function lookupCampaign(
     if (!found) return null;
     await refreshRepositoryHeads(handle.database, environment);
     await reconcile(handle.database, campaignId);
-    return resourceFromDatabase(handle.database, campaignId);
+    return await resourceFromDatabase(handle.database, campaignId);
   } finally {
     handle.close();
   }

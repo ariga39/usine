@@ -329,7 +329,7 @@ describe("durable Ready frontier", () => {
           proposalId: "proposal-two",
           sequence: 2,
           status: "planned",
-          blocker: "proposal dependency is not ready",
+          blocker: "proposal dependency has no accepted delivery",
           ready: null,
         },
       ]);
@@ -342,6 +342,9 @@ describe("durable Ready frontier", () => {
           )
         ).proposals,
       ).toEqual(second.proposals);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        proposals: second.proposals,
+      });
       await writeFile(join(root, "head-advanced.txt"), "the registered head advances\n");
       await execa("git", ["add", "head-advanced.txt"], { cwd: root });
       await execa("git", ["commit", "-m", "advance registered head"], { cwd: root });
@@ -375,6 +378,34 @@ describe("durable Ready frontier", () => {
         {
           status: "blocked",
           blocker: "goal publication is not host-authorized",
+          ready: null,
+        },
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("does not infer an Outcome dependency from a Ready proposal", async () => {
+    const { contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("outcome-one-proposal", "outcome-one"),
+      );
+      const result = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("outcome-two-proposal", "outcome-two"),
+      );
+      expect(result.proposals).toMatchObject([
+        { proposalId: "outcome-one-proposal", status: "ready" },
+        {
+          proposalId: "outcome-two-proposal",
+          status: "planned",
+          blocker: "outcome dependency has no accepted delivery",
           ready: null,
         },
       ]);
@@ -502,7 +533,9 @@ describe("durable Ready frontier", () => {
         published.campaignId,
         frontierProposal("superseded-outcome", "outcome-one"),
       );
-      expect(result.outcomes).toMatchObject([{ id: "outcome-one", status: "superseded" }]);
+      expect(result.outcomes.find((outcome) => outcome.id === "outcome-one")).toMatchObject({
+        status: "superseded",
+      });
       expect(result.proposals).toMatchObject([
         {
           status: "blocked",
@@ -519,11 +552,13 @@ describe("durable Ready frontier", () => {
     const { root, contractPath, server } = await frontierFixture();
     try {
       const first = await publishCampaign(server.url, { contractPath });
-      await proposeCampaign(
+      const oldProjection = await proposeCampaign(
         server.url,
         first.campaignId,
         frontierProposal("old-proposal", "outcome-one"),
       );
+      const oldReady = oldProjection.proposals?.[0]?.ready;
+      expect(oldReady).not.toBeNull();
       const newerPath = join(root, "goal-v2.json");
       await writeFile(
         newerPath,
@@ -538,7 +573,10 @@ describe("durable Ready frontier", () => {
             proposalId: "old-proposal",
             status: "blocked",
             blocker: "goal publication is superseded",
-            ready: null,
+            ready: {
+              baseSha: oldReady?.baseSha,
+              repositoryRevision: oldReady?.repositoryRevision,
+            },
           },
         ],
       });

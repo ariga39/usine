@@ -140,10 +140,12 @@ The minimum durable meanings are:
 | Campaign | One execution of a Goal publication, including status, cumulative budget, and current Spec version. |
 | Outcome | A required user-observable result, its acceptance evidence, dependencies, and live/superseded status. |
 | Task Proposal | Planner-authored execution suggestion with an idempotency key and Outcome trace. It has no lease, resolved base, or execution authority; the coordinator durably orders it and projects it as Planned, Ready, or Blocked. |
-| Ready Task | An admitted immutable Task projection whose dependencies, authority, capacity, Repository state, and exact activation base have been resolved by the coordinator. The base is recorded from the registered Repository fact at the first Ready transition and is never proposal-supplied. |
+| Ready Task | An admitted immutable Task projection whose dependencies, authority, capacity, Repository state, and exact activation base have been resolved by the coordinator. The base is recorded from the registered Repository fact at the first Ready transition and is never proposal-supplied. If later reconciliation makes the proposal non-executable, its status changes but the historical Ready fact remains available for recovery. |
 | Campaign evidence | Accepted Task delivery effects, Outcome observations, usage, human touches, replans, and terminal reason linked to the Campaign. |
 
 Rolling-wave planning freezes the accepted Outcome Tree and proposes only a bounded near-term frontier. A low watermark, an exhausted but incomplete frontier, or evidence that invalidates the plan may activate one Planner run. Dependency changes and capacity release are mechanical transitions and do not consume a Planner run. A Task may be narrowed or split within its Outcome without adding product scope; a new Outcome or material product behavior requires a versioned replan under the Goal authority.
+
+This frontier slice does not run the delivery leaf or record accepted delivery evidence. Proposal and Outcome dependencies therefore remain Planned until a later coordinator slice owns that evidence; a Ready predecessor is executable work, not completed work.
 
 Campaign terminal meanings are deliberately small: `accepted` requires complete Outcome evidence; `blocked` requires a durable authority, product, or exhausted-budget reason that prevents every remaining useful branch; `abandoned` requires explicit authority. Running, planning, ready, active, and waiting are projections of durable facts rather than independent claims by an agent.
 
