@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@usine/candidate-workspace": "workspace:*",
     "@usine/coding-session": "workspace:*",
     "typescript": "latest",
     "vite": "catalog:",

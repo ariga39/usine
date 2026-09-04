@@ -20,6 +20,7 @@ import {
   RepositoryWriterConflictError,
   repositories,
   taskProposalSchema,
+  isTaskStateQuarantinedError,
   type CampaignProposalResource,
   type CampaignResource,
   type GoalContract,
@@ -271,17 +272,139 @@ function blockerFor(
   return null;
 }
 
-function dependencyBlocker(
+interface AcceptedCampaignDelivery {
+  readonly mergedHeadSha: string | null;
+}
+
+interface DependencyResolution {
+  readonly blocker: string | null;
+  readonly baseSha: string | null;
+}
+
+function acceptedCampaignDelivery(
+  result: TaskResult | null,
+  campaign: typeof campaigns.$inferSelect,
+  contract: GoalContract,
+  proposal: TaskProposal,
+): AcceptedCampaignDelivery | null {
+  const association = result?.campaign;
+  if (
+    !result ||
+    !association ||
+    result.taskId !== campaignTaskId(contract, proposal) ||
+    association.campaignId !== campaign.campaignId ||
+    association.goalId !== campaign.goalId ||
+    association.goalVersion !== campaign.goalVersion ||
+    association.outcomeId !== proposal.outcomeId ||
+    result.repository?.id !== proposal.repositoryId ||
+    result.mergeAuthorized !== proposal.merge ||
+    !result.candidateSha ||
+    !EXACT_SHA.test(result.candidateSha) ||
+    !result.check ||
+    result.check.status !== "passed" ||
+    !EXACT_SHA.test(result.check.sha) ||
+    result.check.sha !== result.candidateSha ||
+    !result.review ||
+    result.review.verdict !== "approved" ||
+    !EXACT_SHA.test(result.review.sha) ||
+    result.review.sha !== result.candidateSha ||
+    !result.delivery ||
+    result.delivery.sha !== result.candidateSha ||
+    !EXACT_SHA.test(result.delivery.sha)
+  )
+    return null;
+
+  if (!result.mergeAuthorized) {
+    return result.state === "reviewed_pr" && result.delivery.merge == null
+      ? { mergedHeadSha: null }
+      : null;
+  }
+
+  const merge = result.delivery.merge;
+  return result.state === "merged" &&
+    merge !== null &&
+    merge !== undefined &&
+    merge.observedState === "merged" &&
+    merge.prNumber === result.delivery.prNumber &&
+    merge.approvedHeadSha === result.delivery.sha &&
+    EXACT_SHA.test(merge.approvedHeadSha) &&
+    EXACT_SHA.test(merge.mergeCommitSha)
+    ? { mergedHeadSha: merge.mergeCommitSha }
+    : null;
+}
+
+async function dependencyResolution(
   proposal: TaskProposal,
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   contract: GoalContract,
-): string | null {
-  if (proposal.dependsOn.some((dependency) => !rows.some((row) => row.proposalId === dependency)))
-    return "proposal dependency is not admitted";
-  if (proposal.dependsOn.length > 0) return "proposal dependency has no accepted delivery";
+  campaign: typeof campaigns.$inferSelect,
+  database: CampaignDatabase,
+): Promise<DependencyResolution> {
+  const dependencies = new Map<string, typeof campaignProposals.$inferSelect>();
+  const proposalDependencyIds = new Set<string>();
+  for (const dependency of proposal.dependsOn) {
+    const row = rows.find((candidate) => candidate.proposalId === dependency);
+    if (!row) return { blocker: "proposal dependency is not admitted", baseSha: null };
+    dependencies.set(row.proposalId, row);
+    proposalDependencyIds.add(row.proposalId);
+  }
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
-  if ((outcome?.dependsOn.length ?? 0) > 0) return "outcome dependency has no accepted delivery";
-  return null;
+  const outcomeDependencyIds = new Set<string>();
+  for (const dependency of outcome?.dependsOn ?? []) {
+    outcomeDependencyIds.add(dependency);
+    let found = false;
+    for (const row of rows) {
+      if (taskProposalSchema.parse(row.proposal).outcomeId === dependency) {
+        dependencies.set(row.proposalId, row);
+        found = true;
+      }
+    }
+    if (!found) return { blocker: "outcome dependency has no admitted proposal", baseSha: null };
+  }
+
+  let mergedHeadSha: string | null = null;
+  let latestMergedSequence = -1;
+  for (const row of dependencies.values()) {
+    const predecessor = taskProposalSchema.parse(row.proposal);
+    let task: TaskResult | null = null;
+    if (row.taskId) {
+      try {
+        task = await new TaskAuthority(database).lookup(row.taskId);
+      } catch (error) {
+        if (!isTaskStateQuarantinedError(error)) throw error;
+      }
+    }
+    const accepted = acceptedCampaignDelivery(task, campaign, contract, predecessor);
+    if (!accepted)
+      return {
+        blocker: proposalDependencyIds.has(row.proposalId)
+          ? "proposal dependency has no accepted delivery"
+          : outcomeDependencyIds.has(predecessor.outcomeId)
+            ? "outcome dependency has no accepted delivery"
+            : "dependency has no accepted delivery",
+        baseSha: null,
+      };
+    if (predecessor.repositoryId === proposal.repositoryId && !accepted.mergedHeadSha)
+      return {
+        blocker: proposalDependencyIds.has(row.proposalId)
+          ? "same-Repository dependency has no accepted merge"
+          : outcomeDependencyIds.has(predecessor.outcomeId)
+            ? "same-Repository outcome dependency has no accepted merge"
+            : "same-Repository dependency has no accepted merge",
+        baseSha: null,
+      };
+    if (
+      accepted.mergedHeadSha &&
+      predecessor.repositoryId === proposal.repositoryId &&
+      row.sequence > latestMergedSequence
+    ) {
+      mergedHeadSha = accepted.mergedHeadSha;
+      latestMergedSequence = row.sequence;
+    }
+  }
+
+  if (!mergedHeadSha) return { blocker: null, baseSha: null };
+  return { blocker: null, baseSha: mergedHeadSha };
 }
 
 type CampaignDatabase = ReturnType<typeof openSqliteDatabase>["database"];
@@ -384,16 +507,19 @@ async function reconcile(
       repositoriesById.get(proposal.repositoryId),
       observedRepositoryIds,
     );
-    const dependency = blocker === null ? dependencyBlocker(proposal, rows, contract) : null;
-    const nextStatus = blocker ? "blocked" : dependency ? "planned" : "ready";
-    const nextBlocker = blocker ?? dependency;
+    const dependency =
+      blocker === null
+        ? await dependencyResolution(proposal, rows, contract, campaign, database)
+        : { blocker: null, baseSha: null };
+    const nextStatus = blocker ? "blocked" : dependency.blocker ? "planned" : "ready";
+    const nextBlocker = blocker ?? dependency.blocker;
     const repository = repositoriesById.get(proposal.repositoryId);
     // Ready evidence is a durable fact. Once captured, it remains attached to the
     // proposal even when current eligibility later projects it as blocked.
     const nextBaseSha =
       row.readyBaseSha ??
       (nextStatus === "ready" && observedRepositoryIds.has(proposal.repositoryId)
-        ? (repository?.headSha ?? null)
+        ? (dependency.baseSha ?? repository?.headSha ?? null)
         : null);
     const nextRevision =
       row.readyRepositoryRevision ??
