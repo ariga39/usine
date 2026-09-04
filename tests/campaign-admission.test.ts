@@ -366,6 +366,26 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("accepts only the strict flat proposal shape", async () => {
+    const { contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await expect(
+        proposeCampaign(server.url, published.campaignId, {
+          task: frontierProposal("nested-proposal", "outcome-one"),
+        }),
+      ).rejects.toMatchObject({ status: 400, diagnostic: "validation" });
+      await expect(
+        proposeCampaign(server.url, published.campaignId, {
+          ...frontierProposal("aliased-proposal", "outcome-one"),
+          idempotencyKey: "aliased-proposal",
+        }),
+      ).rejects.toMatchObject({ status: 400, diagnostic: "validation" });
+    } finally {
+      await server.close();
+    }
+  });
+
   test("does not make an unanchored publication executable", async () => {
     const { contractPath, server } = await frontierFixture(
       frontierGoal("campaign-repository"),
