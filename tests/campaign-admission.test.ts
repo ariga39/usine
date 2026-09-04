@@ -194,8 +194,10 @@ test("admits one Ready proposal through the Task leaf without a Task submission"
     const taskId = ready && "taskId" in ready ? ready.taskId : undefined;
     expect(taskId).toEqual("campaign-campaign-366-v1-automatic-admission");
 
-    for (let attempt = 0; attempt < 100 && executions === 0; attempt += 1)
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions > 0) break;
+    }
     expect(executions).toBe(1);
     await expect(taskStatus(server.url, taskId!)).resolves.toMatchObject({
       taskId,
@@ -292,8 +294,10 @@ test("holds the next Ready proposal at active capacity and admits it after relea
     expect(executions).toBe(1);
 
     releaseFirst();
-    for (let attempt = 0; attempt < 100 && executions < 2; attempt += 1)
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions >= 2) break;
+    }
     expect(executions).toBe(2);
     const snapshot = await serverSnapshot(server.url);
     expect(snapshot.tasks.map((task) => task.taskId)).toEqual([
@@ -320,7 +324,9 @@ test("restarts an admitted Campaign leaf without duplicating its Task", async ()
     executions += 1;
     await Promise.race([
       paused,
-      new Promise<void>((resolve) => signal.addEventListener("abort", resolve, { once: true })),
+      new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      ),
     ]);
     return (await authority.lookup(result.taskId)) ?? result;
   };
@@ -335,8 +341,10 @@ test("restarts an admitted Campaign leaf without duplicating its Task", async ()
     );
     const taskId = proposed.proposals?.[0]?.ready?.taskId;
     expect(taskId).toBe("campaign-campaign-366-v1-restartable");
-    for (let attempt = 0; attempt < 100 && executions === 0; attempt += 1)
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions > 0) break;
+    }
     expect(executions).toBe(1);
     await server.close();
 
@@ -353,8 +361,10 @@ test("restarts an admitted Campaign leaf without duplicating its Task", async ()
       port: 0,
     });
     try {
-      for (let attempt = 0; attempt < 100 && executions < 2; attempt += 1)
+      for (let attempt = 0; attempt < 100; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
+        if (executions >= 2) break;
+      }
       expect(executions).toBe(2);
       await expect(serverSnapshot(restarted.url)).resolves.toMatchObject({
         tasks: [expect.objectContaining({ taskId })],

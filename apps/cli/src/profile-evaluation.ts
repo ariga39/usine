@@ -277,21 +277,23 @@ export async function readProfileEvaluationPlan(
       );
     taskIds.add(baseline.id);
     taskIds.add(candidate.id);
+    const baselineIssue = baseline.delivery.issue;
+    const candidateIssue = candidate.delivery.issue;
     if (
       deliveryBranches.has(baseline.delivery.branch) ||
       deliveryBranches.has(candidate.delivery.branch) ||
       baseline.delivery.branch === candidate.delivery.branch ||
-      deliveryIssues.has(baseline.delivery.issue) ||
-      deliveryIssues.has(candidate.delivery.issue) ||
-      baseline.delivery.issue === candidate.delivery.issue
+      (baselineIssue !== undefined && deliveryIssues.has(baselineIssue)) ||
+      (candidateIssue !== undefined && deliveryIssues.has(candidateIssue)) ||
+      (baselineIssue !== undefined && baselineIssue === candidateIssue)
     )
       throw new ProfileEvaluationValidationError(
         `${pair.id}:${pair.repetition}: Task delivery identities must be unique`,
       );
     deliveryBranches.add(baseline.delivery.branch);
     deliveryBranches.add(candidate.delivery.branch);
-    deliveryIssues.add(baseline.delivery.issue);
-    deliveryIssues.add(candidate.delivery.issue);
+    if (baselineIssue !== undefined) deliveryIssues.add(baselineIssue);
+    if (candidateIssue !== undefined) deliveryIssues.add(candidateIssue);
     contracts.push(baseline, candidate);
   }
 

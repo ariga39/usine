@@ -306,7 +306,6 @@ export async function lookupRepositories(
 export async function registerRepositoryResource(
   stateDirectory: string,
   registration: RepositoryRegistration,
-  environment: NodeJS.ProcessEnv = {},
 ): Promise<RepositoryResource> {
   await registerRepository(stateDirectory, registration);
   const resource = await inspectRepositoryResource(stateDirectory, registration.id);
@@ -750,6 +749,7 @@ async function executeWithServices(options: {
       const serverName = `github_read_${role}`;
       if (!readPolicy || contract.delivery.issue === undefined)
         return { serverName, status: "unavailable", reason: "unavailable" };
+      const issueNumber = contract.delivery.issue;
 
       const tools = role === "implementer" ? readPolicy.implementerTools : readPolicy.reviewerTools;
       const existing = githubReadHandles.get(role);
@@ -762,9 +762,7 @@ async function executeWithServices(options: {
       try {
         const handle = await startGithubReadMcpHttp({
           repository: { owner: contract.repository.owner, name: contract.repository.name },
-          ...(contract.delivery.issue !== undefined
-            ? { issueNumber: contract.delivery.issue }
-            : {}),
+          issueNumber,
           role,
           tools,
           policy: readPolicy.policy,
