@@ -356,11 +356,13 @@ function sumUsage(values: readonly CampaignEvidenceUsage[]): CampaignEvidenceUsa
     return total;
   };
   const coverage =
-    values.length === 0 || values.every((value) => value.coverage === "unavailable")
+    values.length === 0
       ? "unavailable"
-      : values.every((value) => value.coverage === "complete")
-        ? "complete"
-        : "partial";
+      : values.every((value) => value.coverage === "unavailable")
+        ? "unavailable"
+        : values.every((value) => value.coverage === "complete")
+          ? "complete"
+          : "partial";
   return {
     inputTokens: sum("inputTokens"),
     cachedInputTokens: sum("cachedInputTokens"),
@@ -373,8 +375,8 @@ function sumUsage(values: readonly CampaignEvidenceUsage[]): CampaignEvidenceUsa
 }
 
 function coverage(runs: readonly CampaignEvidenceRun[]): CampaignEvidencePage["coverage"] {
-  if (runs.length === 0 || runs.every((run) => run.usage.coverage === "unavailable"))
-    return "unavailable";
+  if (runs.length === 0) return "unavailable";
+  if (runs.every((run) => run.usage.coverage === "unavailable")) return "unavailable";
   return runs.every((run) => run.usage.coverage === "complete") ? "complete" : "partial";
 }
 
