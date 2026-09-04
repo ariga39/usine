@@ -2439,6 +2439,34 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("blocks an all-superseded handed-off Campaign with a stable decision request", async () => {
+    const contract = frontierGoal("campaign-repository");
+    const superseded = {
+      ...contract,
+      id: "campaign-366-all-superseded",
+      outcomes: contract.outcomes.map((outcome) => ({ ...outcome, status: "superseded" as const })),
+    };
+    const { contractPath, server } = await frontierFixture(superseded);
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const handedOff = await handoffCampaign(server.url, published.campaignId);
+      expect(handedOff).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "plan_exhausted",
+          outcomeIds: [],
+        },
+      });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: handedOff.decisionRequest,
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   test("keeps a Ready proposal's exact base across a newer Goal version", async () => {
     const { root, contractPath, server } = await frontierFixture();
     try {

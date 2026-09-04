@@ -574,10 +574,14 @@ async function reconcile(
     const results = await campaignTaskResults(database, rows);
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
-    if (liveOutcomes.every((outcome) => outcomeEvidence.has(outcome.id))) {
+    if (
+      campaign.publicationAuthorized &&
+      liveOutcomes.length > 0 &&
+      liveOutcomes.every((outcome) => outcomeEvidence.has(outcome.id))
+    ) {
       campaignStatus = "accepted";
       decisionRequest = null;
-    } else if (!hasUsefulCampaignWork(campaign, rows, results, contract)) {
+    } else if (!hasUsefulCampaignWork(rows, results)) {
       campaignStatus = "blocked";
       decisionRequest ??= {
         requestId: `decision:${campaign.campaignId}`,
@@ -715,33 +719,9 @@ function campaignOutcomeEvidence(
   return evidence;
 }
 
-function dependencyRowsFor(
-  proposal: TaskProposal,
-  rows: readonly (typeof campaignProposals.$inferSelect)[],
-  contract: GoalContract,
-): readonly (typeof campaignProposals.$inferSelect)[] | null {
-  const dependencies = new Map<string, typeof campaignProposals.$inferSelect>();
-  for (const dependencyId of proposal.dependsOn) {
-    const row = rows.find((candidate) => candidate.proposalId === dependencyId);
-    if (!row) return null;
-    dependencies.set(row.proposalId, row);
-  }
-  const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
-  for (const outcomeId of outcome?.dependsOn ?? []) {
-    const matching = rows.filter(
-      (row) => taskProposalSchema.parse(row.proposal).outcomeId === outcomeId,
-    );
-    if (matching.length === 0) return null;
-    for (const row of matching) dependencies.set(row.proposalId, row);
-  }
-  return [...dependencies.values()];
-}
-
 function hasUsefulCampaignWork(
-  campaign: typeof campaigns.$inferSelect,
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   results: ReadonlyMap<string, TaskResult>,
-  contract: GoalContract,
 ): boolean {
   for (const row of rows) {
     const result = results.get(row.proposalId);
@@ -750,33 +730,6 @@ function hasUsefulCampaignWork(
       continue;
     }
     if (row.status === "ready") return true;
-    if (row.status !== "planned") continue;
-    const proposal = taskProposalSchema.parse(row.proposal);
-    const dependencies = dependencyRowsFor(proposal, rows, contract);
-    if (dependencies === null) continue;
-    let canProgress = true;
-    for (const dependency of dependencies) {
-      const dependencyProposal = taskProposalSchema.parse(dependency.proposal);
-      const dependencyResult = results.get(dependency.proposalId);
-      if (!dependencyResult) {
-        canProgress = false;
-        break;
-      }
-      const accepted = acceptedCampaignDelivery(
-        dependencyResult,
-        campaign,
-        contract,
-        dependencyProposal,
-      );
-      if (
-        !accepted ||
-        (dependencyProposal.repositoryId === proposal.repositoryId && !accepted.mergedHeadSha)
-      ) {
-        canProgress = false;
-        break;
-      }
-    }
-    if (canProgress) return true;
   }
   return false;
 }

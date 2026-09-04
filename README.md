@@ -13,7 +13,7 @@ The implemented Task delivery leaf is intentionally bounded:
 - explicit Task Contract delivery authority, with merge authority granted only by `authorization.merge: true`;
 - transient live observation plus durable Task-local event history.
 
-The server also admits a committed Goal Contract through a host-owned publication anchor, accepts its guardian-authored Task Proposals, exposes the durable Planned/Ready frontier, admits eligible Tasks through the delivery leaf, and advances successor dependencies from accepted facts. Outcome evidence reduction and Campaign closure remain pending. Automatic semantic decomposition, concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+The server also admits a committed Goal Contract through a host-owned publication anchor, accepts its guardian-authored Task Proposals, and after explicit handoff admits eligible Tasks through the delivery leaf, reduces owning accepted exact-SHA delivery into live Outcome evidence, and accepts only complete Campaigns. An exhausted or blocked incomplete plan becomes a durable decision request; explicit host authority can abandon an unresolved Campaign. Automatic semantic decomposition, concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Quick start
 

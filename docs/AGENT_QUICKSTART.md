@@ -243,6 +243,11 @@ The public projection remains `planning` while executable work can proceed, `acc
 
 ```sh
 export USINE_CAMPAIGN_ABANDONMENT_SOURCE="<AUTHORITY_SOURCE>"
+```
+
+`USINE_CAMPAIGN_ABANDONMENT_SOURCE` must exist in the server process environment. Start or restart the server after setting it, then run the CLI abandon command:
+
+```sh
 node apps/cli/dist/cli.mjs campaign abandon "<GOAL_ID>:v1" --json
 ```
 
