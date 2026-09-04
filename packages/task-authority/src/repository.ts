@@ -14,6 +14,8 @@ const nonBlank = z
     message: "must not be blank",
   });
 
+const exactSha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
+
 export const forgeProfileSchema = z
   .string()
   .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/, "must use lowercase kebab-case");
@@ -52,7 +54,10 @@ export const repositoryResourceSchema = z
 export type RepositoryResource = z.infer<typeof repositoryResourceSchema>;
 
 /** The immutable repository facts copied into an admitted Task. */
-export type RepositorySnapshot = RepositoryRegistration;
+export type RepositorySnapshot = RepositoryRegistration & {
+  /** Host-observed durable head; never accepted as registration input. */
+  readonly headSha?: z.infer<typeof exactSha>;
+};
 export type TaskRepositorySnapshot = Omit<
   RepositorySnapshot,
   "implementerProfile" | "reviewerProfile" | "forgeProfile" | "githubReadProfile"

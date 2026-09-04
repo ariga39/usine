@@ -1,7 +1,9 @@
 import { createServer } from "node:http";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { execa } from "execa";
 import { expect, test } from "vite-plus/test";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
 const campaign = {
@@ -30,6 +32,69 @@ const campaign = {
   budget: { maxElapsedMs: 60_000, maxTasks: 4, maxPlannerActivations: 1 },
   status: "planning",
   revision: 1,
+} as const;
+
+const frontierCampaign = {
+  ...campaign,
+  campaignId: "campaign-366:v1",
+  goalId: "campaign-366",
+  objective: "Deliver a bounded campaign frontier",
+  outcomes: [
+    {
+      id: "outcome-one",
+      title: "Complete the first outcome",
+      acceptance: ["The first outcome has executable work."],
+      dependsOn: [],
+      parentId: null,
+      status: "planned",
+    },
+    {
+      id: "outcome-two",
+      title: "Complete the dependent outcome",
+      acceptance: ["The dependent outcome has executable work."],
+      dependsOn: ["outcome-one"],
+      parentId: null,
+      status: "planned",
+    },
+  ],
+  authority: {
+    ...campaign.authority,
+    repositories: ["campaign-repository"],
+    effects: ["github"],
+  },
+  budget: {
+    ...campaign.budget,
+    maxImplementerActivations: 1,
+    maxReviewCycles: 1,
+  },
+  proposals: [
+    {
+      proposalId: "proposal-one",
+      outcomeId: "outcome-one",
+      sequence: 1,
+      status: "ready",
+      blocker: null,
+      ready: {
+        repositoryId: "campaign-repository",
+        baseSha: "a".repeat(40),
+        repositoryRevision: 1,
+        instructions: "Implement proposal-one.",
+        acceptance: ["proposal-one is complete."],
+        nonGoals: [],
+        effects: ["github"],
+        budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+        merge: false,
+      },
+    },
+    {
+      proposalId: "proposal-two",
+      outcomeId: "outcome-two",
+      sequence: 2,
+      status: "planned",
+      blocker: "proposal dependency has no accepted delivery",
+      ready: null,
+    },
+  ],
 } as const;
 
 async function serve(
@@ -100,6 +165,51 @@ test("built CLI reports a missing Campaign with the not-found diagnostic", async
       error: "campaign_not_found",
       campaignId: "missing:v1",
     });
+  } finally {
+    await server.close();
+  }
+});
+
+test("built CLI exposes the durable Ready frontier through propose and get", async () => {
+  let receivedProposal = false;
+  let receivedGet = false;
+  const server = await serve((request, response) => {
+    const requestUrl = decodeURIComponent(request.url ?? "");
+    if (request.method === "POST" && requestUrl === "/v1/campaigns/campaign-366:v1/proposals") {
+      receivedProposal = true;
+      respondJson(response, 200, frontierCampaign);
+      return;
+    }
+    if (request.method === "GET" && requestUrl === "/v1/campaigns/campaign-366:v1") {
+      receivedGet = true;
+      respondJson(response, 200, frontierCampaign);
+      return;
+    }
+    respondJson(response, 404, { error: "not_found", message: "route not found" });
+  });
+  const proposalPath = join(await mkdtemp(join(tmpdir(), "usine-campaign-cli-")), "proposal.json");
+  await writeFile(proposalPath, JSON.stringify({ proposalId: "proposal-one" }));
+  try {
+    const propose = await execa(
+      "node",
+      [cliPath, "campaign", "propose", "campaign-366:v1", proposalPath, "--json"],
+      { env: { USINE_SERVER_URL: server.url }, reject: false },
+    );
+    expect(propose.exitCode, propose.stderr).toBe(0);
+    expect(
+      JSON.parse(propose.stdout).proposals.map((proposal: { status: string }) => proposal.status),
+    ).toEqual(["ready", "planned"]);
+    expect(receivedProposal).toBe(true);
+
+    const get = await execa("node", [cliPath, "campaign", "get", "campaign-366:v1", "--json"], {
+      env: { USINE_SERVER_URL: server.url },
+      reject: false,
+    });
+    expect(get.exitCode).toBe(0);
+    expect(
+      JSON.parse(get.stdout).proposals.map((proposal: { status: string }) => proposal.status),
+    ).toEqual(["ready", "planned"]);
+    expect(receivedGet).toBe(true);
   } finally {
     await server.close();
   }

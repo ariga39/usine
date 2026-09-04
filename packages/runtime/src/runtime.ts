@@ -14,6 +14,7 @@ import {
   TaskIdCursorError,
   type TaskContract,
   type TaskExecutionInput,
+  type RepositoryRegistration,
   type RepositorySnapshot,
   type RepositoryResource,
   type ResolvedTaskContract,
@@ -35,6 +36,7 @@ import {
   isWaitingState,
 } from "@usine/task-authority";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
+import { reconcileCampaigns } from "./campaign.js";
 import {
   CodexCodingSession,
   codingSessionAdapterSelectionEnvironment,
@@ -167,6 +169,7 @@ export {
   lookupCampaign,
   parseGoalContract,
   readGoalContract,
+  proposeCampaign,
 } from "./campaign.js";
 export type { CampaignResource, GoalContract } from "@usine/task-authority";
 export * from "./http-api.js";
@@ -232,7 +235,7 @@ export async function reviewCandidateWithProfile(
 
 export async function registerRepository(
   stateDirectory: string,
-  registration: RepositorySnapshot,
+  registration: RepositoryRegistration,
 ): Promise<RepositorySnapshot> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
@@ -303,9 +306,11 @@ export async function lookupRepositories(
 
 export async function registerRepositoryResource(
   stateDirectory: string,
-  registration: RepositorySnapshot,
+  registration: RepositoryRegistration,
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<RepositoryResource> {
   await registerRepository(stateDirectory, registration);
+  await reconcileCampaigns(stateDirectory, environment);
   const resource = await inspectRepositoryResource(stateDirectory, registration.id);
   if (!resource) throw new Error("registered repository is missing");
   return resource;

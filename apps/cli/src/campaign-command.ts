@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 import { Argument, Command } from "effect/unstable/cli";
-import { getCampaign, publishCampaign } from "./server-client.js";
+import { readFile } from "node:fs/promises";
+import { getCampaign, proposeCampaign, publishCampaign } from "./server-client.js";
 import { notFoundFailure, runCommand } from "./cli-failure.js";
 import { jsonFlag } from "./cli-parameters.js";
 import { renderJson } from "./cli-renderer.js";
@@ -33,5 +34,23 @@ export function campaignCommand(serverUrl: string) {
         }),
       ),
   );
-  return Command.make("campaign").pipe(Command.withSubcommands([publish, get]));
+  const propose = Command.make(
+    "propose",
+    {
+      campaignId: Argument.string("campaign-id"),
+      proposalPath: Argument.string("proposal.json"),
+      json: jsonFlag(),
+    },
+    ({ campaignId, proposalPath, json }) =>
+      Effect.promise(() =>
+        runCommand("campaign_propose_failed", async () => {
+          const proposal = JSON.parse(await readFile(proposalPath, "utf8"));
+          const campaign = await proposeCampaign(serverUrl, campaignId, proposal);
+          process.stdout.write(
+            json ? renderJson(campaign) : `Campaign ${campaign.campaignId}: ${campaign.status}\n`,
+          );
+        }),
+      ),
+  );
+  return Command.make("campaign").pipe(Command.withSubcommands([publish, get, propose]));
 }

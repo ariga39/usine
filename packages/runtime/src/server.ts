@@ -18,7 +18,7 @@ import {
   MAX_USAGE_REPORT_PAGE_SIZE,
   isTaskStateQuarantinedError,
   repositoryRegistrationSchema,
-  type RepositorySnapshot,
+  type RepositoryRegistration,
   type TaskContract,
   type TaskExecutionInput,
   type TaskEvent,
@@ -28,9 +28,13 @@ import {
 } from "@usine/task-authority";
 import {
   CampaignContentConflictError,
+  CampaignProposalConflictError,
+  CampaignNotFoundError,
   GoalContractInputError,
   lookupCampaign,
+  proposeCampaign,
   publishCampaign,
+  reconcileCampaigns,
   readGoalContract,
 } from "./campaign.js";
 import {
@@ -227,6 +231,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   };
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
+  await reconcileCampaigns(stateDirectory, options.environment);
   const restartState = await lookupRestartableTasks(stateDirectory);
   const restartable: typeof restartState.restartable = [];
   let activeTaskCount = restartState.activeTaskCount;
@@ -453,11 +458,11 @@ function createApiLayer(options: {
           const parsed = repositoryRegistrationSchema.safeParse(payload);
           if (!parsed.success)
             throw new ServerValidationError(JSON.stringify(contractIssues(parsed.error)));
-          const registration: RepositorySnapshot = {
+          const registration: RepositoryRegistration = {
             ...parsed.data,
             path: await realpath(parsed.data.path),
           };
-          return registerRepositoryResource(stateDirectory, registration);
+          return registerRepositoryResource(stateDirectory, registration, options.environment);
         }),
     }),
   );
@@ -561,13 +566,17 @@ function createApiLayer(options: {
               throw new ServerValidationError(error.message);
             throw error;
           }
-          return publishCampaign(stateDirectory, contract.rawContract);
+          return publishCampaign(stateDirectory, contract.rawContract, options.environment);
         }),
       get: ({ params }) =>
         apiEffect(async () => {
           const campaign = await lookupCampaign(stateDirectory, params.campaignId);
           if (!campaign) throw new ServerNotFoundError("campaign not found");
           return campaign;
+        }),
+      propose: ({ params, payload }) =>
+        apiEffect(async () => {
+          return proposeCampaign(stateDirectory, params.campaignId, payload, options.environment);
         }),
     }),
   );
@@ -598,11 +607,14 @@ function apiEffect<A>(thunk: () => Promise<A>): Effect.Effect<A, ApiError> {
 }
 
 function apiError(error: unknown): ApiError {
+  if (error instanceof GoalContractInputError)
+    return { code: "validation", message: error.message };
   if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
   if (error instanceof UsageReportCursorError)
     return { code: "validation", message: error.message };
   if (error instanceof TaskIdCursorError) return { code: "validation", message: error.message };
   if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof CampaignNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof TaskCapacityError)
     return { code: "active_task_capacity", message: error.message, retryable: true };
   if (error instanceof TaskRetryConflictError)
@@ -613,6 +625,8 @@ function apiError(error: unknown): ApiError {
       state: error.state,
     };
   if (error instanceof CampaignContentConflictError)
+    return { code: error.code, message: error.message, retryable: false };
+  if (error instanceof CampaignProposalConflictError)
     return { code: error.code, message: error.message, retryable: false };
   if (isTaskStateQuarantinedError(error)) {
     if (error.taskId !== undefined)

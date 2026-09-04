@@ -295,6 +295,9 @@ importers:
       '@usine/task-authority':
         specifier: workspace:*
         version: link:../task-authority
+      drizzle-orm:
+        specifier: latest
+        version: 0.45.2
       effect:
         specifier: 4.0.0-rc.110
         version: 4.0.0-rc.110

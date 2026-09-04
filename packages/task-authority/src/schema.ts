@@ -25,6 +25,7 @@ export const repositories = sqliteTable("repositories", {
   reviewerProfile: text("reviewer_profile").notNull(),
   forgeProfile: text("forge_profile").notNull(),
   githubReadProfile: text("github_read_profile"),
+  headSha: text("head_sha"),
   projectCheckCommand: text("project_check_command").notNull(),
   projectCheckTimeoutMs: integer("project_check_timeout_ms").notNull(),
   gitAuthorName: text("git_author_name").notNull(),
@@ -36,6 +37,35 @@ export const repositories = sqliteTable("repositories", {
     .default(sql`(unixepoch() * 1000)`)
     .notNull(),
 });
+
+/** Durable Planner proposal facts owned by Campaign coordination. */
+export const campaignProposals = sqliteTable(
+  "campaign_proposals",
+  {
+    campaignId: text("campaign_id").notNull(),
+    proposalId: text("proposal_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    outcomeId: text("outcome_id").notNull(),
+    proposal: text("proposal", { mode: "json" }).notNull(),
+    status: text("status").notNull(),
+    blocker: text("blocker"),
+    readyBaseSha: text("ready_base_sha"),
+    readyRepositoryRevision: integer("ready_repository_revision"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .default(sql`(unixepoch() * 1000)`)
+      .notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .default(sql`(unixepoch() * 1000)`)
+      .notNull(),
+  },
+  (table) => ({
+    campaignProposalPrimaryKey: primaryKey({ columns: [table.campaignId, table.proposalId] }),
+    campaignProposalOrder: uniqueIndex("campaign_proposals_campaign_order_index").on(
+      table.campaignId,
+      table.sequence,
+    ),
+  }),
+);
 
 export const taskQuarantines = sqliteTable("task_quarantines", {
   taskId: text("task_id").primaryKey(),
@@ -85,6 +115,10 @@ export const campaigns = sqliteTable(
     contractHash: text("contract_hash").notNull(),
     contract: text("contract", { mode: "json" }).notNull(),
     status: text("status").notNull(),
+    publicationAuthorized: integer("publication_authorized", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    superseded: integer("superseded", { mode: "boolean" }).notNull().default(false),
     revision: integer("revision").notNull().default(1),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(unixepoch() * 1000)`)

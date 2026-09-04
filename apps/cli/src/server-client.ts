@@ -8,6 +8,7 @@ import {
   type ApiTaskResource,
   type ApiTaskSubmission,
   type ApiCampaignPublication,
+  type ApiCampaignProposalSubmission,
 } from "@usine/runtime";
 import {
   deriveUsageReportFromInvocations,
@@ -17,7 +18,7 @@ import {
   type TaskListPage,
   type TaskResource,
   type RepositoryResource,
-  type RepositorySnapshot,
+  type RepositoryRegistration,
   type ServerHealth,
   type ServerSnapshot,
   isTerminalState,
@@ -31,6 +32,7 @@ import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
 export type TaskSubmission = ApiTaskSubmission;
 export type CampaignPublication = ApiCampaignPublication;
+export type CampaignProposalSubmission = ApiCampaignProposalSubmission;
 
 export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string {
   const explicit = environment.USINE_SERVER_URL?.trim();
@@ -133,6 +135,15 @@ export async function getCampaign(
   }
 }
 
+export async function proposeCampaign(
+  serverUrl: string,
+  campaignId: string,
+  proposal: CampaignProposalSubmission,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.propose({ params: { campaignId }, payload: proposal }));
+}
+
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
   return normalizeTaskResource(await runRequest(client.tasks.retry({ params: { taskId } })));
@@ -140,7 +151,7 @@ export async function retryTask(serverUrl: string, taskId: string): Promise<Task
 
 export async function registerRepository(
   serverUrl: string,
-  repository: RepositorySnapshot,
+  repository: RepositoryRegistration,
 ): Promise<RepositoryResource> {
   const client = await clientFor(serverUrl);
   return runRequest(client.repositories.register({ payload: repository }));
@@ -459,6 +470,8 @@ function statusForCode(code: string | undefined): number {
     case "task_retry_conflict":
       return 409;
     case "campaign_content_conflict":
+      return 409;
+    case "campaign_proposal_conflict":
       return 409;
     case "task_state_quarantined":
       return 503;
