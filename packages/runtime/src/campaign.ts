@@ -6,6 +6,7 @@ import {
   applyMigrations,
   campaignIdFor,
   campaignProposals,
+  campaignTouches,
   campaigns,
   campaignResourceFromContract,
   decodeCampaignProposalStatus,
@@ -44,6 +45,7 @@ const ANSI_ESCAPE_SEQUENCE = new RegExp(
   `${ESCAPE_CHARACTER}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHARACTER}]*(?:${BELL_CHARACTER}|${ESCAPE_CHARACTER}\\\\))`,
   "gu",
 );
+const SAFE_CAMPAIGN_TOUCH_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -79,6 +81,14 @@ export class CampaignNotFoundError extends Error {
   constructor() {
     super("campaign not found");
     this.name = "CampaignNotFoundError";
+  }
+}
+
+export class CampaignTouchInputError extends Error {
+  readonly code = "validation";
+  constructor() {
+    super("campaign touch ID is invalid");
+    this.name = "CampaignTouchInputError";
   }
 }
 
@@ -764,6 +774,16 @@ export async function publishCampaign(
       superseded: false,
       revision: 1,
     });
+    await database
+      .insert(campaignTouches)
+      .values({
+        campaignId,
+        touchId: `plan:${contractHash}`,
+        goalVersion: contract.version,
+        type: "plan",
+        occurredAtEpochMs: Date.now(),
+      })
+      .onConflictDoNothing();
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);
   });
@@ -818,6 +838,16 @@ export async function proposeCampaign(
         readyBaseSha: null,
         readyRepositoryRevision: null,
       });
+      await database
+        .insert(campaignTouches)
+        .values({
+          campaignId,
+          touchId: `plan:${proposal.proposalId}`,
+          goalVersion: campaign.goalVersion,
+          type: "plan",
+          occurredAtEpochMs: Date.now(),
+        })
+        .onConflictDoNothing();
     }
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);
@@ -840,4 +870,34 @@ export async function lookupCampaign(
   } finally {
     handle.close();
   }
+}
+
+export async function recordCampaignDecisionTouch(
+  stateDirectory: string,
+  campaignId: string,
+  touchId: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<CampaignResource> {
+  if (!SAFE_CAMPAIGN_TOUCH_ID.test(touchId)) throw new CampaignTouchInputError();
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database) => {
+    const campaign = await database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (!campaign) throw new CampaignNotFoundError();
+    await database
+      .insert(campaignTouches)
+      .values({
+        campaignId,
+        touchId: `decision:${touchId}`,
+        goalVersion: campaign.goalVersion,
+        type: "decision",
+        occurredAtEpochMs: Date.now(),
+      })
+      .onConflictDoNothing();
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
 }

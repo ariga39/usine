@@ -32,11 +32,14 @@ import {
   CampaignNotFoundError,
   GoalContractInputError,
   lookupCampaign,
+  recordCampaignDecisionTouch,
+  CampaignTouchInputError,
   proposeCampaign,
   publishCampaign,
   reconcileCampaigns,
   readGoalContract,
 } from "./campaign.js";
+import { CampaignEvidenceCursorError, lookupCampaignEvidence } from "./campaign-evidence.js";
 import {
   admitTask,
   executeAdmittedTask,
@@ -622,6 +625,24 @@ function createApiLayer(options: {
           await options.coordinateCampaigns();
           return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
         }),
+      evidence: ({ params, query }) =>
+        apiEffect(async () => {
+          const page = await lookupCampaignEvidence(stateDirectory, params.campaignId, {
+            cursor: query.cursor ?? null,
+            limit: validLimit(query.limit, 200),
+          });
+          if (!page) throw new ServerNotFoundError("campaign not found");
+          return page;
+        }),
+      touch: ({ params, payload }) =>
+        apiEffect(() =>
+          recordCampaignDecisionTouch(
+            stateDirectory,
+            params.campaignId,
+            payload.touchId,
+            options.environment,
+          ),
+        ),
     }),
   );
   const eventHandlers = HttpApiBuilder.group(UsineApi, "events", (handlers) =>
@@ -654,6 +675,10 @@ function apiError(error: unknown): ApiError {
     return { code: "validation", message: error.message };
   if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
   if (error instanceof UsageReportCursorError)
+    return { code: "validation", message: error.message };
+  if (error instanceof CampaignEvidenceCursorError)
+    return { code: "validation", message: error.message };
+  if (error instanceof CampaignTouchInputError)
     return { code: "validation", message: error.message };
   if (error instanceof TaskIdCursorError) return { code: "validation", message: error.message };
   if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
