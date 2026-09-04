@@ -261,6 +261,21 @@ async function rewriteTaskResult(
   }
 }
 
+async function replaceRawTaskResult(
+  stateDirectory: string,
+  taskId: string,
+  rawResult: string,
+): Promise<void> {
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    database
+      .prepare("UPDATE task_runs SET result = ?, updated_at = ? WHERE task_id = ?")
+      .run(rawResult, Date.now(), taskId);
+  } finally {
+    database.close();
+  }
+}
+
 async function detachedCampaignCommits(repositoryPath: string, baseSha: string) {
   const tree = (
     await execa("git", ["-C", repositoryPath, "rev-parse", `${baseSha}^{tree}`], {
@@ -1140,6 +1155,91 @@ describe("durable Ready frontier", () => {
           }),
         ],
       });
+    } finally {
+      releaseFirst();
+      await server.close();
+    }
+  });
+
+  test("keeps a dependent planned when its predecessor is quarantined", async () => {
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstFinished!: () => void;
+    const firstFinishedPromise = new Promise<void>((resolve) => {
+      firstFinished = resolve;
+    });
+    let successorLaunched = false;
+    const fixtureValue = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-quarantined-first")) {
+          firstStarted();
+          await firstGate;
+          const accepted = await acceptCampaignTask(context, true);
+          firstFinished();
+          return accepted;
+        }
+        successorLaunched = true;
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "quarantined predecessor successor must remain planned",
+        );
+      },
+    );
+    const { contractPath, stateDirectory, server } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("quarantined-first", "outcome-one", [], true),
+      );
+      await firstStartedPromise;
+      releaseFirst();
+      await firstFinishedPromise;
+      await expect(
+        taskStatus(server.url, "campaign-campaign-366-v1-quarantined-first"),
+      ).resolves.toMatchObject({ state: "merged" });
+      await replaceRawTaskResult(
+        stateDirectory,
+        "campaign-campaign-366-v1-quarantined-first",
+        "{ invalid",
+      );
+
+      const successor = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("quarantined-second", "outcome-two", ["quarantined-first"], true),
+      );
+      expect(successor.proposals).toMatchObject([
+        expect.objectContaining({ proposalId: "quarantined-first" }),
+        expect.objectContaining({
+          proposalId: "quarantined-second",
+          status: "planned",
+          blocker: "proposal dependency has no accepted delivery",
+          ready: null,
+        }),
+      ]);
+      expect(successorLaunched).toBe(false);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          (
+            database.prepare("SELECT task_id FROM task_runs ORDER BY task_id").all() as Array<{
+              task_id: string;
+            }>
+          ).map((row) => row.task_id),
+        ).toEqual(["campaign-campaign-366-v1-quarantined-first"]);
+      } finally {
+        database.close();
+      }
     } finally {
       releaseFirst();
       await server.close();

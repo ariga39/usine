@@ -20,6 +20,7 @@ import {
   RepositoryWriterConflictError,
   repositories,
   taskProposalSchema,
+  isTaskStateQuarantinedError,
   type CampaignProposalResource,
   type CampaignResource,
   type GoalContract,
@@ -365,7 +366,14 @@ async function dependencyResolution(
   let latestMergedSequence = -1;
   for (const row of dependencies.values()) {
     const predecessor = taskProposalSchema.parse(row.proposal);
-    const task = row.taskId ? await new TaskAuthority(database).lookup(row.taskId) : null;
+    let task: TaskResult | null = null;
+    if (row.taskId) {
+      try {
+        task = await new TaskAuthority(database).lookup(row.taskId);
+      } catch (error) {
+        if (!isTaskStateQuarantinedError(error)) throw error;
+      }
+    }
     const accepted = acceptedCampaignDelivery(task, campaign, contract, predecessor);
     if (!accepted)
       return {
