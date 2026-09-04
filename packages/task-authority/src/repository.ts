@@ -31,8 +31,6 @@ export const repositoryRegistrationSchema = z
     reviewerProfile: nonBlank,
     forgeProfile: forgeProfileSchema,
     githubReadProfile: forgeProfileSchema.nullable().optional(),
-    /** Host-resolved repository head used by Campaign readiness. */
-    headSha: exactSha.optional(),
     projectCheck: z.object({
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),
@@ -56,7 +54,10 @@ export const repositoryResourceSchema = z
 export type RepositoryResource = z.infer<typeof repositoryResourceSchema>;
 
 /** The immutable repository facts copied into an admitted Task. */
-export type RepositorySnapshot = RepositoryRegistration;
+export type RepositorySnapshot = RepositoryRegistration & {
+  /** Host-observed durable head; never accepted as registration input. */
+  readonly headSha?: z.infer<typeof exactSha>;
+};
 export type TaskRepositorySnapshot = Omit<
   RepositorySnapshot,
   "implementerProfile" | "reviewerProfile" | "forgeProfile" | "githubReadProfile"

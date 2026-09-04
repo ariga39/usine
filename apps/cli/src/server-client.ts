@@ -18,7 +18,7 @@ import {
   type TaskListPage,
   type TaskResource,
   type RepositoryResource,
-  type RepositorySnapshot,
+  type RepositoryRegistration,
   type ServerHealth,
   type ServerSnapshot,
   isTerminalState,
@@ -144,8 +144,6 @@ export async function proposeCampaign(
   return runRequest(client.campaigns.propose({ params: { campaignId }, payload: proposal }));
 }
 
-export const submitCampaignProposal = proposeCampaign;
-
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
   return normalizeTaskResource(await runRequest(client.tasks.retry({ params: { taskId } })));
@@ -153,7 +151,7 @@ export async function retryTask(serverUrl: string, taskId: string): Promise<Task
 
 export async function registerRepository(
   serverUrl: string,
-  repository: RepositorySnapshot,
+  repository: RepositoryRegistration,
 ): Promise<RepositoryResource> {
   const client = await clientFor(serverUrl);
   return runRequest(client.repositories.register({ payload: repository }));

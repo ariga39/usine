@@ -390,6 +390,157 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("keeps Campaign GET as a pure durable projection", async () => {
+    const { root, stateDirectory, contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const proposed = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("read-only-proposal", "outcome-one"),
+      );
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      const before = database
+        .prepare("SELECT revision FROM campaigns WHERE campaign_id = ?")
+        .get(published.campaignId) as { revision: number };
+      const repositoryBefore = database
+        .prepare("SELECT revision FROM repositories WHERE id = ?")
+        .get("campaign-repository") as { revision: number };
+      database.close();
+
+      await writeFile(join(root, "head-advanced-for-read.txt"), "GET must not observe this\n");
+      await execa("git", ["add", "head-advanced-for-read.txt"], { cwd: root });
+      await execa("git", ["commit", "-m", "advance after readiness"], { cwd: root });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toEqual(proposed);
+
+      const afterDatabase = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      expect(
+        afterDatabase
+          .prepare("SELECT revision FROM campaigns WHERE campaign_id = ?")
+          .get(published.campaignId),
+      ).toEqual(before);
+      expect(
+        afterDatabase
+          .prepare("SELECT revision FROM repositories WHERE id = ?")
+          .get("campaign-repository"),
+      ).toEqual(repositoryBefore);
+      afterDatabase.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("rejects supplied registration heads and keeps an unavailable repository non-executable", async () => {
+    const { root, contractPath, server } = await frontierFixture();
+    try {
+      const suppliedHead = (
+        await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+      ).stdout.trim();
+      const rejected = await fetch(`${server.url}/v1/repositories`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "campaign-repository",
+          path: root,
+          owner: "example",
+          name: "campaign-repository",
+          baseBranch: "main",
+          implementerProfile: "writer-profile",
+          reviewerProfile: "reviewer-profile",
+          forgeProfile: "default",
+          projectCheck: { command: "true", timeoutMs: 1_000 },
+          gitAuthor: { name: "Test", email: "test@example.invalid" },
+          headSha: suppliedHead,
+        }),
+      });
+      expect(rejected.status).toBe(200);
+
+      const plainPath = await mkdtemp(join(tmpdir(), "usine-not-a-git-repository-"));
+      await registerRepository(server.url, {
+        id: "campaign-repository",
+        path: plainPath,
+        owner: "example",
+        name: "campaign-repository",
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Test", email: "test@example.invalid" },
+      });
+      const published = await publishCampaign(server.url, { contractPath });
+      await expect(
+        proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("unavailable-repository", "outcome-one"),
+        ),
+      ).resolves.toMatchObject({
+        proposals: [{ status: "blocked", blocker: "registered repository has no exact head" }],
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("reconciles blocked never-Ready work at startup without GET mutation", async () => {
+    const { root, stateDirectory, contractPath, server } = await frontierFixture();
+    const plainPath = await mkdtemp(join(tmpdir(), "usine-startup-not-a-git-repository-"));
+    try {
+      await registerRepository(server.url, {
+        id: "campaign-repository",
+        path: plainPath,
+        owner: "example",
+        name: "campaign-repository",
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Test", email: "test@example.invalid" },
+      });
+      const published = await publishCampaign(server.url, { contractPath });
+      const blocked = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("startup-reconciled", "outcome-one"),
+      );
+      expect(blocked.proposals).toMatchObject([
+        { proposalId: "startup-reconciled", status: "blocked", ready: null },
+      ]);
+
+      await registerRepository(server.url, {
+        id: "campaign-repository",
+        path: root,
+        owner: "example",
+        name: "campaign-repository",
+        baseBranch: "main",
+        implementerProfile: "writer-profile",
+        reviewerProfile: "reviewer-profile",
+        forgeProfile: "default",
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        gitAuthor: { name: "Test", email: "test@example.invalid" },
+      });
+      await server.close();
+      const restarted = await start(stateDirectory);
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          proposals: [
+            {
+              proposalId: "startup-reconciled",
+              status: "ready",
+              ready: { baseSha: expect.stringMatching(/^[0-9a-f]{40}$/) },
+            },
+          ],
+        });
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
   test("does not infer an Outcome dependency from a Ready proposal", async () => {
     const { contractPath, server } = await frontierFixture();
     try {

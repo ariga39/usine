@@ -164,6 +164,7 @@ function blockerFor(
   publicationAuthorized: boolean,
   superseded: boolean,
   repository: typeof repositories.$inferSelect | undefined,
+  observedRepositoryIds: ReadonlySet<string>,
 ): string | null {
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
   if (!publicationAuthorized) return "goal publication is not host-authorized";
@@ -185,7 +186,13 @@ function blockerFor(
     return "proposal budget is outside the Goal budget envelope";
   const hasDurableReadyBase = row.readyBaseSha !== null && row.readyRepositoryRevision !== null;
   if (!repository && !hasDurableReadyBase) return "proposal repository is not registered";
-  if (!hasDurableReadyBase && (!repository?.headSha || !EXACT_SHA.test(repository.headSha)))
+  if (
+    !hasDurableReadyBase &&
+    (!repository ||
+      !observedRepositoryIds.has(repository.id) ||
+      !repository.headSha ||
+      !EXACT_SHA.test(repository.headSha))
+  )
     return "registered repository has no exact head";
   return null;
 }
@@ -195,21 +202,81 @@ function dependencyBlocker(
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   contract: GoalContract,
 ): string | null {
-  for (const dependency of proposal.dependsOn) {
-    const row = rows.find((candidate) => candidate.proposalId === dependency);
-    if (!row) return "proposal dependency is not admitted";
-    return "proposal dependency has no accepted delivery";
-  }
+  if (proposal.dependsOn.some((dependency) => !rows.some((row) => row.proposalId === dependency)))
+    return "proposal dependency is not admitted";
+  if (proposal.dependsOn.length > 0) return "proposal dependency has no accepted delivery";
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
-  for (const dependency of outcome?.dependsOn ?? []) {
-    return "outcome dependency has no accepted delivery";
-  }
+  if ((outcome?.dependsOn.length ?? 0) > 0) return "outcome dependency has no accepted delivery";
   return null;
 }
 
 type CampaignDatabase = ReturnType<typeof openSqliteDatabase>["database"];
 
-async function reconcile(database: CampaignDatabase, campaignId: string): Promise<void> {
+interface RepositoryHeadObservation {
+  readonly id: string;
+  readonly path: string;
+  readonly headSha: string;
+}
+
+async function observeRepositoryHeads(
+  databasePath: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<readonly RepositoryHeadObservation[]> {
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const rows = await handle.database.select().from(repositories);
+    const observations: RepositoryHeadObservation[] = [];
+    for (const row of rows) {
+      try {
+        const headSha = (
+          await execa("git", ["-C", row.path, "rev-parse", "HEAD"], {
+            env: credentialFreeGitEnvironment(environment),
+            extendEnv: false,
+            timeout: 30_000,
+          })
+        ).stdout.trim();
+        if (EXACT_SHA.test(headSha)) observations.push({ id: row.id, path: row.path, headSha });
+      } catch {
+        // An unavailable repository has no successful observation for this pass.
+      }
+    }
+    return observations;
+  } finally {
+    handle.close();
+  }
+}
+
+async function applyRepositoryHeadObservations(
+  database: CampaignDatabase,
+  observations: readonly RepositoryHeadObservation[],
+): Promise<ReadonlySet<string>> {
+  const rows = await database.select().from(repositories);
+  const repositoriesById = new Map(rows.map((row) => [row.id, row]));
+  const observed = new Set<string>();
+  for (const observation of observations) {
+    const row = repositoriesById.get(observation.id);
+    if (!row || row.path !== observation.path) continue;
+    observed.add(row.id);
+    if (row.headSha === observation.headSha) continue;
+    await database
+      .update(repositories)
+      .set({
+        headSha: observation.headSha,
+        revision: sql`${repositories.revision} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(repositories.id, row.id));
+    row.headSha = observation.headSha;
+    row.revision += 1;
+  }
+  return observed;
+}
+
+async function reconcile(
+  database: CampaignDatabase,
+  campaignId: string,
+  observedRepositoryIds: ReadonlySet<string>,
+): Promise<void> {
   const campaign = await database.query.campaigns.findFirst({
     where: eq(campaigns.campaignId, campaignId),
   });
@@ -232,60 +299,61 @@ async function reconcile(database: CampaignDatabase, campaignId: string): Promis
   const repositoryRows = await database.select().from(repositories);
   const repositoriesById = new Map(repositoryRows.map((repository) => [repository.id, repository]));
   let changed = false;
-  let passChanged: boolean;
-  do {
-    passChanged = false;
-    for (const row of rows) {
-      const proposal = taskProposalSchema.parse(row.proposal);
-      const blocker = blockerFor(
-        row,
-        proposal,
-        contract,
-        campaign.publicationAuthorized,
-        superseded,
-        repositoriesById.get(proposal.repositoryId),
-      );
-      const dependency = blocker === null ? dependencyBlocker(proposal, rows, contract) : null;
-      const nextStatus = blocker ? "blocked" : dependency ? "planned" : "ready";
-      const nextBlocker = blocker ?? dependency;
-      const repository = repositoriesById.get(proposal.repositoryId);
-      // Ready evidence is a durable fact. Once captured, it remains attached to the
-      // proposal even when current eligibility later projects it as blocked.
-      const nextBaseSha =
-        row.readyBaseSha ?? (nextStatus === "ready" ? (repository?.headSha ?? null) : null);
-      const nextRevision =
-        row.readyRepositoryRevision ??
-        (nextStatus === "ready" ? (repository?.revision ?? null) : null);
-      if (
-        row.status !== nextStatus ||
-        row.blocker !== nextBlocker ||
-        row.readyBaseSha !== nextBaseSha ||
-        row.readyRepositoryRevision !== nextRevision
-      ) {
-        await database
-          .update(campaignProposals)
-          .set({
-            status: nextStatus,
-            blocker: nextBlocker,
-            readyBaseSha: nextBaseSha,
-            readyRepositoryRevision: nextRevision,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(campaignProposals.campaignId, campaignId),
-              eq(campaignProposals.proposalId, row.proposalId),
-            ),
-          );
-        row.status = nextStatus;
-        row.blocker = nextBlocker;
-        row.readyBaseSha = nextBaseSha;
-        row.readyRepositoryRevision = nextRevision;
-        changed = true;
-        passChanged = true;
-      }
+  for (const row of rows) {
+    const proposal = taskProposalSchema.parse(row.proposal);
+    const blocker = blockerFor(
+      row,
+      proposal,
+      contract,
+      campaign.publicationAuthorized,
+      superseded,
+      repositoriesById.get(proposal.repositoryId),
+      observedRepositoryIds,
+    );
+    const dependency = blocker === null ? dependencyBlocker(proposal, rows, contract) : null;
+    const nextStatus = blocker ? "blocked" : dependency ? "planned" : "ready";
+    const nextBlocker = blocker ?? dependency;
+    const repository = repositoriesById.get(proposal.repositoryId);
+    // Ready evidence is a durable fact. Once captured, it remains attached to the
+    // proposal even when current eligibility later projects it as blocked.
+    const nextBaseSha =
+      row.readyBaseSha ??
+      (nextStatus === "ready" && observedRepositoryIds.has(proposal.repositoryId)
+        ? (repository?.headSha ?? null)
+        : null);
+    const nextRevision =
+      row.readyRepositoryRevision ??
+      (nextStatus === "ready" && observedRepositoryIds.has(proposal.repositoryId)
+        ? (repository?.revision ?? null)
+        : null);
+    if (
+      row.status !== nextStatus ||
+      row.blocker !== nextBlocker ||
+      row.readyBaseSha !== nextBaseSha ||
+      row.readyRepositoryRevision !== nextRevision
+    ) {
+      await database
+        .update(campaignProposals)
+        .set({
+          status: nextStatus,
+          blocker: nextBlocker,
+          readyBaseSha: nextBaseSha,
+          readyRepositoryRevision: nextRevision,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(campaignProposals.campaignId, campaignId),
+            eq(campaignProposals.proposalId, row.proposalId),
+          ),
+        );
+      row.status = nextStatus;
+      row.blocker = nextBlocker;
+      row.readyBaseSha = nextBaseSha;
+      row.readyRepositoryRevision = nextRevision;
+      changed = true;
     }
-  } while (passChanged);
+  }
   if (superseded !== campaign.superseded) {
     await database
       .update(campaigns)
@@ -299,29 +367,47 @@ async function reconcile(database: CampaignDatabase, campaignId: string): Promis
       .where(eq(campaigns.campaignId, campaignId));
 }
 
-async function refreshRepositoryHeads(
+async function reconcileAll(
   database: CampaignDatabase,
-  environment: NodeJS.ProcessEnv,
+  observedRepositoryIds: ReadonlySet<string>,
 ): Promise<void> {
-  const rows = await database.select().from(repositories);
-  for (const row of rows) {
-    try {
-      const headSha = (
-        await execa("git", ["-C", row.path, "rev-parse", "HEAD"], {
-          env: credentialFreeGitEnvironment(environment),
-          extendEnv: false,
-          timeout: 30_000,
-        })
-      ).stdout.trim();
-      if (!EXACT_SHA.test(headSha) || headSha === row.headSha) continue;
-      await database
-        .update(repositories)
-        .set({ headSha, revision: sql`${repositories.revision} + 1`, updatedAt: new Date() })
-        .where(eq(repositories.id, row.id));
-    } catch {
-      // An unavailable repository remains planned or blocked by reconciliation.
-    }
+  const rows = await database.select({ campaignId: campaigns.campaignId }).from(campaigns);
+  for (const row of rows) await reconcile(database, row.campaignId, observedRepositoryIds);
+}
+
+async function reconcileWithRepositoryHeads(
+  stateDirectory: string,
+  environment: NodeJS.ProcessEnv,
+  operation: (
+    database: CampaignDatabase,
+    observedRepositoryIds: ReadonlySet<string>,
+  ) => Promise<void>,
+): Promise<void> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const observations = await observeRepositoryHeads(databasePath, environment);
+  const handle = openSqliteDatabase(databasePath);
+  try {
+    await handle.exclusiveTransaction(async () => {
+      const observedRepositoryIds = await applyRepositoryHeadObservations(
+        handle.database,
+        observations,
+      );
+      await operation(handle.database, observedRepositoryIds);
+    });
+  } finally {
+    handle.close();
   }
+}
+
+export async function reconcileCampaigns(
+  stateDirectory: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<void> {
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    await reconcileAll(database, observed);
+  });
 }
 
 async function resourceFromDatabase(
@@ -355,53 +441,47 @@ export async function publishCampaign(
   const contractHash = createHash("sha256").update(rawContract, "utf8").digest("hex");
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
-  const handle = openSqliteDatabase(databasePath);
-  try {
-    return await handle.exclusiveTransaction(async () => {
-      const existing = await handle.database.query.campaigns.findFirst({
-        where: and(eq(campaigns.goalId, contract.id), eq(campaigns.goalVersion, contract.version)),
-      });
-      if (existing) {
-        if (existing.contractHash !== contractHash)
-          throw new CampaignContentConflictError(existing.campaignId);
-        await refreshRepositoryHeads(handle.database, environment);
-        await reconcile(handle.database, existing.campaignId);
-        return resourceFromDatabase(handle.database, existing.campaignId);
-      }
-      const campaignId = campaignIdFor(contract.id, contract.version);
-      await handle.database
-        .update(campaigns)
-        .set({ superseded: true, updatedAt: new Date() })
-        .where(
-          and(
-            eq(campaigns.goalId, contract.id),
-            sql`${campaigns.goalVersion} < ${contract.version}`,
-          ),
-        );
-      await handle.database.insert(campaigns).values({
-        campaignId,
-        goalId: contract.id,
-        goalVersion: contract.version,
-        contractHash,
-        contract,
-        status: "planning",
-        publicationAuthorized: hostAuthorized(contract, environment),
-        superseded: false,
-        revision: 1,
-      });
-      await reconcile(handle.database, campaignId);
-      return resourceFromDatabase(handle.database, campaignId);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    const existing = await database.query.campaigns.findFirst({
+      where: and(eq(campaigns.goalId, contract.id), eq(campaigns.goalVersion, contract.version)),
     });
-  } finally {
-    handle.close();
-  }
+    if (existing) {
+      if (existing.contractHash !== contractHash)
+        throw new CampaignContentConflictError(existing.campaignId);
+      await reconcileAll(database, observed);
+      resource = await resourceFromDatabase(database, existing.campaignId);
+      return;
+    }
+    const campaignId = campaignIdFor(contract.id, contract.version);
+    await database
+      .update(campaigns)
+      .set({ superseded: true, updatedAt: new Date() })
+      .where(
+        and(eq(campaigns.goalId, contract.id), sql`${campaigns.goalVersion} < ${contract.version}`),
+      );
+    await database.insert(campaigns).values({
+      campaignId,
+      goalId: contract.id,
+      goalVersion: contract.version,
+      contractHash,
+      contract,
+      status: "planning",
+      publicationAuthorized: hostAuthorized(contract, environment),
+      superseded: false,
+      revision: 1,
+    });
+    await reconcileAll(database, observed);
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
 }
 
 export async function proposeCampaign(
   stateDirectory: string,
   campaignId: string,
   input: unknown,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<CampaignResource> {
   let proposal: TaskProposal;
   try {
@@ -413,63 +493,56 @@ export async function proposeCampaign(
   }
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
-  const handle = openSqliteDatabase(databasePath);
-  try {
-    return await handle.exclusiveTransaction(async () => {
-      const campaign = await handle.database.query.campaigns.findFirst({
-        where: eq(campaigns.campaignId, campaignId),
-      });
-      if (!campaign) throw new CampaignNotFoundError();
-      const existing = await handle.database.query.campaignProposals.findFirst({
-        where: and(
-          eq(campaignProposals.campaignId, campaignId),
-          eq(campaignProposals.proposalId, proposal.proposalId),
-        ),
-      });
-      if (existing) {
-        if (JSON.stringify(existing.proposal) !== JSON.stringify(proposal))
-          throw new CampaignProposalConflictError(proposal.proposalId);
-      } else {
-        const sequenceRow = await handle.database
-          .select({ sequence: max(campaignProposals.sequence) })
-          .from(campaignProposals)
-          .where(eq(campaignProposals.campaignId, campaignId));
-        const sequence = (sequenceRow[0]?.sequence ?? 0) + 1;
-        await handle.database.insert(campaignProposals).values({
-          campaignId,
-          proposalId: proposal.proposalId,
-          sequence,
-          outcomeId: proposal.outcomeId,
-          proposal,
-          status: "planned",
-          blocker: null,
-          readyBaseSha: null,
-          readyRepositoryRevision: null,
-        });
-      }
-      await refreshRepositoryHeads(handle.database, environment);
-      await reconcile(handle.database, campaignId);
-      return resourceFromDatabase(handle.database, campaignId);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    const campaign = await database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
     });
-  } finally {
-    handle.close();
-  }
+    if (!campaign) throw new CampaignNotFoundError();
+    const existing = await database.query.campaignProposals.findFirst({
+      where: and(
+        eq(campaignProposals.campaignId, campaignId),
+        eq(campaignProposals.proposalId, proposal.proposalId),
+      ),
+    });
+    if (existing) {
+      if (JSON.stringify(existing.proposal) !== JSON.stringify(proposal))
+        throw new CampaignProposalConflictError(proposal.proposalId);
+    } else {
+      const sequenceRow = await database
+        .select({ sequence: max(campaignProposals.sequence) })
+        .from(campaignProposals)
+        .where(eq(campaignProposals.campaignId, campaignId));
+      const sequence = (sequenceRow[0]?.sequence ?? 0) + 1;
+      await database.insert(campaignProposals).values({
+        campaignId,
+        proposalId: proposal.proposalId,
+        sequence,
+        outcomeId: proposal.outcomeId,
+        proposal,
+        status: "planned",
+        blocker: null,
+        readyBaseSha: null,
+        readyRepositoryRevision: null,
+      });
+    }
+    await reconcileAll(database, observed);
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
 }
 
 export async function lookupCampaign(
   stateDirectory: string,
   campaignId: string,
-  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<CampaignResource | null> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
-  const handle = openSqliteDatabase(databasePath);
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     const found = await handle.database.query.campaigns.findFirst({
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!found) return null;
-    await refreshRepositoryHeads(handle.database, environment);
-    await reconcile(handle.database, campaignId);
     return await resourceFromDatabase(handle.database, campaignId);
   } finally {
     handle.close();

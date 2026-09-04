@@ -166,16 +166,7 @@ export function parseTaskProposal(input: unknown): TaskProposal {
   const raw = z.record(z.string(), z.unknown()).safeParse(input);
   if (!raw.success) throw new Error("task proposal must be an object");
   const value = raw.data;
-  const nested = z.record(z.string(), z.unknown()).safeParse(value.task);
-  if (nested.success) {
-    for (const [key, nestedValue] of Object.entries(nested.data)) {
-      if (!(key in value)) value[key] = nestedValue;
-    }
-  }
-  const proposalId = value.proposalId ?? value.idempotencyKey ?? value.id;
-  if (proposalId !== undefined) value.proposalId = proposalId;
-  if (typeof value.baseSha === "string" || (nested.success && "baseSha" in nested.data))
-    throw new Error("task proposals cannot provide a base SHA");
+  if ("baseSha" in value) throw new Error("task proposals cannot provide a base SHA");
   const parsed = taskProposalSchema.safeParse(value);
   if (!parsed.success)
     throw new Error(`invalid task proposal: ${JSON.stringify(parsed.error.issues)}`);

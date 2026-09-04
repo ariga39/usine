@@ -18,7 +18,7 @@ import {
   MAX_USAGE_REPORT_PAGE_SIZE,
   isTaskStateQuarantinedError,
   repositoryRegistrationSchema,
-  type RepositorySnapshot,
+  type RepositoryRegistration,
   type TaskContract,
   type TaskExecutionInput,
   type TaskEvent,
@@ -34,6 +34,7 @@ import {
   lookupCampaign,
   proposeCampaign,
   publishCampaign,
+  reconcileCampaigns,
   readGoalContract,
 } from "./campaign.js";
 import {
@@ -230,6 +231,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   };
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
+  await reconcileCampaigns(stateDirectory, options.environment);
   const restartState = await lookupRestartableTasks(stateDirectory);
   const restartable: typeof restartState.restartable = [];
   let activeTaskCount = restartState.activeTaskCount;
@@ -456,11 +458,11 @@ function createApiLayer(options: {
           const parsed = repositoryRegistrationSchema.safeParse(payload);
           if (!parsed.success)
             throw new ServerValidationError(JSON.stringify(contractIssues(parsed.error)));
-          const registration: RepositorySnapshot = {
+          const registration: RepositoryRegistration = {
             ...parsed.data,
             path: await realpath(parsed.data.path),
           };
-          return registerRepositoryResource(stateDirectory, registration, options.environment);
+          return registerRepositoryResource(stateDirectory, registration);
         }),
     }),
   );
@@ -568,11 +570,7 @@ function createApiLayer(options: {
         }),
       get: ({ params }) =>
         apiEffect(async () => {
-          const campaign = await lookupCampaign(
-            stateDirectory,
-            params.campaignId,
-            options.environment,
-          );
+          const campaign = await lookupCampaign(stateDirectory, params.campaignId);
           if (!campaign) throw new ServerNotFoundError("campaign not found");
           return campaign;
         }),

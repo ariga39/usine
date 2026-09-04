@@ -3,7 +3,6 @@ import { access, lstat, mkdir, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { execa } from "execa";
 import {
   applyMigrations,
   contractIssues,
@@ -15,6 +14,7 @@ import {
   TaskIdCursorError,
   type TaskContract,
   type TaskExecutionInput,
+  type RepositoryRegistration,
   type RepositorySnapshot,
   type RepositoryResource,
   type ResolvedTaskContract,
@@ -234,30 +234,13 @@ export async function reviewCandidateWithProfile(
 
 export async function registerRepository(
   stateDirectory: string,
-  registration: RepositorySnapshot,
-  environment: NodeJS.ProcessEnv = process.env,
+  registration: RepositoryRegistration,
 ): Promise<RepositorySnapshot> {
-  let headSha = registration.headSha;
-  try {
-    headSha = (
-      await execa("git", ["-C", registration.path, "rev-parse", "HEAD"], {
-        env: credentialFreeGitEnvironment(environment),
-        extendEnv: false,
-        timeout: 30_000,
-      })
-    ).stdout.trim();
-  } catch {
-    // Direct domain fixtures may use a non-Git path; Campaign readiness will
-    // keep such a Repository non-executable until a host head is recorded.
-  }
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
   const handle = openSqliteDatabase(databasePath);
   try {
-    return await new TaskAuthority(handle.database).registerRepository({
-      ...registration,
-      ...(headSha ? { headSha } : {}),
-    });
+    return await new TaskAuthority(handle.database).registerRepository(registration);
   } finally {
     handle.close();
   }
@@ -322,10 +305,9 @@ export async function lookupRepositories(
 
 export async function registerRepositoryResource(
   stateDirectory: string,
-  registration: RepositorySnapshot,
-  environment: NodeJS.ProcessEnv = process.env,
+  registration: RepositoryRegistration,
 ): Promise<RepositoryResource> {
-  await registerRepository(stateDirectory, registration, environment);
+  await registerRepository(stateDirectory, registration);
   const resource = await inspectRepositoryResource(stateDirectory, registration.id);
   if (!resource) throw new Error("registered repository is missing");
   return resource;
