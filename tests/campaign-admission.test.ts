@@ -310,6 +310,10 @@ describe("durable Ready frontier", () => {
       ]);
       const baseSha = first.proposals?.[0]?.ready?.baseSha;
       expect(baseSha).toMatch(/^[0-9a-f]{40}$/);
+      const registeredHead = (
+        await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+      ).stdout.trim();
+      expect(baseSha).toBe(registeredHead);
       expect(first.proposals?.[0]?.ready).not.toHaveProperty("baseSha", undefined);
       await expect(
         proposeCampaign(server.url, published.campaignId, {
