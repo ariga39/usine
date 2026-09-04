@@ -1,6 +1,6 @@
 # Usine
 
-Usine is a local TypeScript and Node.js software-delivery coordinator. Its product direction is to turn one published Goal Contract into accepted Repository outcomes without requiring a person to decompose, start, review, merge, and advance every Task. Durable Campaign and Task facts, rather than process state or agent prose, decide recovery and completion.
+Usine is a local TypeScript and Node.js software-delivery coordinator. Its product direction is to turn one guardian-authored, user-authorized Campaign plan into accepted Repository outcomes without requiring a person to start, review, merge, or advance every Task. Durable Campaign and Task facts, rather than process state or agent prose, decide recovery and completion.
 
 ## Supported boundary
 
@@ -13,7 +13,7 @@ The implemented Task delivery leaf is intentionally bounded:
 - explicit Task Contract delivery authority, with merge authority granted only by `authorization.merge: true`;
 - transient live observation plus durable Task-local event history.
 
-The server now also admits one committed Goal Contract through a host-owned publication anchor and exposes its durable Campaign Planned/Ready frontier. Requirement Proxy/Planner execution, Task admission from Ready projections, and automatic frontier advancement remain outside this slice; they remain product behavior, not an external guardian's responsibility. Concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+The server also admits a committed Goal Contract through a host-owned publication anchor, accepts its guardian-authored Task Proposals, exposes the durable Planned/Ready frontier, admits eligible Tasks through the delivery leaf, and advances successor dependencies from accepted facts. Outcome evidence reduction and Campaign closure remain pending. Automatic semantic decomposition, concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Quick start
 
@@ -25,7 +25,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm build
 ```
 
-For host setup, Repository registration, current leaf Task submission, server operation, observation, and bounded retry, follow [`docs/AGENT_QUICKSTART.md`](docs/AGENT_QUICKSTART.md). This is not yet the wish-to-outcome Campaign entry path.
+For host setup, Repository registration, guardian-authored Campaign handoff, server operation, observation, and bounded retry, follow [`docs/AGENT_QUICKSTART.md`](docs/AGENT_QUICKSTART.md).
 
 ## Documentation map
 

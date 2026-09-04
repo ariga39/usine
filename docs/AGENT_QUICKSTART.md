@@ -4,7 +4,7 @@ This guide is for an agent operating Usine for an authorized project task. It is
 
 Usine runs a local server. The server owns admission, execution, recovery, and public resource projections. The CLI is a client of that server. A submitting CLI process may exit after admission; the server continues the Task.
 
-This guide operates the implemented single-Task delivery leaf and the first Campaign entry path. It does not invoke Requirement Proxy/Planner roles, maintain a Task frontier, or advance successor Tasks. Do not use repeated manual `submit` commands as a substitute for the Campaign product behavior defined in [DESIGN](DESIGN.md).
+This guide operates the implemented Task delivery leaf and guardian-authored Campaign entry path. The guardian prepares and submits one complete bounded plan; the server admits eligible Ready proposals and advances successor Tasks without per-Task direction. Accepted-delivery reduction into Outcome evidence and Campaign closure remain pending. Do not use repeated standalone `submit` commands as a substitute for the Campaign behavior defined in [DESIGN](DESIGN.md).
 
 ## 1. Prerequisites and build
 
@@ -148,11 +148,11 @@ export USINE_ROLE_OUTPUT_MODEL="<ROLE_OUTPUT_MODEL>"
 
 The API key remains in the coordinator host process. It is not passed to the worker or stored in Task facts.
 
-## 3. Publish a Goal Contract
+## 3. Publish a guardian-authored Campaign plan
 
-The Campaign entry path accepts a committed Goal Contract only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. It reads the tracked blob from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. The source string and `publish` flag are contract claims; neither can authorize Ready work without the host anchor. A role response or draft without publication authority cannot create a Campaign.
+Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. Re-publishing the same bytes cannot repair that immutable fact; after correcting the anchor, publish a new Goal version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
 
-The current contract shape is:
+The current contract shape is shown below. Set `delivery` or `merge` to `true` only when the authority source explicitly grants that effect.
 
 ```json
 {
@@ -172,15 +172,14 @@ The current contract shape is:
   "authority": {
     "source": "<AUTHORITY_SOURCE>",
     "publish": true,
-    "delivery": false,
-    "merge": false,
+    "delivery": true,
+    "merge": true,
     "repositories": ["<REPOSITORY_ID>"],
     "effects": ["<EFFECT_ID>"]
   },
   "budget": {
     "maxElapsedMs": 3600000,
     "maxTasks": 10,
-    "maxPlannerActivations": 1,
     "maxImplementerActivations": 1,
     "maxReviewCycles": 1
   }
@@ -202,14 +201,35 @@ To authorize a local publication, start the server with the host-owned anchor an
 export USINE_GOAL_PUBLICATION_SOURCE="<AUTHORITY_SOURCE>"
 ```
 
-Planner output is submitted as a bounded proposal; it cannot include a `baseSha` or change the Campaign's authority. Submit a committed proposal file and inspect the durable projection:
+Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current strict shape is:
+
+```json
+{
+  "proposalId": "<PROPOSAL_ID>",
+  "outcomeId": "<OUTCOME_ID>",
+  "dependsOn": [],
+  "repositoryId": "<REPOSITORY_ID>",
+  "instructions": "<BOUNDED_IMPLEMENTATION_OUTCOME>",
+  "acceptance": ["<TASK_ACCEPTANCE_EVIDENCE>"],
+  "nonGoals": [],
+  "effects": ["<EFFECT_ID>"],
+  "budget": {
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1,
+    "maxElapsedMs": 3600000
+  },
+  "merge": true
+}
+```
+
+The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute, and the complete set must not exceed the Goal's `maxTasks`; later admission sequence entries are durably blocked when that limit is exhausted. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
 
 ```sh
 node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
 node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
 ```
 
-Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable.
+Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable. After the complete set is handed off, the guardian observes the Campaign rather than starting or advancing individual Tasks. An exhausted plan with incomplete Outcomes requires one new guardian/user decision; it must not be hidden by ad hoc standalone Task submission.
 
 ## 4. Register a Repository
 
