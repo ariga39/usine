@@ -73,8 +73,8 @@ export async function lookupCampaignEvidence(
     );
     const sortedRuns = allRuns.toSorted(
       (left, right) =>
-        left.taskId.localeCompare(right.taskId) ||
-        left.invocationId.localeCompare(right.invocationId),
+        compareStrings(left.taskId, right.taskId) ||
+        compareStrings(left.invocationId, right.invocationId),
     );
     const taskIds = source.sources.map((item) => item.task.taskId).toSorted();
     const pageTaskIds = taskIds
@@ -156,22 +156,16 @@ async function loadCampaignSource(
     .where(eq(campaignTouches.campaignId, campaign.campaignId))
     .orderBy(asc(campaignTouches.occurredAtEpochMs), asc(campaignTouches.touchId));
   const taskRows = await database
-    .select({ taskId: taskRuns.taskId })
+    .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
     .from(taskRuns)
     .orderBy(asc(taskRuns.taskId));
   const sources: UsageReportSource[] = [];
   for (const row of taskRows) {
-    const resultRows = await database
-      .select({ rawResult: sql<string>`${taskRuns.result}` })
-      .from(taskRuns)
-      .where(eq(taskRuns.taskId, row.taskId));
     let result: TaskResult | null = null;
-    if (resultRows[0]) {
-      try {
-        result = decodeRawPersistedTaskResult(resultRows[0].rawResult);
-      } catch (error) {
-        if (!isTaskStateQuarantinedError(error)) throw error;
-      }
+    try {
+      result = decodeRawPersistedTaskResult(row.rawResult);
+    } catch (error) {
+      if (!isTaskStateQuarantinedError(error)) throw error;
     }
     if (!belongsToCampaign(result, campaign)) continue;
     const eventRows = await database
@@ -296,29 +290,19 @@ function aggregateRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidenceAg
         usage: sumUsage(group.map((run) => run.usage)),
       };
     })
-    .toSorted((left, right) =>
-      [
-        left.goalVersion,
-        left.outcomeId,
-        left.taskId,
-        left.role,
-        left.model,
-        left.provider,
-        left.adapter,
-      ]
-        .join("\u0000")
-        .localeCompare(
-          [
-            right.goalVersion,
-            right.outcomeId,
-            right.taskId,
-            right.role,
-            right.model,
-            right.provider,
-            right.adapter,
-          ].join("\u0000"),
-        ),
-    );
+    .toSorted((left, right) => compareStrings(aggregateSortKey(left), aggregateSortKey(right)));
+}
+
+function aggregateSortKey(aggregate: CampaignEvidenceAggregate): string {
+  return [
+    aggregate.goalVersion,
+    aggregate.outcomeId,
+    aggregate.taskId,
+    aggregate.role,
+    aggregate.model,
+    aggregate.provider,
+    aggregate.adapter,
+  ].join("\u0000");
 }
 
 function totals(
@@ -378,6 +362,10 @@ function coverage(runs: readonly CampaignEvidenceRun[]): CampaignEvidencePage["c
   if (runs.length === 0) return "unavailable";
   if (runs.every((run) => run.usage.coverage === "unavailable")) return "unavailable";
   return runs.every((run) => run.usage.coverage === "complete") ? "complete" : "partial";
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function encodeCursor(cursor: Schema.Schema.Type<typeof CURSOR>): string {

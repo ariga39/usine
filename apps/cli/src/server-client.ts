@@ -196,21 +196,26 @@ export async function campaignEvidence(
             : "partial",
     runs: [...runs].toSorted(
       (left, right) =>
-        left.taskId.localeCompare(right.taskId) ||
-        left.invocationId.localeCompare(right.invocationId),
+        compareStrings(left.taskId, right.taskId) ||
+        compareStrings(left.invocationId, right.invocationId),
     ),
     aggregates: [...aggregates].toSorted((left, right) =>
-      `${left.goalVersion}:${left.outcomeId}:${left.taskId}:${left.role}:${left.model}:${left.provider}:${left.adapter}`.localeCompare(
+      compareStrings(
+        `${left.goalVersion}:${left.outcomeId}:${left.taskId}:${left.role}:${left.model}:${left.provider}:${left.adapter}`,
         `${right.goalVersion}:${right.outcomeId}:${right.taskId}:${right.role}:${right.model}:${right.provider}:${right.adapter}`,
       ),
     ),
     touches: [...touches.values()].toSorted((left, right) =>
-      left.touchId.localeCompare(right.touchId),
+      compareStrings(left.touchId, right.touchId),
     ),
     deliveries: [...deliveries.values()].toSorted((left, right) =>
-      left.taskId.localeCompare(right.taskId),
+      compareStrings(left.taskId, right.taskId),
     ),
   };
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export async function recordCampaignDecisionTouch(
