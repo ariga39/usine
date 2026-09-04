@@ -405,6 +405,16 @@ export async function reconcileCampaigns(
 ): Promise<void> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
+  const readHandle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const existingCampaign = await readHandle.database
+      .select({ campaignId: campaigns.campaignId })
+      .from(campaigns)
+      .limit(1);
+    if (existingCampaign.length === 0) return;
+  } finally {
+    readHandle.close();
+  }
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);
   });
