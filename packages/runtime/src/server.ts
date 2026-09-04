@@ -30,7 +30,11 @@ import {
   CampaignContentConflictError,
   CampaignProposalConflictError,
   CampaignNotFoundError,
+  CampaignAbandonmentError,
+  CampaignHandoffError,
   GoalContractInputError,
+  abandonCampaign,
+  handoffCampaign,
   lookupCampaign,
   recordCampaignDecisionTouch,
   CampaignTouchInputError,
@@ -629,6 +633,25 @@ function createApiLayer(options: {
           await options.coordinateCampaigns();
           return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
         }),
+      handoff: ({ params }) =>
+        apiEffect(async () => {
+          const campaign = await handoffCampaign(
+            stateDirectory,
+            params.campaignId,
+            options.environment,
+          );
+          await options.coordinateCampaigns();
+          return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
+        }),
+      abandon: ({ params }) =>
+        apiEffect(async () => {
+          const campaign = await abandonCampaign(
+            stateDirectory,
+            params.campaignId,
+            options.environment,
+          );
+          return campaign;
+        }),
       evidence: ({ params, query }) =>
         apiEffect(async () => {
           const page = await lookupCampaignEvidence(stateDirectory, params.campaignId, {
@@ -699,6 +722,10 @@ function apiError(error: unknown): ApiError {
   if (error instanceof CampaignContentConflictError)
     return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CampaignProposalConflictError)
+    return { code: error.code, message: error.message, retryable: false };
+  if (error instanceof CampaignHandoffError)
+    return { code: error.code, message: error.message, retryable: false };
+  if (error instanceof CampaignAbandonmentError)
     return { code: error.code, message: error.message, retryable: false };
   if (isTaskStateQuarantinedError(error)) {
     if (error.taskId !== undefined)

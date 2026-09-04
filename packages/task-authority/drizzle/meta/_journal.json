@@ -127,6 +127,13 @@
       "when": 1787529600002,
       "tag": "0017_campaign_touches",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1787529600003,
+      "tag": "0018_campaign_reduction",
+      "breakpoints": true
     }
   ]
 }

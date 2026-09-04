@@ -10,6 +10,7 @@ import {
 } from "@usine/runtime";
 import {
   campaignEvidence,
+  handoffCampaign,
   proposeCampaign,
   publishCampaign,
   recordCampaignDecisionTouch,
@@ -242,6 +243,7 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
   );
   await recordCampaignDecisionTouch(server.url, published.campaignId, "blocked-review");
   await recordCampaignDecisionTouch(server.url, published.campaignId, "blocked-review");
+  await handoffCampaign(server.url, published.campaignId);
   await finished;
 
   const first = await lookupCampaignEvidence(stateDirectory, published.campaignId, {

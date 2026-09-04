@@ -146,6 +146,22 @@ export async function proposeCampaign(
   return runRequest(client.campaigns.propose({ params: { campaignId }, payload: proposal }));
 }
 
+export async function handoffCampaign(
+  serverUrl: string,
+  campaignId: string,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.handoff({ params: { campaignId }, payload: {} }));
+}
+
+export async function abandonCampaign(
+  serverUrl: string,
+  campaignId: string,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.abandon({ params: { campaignId }, payload: {} }));
+}
+
 export async function campaignEvidence(
   serverUrl: string,
   campaignId: string,

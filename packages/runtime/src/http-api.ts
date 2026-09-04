@@ -58,6 +58,16 @@ const campaignProposalConflictError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(false),
 }).pipe(HttpApiSchema.status(409));
+const campaignHandoffConflictError = Schema.Struct({
+  code: Schema.Literal("campaign_handoff_conflict"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
+}).pipe(HttpApiSchema.status(409));
+const campaignAbandonmentUnauthorizedError = Schema.Struct({
+  code: Schema.Literal("campaign_abandonment_unauthorized"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
+}).pipe(HttpApiSchema.status(403));
 const quarantineError = Schema.Struct({
   taskId: Schema.String,
   error: Schema.Literal("task_state_quarantined"),
@@ -124,6 +134,8 @@ const taskSubmissionSchema = Schema.Struct({
 const campaignPublicationSchema = Schema.Struct({ contractPath: Schema.String });
 const campaignProposalSubmissionSchema = Schema.Unknown;
 const campaignDecisionTouchSchema = Schema.Struct({ touchId: Schema.String });
+const campaignHandoffSchema = Schema.Struct({});
+const campaignAbandonSchema = Schema.Struct({});
 const campaignEvidenceQuery = {
   cursor: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.NumberFromString),
@@ -160,6 +172,8 @@ const allErrors = [
   retryConflictError,
   campaignContentConflictError,
   campaignProposalConflictError,
+  campaignHandoffConflictError,
+  campaignAbandonmentUnauthorizedError,
   quarantineError,
   forgeError,
   serverError,
@@ -243,6 +257,18 @@ const CampaignApi = HttpApiGroup.make("campaigns").add(
   HttpApiEndpoint.post("propose", "/v1/campaigns/:campaignId/proposals", {
     params: { campaignId: Schema.String },
     payload: campaignProposalSubmissionSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.post("handoff", "/v1/campaigns/:campaignId/handoff", {
+    params: { campaignId: Schema.String },
+    payload: campaignHandoffSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.post("abandon", "/v1/campaigns/:campaignId/abandon", {
+    params: { campaignId: Schema.String },
+    payload: campaignAbandonSchema,
     success: campaignResourceSchema,
     error: allErrors,
   }),
@@ -334,6 +360,8 @@ export {
   campaignPublicationSchema,
   campaignResourceSchema,
   campaignProposalSubmissionSchema,
+  campaignHandoffSchema,
+  campaignAbandonSchema,
   campaignEvidencePageSchema,
   campaignDecisionTouchSchema,
   campaignProposalConflictError,

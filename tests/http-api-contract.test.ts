@@ -93,6 +93,8 @@ test("the generated client round-trips the Campaign evidence contract", async ()
       publish: () => Effect.die("unused"),
       get: () => Effect.die("unused"),
       propose: () => Effect.die("unused"),
+      handoff: () => Effect.die("unused"),
+      abandon: () => Effect.die("unused"),
       evidence: () => Effect.succeed(report),
       touch: () => Effect.die("unused"),
     }),
