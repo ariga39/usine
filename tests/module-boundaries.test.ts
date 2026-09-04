@@ -12,6 +12,12 @@ import {
   type RepositorySnapshot,
   type TaskContract,
 } from "@usine/task-authority";
+import {
+  openServerEventListener,
+  serverHealth,
+  serverSnapshot,
+  waitForServerEvent,
+} from "../apps/cli/src/server-client.js";
 
 const repository: RepositorySnapshot = {
   id: "registered-repository",
@@ -227,6 +233,29 @@ test("server returns typed validation for invalid cursor and limit inputs", asyn
       const response = await fetch(new URL(path, server.url));
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ code: "validation" });
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("loopback API exposes only canonical observation routes", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "usine-server-canonical-routes-"));
+  const server = await startUsineServer({
+    environment: { USINE_STATE_DIR: stateDirectory },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    await expect(serverHealth(server.url)).resolves.toMatchObject({ status: "ok" });
+    await expect(serverSnapshot(server.url)).resolves.toMatchObject({ schemaVersion: 1 });
+    await expect(waitForServerEvent(server.url, {}, 0)).resolves.toBeNull();
+
+    const listener = await openServerEventListener(server.url);
+    listener.close();
+
+    for (const path of ["/v1/server/health", "/v1/server/snapshot", "/v1/events"]) {
+      await expect(fetch(new URL(path, server.url))).resolves.toMatchObject({ status: 404 });
     }
   } finally {
     await server.close();
