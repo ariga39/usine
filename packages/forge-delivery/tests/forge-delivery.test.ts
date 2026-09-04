@@ -854,7 +854,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
       credentialFreeGit: credentialFreeGitEnvironment(process.env),
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
-    const writer = await workspace.prepareWriter("materialized-merge", 1, state.mergeCommitSha!);
+    const writer = await workspace.prepareWriter("materialized-merge", 1, state.mergeCommitSha);
     expect(await git(writer.path, "rev-parse", "HEAD")).toBe(state.mergeCommitSha);
     await workspace.quarantine(writer);
     expect(state.mergeCalls).toBe(1);
