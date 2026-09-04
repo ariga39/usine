@@ -10,6 +10,7 @@ import {
   applyMigrations,
   encodeTaskIdCursor,
   openSqliteDatabase,
+  RepositoryWriterConflictError,
   taskResourceFromResult,
   TaskAuthority,
   type TaskContract,
@@ -1239,6 +1240,14 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       firstAuthority.admit({
         contract: makeContract(`${taskId}-other`),
         contractHash: "other-hash",
+        repositoryIdentity,
+        deadlineEpochMs: Date.now() + 30_000,
+      }),
+    ).rejects.toBeInstanceOf(RepositoryWriterConflictError);
+    await expect(
+      firstAuthority.admit({
+        contract: makeContract(`${taskId}-other-message`),
+        contractHash: "other-message-hash",
         repositoryIdentity,
         deadlineEpochMs: Date.now() + 30_000,
       }),
