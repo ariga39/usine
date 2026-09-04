@@ -8,17 +8,7 @@ test("the generated client round-trips the shared server health contract", async
   const handlers = HttpApiBuilder.group(UsineApi, "server", (group) =>
     group.handleAll({
       health: () => Effect.succeed({ status: "ok" as const, revision: 7 }),
-      healthAlias: () => Effect.succeed({ status: "ok" as const, revision: 7 }),
       snapshot: () =>
-        Effect.succeed({
-          schemaVersion: 1 as const,
-          revision: 7,
-          server: { status: "ok" as const, revision: 7 },
-          repositories: [],
-          tasks: [],
-          codingSessions: [],
-        }),
-      snapshotAlias: () =>
         Effect.succeed({
           schemaVersion: 1 as const,
           revision: 7,
@@ -100,8 +90,6 @@ test("the typed SSE contract emits readiness before a domain envelope", async ()
     group.handleAll({
       wait: () => Effect.succeed(envelope),
       subscribe: () => Effect.succeed(Stream.fromIterable([{ kind: "ready" as const }, envelope])),
-      subscribeAlias: () =>
-        Effect.succeed(Stream.fromIterable([{ kind: "ready" as const }, envelope])),
     }),
   );
   const values = await Effect.runPromise(

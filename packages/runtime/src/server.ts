@@ -466,10 +466,7 @@ function createApiLayer(options: {
   const serverHandlers = HttpApiBuilder.group(UsineApi, "server", (handlers) =>
     handlers.handleAll({
       health: () => apiEffect(() => lookupServerHealth(stateDirectory)),
-      healthAlias: () => apiEffect(() => lookupServerHealth(stateDirectory)),
       snapshot: ({ query }) =>
-        apiEffect(() => lookupServerSnapshot(stateDirectory, validLimit(query.limit, 100))),
-      snapshotAlias: ({ query }) =>
         apiEffect(() => lookupServerSnapshot(stateDirectory, validLimit(query.limit, 100))),
     }),
   );
@@ -631,7 +628,6 @@ function createApiLayer(options: {
     handlers.handleAll({
       wait: ({ query }) => waitApiEventResponse(stateDirectory, options.eventHub, query),
       subscribe: ({ query }) => subscribeApiEvents(stateDirectory, options.eventHub, query),
-      subscribeAlias: ({ query }) => subscribeApiEvents(stateDirectory, options.eventHub, query),
     }),
   );
   const apiLayer = HttpApiBuilder.layer(UsineApi).pipe(

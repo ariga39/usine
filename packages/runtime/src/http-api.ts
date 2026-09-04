@@ -161,16 +161,7 @@ const allErrors = [
 
 const ServerApi = HttpApiGroup.make("server", { topLevel: true }).add(
   HttpApiEndpoint.get("health", "/v1/health", { success: serverHealthSchema, error: allErrors }),
-  HttpApiEndpoint.get("healthAlias", "/v1/server/health", {
-    success: serverHealthSchema,
-    error: allErrors,
-  }),
   HttpApiEndpoint.get("snapshot", "/v1/snapshot", {
-    query: limitQuery,
-    success: serverSnapshotSchema,
-    error: allErrors,
-  }),
-  HttpApiEndpoint.get("snapshotAlias", "/v1/server/snapshot", {
     query: limitQuery,
     success: serverSnapshotSchema,
     error: allErrors,
@@ -258,11 +249,6 @@ const EventApi = HttpApiGroup.make("events").add(
     error: allErrors,
   }),
   HttpApiEndpoint.get("subscribe", "/v1/events/subscribe", {
-    query: eventQuery,
-    success: eventStreamSchema,
-    error: allErrors,
-  }),
-  HttpApiEndpoint.get("subscribeAlias", "/v1/events", {
     query: eventQuery,
     success: eventStreamSchema,
     error: allErrors,
