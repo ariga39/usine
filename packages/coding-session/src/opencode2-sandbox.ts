@@ -67,16 +67,24 @@ export class DarwinOpenCode2Sandbox implements OpenCode2Sandbox {
       );
     }
 
-    const workspace = await realpath(request.workspace);
-    const privateDirectory = await realpath(request.privateDirectory);
+    let workspace: string;
+    let privateDirectory: string;
+    try {
+      workspace = await realpath(request.workspace);
+      privateDirectory = await realpath(request.privateDirectory);
+    } catch {
+      throw new OpenCode2SandboxUnavailableError(
+        "OpenCode2 workspace or private state directory is unavailable",
+      );
+    }
     const opencodeExecutable = await resolveExecutable(request.environment.PATH);
     const probeDirectory = join(dirname(privateDirectory), ".sandbox-probe");
     const outsidePath = join(probeDirectory, "outside");
     const workspaceProbe = join(workspace, ".usine-opencode2-sandbox-probe");
-    await mkdir(probeDirectory, { recursive: true });
-    await writeFile(outsidePath, "outside", { encoding: "utf8", flag: "w", mode: 0o600 });
-    await writeFile(workspaceProbe, "workspace", { encoding: "utf8", flag: "w", mode: 0o600 });
     try {
+      await mkdir(probeDirectory, { recursive: true });
+      await writeFile(outsidePath, "outside", { encoding: "utf8", flag: "w", mode: 0o600 });
+      await writeFile(workspaceProbe, "workspace", { encoding: "utf8", flag: "w", mode: 0o600 });
       const profile = sandboxProfile({
         workspace,
         privateDirectory,
