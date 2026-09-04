@@ -60,6 +60,12 @@ import {
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./private-state.js";
 
+export {
+  lookupCampaignEvidence,
+  CampaignEvidenceCursorError,
+  type CampaignEvidenceRequest,
+} from "./campaign-evidence.js";
+
 /** Maximum UTF-8 bytes read from one submitted Task Contract file. */
 export const MAX_TASK_CONTRACT_BYTES = 1_048_576;
 

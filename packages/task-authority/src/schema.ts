@@ -135,3 +135,18 @@ export const campaigns = sqliteTable(
     ),
   }),
 );
+
+/** Guardian-authored Campaign plan and decision touches. */
+export const campaignTouches = sqliteTable(
+  "campaign_touches",
+  {
+    campaignId: text("campaign_id").notNull(),
+    touchId: text("touch_id").notNull(),
+    goalVersion: integer("goal_version").notNull(),
+    type: text("type").notNull(),
+    occurredAtEpochMs: integer("occurred_at_epoch_ms").notNull(),
+  },
+  (table) => ({
+    campaignTouchPrimaryKey: primaryKey({ columns: [table.campaignId, table.touchId] }),
+  }),
+);

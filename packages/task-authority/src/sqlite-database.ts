@@ -4,6 +4,7 @@ import type { RemoteCallback, SqliteRemoteDatabase } from "drizzle-orm/sqlite-pr
 import {
   campaigns,
   campaignProposals,
+  campaignTouches,
   repositories,
   taskEvents,
   repositoryLeases,
@@ -35,6 +36,7 @@ export type RuntimeDatabase = SqliteRemoteDatabase<{
   taskQuarantines: typeof taskQuarantines;
   campaigns: typeof campaigns;
   campaignProposals: typeof campaignProposals;
+  campaignTouches: typeof campaignTouches;
 }>;
 
 export function openSqliteDatabase(
@@ -67,6 +69,7 @@ export function openSqliteDatabase(
       taskQuarantines,
       campaigns,
       campaignProposals,
+      campaignTouches,
     },
   });
 
