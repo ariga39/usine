@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { registerRepositoryResource, startUsineServer } from "@usine/runtime";
+import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
+import { openSqliteDatabase, TaskAuthority, type TaskResult } from "@usine/task-authority";
 import {
   getCampaign,
   proposeCampaign,
@@ -112,19 +114,30 @@ function frontierGoal(repositoryId: string) {
   } as const;
 }
 
-function frontierProposal(proposalId: string, outcomeId: string, dependsOn: string[] = []) {
+function frontierProposal(
+  proposalId: string,
+  outcomeId: string,
+  dependsOn: string[] = [],
+  merge = false,
+  repositoryId = "campaign-repository",
+) {
   return {
     proposalId,
     outcomeId,
     dependsOn,
-    repositoryId: "campaign-repository",
+    repositoryId,
     instructions: `Implement ${proposalId}.`,
     acceptance: [`${proposalId} is complete.`],
     nonGoals: [],
     effects: ["github"],
     budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
-    merge: false,
+    merge,
   };
+}
+
+function mergeFrontierGoal(repositoryId: string) {
+  const contract = frontierGoal(repositoryId);
+  return { ...contract, authority: { ...contract.authority, merge: true } };
 }
 
 async function frontierFixture(
@@ -170,7 +183,113 @@ async function frontierFixture(
       projectCheck: { command: "true", timeoutMs: 1_000 },
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
-  return { root, stateDirectory, contractPath, server };
+  return { root, stateDirectory, contractPath, server, environment };
+}
+
+async function acceptCampaignTask(
+  context: Parameters<NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>>[0],
+  merge = false,
+  candidateSha?: string,
+  mergeCommitSha?: string,
+) {
+  const { authority, contract, result } = context;
+  const activation = await authority.reserveActivation(
+    result.taskId,
+    contract.budget.maxImplementerActivations,
+  );
+  const repositoryPath = result.repository?.path;
+  if (!repositoryPath) throw new Error("Campaign fixture task has no repository snapshot");
+  const sha =
+    candidateSha ??
+    (
+      await execa("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { cwd: repositoryPath })
+    ).stdout.trim();
+  const candidate = await authority.recordCandidate(
+    { taskId: result.taskId, revision: activation.result.revision },
+    { sha, baseSha: contract.baseSha, fence: activation.activation },
+  );
+  const checked = await authority.recordCheck(
+    { taskId: result.taskId, revision: candidate.revision },
+    { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+  );
+  const reviewed = await authority.recordReview(
+    { taskId: result.taskId, revision: checked.revision },
+    { sha, verdict: "approved", summary: "fixture approved", findings: [] },
+  );
+  return authority.recordDelivery(
+    { taskId: result.taskId, revision: reviewed.revision },
+    {
+      sha,
+      effect: "github",
+      prNumber: result.taskId.endsWith("first") ? 1 : 2,
+      url: "https://example.invalid/pull/1",
+      attestationId: `fixture-${result.taskId}`,
+      merge: merge
+        ? {
+            prNumber: result.taskId.endsWith("first") ? 1 : 2,
+            approvedHeadSha: sha,
+            mergeCommitSha: mergeCommitSha ?? sha,
+            observedState: "merged" as const,
+          }
+        : null,
+    },
+  );
+}
+
+type CampaignExecutionContext = Parameters<
+  NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>
+>[0];
+
+async function rewriteTaskResult(
+  stateDirectory: string,
+  taskId: string,
+  rewrite: (result: TaskResult) => TaskResult,
+): Promise<void> {
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    const row = database.prepare("SELECT result FROM task_runs WHERE task_id = ?").get(taskId) as
+      | { result: string | TaskResult }
+      | undefined;
+    if (!row) throw new Error(`missing fixture Task ${taskId}`);
+    const result =
+      typeof row.result === "string" ? (JSON.parse(row.result) as TaskResult) : row.result;
+    database
+      .prepare("UPDATE task_runs SET result = ?, updated_at = ? WHERE task_id = ?")
+      .run(JSON.stringify(rewrite(result)), Date.now(), taskId);
+  } finally {
+    database.close();
+  }
+}
+
+async function detachedCampaignCommits(repositoryPath: string, baseSha: string) {
+  const tree = (
+    await execa("git", ["-C", repositoryPath, "rev-parse", `${baseSha}^{tree}`], {
+      cwd: repositoryPath,
+    })
+  ).stdout.trim();
+  const commitTree = async (...parents: string[]) =>
+    (
+      await execa(
+        "git",
+        [
+          "-C",
+          repositoryPath,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit-tree",
+          tree,
+          ...parents.flatMap((parent) => ["-p", parent]),
+          "-m",
+          parents.length === 1 ? "campaign candidate" : "campaign merge",
+        ],
+        { cwd: repositoryPath },
+      )
+    ).stdout.trim();
+  const candidateSha = await commitTree(baseSha);
+  const mergeCommitSha = await commitTree(baseSha, candidateSha);
+  return { candidateSha, mergeCommitSha };
 }
 
 test("admits one Ready proposal through the Task leaf without a Task submission", async () => {
@@ -747,6 +866,578 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("releases a same-Repository successor after accepted merge and launches it automatically", async () => {
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const executionIds: string[] = [];
+    let acceptedMergeSha: string | undefined;
+    let successorBaseSha: string | undefined;
+    const fixtureValue = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        executionIds.push(context.result.taskId);
+        if (context.result.taskId.endsWith("-first")) {
+          firstStarted();
+          await firstGate;
+          const accepted = await acceptCampaignTask(
+            context,
+            true,
+            detached.candidateSha,
+            detached.mergeCommitSha,
+          );
+          acceptedMergeSha = accepted.delivery?.merge?.mergeCommitSha;
+          return accepted;
+        }
+        successorBaseSha = context.contract.baseSha;
+        const repositoryPath = context.result.repository?.path;
+        if (!repositoryPath) throw new Error("successor fixture task has no repository snapshot");
+        const workspace = new CandidateWorkspace({
+          repository: repositoryPath,
+          stateDirectory: fixtureValue.stateDirectory,
+          deadlineEpochMs: Date.now() + 30_000,
+          credentialFreeGit: credentialFreeGitEnvironment(process.env),
+          gitAuthor: { name: "Test", email: "test@example.invalid" },
+        });
+        const writer = await workspace.prepareWriter(
+          context.contract.id,
+          1,
+          context.contract.baseSha,
+        );
+        expect((await execa("git", ["-C", writer.path, "rev-parse", "HEAD"])).stdout).toBe(
+          context.contract.baseSha,
+        );
+        await workspace.quarantine(writer);
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "successor fixture complete",
+        );
+      },
+    );
+    const { contractPath, server } = fixtureValue;
+    const originalHead = (
+      await execa("git", ["-C", fixtureValue.root, "rev-parse", "HEAD"], {
+        cwd: fixtureValue.root,
+      })
+    ).stdout.trim();
+    const detached = await detachedCampaignCommits(fixtureValue.root, originalHead);
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("first", "outcome-one", [], true),
+      );
+      await firstStartedPromise;
+      const beforeAcceptance = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("second", "outcome-two", ["first"], true),
+      );
+      expect(beforeAcceptance.proposals?.[1]).toMatchObject({
+        proposalId: "second",
+        status: "planned",
+      });
+
+      releaseFirst();
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (successorBaseSha !== undefined) break;
+      }
+      expect(executionIds).toEqual([
+        "campaign-campaign-366-v1-first",
+        "campaign-campaign-366-v1-second",
+      ]);
+      expect(acceptedMergeSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(acceptedMergeSha).not.toBe(originalHead);
+      expect(acceptedMergeSha).not.toBe(detached.candidateSha);
+      expect(successorBaseSha).toBe(acceptedMergeSha);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        proposals: [
+          expect.objectContaining({ proposalId: "first", status: "ready" }),
+          expect.objectContaining({
+            proposalId: "second",
+            status: "ready",
+            ready: expect.objectContaining({ baseSha: acceptedMergeSha }),
+          }),
+        ],
+      });
+    } finally {
+      releaseFirst();
+      await server.close();
+    }
+  });
+
+  test("allows reviewed-only delivery to release only a cross-Repository successor", async () => {
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let successorStarted = false;
+    let successorBaseSha: string | undefined;
+    const fixtureValue = await frontierFixture(
+      {
+        ...frontierGoal("campaign-repository"),
+        authority: {
+          ...frontierGoal("campaign-repository").authority,
+          repositories: ["campaign-repository", "other-repository"],
+        },
+      },
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-cross-first")) {
+          firstStarted();
+          await firstGate;
+          return acceptCampaignTask(context);
+        }
+        successorStarted = true;
+        successorBaseSha = context.contract.baseSha;
+        const repositoryPath = context.result.repository?.path;
+        if (!repositoryPath) throw new Error("cross-Repository task has no repository snapshot");
+        const workspace = new CandidateWorkspace({
+          repository: repositoryPath,
+          stateDirectory: fixtureValue.stateDirectory,
+          deadlineEpochMs: Date.now() + 30_000,
+          credentialFreeGit: credentialFreeGitEnvironment(process.env),
+          gitAuthor: { name: "Test", email: "test@example.invalid" },
+        });
+        const writer = await workspace.prepareWriter(
+          context.contract.id,
+          1,
+          context.contract.baseSha,
+        );
+        expect((await execa("git", ["-C", writer.path, "rev-parse", "HEAD"])).stdout).toBe(
+          otherHead,
+        );
+        await workspace.quarantine(writer);
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "cross-Repository successor fixture complete",
+        );
+      },
+    );
+    const { contractPath, stateDirectory, server, environment } = fixtureValue;
+    const otherRoot = await mkdtemp(join(tmpdir(), "usine-campaign-other-repository-"));
+    await execa("git", ["init", "--initial-branch=main"], { cwd: otherRoot });
+    await execa("git", ["config", "user.name", "Test"], { cwd: otherRoot });
+    await execa("git", ["config", "user.email", "test@example.invalid"], { cwd: otherRoot });
+    await writeFile(join(otherRoot, "other-base.txt"), "other repository base\n");
+    await execa("git", ["add", "other-base.txt"], { cwd: otherRoot });
+    await execa("git", ["commit", "-m", "initialize other repository"], { cwd: otherRoot });
+    const otherHead = (await execa("git", ["rev-parse", "HEAD"], { cwd: otherRoot })).stdout.trim();
+    await registerRepositoryResource(stateDirectory, {
+      id: "other-repository",
+      path: otherRoot,
+      owner: "other",
+      name: "other-repository",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "other",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    });
+    environment.USINE_FORGE_PROFILE_OTHER_APP_SLUG = "test-app";
+    environment.USINE_FORGE_PROFILE_OTHER_TEST_TOKEN = "test-token";
+    environment.USINE_FORGE_PROFILE_OTHER_API_URL = "http://127.0.0.1:9";
+    environment.USINE_FORGE_PROFILE_OTHER_REPOSITORY = "other/other-repository";
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("cross-first", "outcome-one"),
+      );
+      await firstStartedPromise;
+      const beforeAcceptance = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("cross-second", "outcome-two", ["cross-first"], false, "other-repository"),
+      );
+      expect(beforeAcceptance.proposals?.[1]).toMatchObject({
+        proposalId: "cross-second",
+        status: "planned",
+      });
+      releaseFirst();
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (successorStarted) break;
+      }
+      expect(successorStarted).toBe(true);
+      expect(successorBaseSha).toBe(otherHead);
+      await expect(
+        taskStatus(server.url, "campaign-campaign-366-v1-cross-first"),
+      ).resolves.toMatchObject({
+        state: "reviewed_pr",
+        delivery: { merge: null },
+        repository: { id: "campaign-repository" },
+      });
+    } finally {
+      releaseFirst();
+      await server.close();
+    }
+  });
+
+  test("does not release a same-Repository successor from reviewed-only delivery", async () => {
+    let firstStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let successorStarted = false;
+    const { contractPath, server } = await frontierFixture(
+      undefined,
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-same-reviewed-first")) {
+          firstStarted();
+          await firstGate;
+          return acceptCampaignTask(context);
+        }
+        successorStarted = true;
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "same-Repository reviewed-only successor must remain planned",
+        );
+      },
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("same-reviewed-first", "outcome-one"),
+      );
+      await firstStartedPromise;
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("same-reviewed-second", "outcome-two", ["same-reviewed-first"]),
+      );
+      releaseFirst();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(successorStarted).toBe(false);
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        proposals: [
+          expect.objectContaining({ proposalId: "same-reviewed-first" }),
+          expect.objectContaining({
+            proposalId: "same-reviewed-second",
+            status: "planned",
+            blocker: "same-Repository dependency has no accepted merge",
+          }),
+        ],
+      });
+    } finally {
+      releaseFirst();
+      await server.close();
+    }
+  });
+
+  const negativeCampaignEvidenceCases: ReadonlyArray<{
+    readonly label: string;
+    readonly expectedState: "merged" | "blocked" | "waiting";
+    readonly prepare: (
+      context: CampaignExecutionContext,
+      stateDirectory: string,
+    ) => Promise<TaskResult>;
+  }> = [
+    {
+      label: "stale check SHA",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          check: { ...result.check!, sha: "f".repeat(40) },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "stale review SHA",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          review: { ...result.review!, sha: "f".repeat(40) },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "stale delivery SHA",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          delivery: { ...result.delivery!, sha: "f".repeat(40) },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "stale approved-head SHA",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          delivery: {
+            ...result.delivery!,
+            merge: { ...result.delivery!.merge!, approvedHeadSha: "f".repeat(40) },
+          },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "ambiguous merge identity",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          delivery: {
+            ...result.delivery!,
+            merge: { ...result.delivery!.merge!, prNumber: result.delivery!.prNumber + 1 },
+          },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "incomplete merge effect",
+      expectedState: "merged",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          delivery: { ...result.delivery!, merge: null },
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "blocked or refused delivery",
+      expectedState: "blocked",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          state: "blocked",
+          delivery: { ...result.delivery!, merge: null },
+          blocker: "forge refused the authorized merge",
+          blockerClassification: "delivery_failure",
+        }));
+        return accepted;
+      },
+    },
+    {
+      label: "waiting delivery reconciliation",
+      expectedState: "waiting",
+      prepare: async (context, stateDirectory) => {
+        const accepted = await acceptCampaignTask(context, true);
+        await rewriteTaskResult(stateDirectory, context.result.taskId, (result) => ({
+          ...result,
+          state: "waiting",
+          delivery: null,
+          waiting: {
+            reason: "delivery_reconciliation",
+            resumeState: "reviewed",
+            activation: result.candidateFence!,
+          },
+          blocker: null,
+          blockerClassification: null,
+          activeActivation: null,
+        }));
+        return accepted;
+      },
+    },
+  ];
+
+  test.each(negativeCampaignEvidenceCases)(
+    "does not release a successor from $label evidence",
+    async ({ prepare, expectedState }) => {
+      let firstStarted!: () => void;
+      const firstStartedPromise = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstFinished!: () => void;
+      const firstFinishedPromise = new Promise<void>((resolve) => {
+        firstFinished = resolve;
+      });
+      let launches = 0;
+      const fixtureValue = await frontierFixture(
+        mergeFrontierGoal("campaign-repository"),
+        "user:campaign-366",
+        async (context) => {
+          launches += 1;
+          if (context.result.taskId.endsWith("-negative-first")) {
+            firstStarted();
+            await firstGate;
+            const result = await prepare(context, fixtureValue.stateDirectory);
+            firstFinished();
+            return result;
+          }
+          return context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "unexpected negative-evidence successor launch",
+          );
+        },
+      );
+      const { contractPath, server } = fixtureValue;
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("negative-first", "outcome-one", [], true),
+        );
+        await firstStartedPromise;
+        releaseFirst();
+        await firstFinishedPromise;
+        await expect(
+          taskStatus(server.url, "campaign-campaign-366-v1-negative-first"),
+        ).resolves.toMatchObject({ state: expectedState });
+
+        const successor = await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("negative-second", "outcome-two", ["negative-first"], true),
+        );
+        expect(successor.proposals).toMatchObject([
+          expect.objectContaining({ proposalId: "negative-first" }),
+          expect.objectContaining({
+            proposalId: "negative-second",
+            status: "planned",
+            ready: null,
+          }),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(launches).toBe(1);
+        expect((await serverSnapshot(server.url)).tasks.map((task) => task.taskId)).toEqual([
+          "campaign-campaign-366-v1-negative-first",
+        ]);
+      } finally {
+        releaseFirst();
+        await server.close();
+      }
+    },
+  );
+
+  test("restarts between predecessor acceptance and admission without duplicating the successor", async () => {
+    type ExecutionContext = Parameters<
+      NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>
+    >[0];
+    let predecessorContext!: ExecutionContext;
+    let predecessorStarted!: () => void;
+    const predecessorStartedPromise = new Promise<void>((resolve) => {
+      predecessorStarted = resolve;
+    });
+    const fixtureValue = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-restart-first")) {
+          predecessorContext = context;
+          predecessorStarted();
+          await new Promise<void>((resolve) =>
+            context.signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          return (await context.authority.lookup(context.result.taskId)) ?? context.result;
+        }
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "unexpected pre-restart successor execution",
+        );
+      },
+    );
+    const { contractPath, root, stateDirectory, server, environment } = fixtureValue;
+    const originalHead = (
+      await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+    ).stdout.trim();
+    const detached = await detachedCampaignCommits(root, originalHead);
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("restart-first", "outcome-one", [], true),
+      );
+      await predecessorStartedPromise;
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("restart-second", "outcome-two", ["restart-first"], true),
+      );
+      await server.close();
+
+      const databasePath = join(stateDirectory, "usine.sqlite");
+      const handle = openSqliteDatabase(databasePath);
+      try {
+        const authority = new TaskAuthority(handle.database);
+        const predecessor = await authority.lookup("campaign-campaign-366-v1-restart-first");
+        if (!predecessor) throw new Error("predecessor was not persisted before restart");
+        await acceptCampaignTask(
+          { ...predecessorContext, authority, result: predecessor },
+          true,
+          detached.candidateSha,
+          detached.mergeCommitSha,
+        );
+      } finally {
+        handle.close();
+      }
+
+      let successorExecutions = 0;
+      const restarted = await startUsineServer({
+        environment,
+        execute: async (context) => {
+          successorExecutions += 1;
+          return context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "restart successor complete",
+          );
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (successorExecutions > 0) break;
+        }
+        expect(successorExecutions).toBe(1);
+        expect((await serverSnapshot(restarted.url)).tasks.map((task) => task.taskId)).toEqual([
+          "campaign-campaign-366-v1-restart-first",
+          "campaign-campaign-366-v1-restart-second",
+        ]);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
   test("accepts only the strict flat proposal shape", async () => {
     const { contractPath, server } = await frontierFixture();
     try {
@@ -974,6 +1665,29 @@ describe("durable Ready frontier", () => {
           ready: null,
         },
       ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("keeps an Outcome-dependent proposal planned when its dependency has no proposal", async () => {
+    const { contractPath, server } = await frontierFixture();
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const result = await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("missing-outcome-predecessor", "outcome-two"),
+      );
+      expect(result.proposals).toMatchObject([
+        {
+          proposalId: "missing-outcome-predecessor",
+          status: "planned",
+          blocker: "outcome dependency has no admitted proposal",
+          ready: null,
+        },
+      ]);
+      await expect(serverSnapshot(server.url)).resolves.toMatchObject({ tasks: [] });
     } finally {
       await server.close();
     }

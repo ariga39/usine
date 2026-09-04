@@ -9,6 +9,7 @@ import {
   ForgeDeliveryReconciliationError,
   forgeGitEnvironment,
 } from "../src/index.js";
+import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { taskContractSchema, type ResolvedTaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
@@ -221,6 +222,7 @@ type PullRequest = {
 
 type ForgeServerState = {
   candidateSha: string;
+  mergeCommitSha?: string;
   headSha: string | null;
   pullRequests: PullRequest[];
   comments: Comment[];
@@ -341,7 +343,7 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
       pullRequest.state = "closed";
       pullRequest.merged = true;
       pullRequest.merged_at = "2026-08-22T00:00:00Z";
-      pullRequest.merge_commit_sha = "d".repeat(40);
+      pullRequest.merge_commit_sha = state.mergeCommitSha ?? "d".repeat(40);
       if (state.failAfterMerge) {
         state.failAfterMerge = false;
         throw new TypeError("response lost after merge");
@@ -350,7 +352,12 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
         merged: true,
         ...(state.mergeResponseSha === "missing"
           ? {}
-          : { sha: state.mergeResponseSha === "malformed" ? "not-a-sha" : "d".repeat(40) }),
+          : {
+              sha:
+                state.mergeResponseSha === "malformed"
+                  ? "not-a-sha"
+                  : (state.mergeCommitSha ?? "d".repeat(40)),
+            }),
         message: "Pull Request successfully merged",
       });
     }
@@ -401,13 +408,45 @@ async function repositoryFixture() {
   const candidateSha = await git(repository, "rev-parse", "HEAD");
 
   await execa("git", ["init", "--bare", remote]);
+  await execa("git", ["push", remote, `${actualBaseSha}:refs/heads/main`], { cwd: repository });
   const hook = join(remote, "hooks", "update");
   await writeFile(
     hook,
-    '#!/bin/sh\ncount_file="$GIT_DIR/update-count"\ncount=$(cat "$count_file" 2>/dev/null || printf 0)\nprintf "%s\\n" $((count + 1)) > "$count_file"\n',
+    '#!/bin/sh\n[ "$1" = "refs/heads/agent/forge-e2e" ] || exit 0\ncount_file="$GIT_DIR/update-count"\ncount=$(cat "$count_file" 2>/dev/null || printf 0)\nprintf "%s\\n" $((count + 1)) > "$count_file"\n',
   );
   await chmod(hook, 0o755);
   return { root, repository, remote, actualBaseSha, candidateSha };
+}
+
+async function remoteMergeCommit(fixture: Awaited<ReturnType<typeof repositoryFixture>>) {
+  await execa("git", ["push", fixture.remote, "HEAD:refs/setup/candidate"], {
+    cwd: fixture.repository,
+  });
+  const tree = await git(fixture.repository, "rev-parse", `${fixture.candidateSha}^{tree}`);
+  const mergeCommitSha = (
+    await execa("git", [
+      "-C",
+      fixture.remote,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit-tree",
+      tree,
+      "-p",
+      fixture.actualBaseSha,
+      "-p",
+      fixture.candidateSha,
+      "-m",
+      "merge candidate",
+    ])
+  ).stdout.trim();
+  await execa("git", ["-C", fixture.remote, "update-ref", "refs/heads/main", mergeCommitSha]);
+  await execa("git", ["-C", fixture.remote, "update-ref", "-d", "refs/setup/candidate"]);
+  await expect(
+    git(fixture.repository, "cat-file", "-e", `${mergeCommitSha}^{commit}`),
+  ).rejects.toThrow();
+  return mergeCommitSha;
 }
 
 function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDelivery {
@@ -754,7 +793,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(state.commentCreates).toBe(0);
   });
 
-  test("merges an explicitly authorized exact head after the live PR and attestation probe", async () => {
+  test("materializes a remote-only merge for CandidateWorkspace after accepted delivery", async () => {
     const fixture = await repositoryFixture();
     const state: ForgeServerState = {
       candidateSha: fixture.candidateSha,
@@ -781,6 +820,10 @@ describe.sequential("Forge Delivery reconciliation", () => {
     const review = { ...approvedReview, sha: fixture.candidateSha };
     state.pullRequests[0].mergeable = true;
     state.pullRequests[0].mergeable_state = "clean";
+    state.mergeCommitSha = await remoteMergeCommit(fixture);
+    await expect(
+      git(fixture.repository, "cat-file", "-e", `${state.mergeCommitSha}^{commit}`),
+    ).rejects.toThrow();
 
     await withControlledFetch(state, async (apiUrl) => {
       const result = await forge(fixture.repository, apiUrl, fixture.remote).deliver(
@@ -796,11 +839,24 @@ describe.sequential("Forge Delivery reconciliation", () => {
         merge: {
           prNumber: 1,
           approvedHeadSha: fixture.candidateSha,
-          mergeCommitSha: "d".repeat(40),
+          mergeCommitSha: state.mergeCommitSha,
           observedState: "merged",
         },
       });
     });
+    expect(
+      await git(fixture.repository, "rev-parse", `refs/usine/merge/${state.mergeCommitSha}`),
+    ).toBe(state.mergeCommitSha);
+    const workspace = new CandidateWorkspace({
+      repository: fixture.repository,
+      stateDirectory: fixture.root,
+      deadlineEpochMs: Date.now() + 30_000,
+      credentialFreeGit: credentialFreeGitEnvironment(process.env),
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    });
+    const writer = await workspace.prepareWriter("materialized-merge", 1, state.mergeCommitSha!);
+    expect(await git(writer.path, "rev-parse", "HEAD")).toBe(state.mergeCommitSha);
+    await workspace.quarantine(writer);
     expect(state.mergeCalls).toBe(1);
   }, 30_000);
 
@@ -960,6 +1016,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
       commentCreates: 0,
       requests: [],
     };
+    state.mergeCommitSha = await remoteMergeCommit(fixture);
     const result = await withControlledFetch(state, (apiUrl) =>
       forge(fixture.repository, apiUrl, fixture.remote).deliver(
         contract("forge-merge-recovery", true),
@@ -968,7 +1025,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
         { ...approvedReview, sha: fixture.candidateSha },
       ),
     );
-    expect(result.merge?.mergeCommitSha).toBe("d".repeat(40));
+    expect(result.merge?.mergeCommitSha).toBe(state.mergeCommitSha);
     expect(result.attestationId).toBe("7");
     expect(state.mergeCalls).toBe(1);
   }, 30_000);
@@ -998,6 +1055,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
         commentCreates: 0,
         requests: [],
       };
+      state.mergeCommitSha = await remoteMergeCommit(fixture);
 
       const result = await withControlledFetch(state, (apiUrl) =>
         forge(fixture.repository, apiUrl, fixture.remote).deliver(
@@ -1015,7 +1073,7 @@ describe.sequential("Forge Delivery reconciliation", () => {
         merge: {
           prNumber: 1,
           approvedHeadSha: fixture.candidateSha,
-          mergeCommitSha: "d".repeat(40),
+          mergeCommitSha: state.mergeCommitSha,
           observedState: "merged",
         },
       });

@@ -132,6 +132,7 @@ export class ForgeDelivery {
           sha,
           marker,
           body,
+          contract,
         );
         if (recovered) return recovered;
       }
@@ -227,6 +228,7 @@ export class ForgeDelivery {
         sha,
         marker,
         body,
+        contract,
       );
       if (recovered) return recovered;
     }
@@ -257,6 +259,7 @@ export class ForgeDelivery {
         sha,
         marker,
         body,
+        contract,
       );
       if (recovered) return recovered;
       if (isMergeRefusal(error))
@@ -279,12 +282,14 @@ export class ForgeDelivery {
         sha,
         marker,
         body,
+        contract,
       );
       if (recovered) return recovered;
       throw new DeliveryQuarantineError(
         `GitHub accepted merge for PR #${livePullRequest.number} without a merge commit SHA; authoritative probe did not prove the merged effect`,
       );
     }
+    await this.materializeMergeCommit(mergeCommitSha, client.token, contract);
     return deliveryEffect(
       livePullRequest,
       sha,
@@ -306,6 +311,7 @@ export class ForgeDelivery {
     sha: string,
     marker: string,
     body: string,
+    contract: ResolvedTaskContract,
   ): Promise<DeliveryEffect | null> {
     const authoritative = (
       await client.octokit.rest.pulls.get({
@@ -322,7 +328,79 @@ export class ForgeDelivery {
     const merge = mergedEffect(authoritative, sha);
     if (!merge) return null;
     const attestation = await this.ensureAttestation(client, owner, repo, pullNumber, marker, body);
+    await this.materializeMergeCommit(merge.mergeCommitSha, client.token, contract);
     return deliveryEffect(authoritative, sha, merge, requireAttestationId(attestation));
+  }
+
+  private async materializeMergeCommit(
+    mergeCommitSha: string,
+    token: string,
+    contract: ResolvedTaskContract,
+  ): Promise<void> {
+    if (!isExactSha(mergeCommitSha))
+      throw new Error("merge effect must contain an exact commit SHA");
+    const ref = `refs/usine/merge/${mergeCommitSha}`;
+    const remoteBaseRef = `refs/heads/${contract.delivery.baseBranch}`;
+    const environment = forgeGitEnvironment(
+      this.options.environment,
+      token,
+      this.options.forge.gitUrl,
+    );
+    try {
+      await execa(
+        "git",
+        [
+          "-C",
+          this.options.repository,
+          "-c",
+          "core.hooksPath=/dev/null",
+          "fetch",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--force",
+          this.options.forge.gitUrl,
+          `+${remoteBaseRef}:${ref}`,
+        ],
+        {
+          env: environment,
+          extendEnv: false,
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          cancelSignal: this.options.signal,
+        },
+      );
+    } catch (error) {
+      throw new Error("merge commit materialization fetch failed", { cause: error });
+    }
+    const fetchedTip = (
+      await execa("git", ["-C", this.options.repository, "rev-parse", `${ref}^{commit}`], {
+        env: environment,
+        extendEnv: false,
+        timeout: remainingUntil(this.options.deadlineEpochMs),
+        cancelSignal: this.options.signal,
+      })
+    ).stdout.trim();
+    if (!isExactSha(fetchedTip))
+      throw new Error("materialized merge ref did not resolve to a commit");
+    await execa(
+      "git",
+      ["-C", this.options.repository, "merge-base", "--is-ancestor", mergeCommitSha, fetchedTip],
+      {
+        env: environment,
+        extendEnv: false,
+        timeout: remainingUntil(this.options.deadlineEpochMs),
+        cancelSignal: this.options.signal,
+      },
+    );
+    await execa(
+      "git",
+      ["-C", this.options.repository, "cat-file", "-e", `${mergeCommitSha}^{commit}`],
+      {
+        env: environment,
+        extendEnv: false,
+        timeout: remainingUntil(this.options.deadlineEpochMs),
+        cancelSignal: this.options.signal,
+      },
+    );
   }
 
   private async ensureAttestation(
