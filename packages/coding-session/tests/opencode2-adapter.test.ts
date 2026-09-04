@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
@@ -26,6 +26,7 @@ import { CodexCodingSession, createCodexCodingSessionForTesting } from "../src/c
 import { OpenCode2Adapter, opencodeConfig } from "../src/opencode2-adapter.js";
 import {
   DarwinOpenCode2Sandbox,
+  OpenCode2SandboxUnavailableError,
   resolveExecutable,
   runProbe,
   sandboxProfile,
@@ -400,6 +401,8 @@ describe("OpenCode2 bounded adapter", () => {
 
     expect(implementer).toContain("(deny default)");
     expect(reviewer).toContain("(deny default)");
+    expect(implementer).not.toContain("process-signal");
+    expect(reviewer).not.toContain("process-signal");
     expect(implementer).toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
@@ -434,6 +437,64 @@ describe("OpenCode2 bounded adapter", () => {
     await symlink(target, link);
     try {
       await expect(resolveExecutable(linkDirectory)).resolves.toBe(await realpath(target));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reports unavailable paths as typed failures without exposing the path", async () => {
+    if (process.platform !== "darwin") return;
+    const root = await mkdtemp(join(tmpdir(), "usine-opencode2-unavailable-path-"));
+    const bin = join(root, "bin");
+    const privateDirectory = join(root, "private");
+    const missingWorkspace = join(root, "missing-workspace");
+    await mkdir(bin, { recursive: true });
+    await mkdir(privateDirectory, { recursive: true });
+    await writeFile(join(bin, "opencode"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(bin, "opencode"), 0o755);
+    try {
+      const error = await new DarwinOpenCode2Sandbox()
+        .prepare({
+          workspace: missingWorkspace,
+          privateDirectory,
+          role: "reviewer",
+          environment: { PATH: bin },
+          signal: new AbortController().signal,
+        })
+        .catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "opencode2_sandbox_unavailable" });
+      expect(error).toBeInstanceOf(OpenCode2SandboxUnavailableError);
+      expect(error).not.toHaveProperty("message", expect.stringContaining(root));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("cleans probe artifacts when setup fails before the boundary probe", async () => {
+    if (process.platform !== "darwin") return;
+    const root = await mkdtemp(join(tmpdir(), "usine-opencode2-probe-setup-"));
+    const bin = join(root, "bin");
+    const workspace = join(root, "workspace");
+    const privateDirectory = join(root, "private");
+    const probeDirectory = join(root, ".sandbox-probe");
+    const outsidePath = join(probeDirectory, "outside");
+    await mkdir(bin, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await mkdir(privateDirectory, { recursive: true });
+    await mkdir(outsidePath, { recursive: true });
+    await writeFile(join(bin, "opencode"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(bin, "opencode"), 0o755);
+    try {
+      await expect(
+        new DarwinOpenCode2Sandbox().prepare({
+          workspace,
+          privateDirectory,
+          role: "reviewer",
+          environment: { PATH: bin },
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow();
+      await expect(access(probeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -500,17 +561,41 @@ describe("OpenCode2 bounded adapter", () => {
     await mkdir(privateDirectory, { recursive: true });
     await writeFile(join(bin, "opencode"), "#!/bin/sh\nexit 0\n");
     await chmod(join(bin, "opencode"), 0o755);
+    const seatbeltApplies = (() => {
+      if (process.platform !== "darwin") return false;
+      const profile =
+        '(version 1) (deny default) (import "system.sb") (allow process-exec (literal "/usr/bin/true"))';
+      try {
+        execFileSync("/usr/bin/sandbox-exec", ["-p", profile, "/usr/bin/true"], {
+          stdio: "ignore",
+        });
+        try {
+          execFileSync("/usr/bin/sandbox-exec", ["-p", profile, "/usr/bin/printf", "sentinel"], {
+            stdio: "ignore",
+          });
+          return false;
+        } catch {
+          return true;
+        }
+      } catch {
+        return false;
+      }
+    })();
     try {
       for (const role of ["implementer", "reviewer"] as const) {
-        try {
-          const prepared = await new DarwinOpenCode2Sandbox().prepare({
-            workspace,
-            privateDirectory,
-            role,
-            environment: { PATH: bin },
-            signal: AbortSignal.timeout(5_000),
-          });
-          expect(prepared.evidence).toEqual({
+        const prepared = new DarwinOpenCode2Sandbox().prepare({
+          workspace,
+          privateDirectory,
+          role,
+          environment: { PATH: bin },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!seatbeltApplies) {
+          await expect(prepared).rejects.toMatchObject({ code: "opencode2_sandbox_unavailable" });
+          continue;
+        }
+        await expect(prepared).resolves.toMatchObject({
+          evidence: {
             host: "darwin-seatbelt",
             role,
             workspaceRead: "verified",
@@ -518,10 +603,8 @@ describe("OpenCode2 bounded adapter", () => {
             externalRead: "denied",
             externalWrite: "denied",
             subprocess: "inherited",
-          });
-        } catch (error) {
-          expect(error).toMatchObject({ code: "opencode2_sandbox_unavailable" });
-        }
+          },
+        });
       }
     } finally {
       await rm(root, { recursive: true, force: true });
