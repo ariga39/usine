@@ -36,6 +36,7 @@ import {
   isWaitingState,
 } from "@usine/task-authority";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
+import { reconcileCampaigns } from "./campaign.js";
 import {
   CodexCodingSession,
   codingSessionAdapterSelectionEnvironment,
@@ -306,8 +307,10 @@ export async function lookupRepositories(
 export async function registerRepositoryResource(
   stateDirectory: string,
   registration: RepositoryRegistration,
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<RepositoryResource> {
   await registerRepository(stateDirectory, registration);
+  await reconcileCampaigns(stateDirectory, environment);
   const resource = await inspectRepositoryResource(stateDirectory, registration.id);
   if (!resource) throw new Error("registered repository is missing");
   return resource;

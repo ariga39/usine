@@ -541,6 +541,15 @@ describe("durable Ready frontier", () => {
         projectCheck: { command: "true", timeoutMs: 1_000 },
         gitAuthor: { name: "Test", email: "test@example.invalid" },
       });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        proposals: [
+          {
+            proposalId: "startup-reconciled",
+            status: "ready",
+            ready: { baseSha: expect.stringMatching(/^[0-9a-f]{40}$/) },
+          },
+        ],
+      });
       await server.close();
       const restarted = await start(stateDirectory);
       try {

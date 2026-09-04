@@ -462,7 +462,7 @@ function createApiLayer(options: {
             ...parsed.data,
             path: await realpath(parsed.data.path),
           };
-          return registerRepositoryResource(stateDirectory, registration);
+          return registerRepositoryResource(stateDirectory, registration, options.environment);
         }),
     }),
   );
