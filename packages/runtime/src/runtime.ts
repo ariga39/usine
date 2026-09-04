@@ -163,9 +163,7 @@ export type { ReviewAttemptObservation } from "@usine/quality-gate";
 export {
   CampaignContentConflictError,
   GoalContractInputError,
-  MAX_GOAL_CONTRACT_BYTES,
   lookupCampaign,
-  parseGoalContract,
   readGoalContract,
   proposeCampaign,
 } from "./campaign.js";
