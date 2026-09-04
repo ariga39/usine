@@ -67,8 +67,8 @@ export class DarwinOpenCode2Sandbox implements OpenCode2Sandbox {
       );
     }
 
-    const workspace = resolve(request.workspace);
-    const privateDirectory = resolve(request.privateDirectory);
+    const workspace = await realpath(request.workspace);
+    const privateDirectory = await realpath(request.privateDirectory);
     const opencodeExecutable = await resolveExecutable(request.environment.PATH);
     const probeDirectory = join(dirname(privateDirectory), ".sandbox-probe");
     const outsidePath = join(probeDirectory, "outside");
@@ -134,7 +134,7 @@ export function sandboxProfile(input: {
     "(version 1)",
     "(deny default)",
     '(import "system.sb")',
-    "(allow process-exec process-fork process-signal)",
+    "(allow process-exec process-fork)",
     "(allow network-outbound)",
     `(allow file-read* file-map-executable ${subpath(nodeDirectory)})`,
     `(allow file-read* file-map-executable ${subpath(opencodeDirectory)})`,

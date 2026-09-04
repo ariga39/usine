@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
@@ -400,6 +400,8 @@ describe("OpenCode2 bounded adapter", () => {
 
     expect(implementer).toContain("(deny default)");
     expect(reviewer).toContain("(deny default)");
+    expect(implementer).not.toContain("process-signal");
+    expect(reviewer).not.toContain("process-signal");
     expect(implementer).toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
@@ -500,17 +502,34 @@ describe("OpenCode2 bounded adapter", () => {
     await mkdir(privateDirectory, { recursive: true });
     await writeFile(join(bin, "opencode"), "#!/bin/sh\nexit 0\n");
     await chmod(join(bin, "opencode"), 0o755);
+    const seatbeltApplies = (() => {
+      if (process.platform !== "darwin") return false;
+      try {
+        execFileSync(
+          "/usr/bin/sandbox-exec",
+          ["-p", "(version 1) (allow default)", "/usr/bin/true"],
+          { stdio: "ignore" },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    })();
     try {
       for (const role of ["implementer", "reviewer"] as const) {
-        try {
-          const prepared = await new DarwinOpenCode2Sandbox().prepare({
-            workspace,
-            privateDirectory,
-            role,
-            environment: { PATH: bin },
-            signal: AbortSignal.timeout(5_000),
-          });
-          expect(prepared.evidence).toEqual({
+        const prepared = new DarwinOpenCode2Sandbox().prepare({
+          workspace,
+          privateDirectory,
+          role,
+          environment: { PATH: bin },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!seatbeltApplies) {
+          await expect(prepared).rejects.toMatchObject({ code: "opencode2_sandbox_unavailable" });
+          continue;
+        }
+        await expect(prepared).resolves.toMatchObject({
+          evidence: {
             host: "darwin-seatbelt",
             role,
             workspaceRead: "verified",
@@ -518,10 +537,8 @@ describe("OpenCode2 bounded adapter", () => {
             externalRead: "denied",
             externalWrite: "denied",
             subprocess: "inherited",
-          });
-        } catch (error) {
-          expect(error).toMatchObject({ code: "opencode2_sandbox_unavailable" });
-        }
+          },
+        });
       }
     } finally {
       await rm(root, { recursive: true, force: true });
