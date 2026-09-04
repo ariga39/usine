@@ -13,7 +13,7 @@ The implemented Task delivery leaf is intentionally bounded:
 - explicit Task Contract delivery authority, with merge authority granted only by `authorization.merge: true`;
 - transient live observation plus durable Task-local event history.
 
-This leaf does not yet implement Campaign admission, Requirement Proxy/Planner execution, Outcome state, or automatic frontier advancement. Those are required product behavior, not an external guardian's responsibility. Concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
+The server now also admits one committed, explicitly authorized Goal Contract and exposes its durable Campaign projection. Requirement Proxy/Planner execution, Task admission from Outcomes, and automatic frontier advancement are not yet implemented; they remain product behavior, not an external guardian's responsibility. Concurrent writers for one Repository, a distributed scheduler, automatic merge without explicit authority, and provider negotiation remain outside the boundary. The current architecture and durable decisions are documented in [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Quick start
 

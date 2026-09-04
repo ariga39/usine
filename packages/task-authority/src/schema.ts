@@ -74,3 +74,29 @@ export const taskEvents = sqliteTable(
     ),
   }),
 );
+
+/** Durable Campaign publication facts owned by the Campaign coordinator. */
+export const campaigns = sqliteTable(
+  "campaigns",
+  {
+    campaignId: text("campaign_id").primaryKey(),
+    goalId: text("goal_id").notNull(),
+    goalVersion: integer("goal_version").notNull(),
+    contractHash: text("contract_hash").notNull(),
+    contract: text("contract", { mode: "json" }).notNull(),
+    status: text("status").notNull(),
+    revision: integer("revision").notNull().default(1),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .default(sql`(unixepoch() * 1000)`)
+      .notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .default(sql`(unixepoch() * 1000)`)
+      .notNull(),
+  },
+  (table) => ({
+    campaignsGoalIdentity: uniqueIndex("campaigns_goal_identity_index").on(
+      table.goalId,
+      table.goalVersion,
+    ),
+  }),
+);

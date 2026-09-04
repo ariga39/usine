@@ -160,6 +160,15 @@ export {
 } from "@usine/coding-session";
 export type { TaskExecutionInput } from "@usine/task-authority";
 export type { ReviewAttemptObservation } from "@usine/quality-gate";
+export {
+  CampaignContentConflictError,
+  GoalContractInputError,
+  MAX_GOAL_CONTRACT_BYTES,
+  lookupCampaign,
+  parseGoalContract,
+  readGoalContract,
+} from "./campaign.js";
+export type { CampaignResource, GoalContract } from "@usine/task-authority";
 export * from "./http-api.js";
 export {
   cleanupSessionArchives,

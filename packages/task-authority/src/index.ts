@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./campaign-contract.js";
 export * from "./repository.js";
 export * from "./resource.js";
 export * from "./task-state.js";
@@ -21,4 +22,5 @@ export {
 export type { TaskIdCursor, TaskIdPage } from "./task-id-cursor.js";
 export { applyMigrations } from "./apply-migrations.js";
 export { openSqliteDatabase } from "./sqlite-database.js";
+export { campaigns } from "./schema.js";
 export { deadlineExpired, ElapsedBudgetError, remainingUntil } from "./remaining-until.js";

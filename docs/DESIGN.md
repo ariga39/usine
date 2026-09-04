@@ -28,7 +28,7 @@ A Campaign is one execution of a published Goal Contract. It is not a general pr
 | Observation | Durable Campaign/Outcome/Task evidence plus best-effort process-local wait/subscribe observation. |
 | Session Archive | Host-local, bounded Coding Session capture retrieved only by direct CLI operations. |
 
-The current implementation proves only the leaf loop; it does not yet implement Campaign admission, Requirement Proxy/Planner execution, Outcome state, or automatic frontier advancement. That gap is an active product falsifier, not a supported manual operating mode. A distributed scheduler or runner, concurrent writers for one Repository, automatic merge without contract authority, provider negotiation, another forge, a web dashboard, and a memory/vector database remain outside the boundary. Re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
+The current implementation proves the leaf loop and the first committed Goal Contract admission/read slice; it does not yet implement Requirement Proxy/Planner execution, Task admission from Outcomes, or automatic frontier advancement. That gap is an active product falsifier, not a supported manual operating mode. A distributed scheduler or runner, concurrent writers for one Repository, automatic merge without contract authority, provider negotiation, another forge, a web dashboard, and a memory/vector database remain outside the boundary. Re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
 
 ## 2. End-to-end lifecycle
 
@@ -130,7 +130,7 @@ The following invariants are product rules:
 
 ### 4.1 Campaign facts
 
-The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the goal-publication entry path; its downstream consumer is the Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
+The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the runtime server's goal-publication entry path; its current slice validates and durably projects Goal publication and Outcomes, while its downstream consumer is the future Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
 
 The minimum durable meanings are:
 
@@ -193,7 +193,7 @@ Task Authority's reducer and the Candidate Workspace enforce the following lifec
 
 The six implemented behavior packages form the Task delivery leaf. Their package manifests and export barrels are the boundary evidence: [`packages/task-authority/package.json`](../packages/task-authority/package.json), [`candidate-workspace/package.json`](../packages/candidate-workspace/package.json), [`coding-session/package.json`](../packages/coding-session/package.json), [`delivery-run/package.json`](../packages/delivery-run/package.json), [`quality-gate/package.json`](../packages/quality-gate/package.json), and [`forge-delivery/package.json`](../packages/forge-delivery/package.json). `@usine/runtime` and `@usine/cli` are composition roots, not another behavior package.
 
-Campaign coordination is the next behavior cluster, not yet an implemented package. Its first production caller must own the published-goal-to-Ready-Task contract before a physical package boundary is selected. It may reuse Task Authority persistence and the runtime host, but must not overload `TaskResult`, fake a per-Task GitHub Issue, or teach Delivery Run about planning. The replacement target is the guardian-authored Task-list/submit loop: once Campaign admission and advancement own that behavior, an external guardian becomes an observer and exception handler only.
+Campaign coordination is an in-progress behavior cluster owned by the runtime server's published-goal entry path. The current production slice owns committed Goal Contract validation, immutable publication identity, and the durable Campaign read projection; it may reuse Task Authority's SQLite host without overloading `TaskResult`, faking a per-Task GitHub Issue, or teaching Delivery Run about planning. The replacement target is the guardian-authored Task-list/submit loop: once Campaign admission and advancement own that behavior, an external guardian becomes an observer and exception handler only.
 
 | Package | Current caller | Policy hidden behind its port | Typed artifacts crossing the boundary |
 |---|---|---|---|
