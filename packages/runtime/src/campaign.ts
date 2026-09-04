@@ -17,6 +17,7 @@ import {
   repositoryIdentity,
   TaskAuthority,
   TaskCapacityError,
+  RepositoryWriterConflictError,
   repositories,
   taskProposalSchema,
   type CampaignProposalResource,
@@ -35,6 +36,13 @@ export const MAX_GOAL_CONTRACT_BYTES = 1_048_576;
 export const GOAL_PUBLICATION_SOURCE_ENV = "USINE_GOAL_PUBLICATION_SOURCE";
 const GOAL_CONTRACT_INGESTION_TIMEOUT_MS = 30_000;
 const EXACT_SHA = /^[0-9a-f]{40}$/;
+const MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH = 256;
+const ESCAPE_CHARACTER = String.fromCodePoint(0x1b);
+const BELL_CHARACTER = String.fromCodePoint(0x07);
+const ANSI_ESCAPE_SEQUENCE = new RegExp(
+  `${ESCAPE_CHARACTER}(?:\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHARACTER}]*(?:${BELL_CHARACTER}|${ESCAPE_CHARACTER}\\\\))`,
+  "gu",
+);
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -184,6 +192,17 @@ function campaignTaskContract(
   taskId: string,
   baseSha: string,
 ): TaskContract {
+  const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
+  const deliveryTitle = `Campaign ${campaignIdFor(contract.id, contract.version)}: ${
+    outcome?.title ?? proposal.outcomeId
+  }`
+    .normalize("NFKC")
+    .replace(ANSI_ESCAPE_SEQUENCE, "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH)
+    .trimEnd();
   const task: TaskContract = {
     id: taskId,
     repositoryId: proposal.repositoryId,
@@ -199,7 +218,7 @@ function campaignTaskContract(
     },
     delivery: {
       branch: `agent/${taskId}`,
-      title: proposal.instructions,
+      title: deliveryTitle || "Campaign task",
       body: `Campaign ${campaignIdFor(contract.id, contract.version)} Outcome ${proposal.outcomeId}`,
     },
     campaign: {
@@ -547,7 +566,7 @@ async function admitReadyCampaignTasks(
           admissions.push({ result, input: { contractPath: null, rawContract }, contract: task });
         } catch (error) {
           if (error instanceof TaskCapacityError) return admissions;
-          if (error instanceof Error && error.message.includes("active writer")) continue;
+          if (error instanceof RepositoryWriterConflictError) continue;
           throw error;
         }
       }

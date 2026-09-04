@@ -1,4 +1,4 @@
-import { taskContractSchema } from "@usine/task-authority";
+import { resolveTaskContract, taskContractSchema } from "@usine/task-authority";
 import { describe, expect, test } from "vite-plus/test";
 
 const committedContract = {
@@ -61,4 +61,40 @@ test("rejects whitespace-only task and delivery identifiers", () => {
       delivery: { ...committedContract.delivery, branch: " \t\n " },
     }).success,
   ).toBe(false);
+});
+
+test("allows an issue-less Campaign contract and resolves the registered Repository facts", () => {
+  const { issue: _issue, ...delivery } = committedContract.delivery;
+  const campaign = taskContractSchema.parse({
+    ...committedContract,
+    authorization: { source: "campaign:campaign-367", delivery: true },
+    delivery,
+    campaign: {
+      campaignId: "campaign-367:v1",
+      goalId: "campaign-367",
+      goalVersion: 1,
+      outcomeId: "outcome-one",
+    },
+  });
+  const resolved = resolveTaskContract(campaign, {
+    id: "usine-repository",
+    path: "/registered/usine",
+    owner: "example",
+    name: "usine",
+    baseBranch: "main",
+    projectCheck: { command: "true", timeoutMs: 1_000 },
+  });
+  expect(resolved.delivery.issue).toBeUndefined();
+  expect(resolved.delivery.baseBranch).toBe("main");
+  expect(resolved.campaign).toEqual(campaign.campaign);
+});
+
+test("rejects an issue-less standalone Task contract", () => {
+  const { issue: _issue, ...delivery } = committedContract.delivery;
+  const result = taskContractSchema.safeParse({ ...committedContract, delivery });
+  expect(result.success).toBe(false);
+  if (!result.success)
+    expect(result.error.issues.some((issue) => issue.path.join(".") === "delivery.issue")).toBe(
+      true,
+    );
 });

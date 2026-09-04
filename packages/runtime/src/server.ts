@@ -234,21 +234,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   };
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
-  await reconcileCampaigns(stateDirectory, options.environment, activeTaskCapacity);
-  const restartState = await lookupRestartableTasks(stateDirectory);
-  const restartable: typeof restartState.restartable = [];
-  let activeTaskCount = restartState.activeTaskCount;
-  for (const task of restartState.restartable) {
-    try {
-      parseTaskContract(task.input.rawContract);
-      restartable.push(task);
-    } catch (error) {
-      await blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
-      activeTaskCount -= 1;
-    }
-  }
-  if (activeTaskCount > activeTaskCapacity)
-    throw new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount);
 
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {
@@ -305,6 +290,27 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       return run;
     };
 
+    const restartState = yield* Effect.tryPromise({
+      try: () => lookupRestartableTasks(stateDirectory),
+      catch: (cause) => cause,
+    });
+    const restartable: typeof restartState.restartable = [];
+    let activeTaskCount = restartState.activeTaskCount;
+    for (const task of restartState.restartable) {
+      try {
+        parseTaskContract(task.input.rawContract);
+        restartable.push(task);
+      } catch (error) {
+        yield* Effect.tryPromise({
+          try: () => blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent),
+          catch: (cause) => cause,
+        });
+        activeTaskCount -= 1;
+      }
+    }
+    if (activeTaskCount > activeTaskCapacity)
+      return yield* Effect.fail(new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount));
+
     for (const task of restartable) {
       yield* Effect.tryPromise({
         try: async () => {
@@ -330,6 +336,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         ),
       );
     }
+
+    yield* Effect.tryPromise({
+      try: () => coordinateCampaigns(),
+      catch: (cause) => cause,
+    });
 
     const serverPort = server.address._tag === "TcpAddress" ? server.address.port : port;
     return {

@@ -97,6 +97,16 @@ export class TaskCapacityError extends Error {
   }
 }
 
+export class RepositoryWriterConflictError extends Error {
+  readonly code = "repository_writer_conflict";
+  readonly retryable = true;
+
+  constructor(readonly repositoryIdentity: string) {
+    super("repository already has an active writer");
+    this.name = "RepositoryWriterConflictError";
+  }
+}
+
 export type TaskRetryConflictReason =
   | "task_not_waiting"
   | "deadline_exhausted"
@@ -613,7 +623,7 @@ export class TaskAuthority {
         });
         if (occupied?.taskId === input.contract.id)
           throw new Error("repository lease has no admitted task");
-        throw new Error("repository already has an active writer");
+        throw new RepositoryWriterConflictError(input.repositoryIdentity);
       }
 
       const result: TaskResult = {
