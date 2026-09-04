@@ -198,7 +198,7 @@ const campaignProposalSchema = Schema.Struct({
       repositoryId: Schema.String,
       baseSha: Schema.String,
       repositoryRevision: Schema.Natural,
-      taskId: Schema.NullOr(Schema.String),
+      taskId: Schema.optional(Schema.NullOr(Schema.String)),
       instructions: Schema.String,
       acceptance: Schema.Array(Schema.String),
       nonGoals: Schema.Array(Schema.String),

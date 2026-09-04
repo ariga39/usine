@@ -571,6 +571,8 @@ export async function admitTask(
       MAX_TASK_CONTRACT_BYTES,
     );
     const contract = parseTaskContract(committed.rawContract);
+    if (contract.campaign)
+      throw new Error("Campaign Tasks are admitted by the Campaign coordinator");
     if (contract.repositoryId !== provisionalContract.repositoryId)
       throw new Error(
         "committed task contract repository ID does not match the submitted contract",
