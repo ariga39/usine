@@ -6,6 +6,9 @@ export * from "./task-state.js";
 export * from "./task-authority.js";
 export * from "./task-event.js";
 export * from "./usage-report.js";
+export * from "./campaign-evidence.js";
+export * from "./campaign-evidence-sources.js";
+export * from "./accepted-delivery.js";
 export {
   taskListItemFromResult,
   TaskStateQuarantinedError,
@@ -22,5 +25,5 @@ export {
 export type { TaskIdCursor, TaskIdPage } from "./task-id-cursor.js";
 export { applyMigrations } from "./apply-migrations.js";
 export { openSqliteDatabase } from "./sqlite-database.js";
-export { campaigns, campaignProposals, repositories } from "./schema.js";
+export { campaigns, campaignProposals, campaignTouches, repositories } from "./schema.js";
 export { deadlineExpired, ElapsedBudgetError, remainingUntil } from "./remaining-until.js";

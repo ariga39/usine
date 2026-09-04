@@ -38,7 +38,7 @@ export const repositories = sqliteTable("repositories", {
     .notNull(),
 });
 
-/** Durable Planner proposal facts owned by Campaign coordination. */
+/** Durable Campaign proposal facts owned by Campaign coordination. */
 export const campaignProposals = sqliteTable(
   "campaign_proposals",
   {
@@ -133,5 +133,20 @@ export const campaigns = sqliteTable(
       table.goalId,
       table.goalVersion,
     ),
+  }),
+);
+
+/** Guardian-authored Campaign decision touches; plan touches are projected from Campaign facts. */
+export const campaignTouches = sqliteTable(
+  "campaign_touches",
+  {
+    campaignId: text("campaign_id").notNull(),
+    touchId: text("touch_id").notNull(),
+    goalVersion: integer("goal_version").notNull(),
+    type: text("type").notNull(),
+    occurredAtEpochMs: integer("occurred_at_epoch_ms").notNull(),
+  },
+  (table) => ({
+    campaignTouchPrimaryKey: primaryKey({ columns: [table.campaignId, table.touchId] }),
   }),
 );

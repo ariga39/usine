@@ -9,6 +9,7 @@ import {
   type ApiTaskSubmission,
   type ApiCampaignPublication,
   type ApiCampaignProposalSubmission,
+  MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
 } from "@usine/runtime";
 import {
   deriveUsageReportFromInvocations,
@@ -27,6 +28,7 @@ import {
   type UsageReportPage,
   type UsageReportScope,
   type CampaignResource,
+  type CampaignEvidencePage,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
@@ -142,6 +144,88 @@ export async function proposeCampaign(
 ): Promise<CampaignResource> {
   const client = await clientFor(serverUrl);
   return runRequest(client.campaigns.propose({ params: { campaignId }, payload: proposal }));
+}
+
+export async function campaignEvidence(
+  serverUrl: string,
+  campaignId: string,
+  limit = MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+): Promise<CampaignEvidencePage | null> {
+  validateLimit(limit);
+  const client = await clientFor(serverUrl);
+  const runs: Array<CampaignEvidencePage["runs"][number]> = [];
+  const aggregates: Array<CampaignEvidencePage["aggregates"][number]> = [];
+  const touches = new Map<string, CampaignEvidencePage["touches"][number]>();
+  const deliveries = new Map<string, CampaignEvidencePage["deliveries"][number]>();
+  let cursor: string | null = null;
+  let first: CampaignEvidencePage | null = null;
+  while (true) {
+    let page: CampaignEvidencePage;
+    try {
+      page = await runRequest(
+        client.campaigns.evidence({
+          params: { campaignId },
+          query: { limit, ...(cursor === null ? {} : { cursor }) },
+        }),
+      );
+    } catch (error) {
+      if (error instanceof ServerClientError && error.status === 404) return null;
+      throw error;
+    }
+    first ??= page;
+    runs.push(...page.runs);
+    aggregates.push(...page.aggregates);
+    for (const touch of page.touches) touches.set(touch.touchId, touch);
+    for (const delivery of page.deliveries) deliveries.set(delivery.taskId, delivery);
+    if (page.nextCursor === null) break;
+    if (page.nextCursor === cursor)
+      throw new ServerClientError("campaign evidence cursor did not advance", 500);
+    cursor = page.nextCursor;
+  }
+  if (first === null) return null;
+  return {
+    ...first,
+    cursor: null,
+    nextCursor: null,
+    coverage:
+      runs.length === 0
+        ? "unavailable"
+        : runs.every((run) => run.usage.coverage === "unavailable")
+          ? "unavailable"
+          : runs.every((run) => run.usage.coverage === "complete")
+            ? "complete"
+            : "partial",
+    runs: [...runs].toSorted(
+      (left, right) =>
+        compareStrings(left.taskId, right.taskId) ||
+        compareStrings(left.invocationId, right.invocationId),
+    ),
+    aggregates: [...aggregates].toSorted((left, right) =>
+      compareStrings(
+        `${left.goalVersion}:${left.outcomeId}:${left.taskId}:${left.role}:${left.model}:${left.provider}:${left.adapter}`,
+        `${right.goalVersion}:${right.outcomeId}:${right.taskId}:${right.role}:${right.model}:${right.provider}:${right.adapter}`,
+      ),
+    ),
+    touches: [...touches.values()].toSorted((left, right) =>
+      compareStrings(left.touchId, right.touchId),
+    ),
+    deliveries: [...deliveries.values()].toSorted((left, right) =>
+      compareStrings(left.taskId, right.taskId),
+    ),
+  };
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export async function recordCampaignDecisionTouch(
+  serverUrl: string,
+  campaignId: string,
+  touchId: string,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.touch({ params: { campaignId }, payload: { touchId } }));
 }
 
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {

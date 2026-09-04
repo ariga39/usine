@@ -231,6 +231,22 @@ node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
 
 Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. Dependencies remain unsatisfied until accepted delivery evidence exists; an unsatisfied dependency or authority mismatch remains `planned` or `blocked`. Repeated submission and server restart preserve identity, order, and the recorded Ready base, even when later reconciliation makes that proposal non-executable. After the complete set is handed off, the guardian observes the Campaign rather than starting or advancing individual Tasks. An exhausted plan with incomplete Outcomes requires one new guardian/user decision; it must not be hidden by ad hoc standalone Task submission.
 
+Read one Campaign evidence report after the plan handoff:
+
+```sh
+node apps/cli/dist/cli.mjs campaign evidence "<GOAL_ID>:v1" --json
+```
+
+The report groups provider-neutral implementer and reviewer runs by Goal version, Outcome, Task, role, observed model/provider, and adapter. It keeps uncached input, cached input, and output token dimensions separate; an unavailable dimension remains `null`. It also reports review and repair cycles, blocked proposals, guardian plan and decision touches, and accepted exact-SHA deliveries. Plan touches are projected from the durable Campaign publication and admitted proposal facts, while decision touches are recorded through the Campaign touch path.
+
+Evidence pages use a bounded Campaign Task cursor. Totals and plan/decision touch facts are Campaign-global and are returned on the first page; runs, aggregates, accepted deliveries, and coverage are page-scoped. The CLI drains all pages and recomputes the complete report. Record a bounded guardian decision through the public touch path:
+
+```sh
+node apps/cli/dist/cli.mjs campaign touch "<GOAL_ID>:v1" "<TOUCH_ID>" --json
+```
+
+Repeating the same touch ID is idempotent. Neither command exposes provider configuration, credentials, prompts, transcripts, archive content, or local profile data.
+
 ## 4. Register a Repository
 
 Create a host-private JSON file and replace its placeholders. The registration schema is strict; the fields below are the current CLI shape. `githubReadProfile` may be `null` when the optional read capability is not configured.

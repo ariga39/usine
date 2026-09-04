@@ -7,6 +7,7 @@ import type {
   TaskListPage,
   TaskResource,
   UsageReport,
+  CampaignEvidencePage,
 } from "@usine/task-authority";
 import type { SessionArchiveManifest } from "@usine/runtime";
 
@@ -87,6 +88,24 @@ export function renderUsageReport(report: UsageReport, json: boolean): string {
   return [
     `Usage: ${report.coverage} (${report.invocations.length} invocations)`,
     `Aggregates: ${report.aggregates.length}`,
+    "",
+  ].join("\n");
+}
+
+export function renderCampaignEvidence(report: CampaignEvidencePage, json: boolean): string {
+  if (json) return renderJson(report);
+  const token = (value: number | null): string => (value === null ? "unknown" : String(value));
+  return [
+    `Campaign ${report.campaignId} evidence: ${report.coverage}`,
+    `Totals: ${report.totals.invocations} runs, ${report.totals.reviewCycles} review cycles, ${report.totals.repairBatches} repair batches`,
+    `Proposals: ${report.totals.blockedProposals} blocked`,
+    `Guardian touches: ${report.totals.guardianTouches}; accepted deliveries: ${report.totals.acceptedDeliveries}`,
+    `Tokens: input=${token(report.totals.usage.inputTokens)} cached=${token(report.totals.usage.cachedInputTokens)} uncached=${token(report.totals.usage.uncachedInputTokens)} output=${token(report.totals.usage.outputTokens)}`,
+    "TASK ID\tOUTCOME\tROLE\tMODEL\tPROVIDER\tADAPTER\tINPUT\tCACHED\tUNCACHED\tOUTPUT",
+    ...report.runs.map(
+      (run) =>
+        `${run.taskId}\t${run.outcome}\t${run.role}\t${run.model}\t${run.provider}\t${run.adapter}\t${token(run.usage.inputTokens)}\t${token(run.usage.cachedInputTokens)}\t${token(run.usage.uncachedInputTokens)}\t${token(run.usage.outputTokens)}`,
+    ),
     "",
   ].join("\n");
 }

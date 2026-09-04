@@ -56,6 +56,58 @@ test("the generated client round-trips the durable usage report contract", async
   expect(result).toEqual(report);
 });
 
+test("the generated client round-trips the Campaign evidence contract", async () => {
+  const report = {
+    schemaVersion: 1 as const,
+    campaignId: "goal:v1",
+    goalId: "goal",
+    goalVersion: 1,
+    cursor: null,
+    nextCursor: null,
+    coverage: "complete" as const,
+    runs: [],
+    aggregates: [],
+    totals: {
+      invocations: 0,
+      elapsedMs: 0,
+      reviewCycles: 0,
+      repairBatches: 0,
+      blockedProposals: 0,
+      guardianTouches: 0,
+      acceptedDeliveries: 0,
+      usage: {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        uncachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        coverage: "complete" as const,
+      },
+    },
+    touches: [],
+    deliveries: [],
+  };
+  const handlers = HttpApiBuilder.group(UsineApi, "campaigns", (group) =>
+    group.handleAll({
+      publish: () => Effect.die("unused"),
+      get: () => Effect.die("unused"),
+      propose: () => Effect.die("unused"),
+      evidence: () => Effect.succeed(report),
+      touch: () => Effect.die("unused"),
+    }),
+  );
+  const result = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* HttpApiTest.groups(UsineApi, ["campaigns"]);
+        return yield* client.campaigns.evidence({ params: { campaignId: "goal:v1" }, query: {} });
+      }).pipe(Effect.provide(Layer.mergeAll(handlers, HttpServer.layerServices))),
+    ),
+  );
+  expect(result).toEqual(report);
+});
+
 test("the shared event envelope preserves exact fields and Task identity", () => {
   const event = {
     taskId: "task-1",

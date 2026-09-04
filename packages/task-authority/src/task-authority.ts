@@ -53,6 +53,11 @@ import {
   type UsageReportPageRequest,
   type UsageReportSourcesPage,
 } from "./usage-report.js";
+import { listCampaignEvidenceSources } from "./campaign-evidence-sources.js";
+import type {
+  CampaignEvidencePageRequest,
+  CampaignEvidenceSourcesPage,
+} from "./campaign-evidence.js";
 
 type AuthorityDatabase = RuntimeDatabase;
 
@@ -473,6 +478,13 @@ export class TaskAuthority {
     request?: UsageReportPageRequest,
   ): Promise<UsageReportSourcesPage> {
     return listUsageReportSources(this.database, scope, request);
+  }
+
+  async listCampaignEvidenceSources(
+    campaignId: string,
+    request?: CampaignEvidencePageRequest,
+  ): Promise<CampaignEvidenceSourcesPage | null> {
+    return listCampaignEvidenceSources(this.database, campaignId, request);
   }
 
   async listRestartable(): Promise<{

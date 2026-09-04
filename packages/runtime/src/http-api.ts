@@ -9,6 +9,7 @@ import {
   taskResourceSchema,
   usageReportPageSchema,
   campaignResourceSchema,
+  campaignEvidencePageSchema,
   type CampaignResource,
   type RepositoryResource,
   type ServerHealth,
@@ -122,6 +123,11 @@ const taskSubmissionSchema = Schema.Struct({
 });
 const campaignPublicationSchema = Schema.Struct({ contractPath: Schema.String });
 const campaignProposalSubmissionSchema = Schema.Unknown;
+const campaignDecisionTouchSchema = Schema.Struct({ touchId: Schema.String });
+const campaignEvidenceQuery = {
+  cursor: Schema.optional(Schema.String),
+  limit: Schema.optional(Schema.NumberFromString),
+};
 const eventEnvelopeSchema = Schema.StructWithRest(
   Schema.Struct({
     taskId: Schema.String,
@@ -240,6 +246,18 @@ const CampaignApi = HttpApiGroup.make("campaigns").add(
     success: campaignResourceSchema,
     error: allErrors,
   }),
+  HttpApiEndpoint.get("evidence", "/v1/campaigns/:campaignId/evidence", {
+    params: { campaignId: Schema.String },
+    query: campaignEvidenceQuery,
+    success: campaignEvidencePageSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.post("touch", "/v1/campaigns/:campaignId/touches", {
+    params: { campaignId: Schema.String },
+    payload: campaignDecisionTouchSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
 );
 
 const EventApi = HttpApiGroup.make("events").add(
@@ -277,6 +295,9 @@ export type ApiCampaignResource = Schema.Schema.Type<typeof campaignResourceSche
 export type ApiCampaignProposalSubmission = Schema.Schema.Type<
   typeof campaignProposalSubmissionSchema
 >;
+export type ApiCampaignEvidenceQuery = Schema.Schema.Type<typeof campaignEvidenceQuery>;
+export type ApiCampaignEvidencePage = Schema.Schema.Type<typeof campaignEvidencePageSchema>;
+export type ApiCampaignDecisionTouch = Schema.Schema.Type<typeof campaignDecisionTouchSchema>;
 
 export function encodeApiWaitResponse(value: ApiEventEnvelope | null): string {
   return JSON.stringify(Schema.encodeUnknownSync(Schema.NullOr(eventEnvelopeSchema))(value));
@@ -313,6 +334,8 @@ export {
   campaignPublicationSchema,
   campaignResourceSchema,
   campaignProposalSubmissionSchema,
+  campaignEvidencePageSchema,
+  campaignDecisionTouchSchema,
   campaignProposalConflictError,
   validationError,
   notFoundError,
