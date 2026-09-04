@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { startUsineServer } from "@usine/runtime";
+import { registerRepositoryResource, startUsineServer } from "@usine/runtime";
 import {
   getCampaign,
   proposeCampaign,
   publishCampaign,
   registerRepository,
+  serverSnapshot,
+  taskStatus,
 } from "../apps/cli/src/server-client.js";
 
 function goalContract(objective = "Deliver the authorized campaign") {
@@ -128,6 +130,9 @@ function frontierProposal(proposalId: string, outcomeId: string, dependsOn: stri
 async function frontierFixture(
   contract: unknown = frontierGoal("campaign-repository"),
   publicationSource: string | null = "user:campaign-366",
+  execute?: Parameters<typeof startUsineServer>[0]["execute"],
+  activeTaskCapacity = 1,
+  register = true,
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-frontier-"));
   const stateDirectory = join(root, "state");
@@ -140,13 +145,290 @@ async function frontierFixture(
   await execa("git", ["add", "goal.json"], { cwd: root });
   await execa("git", ["commit", "-m", "authorize frontier"], { cwd: root });
   const environment: NodeJS.ProcessEnv = { USINE_STATE_DIR: stateDirectory };
+  environment.USINE_FORGE_PROFILE_DEFAULT_APP_SLUG = "test-app";
+  environment.USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN = "test-token";
+  environment.USINE_FORGE_PROFILE_DEFAULT_API_URL = "http://127.0.0.1:9";
+  environment.USINE_FORGE_PROFILE_DEFAULT_REPOSITORY = "example/campaign-repository";
+  environment.USINE_ACTIVE_TASK_CAPACITY = String(activeTaskCapacity);
   if (publicationSource !== null) environment.USINE_GOAL_PUBLICATION_SOURCE = publicationSource;
   const server = await startUsineServer({
     environment,
+    execute,
     host: "127.0.0.1",
     port: 0,
   });
-  await registerRepository(server.url, {
+  if (register)
+    await registerRepository(server.url, {
+      id: "campaign-repository",
+      path: root,
+      owner: "example",
+      name: "campaign-repository",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    });
+  return { root, stateDirectory, contractPath, server };
+}
+
+test("admits one Ready proposal through the Task leaf without a Task submission", async () => {
+  let executions = 0;
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async ({ authority, result, input }) => {
+      executions += 1;
+      expect(input.contractPath).toBeNull();
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "campaign fixture complete",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    const proposed = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("automatic-admission", "outcome-one"),
+    );
+    const ready = proposed.proposals?.[0]?.ready;
+    expect(ready).toMatchObject({ repositoryId: "campaign-repository" });
+    const taskId = ready && "taskId" in ready ? ready.taskId : undefined;
+    expect(taskId).toEqual("campaign-campaign-366-v1-automatic-admission");
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions > 0) break;
+    }
+    expect(executions).toBe(1);
+    await expect(taskStatus(server.url, taskId!)).resolves.toMatchObject({
+      taskId,
+      campaign: {
+        campaignId: published.campaignId,
+        goalId: "campaign-366",
+        goalVersion: 1,
+        outcomeId: "outcome-one",
+      },
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("does not admit a proposal that expands Goal authority or budget", async () => {
+  let executions = 0;
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async () => {
+      executions += 1;
+      throw new Error("an unauthorized proposal must not reach the leaf");
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    const outsideEffect = await proposeCampaign(server.url, published.campaignId, {
+      ...frontierProposal("outside-effect", "outcome-one"),
+      effects: ["github", "shell"],
+    });
+    expect(outsideEffect.proposals?.[0]).toMatchObject({
+      status: "blocked",
+      blocker: "proposal effect is outside the Goal authority envelope",
+      ready: null,
+    });
+    const mergeExpansion = await proposeCampaign(server.url, published.campaignId, {
+      ...frontierProposal("merge-expansion", "outcome-one"),
+      merge: true,
+    });
+    expect(mergeExpansion.proposals?.[1]).toMatchObject({
+      status: "blocked",
+      blocker: "proposal merge authority is outside the Goal authority envelope",
+      ready: null,
+    });
+    const budgetExpansion = await proposeCampaign(server.url, published.campaignId, {
+      ...frontierProposal("budget-expansion", "outcome-one"),
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 60_001 },
+    });
+    expect(budgetExpansion.proposals?.[2]).toMatchObject({
+      status: "blocked",
+      blocker: "proposal budget is outside the Goal budget envelope",
+      ready: null,
+    });
+    expect(executions).toBe(0);
+    await expect(serverSnapshot(server.url)).resolves.toMatchObject({ tasks: [] });
+  } finally {
+    await server.close();
+  }
+});
+
+test("holds the next Ready proposal at active capacity and admits it after release", async () => {
+  let executions = 0;
+  let releaseFirst!: () => void;
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      executions += 1;
+      if (executions === 1) await firstRelease;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "capacity fixture complete",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    const first = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("capacity-first", "outcome-one"),
+    );
+    const second = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("capacity-second", "outcome-one"),
+    );
+    expect(first.proposals?.[0]?.ready?.taskId).toBe("campaign-campaign-366-v1-capacity-first");
+    expect(second.proposals?.[1]?.ready?.taskId).toBeNull();
+    expect(executions).toBe(1);
+
+    releaseFirst();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions >= 2) break;
+    }
+    expect(executions).toBe(2);
+    const snapshot = await serverSnapshot(server.url);
+    expect(snapshot.tasks.map((task) => task.taskId)).toEqual([
+      "campaign-campaign-366-v1-capacity-first",
+      "campaign-campaign-366-v1-capacity-second",
+    ]);
+  } finally {
+    releaseFirst();
+    await server.close();
+  }
+});
+
+test("keeps same-Repository Ready proposals serial with spare active capacity", async () => {
+  let executions = 0;
+  let releaseFirst!: () => void;
+  const firstRelease = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      executions += 1;
+      if (executions === 1) await firstRelease;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "same Repository serialization fixture complete",
+      );
+    },
+    2,
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("serial-first", "outcome-one"),
+    );
+    const second = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("serial-second", "outcome-one"),
+    );
+    expect(second.proposals?.[1]?.ready?.taskId).toBeNull();
+    expect(executions).toBe(1);
+    await expect(serverSnapshot(server.url)).resolves.toMatchObject({
+      tasks: [expect.objectContaining({ taskId: "campaign-campaign-366-v1-serial-first" })],
+    });
+
+    releaseFirst();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions >= 2) break;
+    }
+    expect(executions).toBe(2);
+    await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+      proposals: [
+        expect.objectContaining({ status: "ready" }),
+        expect.objectContaining({
+          status: "ready",
+          ready: expect.objectContaining({ taskId: "campaign-campaign-366-v1-serial-second" }),
+        }),
+      ],
+    });
+  } finally {
+    releaseFirst();
+    await server.close();
+  }
+});
+
+test("bounds generated Campaign PR titles without truncating instructions", async () => {
+  const outcomeTitle = `Ship the outcome \u001b[31m${"x".repeat(500)}`;
+  const contract = {
+    ...frontierGoal("campaign-repository"),
+    outcomes: [
+      { ...frontierGoal("campaign-repository").outcomes[0], title: outcomeTitle },
+      ...frontierGoal("campaign-repository").outcomes.slice(1),
+    ],
+  };
+  const instructions = `Implement the proposal ${"i".repeat(500)}`;
+  let observedTitle = "";
+  let observedInstructions = "";
+  const { contractPath, server } = await frontierFixture(
+    contract,
+    "user:campaign-366",
+    async ({ authority, result, contract: taskContract }) => {
+      observedTitle = taskContract.delivery.title;
+      observedInstructions = taskContract.instructions;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "title fixture complete",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(server.url, published.campaignId, {
+      ...frontierProposal("bounded-title", "outcome-one"),
+      instructions,
+    });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (observedTitle !== "") break;
+    }
+    expect(observedInstructions).toBe(instructions);
+    expect(observedTitle).toHaveLength(256);
+    expect(observedTitle).not.toContain("undefined");
+    expect(Array.from(observedTitle).some((character) => character.codePointAt(0)! < 0x20)).toBe(
+      false,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("does not record a restart recovery for a Campaign Task admitted during startup", async () => {
+  const seeded = await frontierFixture(undefined, "user:campaign-366", undefined, 1, false);
+  const { contractPath, root, stateDirectory, server: seededServer } = seeded;
+  const published = await publishCampaign(seededServer.url, { contractPath });
+  await proposeCampaign(
+    seededServer.url,
+    published.campaignId,
+    frontierProposal("startup-admission", "outcome-one"),
+  );
+  await seededServer.close();
+  await registerRepositoryResource(stateDirectory, {
     id: "campaign-repository",
     path: root,
     owner: "example",
@@ -158,8 +440,107 @@ async function frontierFixture(
     projectCheck: { command: "true", timeoutMs: 1_000 },
     gitAuthor: { name: "Test", email: "test@example.invalid" },
   });
-  return { root, stateDirectory, contractPath, server };
-}
+  const environment: NodeJS.ProcessEnv = {
+    USINE_STATE_DIR: stateDirectory,
+    USINE_GOAL_PUBLICATION_SOURCE: "user:campaign-366",
+    USINE_ACTIVE_TASK_CAPACITY: "1",
+    USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
+    USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
+    USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
+    USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: "example/campaign-repository",
+  };
+  let executions = 0;
+  const server = await startUsineServer({
+    environment,
+    execute: async ({ authority, result }) => {
+      executions += 1;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "startup admission fixture complete",
+      );
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    await expect(
+      taskStatus(server.url, "campaign-campaign-366-v1-startup-admission"),
+    ).resolves.toMatchObject({
+      state: "blocked",
+      evidence: { restartRecoveries: 0 },
+    });
+    expect(executions).toBe(1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("restarts an admitted Campaign leaf without duplicating its Task", async () => {
+  let executions = 0;
+  const paused = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 5_000);
+    void timer;
+  });
+  const execute = async ({
+    signal,
+    authority,
+    result,
+  }: Parameters<NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>>[0]) => {
+    executions += 1;
+    await Promise.race([
+      paused,
+      new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      ),
+    ]);
+    return (await authority.lookup(result.taskId)) ?? result;
+  };
+  const fixtureValue = await frontierFixture(undefined, "user:campaign-366", execute);
+  const { contractPath, stateDirectory, server } = fixtureValue;
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    const proposed = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("restartable", "outcome-one"),
+    );
+    const taskId = proposed.proposals?.[0]?.ready?.taskId;
+    expect(taskId).toBe("campaign-campaign-366-v1-restartable");
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (executions > 0) break;
+    }
+    expect(executions).toBe(1);
+    await server.close();
+
+    const restarted = await startUsineServer({
+      environment: {
+        USINE_STATE_DIR: stateDirectory,
+        USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
+        USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
+        USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
+        USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: "example/campaign-repository",
+      },
+      execute,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (executions >= 2) break;
+      }
+      expect(executions).toBe(2);
+      await expect(serverSnapshot(restarted.url)).resolves.toMatchObject({
+        tasks: [expect.objectContaining({ taskId })],
+      });
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    await server.close().catch(() => undefined);
+  }
+});
 
 describe("Campaign publication boundary", () => {
   test("requires explicit publication authority and does not accept role prose", async () => {

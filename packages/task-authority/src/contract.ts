@@ -10,6 +10,15 @@ const repositoryId = z
     "must be a safe durable repository identifier of at most 128 characters",
   );
 
+const campaignAssociation = z
+  .object({
+    campaignId: z.string().min(1),
+    goalId: z.string().min(1),
+    goalVersion: z.number().int().positive(),
+    outcomeId: z.string().min(1),
+  })
+  .strict();
+
 function isCanonicalGitHubIssueSource(source: unknown, issue: number): boolean {
   if (typeof source !== "string") return false;
 
@@ -78,14 +87,24 @@ export const taskContractSchema = z
         .refine((value) => value.trim().length > 0, {
           message: "must not be blank",
         }),
-      issue: z.number().int().positive(),
+      issue: z.number().int().positive().optional(),
       title: z.string().min(1),
       body: z.string().min(1),
     }),
+    campaign: campaignAssociation.optional(),
   })
   .strict()
   .superRefine((contract, context) => {
     if (!contract.authorization || !contract.delivery) return;
+    if (contract.campaign && contract.delivery.issue === undefined) return;
+    if (contract.delivery.issue === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["delivery", "issue"],
+        message: "is required for standalone Task Contracts",
+      });
+      return;
+    }
     if (!isCanonicalGitHubIssueSource(contract.authorization.source, contract.delivery.issue)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -112,6 +131,14 @@ export function resolveTaskContract(
 ): ResolvedTaskContract {
   if (contract.repositoryId !== repository.id)
     throw new Error("task repository ID does not match the registered repository");
+  if (contract.campaign && contract.delivery.issue === undefined) {
+    return {
+      ...contract,
+      repository: { path: repository.path, owner: repository.owner, name: repository.name },
+      projectCheck: { ...repository.projectCheck },
+      delivery: { ...contract.delivery, baseBranch: repository.baseBranch },
+    };
+  }
   const source = new URL(contract.authorization.source);
   const [leading, owner, name, kind, issue] = source.pathname.split("/");
   if (

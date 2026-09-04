@@ -233,6 +233,7 @@ type ForgeServerState = {
   mergeResponseSha?: "missing" | "malformed";
   mergeRefusal?: string;
   authoritativeHeadSha?: string;
+  lastPullRequest?: { title: string; body: string };
   requests: string[];
 };
 
@@ -262,6 +263,22 @@ function contract(id: string, merge = false): ResolvedTaskContract {
     repository: { path: ".", owner: "owner", name: "repo" },
     projectCheck: { command: "true", timeoutMs: 10_000 },
     delivery: { ...parsed.delivery, baseBranch: "main" },
+  };
+}
+
+function campaignContract(id: string): ResolvedTaskContract {
+  const standalone = contract(id);
+  const { issue: _issue, ...delivery } = standalone.delivery;
+  return {
+    ...standalone,
+    authorization: { source: "campaign:campaign-367", delivery: true },
+    delivery,
+    campaign: {
+      campaignId: "campaign-367:v1",
+      goalId: "campaign-367",
+      goalVersion: 1,
+      outcomeId: "outcome-one",
+    },
   };
 }
 
@@ -295,8 +312,11 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
     if (method === "POST" && pathname === "/repos/owner/repo/pulls") {
       const inputBody = JSON.parse(typeof init?.body === "string" ? init.body : "") as {
         head: string;
+        title: string;
+        body: string;
       };
       state.headSha = state.candidateSha;
+      state.lastPullRequest = { title: inputBody.title, body: inputBody.body };
       const pullRequest: PullRequest = {
         number: 1,
         state: "open",
@@ -814,6 +834,37 @@ describe.sequential("Forge Delivery reconciliation", () => {
     );
     expect(result.merge).toBeNull();
     expect(state.mergeCalls ?? 0).toBe(0);
+  }, 30_000);
+
+  test("delivers an issue-less Campaign without a fabricated Closes reference", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: null,
+      pullRequests: [],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = campaignContract("forge-campaign");
+    const check = { ...passingCheck, sha: fixture.candidateSha };
+    const review = { ...approvedReview, sha: fixture.candidateSha };
+
+    await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        task,
+        fixture.candidateSha,
+        check,
+        review,
+      ),
+    );
+
+    expect(state.lastPullRequest).toEqual({ title: "Forge delivery", body: "Forge delivery" });
+    expect(state.lastPullRequest?.body).not.toContain("Closes #");
+    expect(state.lastPullRequest?.body).not.toContain("undefined");
   }, 30_000);
 
   test("blocks a changed live head before calling merge", async () => {

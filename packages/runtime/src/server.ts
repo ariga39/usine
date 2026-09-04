@@ -220,6 +220,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
   const eventHub = new TransientEventHub();
   let eventDispatch = Promise.resolve();
+  let coordinateCampaigns: () => Promise<void> = async () => undefined;
+  let campaignCoordination = Promise.resolve();
   const onEvent = (event: TaskEvent): void => {
     eventDispatch = eventDispatch
       .then(async () => {
@@ -228,24 +230,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         if (repositoryId) eventHub.publish({ taskId: event.taskId, repositoryId, event });
       })
       .catch(() => undefined);
+    if (event.data.type === "task_terminal") void coordinateCampaigns().catch(() => undefined);
   };
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
-  await reconcileCampaigns(stateDirectory, options.environment);
-  const restartState = await lookupRestartableTasks(stateDirectory);
-  const restartable: typeof restartState.restartable = [];
-  let activeTaskCount = restartState.activeTaskCount;
-  for (const task of restartState.restartable) {
-    try {
-      parseTaskContract(task.input.rawContract);
-      restartable.push(task);
-    } catch (error) {
-      await blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
-      activeTaskCount -= 1;
-    }
-  }
-  if (activeTaskCount > activeTaskCapacity)
-    throw new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount);
 
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {
@@ -258,6 +246,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         activeTaskCapacity,
         onEvent,
         eventHub,
+        coordinateCampaigns: async () => coordinateCampaigns(),
       }).pipe(Layer.provide(NodeHttpServer.layerHttpServices)),
     );
     const server = yield* NodeHttpServer.make(createServer, { host, port }).pipe(
@@ -285,6 +274,43 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       );
     };
 
+    coordinateCampaigns = () => {
+      const run = campaignCoordination.then(async () => {
+        const admissions = await reconcileCampaigns(
+          stateDirectory,
+          options.environment,
+          activeTaskCapacity,
+        );
+        for (const admission of admissions) {
+          if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")
+            launchTask(admission);
+        }
+      });
+      campaignCoordination = run.catch(() => undefined);
+      return run;
+    };
+
+    const restartState = yield* Effect.tryPromise({
+      try: () => lookupRestartableTasks(stateDirectory),
+      catch: (cause) => cause,
+    });
+    const restartable: typeof restartState.restartable = [];
+    let activeTaskCount = restartState.activeTaskCount;
+    for (const task of restartState.restartable) {
+      try {
+        parseTaskContract(task.input.rawContract);
+        restartable.push(task);
+      } catch (error) {
+        yield* Effect.tryPromise({
+          try: () => blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent),
+          catch: (cause) => cause,
+        });
+        activeTaskCount -= 1;
+      }
+    }
+    if (activeTaskCount > activeTaskCapacity)
+      return yield* Effect.fail(new TaskCapacityStartupError(activeTaskCapacity, activeTaskCount));
+
     for (const task of restartable) {
       yield* Effect.tryPromise({
         try: async () => {
@@ -310,6 +336,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         ),
       );
     }
+
+    yield* Effect.tryPromise({
+      try: () => coordinateCampaigns(),
+      catch: (cause) => cause,
+    });
 
     const serverPort = server.address._tag === "TcpAddress" ? server.address.port : port;
     return {
@@ -429,6 +460,7 @@ function createApiLayer(options: {
   readonly activeTaskCapacity: number;
   readonly onEvent: (event: TaskEvent) => void;
   readonly eventHub: TransientEventHub;
+  readonly coordinateCampaigns: () => Promise<void>;
 }) {
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const serverHandlers = HttpApiBuilder.group(UsineApi, "server", (handlers) =>
@@ -462,7 +494,9 @@ function createApiLayer(options: {
             ...parsed.data,
             path: await realpath(parsed.data.path),
           };
-          return registerRepositoryResource(stateDirectory, registration, options.environment);
+          const resource = await registerRepositoryResource(stateDirectory, registration);
+          await options.coordinateCampaigns();
+          return resource;
         }),
     }),
   );
@@ -566,7 +600,13 @@ function createApiLayer(options: {
               throw new ServerValidationError(error.message);
             throw error;
           }
-          return publishCampaign(stateDirectory, contract.rawContract, options.environment);
+          const campaign = await publishCampaign(
+            stateDirectory,
+            contract.rawContract,
+            options.environment,
+          );
+          await options.coordinateCampaigns();
+          return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
         }),
       get: ({ params }) =>
         apiEffect(async () => {
@@ -576,7 +616,14 @@ function createApiLayer(options: {
         }),
       propose: ({ params, payload }) =>
         apiEffect(async () => {
-          return proposeCampaign(stateDirectory, params.campaignId, payload, options.environment);
+          const campaign = await proposeCampaign(
+            stateDirectory,
+            params.campaignId,
+            payload,
+            options.environment,
+          );
+          await options.coordinateCampaigns();
+          return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
         }),
     }),
   );

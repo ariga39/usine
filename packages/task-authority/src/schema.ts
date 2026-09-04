@@ -51,6 +51,7 @@ export const campaignProposals = sqliteTable(
     blocker: text("blocker"),
     readyBaseSha: text("ready_base_sha"),
     readyRepositoryRevision: integer("ready_repository_revision"),
+    taskId: text("task_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(unixepoch() * 1000)`)
       .notNull(),

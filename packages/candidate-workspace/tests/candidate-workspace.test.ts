@@ -45,6 +45,28 @@ function contract(baseSha: string, title = "Deliver the authorized outcome"): Re
   };
 }
 
+function campaignContract(
+  baseSha: string,
+  title = "Deliver the campaign outcome",
+): ResolvedTaskContract {
+  const standalone = contract(baseSha, title);
+  const { issue: _issue, ...delivery } = standalone.delivery;
+  return {
+    ...standalone,
+    authorization: {
+      source: "campaign:campaign-367",
+      delivery: true,
+    },
+    delivery,
+    campaign: {
+      campaignId: "campaign-367-v1",
+      goalId: "campaign-367",
+      goalVersion: 1,
+      outcomeId: "outcome-one",
+    },
+  };
+}
+
 function isUnsafeSubjectCodePoint(character: string): boolean {
   const codePoint = character.codePointAt(0);
   if (codePoint === undefined) return false;
@@ -119,6 +141,32 @@ describe("Candidate Workspace", () => {
     expect(subject).toBe(`#150 [outcome-task] Ship the outcome --no-verify ${"x".repeat(111)}`);
     expect(subject).toHaveLength(160);
     expect(Array.from(subject).some(isUnsafeSubjectCodePoint)).toBe(false);
+    await workspace.quarantine(writer);
+  });
+
+  test("host-finalizes an issue-less Campaign subject through the same leaf", async () => {
+    const input = await fixture();
+    const workspace = new CandidateWorkspace({
+      repository: input.repository,
+      stateDirectory: join(input.root, "state"),
+      deadlineEpochMs: Date.now() + 30_000,
+      credentialFreeGit: credentialFreeGitEnvironment(process.env),
+      gitAuthor: { name: "Release Bot", email: "release@example.invalid" },
+    });
+    const writer = await workspace.prepareWriter("campaign-task", 1, input.baseSha);
+    await writeFile(join(writer.path, "delivered.txt"), "ok\n");
+
+    const candidate = await workspace.freeze(
+      writer,
+      input.baseSha,
+      campaignContract(input.baseSha),
+    );
+    const subject = (
+      await execa("git", ["-C", writer.path, "show", "-s", "--format=%s", candidate.sha])
+    ).stdout.trim();
+
+    expect(subject).toBe("Campaign [outcome-task] Deliver the campaign outcome");
+    expect(subject).not.toContain("undefined");
     await workspace.quarantine(writer);
   });
 

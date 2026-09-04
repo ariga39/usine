@@ -97,6 +97,16 @@ export class TaskCapacityError extends Error {
   }
 }
 
+export class RepositoryWriterConflictError extends Error {
+  readonly code = "repository_writer_conflict";
+  readonly retryable = true;
+
+  constructor(readonly repositoryIdentity: string) {
+    super("repository already has an active writer");
+    this.name = "RepositoryWriterConflictError";
+  }
+}
+
 export type TaskRetryConflictReason =
   | "task_not_waiting"
   | "deadline_exhausted"
@@ -488,7 +498,7 @@ export class TaskAuthority {
       if (isTerminalState(result.state)) continue;
       activeTaskCount += 1;
       if (isWaitingState(result.state)) continue;
-      if (!row.contractPath || !row.rawContract || !result.repository) continue;
+      if (!row.rawContract || !result.repository) continue;
       restartable.push({
         result,
         input: {
@@ -514,7 +524,7 @@ export class TaskAuthority {
       .limit(1);
     const row = rows[0];
     if (!row) return null;
-    if (!row.contractPath || !row.rawContract) return null;
+    if (!row.rawContract) return null;
     return {
       result: decodeRawPersistedTaskResult(row.rawResult),
       input: {
@@ -539,6 +549,8 @@ export class TaskAuthority {
       throw new Error("task repository identity is immutable");
     if (result.mergeAuthorized !== (input.contract.authorization.merge === true))
       throw new Error("task merge authority is immutable");
+    if (JSON.stringify(result.campaign ?? null) !== JSON.stringify(input.contract.campaign ?? null))
+      throw new Error("task Campaign association is immutable");
     if (
       input.repository &&
       (!result.repository ||
@@ -611,7 +623,7 @@ export class TaskAuthority {
         });
         if (occupied?.taskId === input.contract.id)
           throw new Error("repository lease has no admitted task");
-        throw new Error("repository already has an active writer");
+        throw new RepositoryWriterConflictError(input.repositoryIdentity);
       }
 
       const result: TaskResult = {
@@ -621,6 +633,7 @@ export class TaskAuthority {
         revision: 0,
         deadlineEpochMs: input.deadlineEpochMs,
         state: "admitted",
+        ...(input.contract.campaign ? { campaign: { ...input.contract.campaign } } : {}),
         mergeAuthorized: input.contract.authorization.merge === true,
         candidateSha: null,
         candidateFence: null,

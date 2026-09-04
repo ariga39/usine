@@ -63,7 +63,10 @@ function normalizeCommitSubjectPart(value: string): string {
 function commitSubjectForTask(contract: ResolvedTaskContract): string {
   const taskId = normalizeCommitSubjectPart(contract.id) || "unknown-task";
   const outcome = normalizeCommitSubjectPart(contract.delivery.title) || "authorized outcome";
-  const prefix = `#${contract.delivery.issue} [${taskId}]`;
+  const prefix =
+    contract.delivery.issue === undefined
+      ? `Campaign [${taskId}]`
+      : `#${contract.delivery.issue} [${taskId}]`;
   const availableOutcomeLength = MAX_COMMIT_SUBJECT_LENGTH - prefix.length - 1;
   return `${prefix} ${outcome.slice(0, Math.max(0, availableOutcomeLength)).trimEnd()}`;
 }
