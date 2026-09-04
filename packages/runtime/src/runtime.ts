@@ -21,7 +21,6 @@ import {
   type TaskEvent,
   type TaskListPage,
   type TaskListPageRequest,
-  type TaskListItem,
   type TaskResult,
   deriveUsageReport,
   MAX_USAGE_REPORT_PAGE_SIZE,
@@ -328,23 +327,6 @@ export async function lookupTaskStatus(
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
     return await new TaskAuthority(handle.database).lookup(taskId);
-  } finally {
-    handle.close();
-  }
-}
-
-export async function lookupTasks(stateDirectory: string, limit = 100): Promise<TaskListItem[]> {
-  const databasePath = resolve(stateDirectory, "usine.sqlite");
-  try {
-    await access(databasePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-
-  const handle = openSqliteDatabase(databasePath, { readOnly: true });
-  try {
-    return await new TaskAuthority(handle.database).listTasks(limit);
   } finally {
     handle.close();
   }
