@@ -8,6 +8,7 @@ import {
   type ApiTaskResource,
   type ApiTaskSubmission,
   type ApiCampaignPublication,
+  type ApiCampaignProposalSubmission,
 } from "@usine/runtime";
 import {
   deriveUsageReportFromInvocations,
@@ -31,6 +32,7 @@ import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
 export type TaskSubmission = ApiTaskSubmission;
 export type CampaignPublication = ApiCampaignPublication;
+export type CampaignProposalSubmission = ApiCampaignProposalSubmission;
 
 export function serverUrlFromEnvironment(environment: NodeJS.ProcessEnv): string {
   const explicit = environment.USINE_SERVER_URL?.trim();
@@ -132,6 +134,17 @@ export async function getCampaign(
     throw error;
   }
 }
+
+export async function proposeCampaign(
+  serverUrl: string,
+  campaignId: string,
+  proposal: CampaignProposalSubmission,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.propose({ params: { campaignId }, payload: proposal }));
+}
+
+export const submitCampaignProposal = proposeCampaign;
 
 export async function retryTask(serverUrl: string, taskId: string): Promise<TaskResource> {
   const client = await clientFor(serverUrl);
@@ -459,6 +472,8 @@ function statusForCode(code: string | undefined): number {
     case "task_retry_conflict":
       return 409;
     case "campaign_content_conflict":
+      return 409;
+    case "campaign_proposal_conflict":
       return 409;
     case "task_state_quarantined":
       return 503;

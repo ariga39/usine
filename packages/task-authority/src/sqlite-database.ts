@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/sqlite-proxy";
 import type { RemoteCallback, SqliteRemoteDatabase } from "drizzle-orm/sqlite-proxy";
 import {
   campaigns,
+  campaignProposals,
   repositories,
   taskEvents,
   repositoryLeases,
@@ -33,6 +34,7 @@ export type RuntimeDatabase = SqliteRemoteDatabase<{
   repositories: typeof repositories;
   taskQuarantines: typeof taskQuarantines;
   campaigns: typeof campaigns;
+  campaignProposals: typeof campaignProposals;
 }>;
 
 export function openSqliteDatabase(
@@ -57,7 +59,15 @@ export function openSqliteDatabase(
     return { rows: statement.all(...values) };
   };
   const database = drizzle(execute, {
-    schema: { repositoryLeases, taskEvents, taskRuns, repositories, taskQuarantines, campaigns },
+    schema: {
+      repositoryLeases,
+      taskEvents,
+      taskRuns,
+      repositories,
+      taskQuarantines,
+      campaigns,
+      campaignProposals,
+    },
   });
 
   const databaseWithTransaction = database as unknown as {

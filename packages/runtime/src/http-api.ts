@@ -52,6 +52,11 @@ const campaignContentConflictError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(false),
 }).pipe(HttpApiSchema.status(409));
+const campaignProposalConflictError = Schema.Struct({
+  code: Schema.Literal("campaign_proposal_conflict"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
+}).pipe(HttpApiSchema.status(409));
 const quarantineError = Schema.Struct({
   taskId: Schema.String,
   error: Schema.Literal("task_state_quarantined"),
@@ -116,6 +121,7 @@ const taskSubmissionSchema = Schema.Struct({
   repositoryId: Schema.optional(Schema.String),
 });
 const campaignPublicationSchema = Schema.Struct({ contractPath: Schema.String });
+const campaignProposalSubmissionSchema = Schema.Unknown;
 const eventEnvelopeSchema = Schema.StructWithRest(
   Schema.Struct({
     taskId: Schema.String,
@@ -147,6 +153,7 @@ const allErrors = [
   capacityError,
   retryConflictError,
   campaignContentConflictError,
+  campaignProposalConflictError,
   quarantineError,
   forgeError,
   serverError,
@@ -236,6 +243,12 @@ const CampaignApi = HttpApiGroup.make("campaigns").add(
     success: campaignResourceSchema,
     error: allErrors,
   }),
+  HttpApiEndpoint.post("propose", "/v1/campaigns/:campaignId/proposals", {
+    params: { campaignId: Schema.String },
+    payload: campaignProposalSubmissionSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
 );
 
 const EventApi = HttpApiGroup.make("events").add(
@@ -275,6 +288,9 @@ export type ApiUsageQuery = Schema.Schema.Type<typeof usageQuerySchema>;
 export type ApiUsageReport = UsageReportPage;
 export type ApiCampaignPublication = Schema.Schema.Type<typeof campaignPublicationSchema>;
 export type ApiCampaignResource = Schema.Schema.Type<typeof campaignResourceSchema>;
+export type ApiCampaignProposalSubmission = Schema.Schema.Type<
+  typeof campaignProposalSubmissionSchema
+>;
 
 export function encodeApiWaitResponse(value: ApiEventEnvelope | null): string {
   return JSON.stringify(Schema.encodeUnknownSync(Schema.NullOr(eventEnvelopeSchema))(value));
@@ -310,6 +326,8 @@ export {
   taskSubmissionSchema,
   campaignPublicationSchema,
   campaignResourceSchema,
+  campaignProposalSubmissionSchema,
+  campaignProposalConflictError,
   validationError,
   notFoundError,
   capacityError,

@@ -2,7 +2,7 @@
 status: current
 design_version: 1.0
 updated: 2026-09-04
-issue: https://github.com/ariga39/usine/issues/363
+issue: https://github.com/ariga39/usine/issues/366
 ---
 
 # Usine product design
@@ -24,15 +24,15 @@ A Campaign is one execution of a published Goal Contract. It is not a general pr
 | Leaf execution | The existing Task delivery loop implements, checks, independently reviews, repairs, delivers, and optionally merges one Ready Task. |
 | Provider | Host-selected profiles run bounded semantic roles behind caller-owned contracts; provider process and transcript details remain outside domain authority. |
 | Forge | GitHub for delivery and a bounded, role-scoped read surface through GitHub MCP. |
-| Authority | A published Goal Contract is the root Campaign authority. Admitted Task Contracts are immutable authorized projections of it; explicit merge authority still gates merge. |
+| Authority | A host-authorized published Goal Contract is the root Campaign authority. Admitted Ready projections are bounded by its repository, effect, budget, delivery, and merge envelope; explicit merge authority still gates merge. |
 | Observation | Durable Campaign/Outcome/Task evidence plus best-effort process-local wait/subscribe observation. |
 | Session Archive | Host-local, bounded Coding Session capture retrieved only by direct CLI operations. |
 
-The current implementation proves the leaf loop and the first committed Goal Contract admission/read slice; it does not yet implement Requirement Proxy/Planner execution, Task admission from Outcomes, or automatic frontier advancement. That gap is an active product falsifier, not a supported manual operating mode. A distributed scheduler or runner, concurrent writers for one Repository, automatic merge without contract authority, provider negotiation, another forge, a web dashboard, and a memory/vector database remain outside the boundary. Re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
+The current implementation proves the leaf loop, host-anchored committed Goal publication, and the first durable Campaign Planned/Ready frontier slice. It does not yet invoke Requirement Proxy/Planner roles, admit Ready projections into the delivery leaf, or automatically advance successors after delivery. Those gaps remain product behavior, not a supported manual operating mode. A distributed scheduler or runner, concurrent writers for one Repository, automatic merge without contract authority, provider negotiation, another forge, a web dashboard, and a memory/vector database remain outside the boundary. Re-entry conditions are in [`DECISIONS.md`](DECISIONS.md).
 
 ## 2. End-to-end lifecycle
 
-The root handoff is `goal_published`: one immutable Spec version and Goal Contract whose publication is authorized by the user or a previously delegated publication policy. Draft discussion and Planner output cannot create that fact. The Campaign coordinator admits bounded Task Proposals only when they trace to a live Outcome, request a subset of the root authority and budget, and have satisfied dependencies. It resolves the exact base SHA from the durable Repository state only when the Task becomes Ready; a proposal never invents a future SHA.
+The root handoff is `goal_published`: one immutable Spec version and Goal Contract whose publication is authorized by the user or a previously delegated publication policy. In the local-server composition, the server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` anchor must match the committed authority source; `authority.publish`, source prose, and model-writable file content cannot mint executable authority. Draft discussion and Planner output cannot create that fact. The Campaign coordinator admits bounded Task Proposals only when they trace to a live Outcome, request a subset of the root authority and budget, and have satisfied dependencies. It resolves the exact base SHA from the durable Repository state only when the Task becomes Ready; a proposal never invents a future SHA.
 
 ```text
 wish + steering
@@ -130,17 +130,17 @@ The following invariants are product rules:
 
 ### 4.1 Campaign facts
 
-The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the runtime server's goal-publication entry path; its current slice validates and durably projects Goal publication and Outcomes, while its downstream consumer is the future Task delivery leaf. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until that first implementation caller proves the seam.
+The Campaign orchestration behavior cluster owns the policy between a published goal and the existing Task admission seam. Its first caller is the runtime server's goal-publication and proposal entry path; its current slice validates and durably projects Goal publication, Outcomes, proposal identity/order, Planned/Ready/Blocked status, authority and budget subset checks, dependency readiness, and readiness-time Repository heads. It hides Spec-version authority, Outcome traceability, proposal admission, readiness, dependency release, bounded Planner replenishment, Campaign budgets, and terminal reduction. No package or general queue interface is selected until a current caller proves the seam.
 
 The minimum durable meanings are:
 
 | Fact | Meaning and owner |
 |---|---|
-| Goal publication | Immutable identity of the authorized Spec version, Goal Contract, authority envelope, budgets, and publication provenance. Campaign coordination owns admission; a model cannot self-publish it. |
+| Goal publication | Immutable identity of the authorized Spec version, Goal Contract, authority envelope, budgets, host publication anchor result, and publication provenance. Campaign coordination owns admission; a model cannot self-publish it. |
 | Campaign | One execution of a Goal publication, including status, cumulative budget, and current Spec version. |
 | Outcome | A required user-observable result, its acceptance evidence, dependencies, and live/superseded status. |
-| Task Proposal | Planner-authored execution suggestion with an idempotency key and Outcome trace. It has no lease, resolved base, or execution authority. |
-| Ready Task | An admitted immutable Task projection whose dependencies, authority, capacity, Repository state, and exact activation base have been resolved by the coordinator. |
+| Task Proposal | Planner-authored execution suggestion with an idempotency key and Outcome trace. It has no lease, resolved base, or execution authority; the coordinator durably orders it and projects it as Planned, Ready, or Blocked. |
+| Ready Task | An admitted immutable Task projection whose dependencies, authority, capacity, Repository state, and exact activation base have been resolved by the coordinator. The base is recorded from the registered Repository fact at the first Ready transition and is never proposal-supplied. |
 | Campaign evidence | Accepted Task delivery effects, Outcome observations, usage, human touches, replans, and terminal reason linked to the Campaign. |
 
 Rolling-wave planning freezes the accepted Outcome Tree and proposes only a bounded near-term frontier. A low watermark, an exhausted but incomplete frontier, or evidence that invalidates the plan may activate one Planner run. Dependency changes and capacity release are mechanical transitions and do not consume a Planner run. A Task may be narrowed or split within its Outcome without adding product scope; a new Outcome or material product behavior requires a versioned replan under the Goal authority.

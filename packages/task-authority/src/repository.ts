@@ -14,6 +14,8 @@ const nonBlank = z
     message: "must not be blank",
   });
 
+const exactSha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
+
 export const forgeProfileSchema = z
   .string()
   .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/, "must use lowercase kebab-case");
@@ -29,6 +31,8 @@ export const repositoryRegistrationSchema = z
     reviewerProfile: nonBlank,
     forgeProfile: forgeProfileSchema,
     githubReadProfile: forgeProfileSchema.nullable().optional(),
+    /** Host-resolved repository head used by Campaign readiness. */
+    headSha: exactSha.optional(),
     projectCheck: z.object({
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),

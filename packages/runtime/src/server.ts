@@ -28,8 +28,11 @@ import {
 } from "@usine/task-authority";
 import {
   CampaignContentConflictError,
+  CampaignProposalConflictError,
+  CampaignNotFoundError,
   GoalContractInputError,
   lookupCampaign,
+  proposeCampaign,
   publishCampaign,
   readGoalContract,
 } from "./campaign.js";
@@ -457,7 +460,7 @@ function createApiLayer(options: {
             ...parsed.data,
             path: await realpath(parsed.data.path),
           };
-          return registerRepositoryResource(stateDirectory, registration);
+          return registerRepositoryResource(stateDirectory, registration, options.environment);
         }),
     }),
   );
@@ -561,13 +564,21 @@ function createApiLayer(options: {
               throw new ServerValidationError(error.message);
             throw error;
           }
-          return publishCampaign(stateDirectory, contract.rawContract);
+          return publishCampaign(stateDirectory, contract.rawContract, options.environment);
         }),
       get: ({ params }) =>
         apiEffect(async () => {
-          const campaign = await lookupCampaign(stateDirectory, params.campaignId);
+          const campaign = await lookupCampaign(
+            stateDirectory,
+            params.campaignId,
+            options.environment,
+          );
           if (!campaign) throw new ServerNotFoundError("campaign not found");
           return campaign;
+        }),
+      propose: ({ params, payload }) =>
+        apiEffect(async () => {
+          return proposeCampaign(stateDirectory, params.campaignId, payload, options.environment);
         }),
     }),
   );
@@ -598,11 +609,14 @@ function apiEffect<A>(thunk: () => Promise<A>): Effect.Effect<A, ApiError> {
 }
 
 function apiError(error: unknown): ApiError {
+  if (error instanceof GoalContractInputError)
+    return { code: "validation", message: error.message };
   if (error instanceof ServerValidationError) return { code: "validation", message: error.message };
   if (error instanceof UsageReportCursorError)
     return { code: "validation", message: error.message };
   if (error instanceof TaskIdCursorError) return { code: "validation", message: error.message };
   if (error instanceof ServerNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof CampaignNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof TaskCapacityError)
     return { code: "active_task_capacity", message: error.message, retryable: true };
   if (error instanceof TaskRetryConflictError)
@@ -613,6 +627,8 @@ function apiError(error: unknown): ApiError {
       state: error.state,
     };
   if (error instanceof CampaignContentConflictError)
+    return { code: error.code, message: error.message, retryable: false };
+  if (error instanceof CampaignProposalConflictError)
     return { code: error.code, message: error.message, retryable: false };
   if (isTaskStateQuarantinedError(error)) {
     if (error.taskId !== undefined)

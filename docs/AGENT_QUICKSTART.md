@@ -150,7 +150,7 @@ The API key remains in the coordinator host process. It is not passed to the wor
 
 ## 3. Publish a Goal Contract
 
-The Campaign entry path accepts a committed Goal Contract only when its `authority.publish` field is explicitly `true`. It reads the tracked blob from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. A role response or draft without publication authority cannot create a Campaign.
+The Campaign entry path accepts a committed Goal Contract only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. It reads the tracked blob from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. The source string and `publish` flag are contract claims; neither can authorize Ready work without the host anchor. A role response or draft without publication authority cannot create a Campaign.
 
 The current contract shape is:
 
@@ -173,12 +173,16 @@ The current contract shape is:
     "source": "<AUTHORITY_SOURCE>",
     "publish": true,
     "delivery": false,
-    "merge": false
+    "merge": false,
+    "repositories": ["<REPOSITORY_ID>"],
+    "effects": ["<EFFECT_ID>"]
   },
   "budget": {
     "maxElapsedMs": 3600000,
     "maxTasks": 10,
-    "maxPlannerActivations": 1
+    "maxPlannerActivations": 1,
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1
   }
 }
 ```
@@ -191,6 +195,21 @@ node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
 ```
 
 Repeating publication of the same tracked bytes returns the same Campaign. Reusing the Goal ID and version with different committed bytes is rejected and does not rewrite the stored facts.
+
+To authorize a local publication, start the server with the host-owned anchor and use the registered Repository and effect IDs in the Goal envelope:
+
+```sh
+export USINE_GOAL_PUBLICATION_SOURCE="<AUTHORITY_SOURCE>"
+```
+
+Planner output is submitted as a bounded proposal; it cannot include a `baseSha` or change the Campaign's authority. Submit a committed proposal file and inspect the durable projection:
+
+```sh
+node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
+node apps/cli/dist/cli.mjs campaign get "<GOAL_ID>:v1" --json
+```
+
+Each proposal is durably ordered by admission. A dependency-free eligible proposal is `ready` and carries the registered Repository's exact head captured at that transition. An unsatisfied dependency or authority mismatch remains `planned` or `blocked`; repeated submission and server restart preserve identity, order, and the recorded Ready base.
 
 ## 4. Register a Repository
 
