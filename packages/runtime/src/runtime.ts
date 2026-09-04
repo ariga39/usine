@@ -36,7 +36,6 @@ import {
   isWaitingState,
 } from "@usine/task-authority";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import { reconcileCampaigns } from "./campaign.js";
 import {
   CodexCodingSession,
   codingSessionAdapterSelectionEnvironment,
@@ -310,7 +309,6 @@ export async function registerRepositoryResource(
   environment: NodeJS.ProcessEnv = {},
 ): Promise<RepositoryResource> {
   await registerRepository(stateDirectory, registration);
-  await reconcileCampaigns(stateDirectory, environment);
   const resource = await inspectRepositoryResource(stateDirectory, registration.id);
   if (!resource) throw new Error("registered repository is missing");
   return resource;
@@ -660,21 +658,23 @@ export async function executeAdmittedTask(
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
     const resolvedContract = resolveTaskContract(contract, existing.repository);
     const forgePolicy = policy.forge;
-    const committed = await readCommittedContract(
-      input.contractPath,
-      existing.repository.path,
-      existing.deadlineEpochMs,
-      policy.credentialFreeGitEnvironment,
-      MAX_TASK_CONTRACT_BYTES,
-    );
-    if (committed.rawContract !== input.rawContract)
-      throw new Error("persisted task contract bytes do not match the committed contract");
-    await verifyCommittedContract(
-      committed,
-      resolvedContract,
-      existing.deadlineEpochMs,
-      policy.credentialFreeGitEnvironment,
-    );
+    if (input.contractPath !== null) {
+      const committed = await readCommittedContract(
+        input.contractPath,
+        existing.repository.path,
+        existing.deadlineEpochMs,
+        policy.credentialFreeGitEnvironment,
+        MAX_TASK_CONTRACT_BYTES,
+      );
+      if (committed.rawContract !== input.rawContract)
+        throw new Error("persisted task contract bytes do not match the committed contract");
+      await verifyCommittedContract(
+        committed,
+        resolvedContract,
+        existing.deadlineEpochMs,
+        policy.credentialFreeGitEnvironment,
+      );
+    }
     return await executeWithServices({
       contract: resolvedContract,
       contractHash: existing.contractHash,
@@ -746,7 +746,8 @@ async function executeWithServices(options: {
       const readPolicy = policy.githubRead;
       const role: GithubReadRole = request.role;
       const serverName = `github_read_${role}`;
-      if (!readPolicy) return { serverName, status: "unavailable", reason: "unavailable" };
+      if (!readPolicy || contract.delivery.issue === undefined)
+        return { serverName, status: "unavailable", reason: "unavailable" };
 
       const tools = role === "implementer" ? readPolicy.implementerTools : readPolicy.reviewerTools;
       const existing = githubReadHandles.get(role);
@@ -759,7 +760,9 @@ async function executeWithServices(options: {
       try {
         const handle = await startGithubReadMcpHttp({
           repository: { owner: contract.repository.owner, name: contract.repository.name },
-          issueNumber: contract.delivery.issue,
+          ...(contract.delivery.issue !== undefined
+            ? { issueNumber: contract.delivery.issue }
+            : {}),
           role,
           tools,
           policy: readPolicy.policy,

@@ -10,6 +10,7 @@ import {
   proposeCampaign,
   publishCampaign,
   registerRepository,
+  taskStatus,
 } from "../apps/cli/src/server-client.js";
 
 function goalContract(objective = "Deliver the authorized campaign") {
@@ -128,6 +129,7 @@ function frontierProposal(proposalId: string, outcomeId: string, dependsOn: stri
 async function frontierFixture(
   contract: unknown = frontierGoal("campaign-repository"),
   publicationSource: string | null = "user:campaign-366",
+  execute?: Parameters<typeof startUsineServer>[0]["execute"],
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-frontier-"));
   const stateDirectory = join(root, "state");
@@ -140,9 +142,14 @@ async function frontierFixture(
   await execa("git", ["add", "goal.json"], { cwd: root });
   await execa("git", ["commit", "-m", "authorize frontier"], { cwd: root });
   const environment: NodeJS.ProcessEnv = { USINE_STATE_DIR: stateDirectory };
+  environment.USINE_FORGE_PROFILE_DEFAULT_APP_SLUG = "test-app";
+  environment.USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN = "test-token";
+  environment.USINE_FORGE_PROFILE_DEFAULT_API_URL = "http://127.0.0.1:9";
+  environment.USINE_FORGE_PROFILE_DEFAULT_REPOSITORY = "example/campaign-repository";
   if (publicationSource !== null) environment.USINE_GOAL_PUBLICATION_SOURCE = publicationSource;
   const server = await startUsineServer({
     environment,
+    execute,
     host: "127.0.0.1",
     port: 0,
   });
@@ -160,6 +167,48 @@ async function frontierFixture(
   });
   return { root, stateDirectory, contractPath, server };
 }
+
+test("admits one Ready proposal through the Task leaf without a Task submission", async () => {
+  let executions = 0;
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      executions += 1;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "campaign fixture complete",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    const proposed = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("automatic-admission", "outcome-one"),
+    );
+    const ready = proposed.proposals?.[0]?.ready;
+    expect(ready).toMatchObject({ repositoryId: "campaign-repository" });
+    const taskId = ready && "taskId" in ready ? ready.taskId : undefined;
+    expect(taskId).toEqual("campaign-campaign-366-v1-automatic-admission");
+
+    for (let attempt = 0; attempt < 100 && executions === 0; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(executions).toBe(1);
+    await expect(taskStatus(server.url, taskId!)).resolves.toMatchObject({
+      taskId,
+      campaign: {
+        campaignId: published.campaignId,
+        goalId: "campaign-366",
+        goalVersion: 1,
+        outcomeId: "outcome-one",
+      },
+    });
+  } finally {
+    await server.close();
+  }
+});
 
 describe("Campaign publication boundary", () => {
   test("requires explicit publication authority and does not accept role prose", async () => {

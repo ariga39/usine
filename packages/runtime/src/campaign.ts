@@ -11,13 +11,20 @@ import {
   decodeCampaignProposalStatus,
   decodeCampaignStatus,
   goalContractSchema,
+  hashTaskContract,
   openSqliteDatabase,
   parseTaskProposal,
+  repositoryIdentity,
+  TaskAuthority,
+  TaskCapacityError,
   repositories,
   taskProposalSchema,
   type CampaignProposalResource,
   type CampaignResource,
   type GoalContract,
+  type TaskExecutionInput,
+  type TaskResult,
+  type TaskContract,
   type TaskProposal,
 } from "@usine/task-authority";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
@@ -147,6 +154,7 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
             repositoryId: proposal.repositoryId,
             baseSha: row.readyBaseSha,
             repositoryRevision: row.readyRepositoryRevision,
+            taskId: row.taskId,
             instructions: proposal.instructions,
             acceptance: proposal.acceptance,
             nonGoals: proposal.nonGoals,
@@ -155,6 +163,53 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
             merge: proposal.merge,
           },
   };
+}
+
+export interface CampaignTaskAdmission {
+  readonly result: TaskResult;
+  readonly input: TaskExecutionInput;
+  readonly contract: TaskContract;
+}
+
+function campaignTaskId(contract: GoalContract, proposal: TaskProposal): string {
+  const readable = `campaign-${contract.id}-v${contract.version}-${proposal.proposalId}`;
+  return readable.length <= 128
+    ? readable
+    : `campaign-${createHash("sha256").update(readable, "utf8").digest("hex")}`;
+}
+
+function campaignTaskContract(
+  contract: GoalContract,
+  proposal: TaskProposal,
+  taskId: string,
+  baseSha: string,
+): TaskContract {
+  const task: TaskContract = {
+    id: taskId,
+    repositoryId: proposal.repositoryId,
+    baseSha,
+    instructions: proposal.instructions,
+    acceptance: [...proposal.acceptance],
+    nonGoals: [...proposal.nonGoals],
+    budget: { ...proposal.budget },
+    authorization: {
+      source: contract.authority.source,
+      delivery: true,
+      ...(proposal.merge ? { merge: true } : {}),
+    },
+    delivery: {
+      branch: `agent/${taskId}`,
+      title: proposal.instructions,
+      body: `Campaign ${campaignIdFor(contract.id, contract.version)} Outcome ${proposal.outcomeId}`,
+    },
+    campaign: {
+      campaignId: campaignIdFor(contract.id, contract.version),
+      goalId: contract.id,
+      goalVersion: contract.version,
+      outcomeId: proposal.outcomeId,
+    },
+  };
+  return task;
 }
 
 function blockerFor(
@@ -402,7 +457,8 @@ async function reconcileWithRepositoryHeads(
 export async function reconcileCampaigns(
   stateDirectory: string,
   environment: NodeJS.ProcessEnv = {},
-): Promise<void> {
+  activeTaskCapacity = 1,
+): Promise<readonly CampaignTaskAdmission[]> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
   const readHandle = openSqliteDatabase(databasePath, { readOnly: true });
@@ -411,13 +467,95 @@ export async function reconcileCampaigns(
       .select({ campaignId: campaigns.campaignId })
       .from(campaigns)
       .limit(1);
-    if (existingCampaign.length === 0) return;
+    if (existingCampaign.length === 0) return [];
   } finally {
     readHandle.close();
   }
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);
   });
+  return admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
+}
+
+async function admitReadyCampaignTasks(
+  stateDirectory: string,
+  activeTaskCapacity: number,
+): Promise<readonly CampaignTaskAdmission[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath);
+  const admissions: CampaignTaskAdmission[] = [];
+  try {
+    const campaignsRows = await handle.database
+      .select()
+      .from(campaigns)
+      .orderBy(asc(campaigns.campaignId));
+    const authority = new TaskAuthority(handle.database);
+    for (const campaignRow of campaignsRows) {
+      const contract = goalContractSchema.parse(campaignRow.contract);
+      const proposalRows = await handle.database
+        .select()
+        .from(campaignProposals)
+        .where(eq(campaignProposals.campaignId, campaignRow.campaignId))
+        .orderBy(asc(campaignProposals.sequence));
+      for (const row of proposalRows) {
+        if (row.status !== "ready" || row.taskId !== null || !row.readyBaseSha) continue;
+        const proposal = taskProposalSchema.parse(row.proposal);
+        const taskId = campaignTaskId(contract, proposal);
+        const task = campaignTaskContract(contract, proposal, taskId, row.readyBaseSha);
+        const rawContract = JSON.stringify(task);
+        const repository = await handle.database.query.repositories.findFirst({
+          where: eq(repositories.id, proposal.repositoryId),
+        });
+        if (!repository) continue;
+        try {
+          const result = await authority.admit(
+            {
+              contract: task,
+              contractHash: hashTaskContract(rawContract),
+              repositoryIdentity: repositoryIdentity(repository.owner, repository.name),
+              repository: {
+                id: repository.id,
+                path: repository.path,
+                owner: repository.owner,
+                name: repository.name,
+                baseBranch: repository.baseBranch,
+                implementerProfile: repository.implementerProfile,
+                reviewerProfile: repository.reviewerProfile,
+                forgeProfile: repository.forgeProfile,
+                githubReadProfile: repository.githubReadProfile,
+                projectCheck: {
+                  command: repository.projectCheckCommand,
+                  timeoutMs: repository.projectCheckTimeoutMs,
+                },
+                gitAuthor: { name: repository.gitAuthorName, email: repository.gitAuthorEmail },
+                ...(repository.headSha ? { headSha: repository.headSha } : {}),
+              },
+              deadlineEpochMs: Date.now() + task.budget.maxElapsedMs,
+            },
+            { contractPath: null, rawContract },
+            activeTaskCapacity,
+          );
+          await handle.database
+            .update(campaignProposals)
+            .set({ taskId: result.taskId, updatedAt: new Date() })
+            .where(
+              and(
+                eq(campaignProposals.campaignId, campaignRow.campaignId),
+                eq(campaignProposals.proposalId, row.proposalId),
+              ),
+            );
+          admissions.push({ result, input: { contractPath: null, rawContract }, contract: task });
+        } catch (error) {
+          if (error instanceof TaskCapacityError) return admissions;
+          if (error instanceof Error && error.message.includes("active writer")) continue;
+          throw error;
+        }
+      }
+    }
+    return admissions;
+  } finally {
+    handle.close();
+  }
 }
 
 async function resourceFromDatabase(

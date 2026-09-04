@@ -54,6 +54,8 @@ export interface TaskResult {
   /** The first admission deadline, reused for every recovery. */
   deadlineEpochMs: number;
   state: TaskState;
+  /** Immutable Campaign projection when the coordinator admitted this leaf. */
+  campaign?: TaskCampaignAssociation;
   /** Immutable projection of Task Contract authorization.merge. */
   mergeAuthorized: boolean;
   candidateSha: string | null;
@@ -76,6 +78,13 @@ export interface TaskResult {
     changesRequestedBatches: number;
     restartRecoveries: number;
   };
+}
+
+export interface TaskCampaignAssociation {
+  campaignId: string;
+  goalId: string;
+  goalVersion: number;
+  outcomeId: string;
 }
 
 export type TaskWaitingReason = "network_interruption" | "delivery_reconciliation";
@@ -133,6 +142,7 @@ export interface TaskResource {
   revision: number;
   deadlineEpochMs: number;
   state: TaskState;
+  campaign?: TaskCampaignAssociation;
   mergeAuthorized: boolean;
   candidateSha: string | null;
   candidateFence: number | null;
@@ -156,6 +166,7 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
     revision: result.revision,
     deadlineEpochMs: result.deadlineEpochMs,
     state: result.state,
+    ...(result.campaign ? { campaign: { ...result.campaign } } : {}),
     mergeAuthorized: result.mergeAuthorized,
     candidateSha: result.candidateSha,
     candidateFence: result.candidateFence,
@@ -261,7 +272,7 @@ export interface AuthorityInput {
 
 /** Local input needed to re-enter an admitted task after a server restart. */
 export interface TaskExecutionInput {
-  contractPath: string;
+  contractPath: string | null;
   rawContract: string;
 }
 

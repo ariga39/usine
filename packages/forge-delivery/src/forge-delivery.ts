@@ -178,7 +178,10 @@ export class ForgeDelivery {
           head: branch,
           base: baseBranch,
           title: contract.delivery.title,
-          body: `${contract.delivery.body}\n\nCloses #${contract.delivery.issue}`,
+          body:
+            contract.delivery.issue === undefined
+              ? contract.delivery.body
+              : `${contract.delivery.body}\n\nCloses #${contract.delivery.issue}`,
           draft: false,
           request: {
             timeout: remainingUntil(this.options.deadlineEpochMs),

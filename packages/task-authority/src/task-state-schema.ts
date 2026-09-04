@@ -93,6 +93,14 @@ const taskResultFields = {
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
   state: taskState,
+  campaign: Schema.optional(
+    Schema.Struct({
+      campaignId: Schema.String,
+      goalId: Schema.String,
+      goalVersion: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+      outcomeId: Schema.String,
+    }),
+  ),
   mergeAuthorized: Schema.Boolean,
   candidateSha: Schema.NullOr(exactSha),
   candidateFence: Schema.NullOr(Schema.Natural),
@@ -211,6 +219,14 @@ export const taskResourceSchema = Schema.Struct({
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
   state: taskState,
+  campaign: Schema.optional(
+    Schema.Struct({
+      campaignId: Schema.String,
+      goalId: Schema.String,
+      goalVersion: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+      outcomeId: Schema.String,
+    }),
+  ),
   mergeAuthorized: Schema.Boolean,
   candidateSha: Schema.NullOr(exactSha),
   candidateFence: Schema.NullOr(Schema.Natural),
@@ -300,6 +316,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
     revision: decoded.revision,
     deadlineEpochMs: decoded.deadlineEpochMs,
     state: decoded.state,
+    ...("campaign" in decoded && decoded.campaign ? { campaign: { ...decoded.campaign } } : {}),
     mergeAuthorized: "mergeAuthorized" in decoded ? decoded.mergeAuthorized : false,
     candidateSha: decoded.candidateSha,
     candidateFence: decoded.candidateFence,
