@@ -150,9 +150,9 @@ The API key remains in the coordinator host process. It is not passed to the wor
 
 ## 3. Publish a guardian-authored Campaign plan
 
-Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path accepts the committed Goal Contract only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. It reads the tracked blob from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
+Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
 
-The current contract shape is:
+The current contract shape is shown below. Set `delivery` or `merge` to `true` only when the authority source explicitly grants that effect.
 
 ```json
 {
@@ -172,8 +172,8 @@ The current contract shape is:
   "authority": {
     "source": "<AUTHORITY_SOURCE>",
     "publish": true,
-    "delivery": false,
-    "merge": false,
+    "delivery": true,
+    "merge": true,
     "repositories": ["<REPOSITORY_ID>"],
     "effects": ["<EFFECT_ID>"]
   },
@@ -201,7 +201,28 @@ To authorize a local publication, start the server with the host-owned anchor an
 export USINE_GOAL_PUBLICATION_SOURCE="<AUTHORITY_SOURCE>"
 ```
 
-Each guardian-authored Task Proposal is bounded and Outcome-traced; it cannot include a `baseSha` or change the Campaign's authority. Commit the complete proposal set, submit each proposal once as the initial handoff, and inspect the durable projection:
+Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current strict shape is:
+
+```json
+{
+  "proposalId": "<PROPOSAL_ID>",
+  "outcomeId": "<OUTCOME_ID>",
+  "dependsOn": [],
+  "repositoryId": "<REPOSITORY_ID>",
+  "instructions": "<BOUNDED_IMPLEMENTATION_OUTCOME>",
+  "acceptance": ["<TASK_ACCEPTANCE_EVIDENCE>"],
+  "nonGoals": [],
+  "effects": ["<EFFECT_ID>"],
+  "budget": {
+    "maxImplementerActivations": 1,
+    "maxReviewCycles": 1,
+    "maxElapsedMs": 3600000
+  },
+  "merge": true
+}
+```
+
+The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
 
 ```sh
 node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
