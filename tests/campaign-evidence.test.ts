@@ -114,11 +114,11 @@ async function fixture() {
           effectiveProfile: {
             profileName: "implementer",
             configSha256: "c".repeat(64),
-            adapter: index === 0 ? "sdk" : "opencode2",
-            model: "configured-model",
+            adapter: "sdk",
+            model: index === 0 ? "configured-model" : "configured-model-two",
             modelProvider: "configured-provider",
-            actualModel: index === 0 ? "observed-one" : "observed-two",
-            actualModelProvider: index === 0 ? "provider-one" : "provider-two",
+            actualModel: "observed-one",
+            actualModelProvider: "provider-one",
             reasoningEffort: "high",
             developerInstructionsSha256: null,
             serviceTier: "default",
@@ -139,11 +139,12 @@ async function fixture() {
           effectiveProfile: {
             profileName: "reviewer",
             configSha256: "d".repeat(64),
-            adapter: index === 0 ? "app-server" : "sdk",
+            adapter: index === 0 ? "app-server" : "opencode2",
             model: "review-model",
             modelProvider: "review-provider",
-            actualModel: "review-observed",
-            actualModelProvider: "review-observed-provider",
+            ...(index === 0
+              ? { actualModel: "review-observed", actualModelProvider: "review-observed-provider" }
+              : {}),
             reasoningEffort: "medium",
             developerInstructionsSha256: null,
             serviceTier: "default",
@@ -251,9 +252,32 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
     limit: 1,
   });
   expect(first?.runs).toHaveLength(2);
-  expect(first?.runs.map((run) => [run.role, run.model, run.provider, run.adapter])).toEqual([
-    ["implementer", "observed-one", "provider-one", "sdk"],
-    ["reviewer", "review-observed", "review-observed-provider", "app-server"],
+  expect(
+    first?.runs.map((run) => [
+      run.role,
+      run.configuredModel,
+      run.configuredProvider,
+      run.model,
+      run.provider,
+      run.adapter,
+    ]),
+  ).toEqual([
+    [
+      "implementer",
+      "configured-model",
+      "configured-provider",
+      "observed-one",
+      "provider-one",
+      "sdk",
+    ],
+    [
+      "reviewer",
+      "review-model",
+      "review-provider",
+      "review-observed",
+      "review-observed-provider",
+      "app-server",
+    ],
   ]);
   expect(first?.totals).toMatchObject({
     invocations: 4,
@@ -265,7 +289,7 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
     usage: { inputTokens: null, outputTokens: null, coverage: "partial" },
   });
   expect(first?.runs[0]).not.toHaveProperty("profile");
-  expect(first?.runs[0]).not.toHaveProperty("configuredProvider");
+  expect(first?.runs[0]).toHaveProperty("configuredProvider", "configured-provider");
   expect(first?.deliveries).toHaveLength(1);
   expect(first?.touches.map((touch) => touch.type)).toEqual([
     "plan",
@@ -293,6 +317,19 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
 
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
   expect(publicReport?.runs).toHaveLength(4);
+  expect(publicReport?.runs.find((run) => run.adapter === "opencode2")).toMatchObject({
+    configuredModel: "review-model",
+    configuredProvider: "review-provider",
+    model: "unavailable",
+    provider: "unavailable",
+  });
+  const implementerAggregates = publicReport?.aggregates.filter(
+    (aggregate) => aggregate.role === "implementer",
+  );
+  expect(implementerAggregates?.map((aggregate) => aggregate.configuredModel).toSorted()).toEqual([
+    "configured-model",
+    "configured-model-two",
+  ]);
   expect(publicReport?.deliveries).toHaveLength(2);
   expect(publicReport?.touches).toHaveLength(5);
   expect(publicReport?.totals).toEqual(first?.totals);

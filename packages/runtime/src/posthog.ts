@@ -213,6 +213,8 @@ function roleRunEvent(
     review_cycle: run.reviewCycle,
     repository_id: run.repositoryId,
     repository: run.repository,
+    configured_provider: run.configuredProvider,
+    configured_model: run.configuredModel,
     $ai_provider: run.provider,
     adapter: run.adapter,
     $ai_model: run.model,
