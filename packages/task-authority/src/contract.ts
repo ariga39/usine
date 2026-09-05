@@ -96,7 +96,9 @@ export const taskContractSchema = z
   .strict()
   .superRefine((contract, context) => {
     if (!contract.authorization || !contract.delivery) return;
-    if (contract.campaign && contract.delivery.issue === undefined) return;
+    // Campaign delivery.issue is optional metadata for the target Repository's
+    // Task Issue. The Goal Issue remains the root authority and need not match it.
+    if (contract.campaign) return;
     if (contract.delivery.issue === undefined) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -131,7 +133,7 @@ export function resolveTaskContract(
 ): ResolvedTaskContract {
   if (contract.repositoryId !== repository.id)
     throw new Error("task repository ID does not match the registered repository");
-  if (contract.campaign && contract.delivery.issue === undefined) {
+  if (contract.campaign) {
     return {
       ...contract,
       repository: { path: repository.path, owner: repository.owner, name: repository.name },

@@ -230,11 +230,14 @@ Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current 
     "maxReviewCycles": 1,
     "maxElapsedMs": 3600000
   },
+  "delivery": {
+    "issue": 123
+  },
   "merge": true
 }
 ```
 
-The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute, and the complete set must not exceed the Goal's `maxTasks`; later admission sequence entries are durably blocked when that limit is exhausted. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
+The optional `delivery.issue` is a positive GitHub Task Issue number in the proposal's Repository. It is delivery metadata, does not authorize the Campaign or Task, is not inferred from `instructions`, and may be omitted for issue-less Campaign Tasks. The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute, and the complete set must not exceed the Goal's `maxTasks`; later admission sequence entries are durably blocked when that limit is exhausted. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
 
 ```sh
 node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
@@ -329,7 +332,7 @@ node apps/cli/dist/cli.mjs repository get "<REPOSITORY_ID>" --json
 
 ## 5. Write and submit a Task Contract
 
-The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. The authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`.
+The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. For a standalone Task, the authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`. Campaign-derived Task Contracts are admitted only by Campaign coordination: they retain the Goal source and may carry the proposal's optional same-Repository Task Issue without requiring it to match that source.
 
 Current contract shape:
 

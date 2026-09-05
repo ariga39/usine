@@ -1,4 +1,4 @@
-import { resolveTaskContract, taskContractSchema } from "@usine/task-authority";
+import { resolveTaskContract, taskContractSchema, taskProposalSchema } from "@usine/task-authority";
 import { describe, expect, test } from "vite-plus/test";
 
 const committedContract = {
@@ -88,6 +88,52 @@ test("allows an issue-less Campaign contract and resolves the registered Reposit
   expect(resolved.delivery.baseBranch).toBe("main");
   expect(resolved.campaign).toEqual(campaign.campaign);
 });
+
+test("allows a Campaign Task Issue that is separate from the Goal Issue", () => {
+  const campaign = taskContractSchema.parse({
+    ...committedContract,
+    authorization: {
+      source: "https://github.com/example/usine/issues/2",
+      delivery: true,
+    },
+    delivery: { ...committedContract.delivery, issue: 3 },
+    campaign: {
+      campaignId: "campaign-367:v1",
+      goalId: "campaign-367",
+      goalVersion: 1,
+      outcomeId: "outcome-one",
+    },
+  });
+  expect(
+    resolveTaskContract(campaign, {
+      id: "usine-repository",
+      path: "/registered/usine",
+      owner: "example",
+      name: "usine",
+      baseBranch: "main",
+      projectCheck: { command: "true", timeoutMs: 1_000 },
+    }).delivery.issue,
+  ).toBe(3);
+});
+
+test.each([0, -1, 1.5])(
+  "rejects a non-positive or non-integer proposal Task Issue: %s",
+  (issue) => {
+    expect(
+      taskProposalSchema.safeParse({
+        proposalId: "proposal-test",
+        outcomeId: "outcome-test",
+        repositoryId: "usine-repository",
+        instructions: "Implement the task.",
+        acceptance: ["The task is complete."],
+        nonGoals: [],
+        effects: ["github"],
+        budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 1_000 },
+        delivery: { issue },
+      }).success,
+    ).toBe(false);
+  },
+);
 
 test("rejects an issue-less standalone Task contract", () => {
   const { issue: _issue, ...delivery } = committedContract.delivery;

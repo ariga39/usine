@@ -579,12 +579,21 @@ test("bounds generated Campaign PR titles without truncating instructions", asyn
   const instructions = `Implement the proposal ${"i".repeat(500)}`;
   let observedTitle = "";
   let observedInstructions = "";
+  let observedBody = "";
+  let observedIssue: number | undefined;
+  const goalIssue = "https://github.com/example/usine/issues/366";
+  const authorizedContract = {
+    ...contract,
+    authority: { ...contract.authority, source: goalIssue },
+  };
   const { contractPath, server } = await frontierFixture(
-    contract,
-    "user:campaign-366",
+    authorizedContract,
+    goalIssue,
     async ({ authority, result, contract: taskContract }) => {
       observedTitle = taskContract.delivery.title;
       observedInstructions = taskContract.instructions;
+      observedBody = taskContract.delivery.body;
+      observedIssue = taskContract.delivery.issue;
       return authority.block(
         { taskId: result.taskId, revision: result.revision },
         "title fixture complete",
@@ -593,21 +602,77 @@ test("bounds generated Campaign PR titles without truncating instructions", asyn
   );
   try {
     const published = await publishCampaign(server.url, { contractPath });
-    await proposeCampaign(server.url, published.campaignId, {
+    const proposal = await proposeCampaign(server.url, published.campaignId, {
       ...frontierProposal("bounded-title", "outcome-one"),
       instructions,
+      acceptance: ["The bounded task is complete."],
+      delivery: { issue: 123 },
     });
+    expect(proposal.proposals?.at(-1)?.ready?.delivery).toEqual({ issue: 123 });
     await handoffCampaign(server.url, published.campaignId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
       if (observedTitle !== "") break;
     }
     expect(observedInstructions).toBe(instructions);
+    expect(observedIssue).toBe(123);
     expect(observedTitle).toHaveLength(256);
+    expect(observedTitle).not.toContain("Campaign");
+    expect(observedBody).toContain("Outcome: Ship the outcome");
+    expect(observedBody).toContain("Acceptance criteria:");
+    expect(observedBody).toContain("- The bounded task is complete.");
+    expect(observedBody).toContain(`Goal: ${goalIssue}`);
+    expect(observedBody).not.toContain("campaign-366");
+    expect(observedBody).not.toContain("bounded-title");
+    expect(observedBody).not.toContain("provider");
+    expect(observedBody).not.toContain("model");
     expect(observedTitle).not.toContain("undefined");
     expect(Array.from(observedTitle).some((character) => character.codePointAt(0)! < 0x20)).toBe(
       false,
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("uses a neutral Campaign PR fallback when the Outcome title sanitizes to empty", async () => {
+  const contract = {
+    ...frontierGoal("campaign-repository"),
+    outcomes: [
+      { ...frontierGoal("campaign-repository").outcomes[0], title: "\u001b" },
+      ...frontierGoal("campaign-repository").outcomes.slice(1),
+    ],
+  };
+  let observedTitle = "";
+  let observedBody = "";
+  const { contractPath, server } = await frontierFixture(
+    contract,
+    "user:campaign-366",
+    async ({ authority, result, contract: taskContract }) => {
+      observedTitle = taskContract.delivery.title;
+      observedBody = taskContract.delivery.body;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "empty title fixture complete",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("empty-title", "outcome-one"),
+    );
+    await handoffCampaign(server.url, published.campaignId);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (observedTitle !== "") break;
+    }
+    expect(observedTitle).toBe("Authorized outcome");
+    expect(observedBody).toContain("Outcome: Authorized outcome");
+    expect(observedTitle).not.toContain("Campaign");
+    expect(observedBody).not.toContain("Campaign");
   } finally {
     await server.close();
   }

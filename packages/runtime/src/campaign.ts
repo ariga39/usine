@@ -203,6 +203,7 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
             nonGoals: proposal.nonGoals,
             effects: proposal.effects,
             budget: proposal.budget,
+            ...(proposal.delivery ? { delivery: proposal.delivery } : {}),
             merge: proposal.merge,
           },
   };
@@ -228,16 +229,17 @@ function campaignTaskContract(
   baseSha: string,
 ): TaskContract {
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
-  const deliveryTitle = `Campaign ${campaignIdFor(contract.id, contract.version)}: ${
-    outcome?.title ?? proposal.outcomeId
-  }`
-    .normalize("NFKC")
-    .replace(ANSI_ESCAPE_SEQUENCE, "")
-    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH)
-    .trimEnd();
+  const outcomeTitle = sanitizeCampaignDeliveryText(outcome?.title ?? "Authorized outcome");
+  const deliveryTitle = outcomeTitle.slice(0, MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH).trimEnd();
+  const acceptance = proposal.acceptance.map(sanitizeCampaignDeliveryText);
+  const goalIssue = canonicalGitHubIssueSource(contract.authority.source);
+  const deliveryBody = [
+    `Outcome: ${outcomeTitle || "Authorized outcome"}`,
+    "",
+    "Acceptance criteria:",
+    ...acceptance.map((criterion) => `- ${criterion}`),
+    ...(goalIssue ? ["", `Goal: ${goalIssue}`] : []),
+  ].join("\n");
   const task: TaskContract = {
     id: taskId,
     repositoryId: proposal.repositoryId,
@@ -253,8 +255,9 @@ function campaignTaskContract(
     },
     delivery: {
       branch: `agent/${taskId}`,
-      title: deliveryTitle || "Campaign task",
-      body: `Campaign ${campaignIdFor(contract.id, contract.version)} Outcome ${proposal.outcomeId}`,
+      ...(proposal.delivery ? { issue: proposal.delivery.issue } : {}),
+      title: deliveryTitle || "Authorized outcome",
+      body: deliveryBody,
     },
     campaign: {
       campaignId: campaignIdFor(contract.id, contract.version),
@@ -264,6 +267,44 @@ function campaignTaskContract(
     },
   };
   return task;
+}
+
+function sanitizeCampaignDeliveryText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(ANSI_ESCAPE_SEQUENCE, "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function canonicalGitHubIssueSource(source: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    return null;
+  }
+  const segments = url.pathname.split("/");
+  if (
+    source !== url.href ||
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    segments.length !== 5 ||
+    segments[0] !== "" ||
+    segments[1] === "" ||
+    segments[2] === "" ||
+    segments[3] !== "issues" ||
+    !/^\d+$/.test(segments[4] ?? "") ||
+    Number(segments[4]) <= 0
+  )
+    return null;
+  return source;
 }
 
 function blockerFor(
