@@ -179,10 +179,7 @@ export class ForgeDelivery {
           head: branch,
           base: baseBranch,
           title: contract.delivery.title,
-          body:
-            contract.delivery.issue === undefined
-              ? contract.delivery.body
-              : `${contract.delivery.body}\n\nCloses #${contract.delivery.issue}`,
+          body: pullRequestBody(contract, sha, check, review),
           draft: false,
           request: {
             timeout: remainingUntil(this.options.deadlineEpochMs),
@@ -472,6 +469,28 @@ export class ForgeDelivery {
     if (!attestation) throw new DeliveryQuarantineError("approval attestation was not observed");
     return attestation;
   }
+}
+
+function pullRequestBody(
+  contract: ResolvedTaskContract,
+  sha: string,
+  check: CheckResult,
+  review: ReviewVerdict,
+): string {
+  const evidence =
+    contract.campaign === undefined
+      ? contract.delivery.body
+      : [
+          contract.delivery.body,
+          "",
+          "Delivery evidence:",
+          `- Candidate SHA: \`${sha}\``,
+          `- Project check: \`${check.status}\``,
+          `- Fresh independent review: \`${review.verdict}\``,
+        ].join("\n");
+  return contract.delivery.issue === undefined
+    ? evidence
+    : `${evidence}\n\nCloses #${contract.delivery.issue}`;
 }
 
 type LivePullRequest = {

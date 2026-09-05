@@ -156,6 +156,13 @@ export const taskProposalSchema = z
       maxReviewCycles: z.number().int().min(1).max(2),
       maxElapsedMs: z.number().int().positive(),
     }),
+    delivery: z
+      .object({
+        /** Optional same-Repository GitHub Task Issue used only for delivery metadata. */
+        issue: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
     merge: z.boolean().default(false),
   })
   .strict();
@@ -231,6 +238,11 @@ const campaignProposalSchema = Schema.Struct({
         maxReviewCycles: Schema.Int,
         maxElapsedMs: Schema.Int,
       }),
+      delivery: Schema.optional(
+        Schema.Struct({
+          issue: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+        }),
+      ),
       merge: Schema.Boolean,
     }),
   ),

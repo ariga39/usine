@@ -918,9 +918,54 @@ describe.sequential("Forge Delivery reconciliation", () => {
       ),
     );
 
-    expect(state.lastPullRequest).toEqual({ title: "Forge delivery", body: "Forge delivery" });
+    expect(state.lastPullRequest).toEqual({
+      title: "Forge delivery",
+      body: [
+        "Forge delivery",
+        "",
+        "Delivery evidence:",
+        `- Candidate SHA: \`${fixture.candidateSha}\``,
+        "- Project check: `passed`",
+        "- Fresh independent review: `approved`",
+      ].join("\n"),
+    });
     expect(state.lastPullRequest?.body).not.toContain("Closes #");
     expect(state.lastPullRequest?.body).not.toContain("undefined");
+  }, 30_000);
+
+  test("appends Campaign delivery evidence and the associated Task Issue", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: null,
+      pullRequests: [],
+      comments: [],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = campaignContract("forge-campaign-with-issue");
+    task.delivery.issue = 123;
+    const check = { ...passingCheck, sha: fixture.candidateSha };
+    const review = { ...approvedReview, sha: fixture.candidateSha };
+
+    await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote).deliver(
+        task,
+        fixture.candidateSha,
+        check,
+        review,
+      ),
+    );
+
+    expect(state.lastPullRequest?.body).toContain("Candidate SHA");
+    expect(state.lastPullRequest?.body).toContain(fixture.candidateSha);
+    expect(state.lastPullRequest?.body).toContain("Project check: `passed`");
+    expect(state.lastPullRequest?.body).toContain("Fresh independent review: `approved`");
+    expect(state.lastPullRequest?.body).toContain("Closes #123");
+    expect(state.lastPullRequest?.body).not.toContain("forge-campaign-with-issue");
   }, 30_000);
 
   test("blocks a changed live head before calling merge", async () => {
