@@ -74,6 +74,11 @@ import {
   type RuntimePolicy,
 } from "./runtime.js";
 import {
+  captureCampaignEvidence,
+  recordAllCampaignEvidence,
+  reportPostHogFailure,
+} from "./posthog.js";
+import {
   UsineApi,
   type ApiError,
   type ApiEventEnvelope,
@@ -239,12 +244,22 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         const result = await lookupTaskStatus(stateDirectory, event.taskId);
         const repositoryId = result?.repository?.id;
         if (repositoryId) eventHub.publish({ taskId: event.taskId, repositoryId, event });
+        const campaignId = result?.campaign?.campaignId;
+        if (campaignId && event.data.type === "coding_session_completed")
+          void captureCampaignEvidence(stateDirectory, campaignId, options.environment).catch(
+            reportPostHogFailure,
+          );
+        if (campaignId && event.data.type === "task_terminal")
+          void coordinateCampaigns()
+            .catch(() => undefined)
+            .then(() => captureCampaignEvidence(stateDirectory, campaignId, options.environment))
+            .catch(reportPostHogFailure);
       })
       .catch(() => undefined);
-    if (event.data.type === "task_terminal") void coordinateCampaigns().catch(() => undefined);
   };
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
+  void recordAllCampaignEvidence(stateDirectory, options.environment).catch(reportPostHogFailure);
 
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {

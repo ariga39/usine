@@ -5,6 +5,7 @@ import {
   MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   openSqliteDatabase,
   TaskAuthority,
+  isTerminalState,
   type CampaignAcceptedDelivery,
   type CampaignEvidenceAggregate,
   type CampaignEvidencePage,
@@ -12,6 +13,7 @@ import {
   type CampaignEvidenceRun,
   type CampaignEvidenceSource,
   type CampaignEvidenceSourcesPage,
+  type CampaignEvidenceTerminalTaskCounts,
   type CampaignEvidenceTotals,
   type CampaignEvidenceTouch,
   type CampaignEvidenceUsage,
@@ -50,7 +52,7 @@ export async function lookupCampaignEvidence(
     const pageRuns = requested.sources.flatMap((source) => usageRuns(source));
     const allRuns = sourceSet.sources.flatMap((source) => usageRuns(source));
     const allTouches = touches(sourceSet.firstPage);
-    const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source.task));
+    const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source));
     const report: CampaignEvidencePage = {
       schemaVersion: 1,
       campaignId: requested.campaign.campaignId,
@@ -150,10 +152,14 @@ function touches(source: CampaignEvidenceSourcesPage): CampaignEvidenceTouch[] {
   return [...planTouches, ...source.decisionTouches];
 }
 
-function acceptedDelivery(task: CampaignEvidenceSource["task"]): CampaignAcceptedDelivery[] {
+function acceptedDelivery(source: CampaignEvidenceSource): CampaignAcceptedDelivery[] {
+  const task = source.task;
   const association = task.campaign;
   const accepted = acceptedTaskDelivery(task);
   if (!association || !accepted) return [];
+  const deliveryEvent = source.events.find(
+    (event) => event.data.type === "delivery_completed" && event.data.sha === accepted.delivery.sha,
+  );
   return [
     {
       taskId: task.taskId,
@@ -166,6 +172,7 @@ function acceptedDelivery(task: CampaignEvidenceSource["task"]): CampaignAccepte
       attestationId: accepted.delivery.attestationId,
       merged: accepted.mergedHeadSha !== null,
       mergeCommitSha: accepted.mergedHeadSha,
+      occurredAtEpochMs: deliveryEvent?.occurredAtEpochMs ?? null,
     },
   ];
 }
@@ -220,7 +227,7 @@ function totals(
   runs: readonly CampaignEvidenceRun[],
   allTouches: readonly CampaignEvidenceTouch[],
 ): CampaignEvidenceTotals {
-  const deliveries = sourceSet.sources.flatMap((source) => acceptedDelivery(source.task));
+  const deliveries = sourceSet.sources.flatMap((source) => acceptedDelivery(source));
   return {
     invocations: runs.length,
     elapsedMs: sumNullable(runs.map((run) => run.elapsedMs)),
@@ -237,8 +244,30 @@ function totals(
     ).length,
     guardianTouches: allTouches.length,
     acceptedDeliveries: deliveries.length,
+    terminalTaskCounts: terminalTaskCounts(sourceSet.sources),
     usage: sumUsage(runs.map((run) => run.usage)),
   };
+}
+
+function terminalTaskCounts(
+  sources: readonly CampaignEvidenceSource[],
+): CampaignEvidenceTerminalTaskCounts {
+  const counts = {
+    elapsed_budget: 0,
+    invalid_phase: 0,
+    missing_evidence: 0,
+    provider_failure: 0,
+    project_check_failure: 0,
+    review_inconclusive: 0,
+    delivery_failure: 0,
+    unknown: 0,
+  } satisfies CampaignEvidenceTerminalTaskCounts;
+  for (const source of sources) {
+    if (!isTerminalState(source.task.state)) continue;
+    const classification = source.task.blockerClassification;
+    if (classification !== null) counts[classification] += 1;
+  }
+  return counts;
 }
 
 function sumNullable(values: readonly (number | null)[]): number | null {

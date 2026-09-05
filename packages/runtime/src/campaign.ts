@@ -1062,6 +1062,20 @@ export async function lookupCampaign(
   }
 }
 
+export async function listCampaignIds(stateDirectory: string): Promise<readonly string[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const rows = await handle.database
+      .select({ campaignId: campaigns.campaignId })
+      .from(campaigns)
+      .orderBy(asc(campaigns.campaignId));
+    return rows.map((row) => row.campaignId);
+  } finally {
+    handle.close();
+  }
+}
+
 export async function recordCampaignDecisionTouch(
   stateDirectory: string,
   campaignId: string,

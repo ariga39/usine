@@ -75,6 +75,16 @@ test("the generated client round-trips the Campaign evidence contract", async ()
       blockedProposals: 0,
       guardianTouches: 0,
       acceptedDeliveries: 0,
+      terminalTaskCounts: {
+        elapsed_budget: 0,
+        invalid_phase: 0,
+        missing_evidence: 0,
+        provider_failure: 0,
+        project_check_failure: 0,
+        review_inconclusive: 0,
+        delivery_failure: 0,
+        unknown: 0,
+      },
       usage: {
         inputTokens: 0,
         cachedInputTokens: 0,

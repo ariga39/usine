@@ -148,6 +148,17 @@ export USINE_ROLE_OUTPUT_MODEL="<ROLE_OUTPUT_MODEL>"
 
 The API key remains in the coordinator host process. It is not passed to the worker or stored in Task facts.
 
+### Optional PostHog evidence recording
+
+Set the key to opt in. The URL is optional and must be a PostHog `/batch/` endpoint:
+
+```sh
+export USINE_POSTHOG_API_KEY="<POSTHOG_PROJECT_KEY>"
+export USINE_POSTHOG_API_URL="https://us.i.posthog.com/batch/"
+```
+
+Usine projects existing sanitized Campaign evidence once at startup and records later closed or terminal Task observations. Capture failure is logged and does not block the factory; no prompts, completions, transcripts, paths, credentials, archives, URLs, or raw diagnostics are sent.
+
 ## 3. Publish a guardian-authored Campaign plan
 
 Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. Re-publishing the same bytes cannot repair that immutable fact; after correcting the anchor, publish a new Goal version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
