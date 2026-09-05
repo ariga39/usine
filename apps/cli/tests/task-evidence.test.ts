@@ -362,6 +362,68 @@ describe("task evidence", () => {
     });
   });
 
+  test("keeps configured and provider-attested identities distinct", () => {
+    const taskId = "identity-provenance-task";
+    const event = (sequence: number, data: unknown): TaskEvent =>
+      decodeTaskEvent({
+        taskId,
+        sequence,
+        eventId: `identity-provenance-${sequence}`,
+        occurredAtEpochMs: sequence,
+        data,
+      });
+    const configured = {
+      profileName: "implementer-profile",
+      configSha256: "a".repeat(64),
+      adapter: "sdk",
+      model: "configured-model",
+      modelProvider: "configured-provider",
+      reasoningEffort: "high",
+      developerInstructionsSha256: null,
+      serviceTier: "standard",
+    };
+    const observed = deriveTaskEvidence({ taskId, state: "admitted" } as TaskResource, [
+      event(1, {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "identity-session",
+        effectiveProfile: {
+          ...configured,
+          actualModel: "provider-model",
+          actualModelProvider: "provider-name",
+        },
+      }),
+    ]);
+    const omitted = deriveTaskEvidence({ taskId, state: "admitted" } as TaskResource, [
+      event(1, {
+        type: "coding_session_completed",
+        role: "implementer",
+        activation: 1,
+        outcome: "succeeded",
+        sessionId: "identity-session",
+        effectiveProfile: configured,
+      }),
+    ]);
+
+    expect(observed.roleRuns.implementer[0]?.effectiveProfile).toMatchObject({
+      model: "configured-model",
+      modelProvider: "configured-provider",
+      actualModel: "provider-model",
+      actualModelProvider: "provider-name",
+    });
+    expect(omitted.roleRuns.implementer[0]?.effectiveProfile).toMatchObject({
+      model: "configured-model",
+      modelProvider: "configured-provider",
+      actualModel: null,
+      actualModelProvider: null,
+    });
+    expect(renderTaskEvidence(omitted, false)).toContain(
+      "configured-model=configured-model configured-provider=configured-provider actual-model=unavailable actual-provider=unavailable",
+    );
+  });
+
   test("joins successful Role Runs to current Task facts across a repaired Candidate", () => {
     const taskId = "repair-join-task";
     const staleSha = "f".repeat(40);
