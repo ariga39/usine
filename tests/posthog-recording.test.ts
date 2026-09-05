@@ -4,12 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
-import {
-  campaignEvidenceToPostHogEvents,
-  sendPostHogEvents,
-  startUsineServer,
-  type PostHogEvent,
-} from "@usine/runtime";
+import { startUsineServer } from "@usine/runtime";
+import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
 import type { CampaignEvidencePage, CampaignResource } from "@usine/task-authority";
 import {
   handoffCampaign,
@@ -17,6 +13,18 @@ import {
   publishCampaign,
   registerRepository,
 } from "../apps/cli/src/server-client.js";
+
+interface CapturedBatchEvent {
+  readonly uuid?: string;
+  readonly timestamp?: string;
+  readonly event?: string;
+  readonly properties?: Record<string, unknown>;
+}
+interface FakePostHog {
+  readonly server: ReturnType<typeof createServer>;
+  readonly requests: Array<{ url?: string; batch?: CapturedBatchEvent[] }>;
+  readonly status: number;
+}
 
 const servers: Array<ReturnType<typeof createServer>> = [];
 const usineServers: Array<{ close: () => Promise<void> }> = [];
@@ -50,12 +58,7 @@ function campaign(): CampaignResource {
         evidence: null,
       },
     ],
-    authority: {
-      source: "private source",
-      publish: true,
-      delivery: true,
-      merge: true,
-    },
+    authority: { source: "private source", publish: true, delivery: true, merge: true },
     budget: {
       maxElapsedMs: 10_000,
       maxTasks: 1,
@@ -81,6 +84,15 @@ function campaign(): CampaignResource {
 }
 
 function evidence(): CampaignEvidencePage {
+  const usage = {
+    inputTokens: 10,
+    cachedInputTokens: 2,
+    uncachedInputTokens: 8,
+    cacheWriteInputTokens: 1,
+    outputTokens: 5,
+    reasoningOutputTokens: 3,
+    coverage: "complete" as const,
+  };
   return {
     schemaVersion: 1,
     campaignId: "campaign-391:v1",
@@ -105,19 +117,9 @@ function evidence(): CampaignEvidencePage {
         adapter: "sdk",
         model: "observed-model",
         outcome: "succeeded",
-        taskState: "merged",
-        taskBlocker: null,
         occurredAtEpochMs: 1_700_000_000_100,
         elapsedMs: 900,
-        usage: {
-          inputTokens: 10,
-          cachedInputTokens: 2,
-          uncachedInputTokens: 8,
-          cacheWriteInputTokens: 1,
-          outputTokens: 5,
-          reasoningOutputTokens: 3,
-          coverage: "complete",
-        },
+        usage,
       },
     ],
     aggregates: [],
@@ -129,23 +131,10 @@ function evidence(): CampaignEvidencePage {
       blockedProposals: 0,
       guardianTouches: 1,
       acceptedDeliveries: 1,
-      usage: {
-        inputTokens: 10,
-        cachedInputTokens: 2,
-        uncachedInputTokens: 8,
-        cacheWriteInputTokens: 1,
-        outputTokens: 5,
-        reasoningOutputTokens: 3,
-        coverage: "complete",
-      },
+      usage,
     },
     touches: [
-      {
-        touchId: "plan:campaign-391:v1",
-        goalVersion: 1,
-        type: "plan",
-        occurredAtEpochMs: 1_700_000_000_000,
-      },
+      { touchId: "touch-1", goalVersion: 1, type: "plan", occurredAtEpochMs: 1_700_000_000_000 },
     ],
     deliveries: [
       {
@@ -159,88 +148,136 @@ function evidence(): CampaignEvidencePage {
         attestationId: "private-attestation",
         merged: true,
         mergeCommitSha: "b".repeat(40),
-        occurredAtEpochMs: 1_700_000_000_200,
       },
     ],
   };
 }
 
-test("maps only sanitized Campaign evidence and replays with stable identities", () => {
+test("maps fixed Campaign evidence fields without private payloads", () => {
   const first = campaignEvidenceToPostHogEvents(campaign(), evidence());
   const second = campaignEvidenceToPostHogEvents(campaign(), evidence());
-
+  const roleRun = first.find((event) => event.event === "$ai_generation")!;
+  const delivery = first.find((event) => event.event === "usine_campaign_delivery")!;
   expect(first).toEqual(second);
-  expect(first.map((event) => event.event)).toEqual([
-    "usine_campaign_progress",
-    "usine_campaign_role_run",
-    "usine_campaign_guardian_touch",
-    "usine_campaign_delivery",
-  ]);
-  expect(first[1]).toMatchObject({
-    distinctId: "campaign-391:v1",
-    insertId: "role-run:task-1:implementer:1:session-1",
-    occurredAtEpochMs: 1_700_000_000_100,
+  expect(roleRun).toMatchObject({
+    timestamp: "2023-11-14T22:13:20.100Z",
     properties: {
-      provider: "observed-provider",
-      adapter: "sdk",
-      model: "observed-model",
-      input_tokens: 10,
-      cached_input_tokens: 2,
+      $ai_provider: "observed-provider",
+      $ai_model: "observed-model",
+      $ai_trace_id: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+      $ai_latency: 0.9,
+      $ai_input_tokens: 10,
+      $ai_cache_read_input_tokens: 2,
+      $ai_cache_creation_input_tokens: 1,
       uncached_input_tokens: 8,
-      output_tokens: 5,
+      $ai_output_tokens: 5,
+      reasoning_output_tokens: 3,
+      $ai_cache_reporting_exclusive: false,
+      aggregation_scope: "role_run",
       token_coverage: "complete",
-      task_state: "merged",
-      task_blocker: null,
     },
   });
+  expect(delivery).toMatchObject({ timestamp: roleRun.timestamp });
+  expect(roleRun.properties).not.toHaveProperty("$ai_input");
+  expect(roleRun.properties).not.toHaveProperty("$ai_output");
+  expect(roleRun.properties).not.toHaveProperty("$ai_is_cumulative");
+  expect(first[0]?.properties).not.toHaveProperty("merged_deliveries");
+  expect(first[0]?.properties).not.toHaveProperty("successful_runs");
+  expect(first[0]?.properties).not.toHaveProperty("failed_runs");
+  expect(first[0]?.properties).not.toHaveProperty("cancelled_runs");
+  expect(first[0]?.properties).not.toHaveProperty("blocked_runs");
+  expect(first[0]?.properties).not.toHaveProperty("unknown_runs");
+  expect(first[0]?.properties).not.toHaveProperty("task_count");
+  const changedRun = campaignEvidenceToPostHogEvents(campaign(), {
+    ...evidence(),
+    runs: [{ ...evidence().runs[0]!, model: "another-observed-model" }],
+  }).find((event) => event.event === "$ai_generation");
+  expect(changedRun?.uuid).toBe(roleRun.uuid);
+  const changedProgress = campaignEvidenceToPostHogEvents(
+    { ...campaign(), status: "abandoned" },
+    evidence(),
+  )[0];
+  const changedDelivery = campaignEvidenceToPostHogEvents(campaign(), {
+    ...evidence(),
+    deliveries: [{ ...evidence().deliveries[0]!, merged: false, mergeCommitSha: null }],
+  }).find((event) => event.event === "usine_campaign_delivery");
+  expect(changedProgress?.uuid).not.toBe(first[0]!.uuid);
+  expect(changedDelivery?.uuid).not.toBe(delivery.uuid);
   const serialized = JSON.stringify(first);
-  expect(serialized).not.toContain("private objective");
-  expect(serialized).not.toContain("private source");
-  expect(serialized).not.toContain("private diagnostic");
-  expect(serialized).not.toContain("private.example");
-  expect(serialized).not.toContain("private-attestation");
+  for (const omitted of [
+    "private-contract-hash",
+    "private objective",
+    "private source",
+    "private diagnostic",
+    "private.example",
+    "private-attestation",
+    "url",
+    "sha",
+    "archive",
+    "path",
+    "raw",
+  ])
+    expect(serialized).not.toContain(omitted);
 });
 
-test("sends a Campaign role run to a PostHog-compatible endpoint", async () => {
-  let received: unknown;
-  const server = createServer((request, response) => {
-    let body = "";
-    request.on("data", (chunk) => (body += chunk));
-    request.on("end", () => {
-      received = JSON.parse(body);
-      response.writeHead(200).end("ok");
-    });
+test("continuation Campaign evidence maps only Role Runs and deliveries", () => {
+  const events = campaignEvidenceToPostHogEvents(campaign(), {
+    ...evidence(),
+    cursor: "page-2",
   });
-  servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("fake PostHog address missing");
+  expect(events.map((event) => event.event)).toEqual(["$ai_generation", "usine_campaign_delivery"]);
+});
 
-  const roleRun = campaignEvidenceToPostHogEvents(campaign(), evidence()).find(
-    (event) => event.event === "usine_campaign_role_run",
-  )!;
-  await sendPostHogEvents(
-    { apiKey: "test-project-key", captureUrl: `http://127.0.0.1:${address.port}/capture/` },
-    [roleRun],
+test("captures persisted evidence from Task events using the Batch protocol", async () => {
+  const fixture = await campaignFixture(200);
+  const request = await waitForRequest(
+    fixture.posthog,
+    (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
   );
-
-  expect(received).toMatchObject({
-    api_key: "test-project-key",
-    batch: [
-      {
-        event: "usine_campaign_role_run",
-        distinct_id: "campaign-391:v1",
-        properties: {
-          $insert_id: "role-run:task-1:implementer:1:session-1",
-          provider: "observed-provider",
-        },
-        timestamp: "2023-11-14T22:13:20.100Z",
-      },
-    ],
+  const roleRun = request.batch!.find((event) => event.event === "$ai_generation")!;
+  expect(request.url).toBe("/batch/");
+  expect(roleRun).toMatchObject({
+    uuid: expect.stringMatching(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    ),
+    timestamp: "2023-11-14T22:13:20.100Z",
+    event: "$ai_generation",
+    properties: {
+      distinct_id: fixture.published.campaignId,
+      $process_person_profile: false,
+      $ai_provider: "unavailable",
+      $ai_input_tokens: 4,
+      uncached_input_tokens: 3,
+      $ai_cache_reporting_exclusive: false,
+    },
   });
+  expect(roleRun).not.toHaveProperty("distinct_id");
+  const beforeRestart = fixture.posthog.requests.length;
+  await fixture.usine.close();
+  usineServers.pop();
+  const restarted = await startUsineServer({
+    environment: fixture.environment,
+    host: "127.0.0.1",
+    port: 0,
+  });
+  usineServers.push(restarted);
+  const backfill = await waitForRequest(
+    fixture.posthog,
+    (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
+    beforeRestart,
+  );
+  const backfilledRoleRun = backfill.batch!.find((event) => event.event === "$ai_generation")!;
+  expect(backfilledRoleRun).toMatchObject({ uuid: roleRun.uuid, timestamp: roleRun.timestamp });
 });
 
-test("records one persisted Campaign role run through the server recorder", async () => {
+test("a failed PostHog capture does not block the Campaign event entry", async () => {
+  const fixture = await campaignFixture(503);
+  await waitForRequest(fixture.posthog, (value) => value.batch?.length === 4);
+});
+
+async function campaignFixture(postHogStatus: number) {
   const root = await mkdtemp(join(tmpdir(), "usine-posthog-campaign-"));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory);
@@ -273,29 +310,12 @@ test("records one persisted Campaign role run through the server recorder", asyn
   await writeFile(contractPath, JSON.stringify(contract));
   await execa("git", ["add", "goal.json"], { cwd: root });
   await execa("git", ["commit", "-m", "authorize campaign"], { cwd: root });
-
-  let resolveRoleRun!: (body: unknown) => void;
-  const roleRunReceived = new Promise<unknown>((resolve) => (resolveRoleRun = resolve));
-  const fakePostHog = createServer((request, response) => {
-    let body = "";
-    request.on("data", (chunk) => (body += chunk));
-    request.on("end", () => {
-      const parsed = JSON.parse(body) as { batch?: Array<{ event?: string }> };
-      if (parsed.batch?.some((event) => event.event === "usine_campaign_role_run"))
-        resolveRoleRun(parsed);
-      response.writeHead(200).end("ok");
-    });
-  });
-  servers.push(fakePostHog);
-  await new Promise<void>((resolve) => fakePostHog.listen(0, "127.0.0.1", resolve));
-  const address = fakePostHog.address();
-  if (!address || typeof address === "string") throw new Error("fake PostHog address missing");
-
+  const posthog = await fakePostHog(postHogStatus);
   const environment: NodeJS.ProcessEnv = {
     USINE_STATE_DIR: stateDirectory,
     USINE_GOAL_PUBLICATION_SOURCE: "user:posthog-campaign",
     USINE_POSTHOG_API_KEY: "test-project-key",
-    USINE_POSTHOG_API_URL: `http://127.0.0.1:${address.port}/capture/`,
+    USINE_POSTHOG_API_URL: posthog.url,
     USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
     USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
     USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",
@@ -351,37 +371,42 @@ test("records one persisted Campaign role run through the server recorder", asyn
     merge: false,
   });
   await handoffCampaign(usine.url, published.campaignId);
+  return { published, posthog, usine, environment };
+}
 
-  const received = (await Promise.race([
-    roleRunReceived,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("role run not recorded")), 5_000)),
-  ])) as { batch: Array<{ event: string; properties: Record<string, unknown> }> };
-  expect(received.batch.some((event) => event.event === "usine_campaign_role_run")).toBe(true);
-  expect(received.batch.find((event) => event.event === "usine_campaign_role_run")).toMatchObject({
-    properties: {
-      campaign_id: published.campaignId,
-      task_id: "campaign-posthog-campaign-v1-proposal-1",
-      provider: "unavailable",
-      input_tokens: 4,
-      uncached_input_tokens: 3,
-    },
-  });
-});
-
-test("surfaces a failed PostHog response to the non-authoritative caller", async () => {
-  const fetchImplementation: typeof fetch = async () => new Response(null, { status: 503 });
-  const event: PostHogEvent = {
-    event: "usine_campaign_role_run",
-    distinctId: "campaign-391:v1",
-    insertId: "role-run:one",
-    occurredAtEpochMs: 1_700_000_000_100,
-    properties: {},
+async function fakePostHog(status: number): Promise<FakePostHog & { url: string }> {
+  const requests: Array<{ url?: string; batch?: CapturedBatchEvent[] }> = [];
+  const fake: FakePostHog = {
+    server: createServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk) => (body += chunk));
+      request.on("end", () => {
+        requests.push({
+          url: request.url,
+          ...(JSON.parse(body) as { batch?: CapturedBatchEvent[] }),
+        });
+        response.writeHead(fake.status).end("ok");
+      });
+    }),
+    requests,
+    status,
   };
-  await expect(
-    sendPostHogEvents(
-      { apiKey: "test-project-key", captureUrl: "http://127.0.0.1/capture/" },
-      [event],
-      fetchImplementation,
-    ),
-  ).rejects.toThrow("PostHog capture request failed");
-});
+  servers.push(fake.server);
+  await new Promise<void>((resolve) => fake.server.listen(0, "127.0.0.1", resolve));
+  const address = fake.server.address();
+  if (!address || typeof address === "string") throw new Error("fake PostHog address missing");
+  return { ...fake, url: `http://127.0.0.1:${address.port}/batch/` };
+}
+
+async function waitForRequest(
+  fake: FakePostHog,
+  predicate: (value: { url?: string; batch?: CapturedBatchEvent[] }) => boolean,
+  startAt = 0,
+): Promise<{ url?: string; batch?: CapturedBatchEvent[] }> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const found = fake.requests.slice(startAt).find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("PostHog request was not received");
+}
