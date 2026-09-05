@@ -110,6 +110,7 @@ export interface PublicCheckResult {
 
 export const TASK_BLOCKER_CLASSIFICATIONS = [
   "elapsed_budget",
+  "implementation_budget",
   "invalid_phase",
   "missing_evidence",
   "provider_failure",
@@ -210,6 +211,8 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
 
 export function classifyTaskBlocker(diagnostic: string): TaskBlockerClassification {
   const normalized = diagnostic.toLowerCase();
+  if (normalized.includes("implementer activation") && normalized.includes("budget"))
+    return "implementation_budget";
   return normalized.includes("elapsed") ||
     normalized.includes("deadline") ||
     normalized.includes("budget")

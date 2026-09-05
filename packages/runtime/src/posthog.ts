@@ -78,6 +78,7 @@ export function campaignEvidenceToPostHogEvents(
     accepted_deliveries: evidence.totals.acceptedDeliveries,
     terminal_reason: campaign.decisionRequest?.reason ?? null,
     terminal_tasks_elapsed_budget: evidence.totals.terminalTaskCounts.elapsed_budget,
+    terminal_tasks_implementation_budget: evidence.totals.terminalTaskCounts.implementation_budget,
     terminal_tasks_invalid_phase: evidence.totals.terminalTaskCounts.invalid_phase,
     terminal_tasks_missing_evidence: evidence.totals.terminalTaskCounts.missing_evidence,
     terminal_tasks_provider_failure: evidence.totals.terminalTaskCounts.provider_failure,

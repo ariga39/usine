@@ -933,6 +933,84 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     handle.close();
   });
 
+  test("migrates a legacy activation exhaustion classification", async () => {
+    const path = await makeDatabaseBeforeMigration(18);
+    const taskId = `authority-implementation-budget-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const elapsedTaskId = `${taskId}-elapsed`;
+    const firstHandle = openSqliteDatabase(path);
+    const first = new TaskAuthority(firstHandle.database);
+    const admitted = await first.admit({
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: `authority/implementation-budget-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const elapsedAdmitted = await first.admit({
+      contract: makeContract(elapsedTaskId),
+      contractHash: "b".repeat(64),
+      repositoryIdentity: `authority/implementation-budget-${elapsedTaskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    firstHandle.close();
+
+    const legacyResult = {
+      ...admitted,
+      state: "blocked",
+      blocker: "implementer activation budget exhausted",
+      blockerClassification: "elapsed_budget",
+    };
+    const elapsedResult = {
+      ...elapsedAdmitted,
+      state: "blocked",
+      blocker: "elapsed budget exhausted",
+      blockerClassification: "elapsed_budget",
+    };
+    const legacy = new DatabaseSync(path);
+    legacy
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(legacyResult), taskId);
+    legacy
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(elapsedResult), elapsedTaskId);
+    const blockedEvent = JSON.stringify({ type: "task_blocked", reason: "elapsed_budget" });
+    legacy
+      .prepare(
+        "INSERT INTO task_events (task_id, sequence, event_id, occurred_at_epoch_ms, data) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(taskId, 2, `blocked:${taskId}`, Date.now(), blockedEvent);
+    legacy
+      .prepare(
+        "INSERT INTO task_events (task_id, sequence, event_id, occurred_at_epoch_ms, data) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(elapsedTaskId, 2, `blocked:${elapsedTaskId}`, Date.now(), blockedEvent);
+    legacy.close();
+
+    await applyMigrations(path);
+    const reopened = authorityAt(path);
+    const result = await reopened.lookup(taskId);
+    if (!result) throw new Error("migrated task is missing");
+
+    expect(result.blockerClassification).toBe("implementation_budget");
+    expect(taskResourceFromResult(result).blocker).toEqual({
+      classification: "implementation_budget",
+    });
+    const elapsedResultAfterMigration = await reopened.lookup(elapsedTaskId);
+    if (!elapsedResultAfterMigration) throw new Error("migrated elapsed task is missing");
+    const events = await reopened.listEvents(taskId);
+    const elapsedEvents = await reopened.listEvents(elapsedTaskId);
+    expect(elapsedResultAfterMigration.blockerClassification).toBe("elapsed_budget");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        data: { type: "task_blocked", reason: "implementation_budget" },
+      }),
+    );
+    expect(elapsedEvents).toContainEqual(
+      expect.objectContaining({
+        data: { type: "task_blocked", reason: "elapsed_budget" },
+      }),
+    );
+  });
+
   test.each(["unversioned", 1, 2, 3] as const)(
     "decodes a %s persisted blocker without quarantine",
     async (version) => {

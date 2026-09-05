@@ -262,6 +262,7 @@ function terminalTaskCounts(
 ): CampaignEvidenceTerminalTaskCounts {
   const counts = {
     elapsed_budget: 0,
+    implementation_budget: 0,
     invalid_phase: 0,
     missing_evidence: 0,
     provider_failure: 0,

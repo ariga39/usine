@@ -77,6 +77,7 @@ test("the generated client round-trips the Campaign evidence contract", async ()
       acceptedDeliveries: 0,
       terminalTaskCounts: {
         elapsed_budget: 0,
+        implementation_budget: 0,
         invalid_phase: 0,
         missing_evidence: 0,
         provider_failure: 0,
