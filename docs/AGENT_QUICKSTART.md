@@ -155,9 +155,10 @@ Set the key to opt in. The URL is optional and must be a PostHog `/batch/` endpo
 ```sh
 export USINE_POSTHOG_API_KEY="<POSTHOG_PROJECT_KEY>"
 export USINE_POSTHOG_API_URL="https://us.i.posthog.com/batch/"
+export USINE_POSTHOG_DEPLOYMENT="<DEPLOYMENT_LABEL>"
 ```
 
-Usine projects existing sanitized Campaign evidence once at startup and records later closed or terminal Task observations. Capture failure is logged and does not block the factory; no prompts, completions, transcripts, paths, credentials, archives, URLs, or raw diagnostics are sent.
+`USINE_POSTHOG_DEPLOYMENT` is required when PostHog is enabled. Use one stable non-empty label per Usine deployment; distinct labels let multiple deployments share one PostHog project without deduplicating equal Campaign or invocation evidence. The label is included on every event and scopes its stable event and AI trace identities. Missing or blank configuration disables capture. Usine projects existing sanitized Campaign evidence once at startup and records later closed or terminal Task observations. Capture failure is logged and does not block the factory; no prompts, completions, transcripts, paths, credentials, archives, URLs, or raw diagnostics are sent.
 
 ## 3. Publish a guardian-authored Campaign plan
 

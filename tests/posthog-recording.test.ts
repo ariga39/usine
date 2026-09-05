@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
-import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
+import {
+  campaignEvidenceToPostHogEvents,
+  postHogConfigFromEnvironment,
+} from "../packages/runtime/src/posthog.js";
 import type { CampaignEvidencePage, CampaignResource } from "@usine/task-authority";
 import {
   handoffCampaign,
@@ -165,8 +168,8 @@ function evidence(): CampaignEvidencePage {
 }
 
 test("maps fixed Campaign evidence fields without private payloads", () => {
-  const first = campaignEvidenceToPostHogEvents(campaign(), evidence());
-  const second = campaignEvidenceToPostHogEvents(campaign(), evidence());
+  const first = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-test");
+  const second = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-test");
   const roleRun = first.find((event) => event.event === "$ai_generation")!;
   const delivery = first.find((event) => event.event === "usine_campaign_delivery")!;
   expect(first).toEqual(second);
@@ -208,19 +211,28 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
       terminal_tasks_unknown: 0,
     },
   });
-  const changedRun = campaignEvidenceToPostHogEvents(campaign(), {
-    ...evidence(),
-    runs: [{ ...evidence().runs[0]!, model: "another-observed-model" }],
-  }).find((event) => event.event === "$ai_generation");
+  const changedRun = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      runs: [{ ...evidence().runs[0]!, model: "another-observed-model" }],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "$ai_generation");
   expect(changedRun?.uuid).toBe(roleRun.uuid);
   const changedProgress = campaignEvidenceToPostHogEvents(
     { ...campaign(), status: "abandoned" },
     evidence(),
+    "deployment-test",
   )[0];
-  const changedDelivery = campaignEvidenceToPostHogEvents(campaign(), {
-    ...evidence(),
-    deliveries: [{ ...evidence().deliveries[0]!, merged: false, mergeCommitSha: null }],
-  }).find((event) => event.event === "usine_campaign_delivery");
+  const changedDelivery = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      deliveries: [{ ...evidence().deliveries[0]!, merged: false, mergeCommitSha: null }],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "usine_campaign_delivery");
   expect(changedProgress?.uuid).not.toBe(first[0]!.uuid);
   expect(changedDelivery?.uuid).not.toBe(delivery.uuid);
   const serialized = JSON.stringify(first);
@@ -238,6 +250,45 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
     "raw",
   ])
     expect(serialized).not.toContain(omitted);
+});
+
+test("namespaces stable event and AI trace identities by deployment", () => {
+  const first = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-alpha");
+  const retry = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-alpha");
+  const otherDeployment = campaignEvidenceToPostHogEvents(
+    campaign(),
+    evidence(),
+    "deployment-beta",
+  );
+
+  expect(first).toEqual(retry);
+  expect(first.every((event) => event.properties.deployment === "deployment-alpha")).toBe(true);
+  expect(otherDeployment.every((event) => event.properties.deployment === "deployment-beta")).toBe(
+    true,
+  );
+  expect(otherDeployment.map((event) => event.uuid)).not.toEqual(first.map((event) => event.uuid));
+
+  const firstTrace = first.find((event) => event.event === "$ai_generation")!.properties
+    .$ai_trace_id;
+  const otherTrace = otherDeployment.find((event) => event.event === "$ai_generation")!.properties
+    .$ai_trace_id;
+  expect(otherTrace).not.toBe(firstTrace);
+});
+
+test("does not opt into PostHog without a non-empty deployment label", () => {
+  expect(postHogConfigFromEnvironment({ USINE_POSTHOG_API_KEY: "test-project-key" })).toBeNull();
+  expect(
+    postHogConfigFromEnvironment({
+      USINE_POSTHOG_API_KEY: "test-project-key",
+      USINE_POSTHOG_DEPLOYMENT: "  ",
+    }),
+  ).toBeNull();
+  expect(
+    postHogConfigFromEnvironment({
+      USINE_POSTHOG_API_KEY: "test-project-key",
+      USINE_POSTHOG_DEPLOYMENT: "  deployment-test  ",
+    }),
+  ).toMatchObject({ deployment: "deployment-test" });
 });
 
 test("projects blocked Task classification without its raw blocker", () => {
@@ -258,6 +309,7 @@ test("projects blocked Task classification without its raw blocker", () => {
         terminalTaskCounts: { ...evidence().totals.terminalTaskCounts, delivery_failure: 1 },
       },
     },
+    "deployment-test",
   )[0]!;
   expect(blocked.properties).toMatchObject({
     terminal_reason: "branches_blocked",
@@ -267,20 +319,28 @@ test("projects blocked Task classification without its raw blocker", () => {
 });
 
 test("omits in-flight unknown Role Runs but emits the closed run", () => {
-  const unknown = campaignEvidenceToPostHogEvents(campaign(), {
-    ...evidence(),
-    runs: [{ ...evidence().runs[0]!, outcome: "unknown" }],
-  });
+  const unknown = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      runs: [{ ...evidence().runs[0]!, outcome: "unknown" }],
+    },
+    "deployment-test",
+  );
   expect(unknown.some((event) => event.event === "$ai_generation")).toBe(false);
-  const closed = campaignEvidenceToPostHogEvents(campaign(), evidence());
+  const closed = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-test");
   expect(closed.some((event) => event.event === "$ai_generation")).toBe(true);
 });
 
 test("continuation Campaign evidence maps only Role Runs and deliveries", () => {
-  const events = campaignEvidenceToPostHogEvents(campaign(), {
-    ...evidence(),
-    cursor: "page-2",
-  });
+  const events = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      cursor: "page-2",
+    },
+    "deployment-test",
+  );
   expect(events.map((event) => event.event)).toEqual(["$ai_generation", "usine_campaign_delivery"]);
 });
 
@@ -300,6 +360,7 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     event: "$ai_generation",
     properties: {
       distinct_id: fixture.published.campaignId,
+      deployment: "deployment-test",
       $process_person_profile: false,
       $ai_provider: "unavailable",
       $ai_input_tokens: 4,
@@ -307,6 +368,9 @@ test("captures persisted evidence from Task events using the Batch protocol", as
       $ai_cache_reporting_exclusive: false,
     },
   });
+  expect(request.batch!.every((event) => event.properties?.deployment === "deployment-test")).toBe(
+    true,
+  );
   expect(roleRun).not.toHaveProperty("distinct_id");
   const blockedRequest = await waitForRequest(
     fixture.posthog,
@@ -384,6 +448,7 @@ async function campaignFixture(postHogStatus: number) {
     USINE_GOAL_PUBLICATION_SOURCE: "user:posthog-campaign",
     USINE_POSTHOG_API_KEY: "test-project-key",
     USINE_POSTHOG_API_URL: posthog.url,
+    USINE_POSTHOG_DEPLOYMENT: "deployment-test",
     USINE_FORGE_PROFILE_DEFAULT_APP_SLUG: "test-app",
     USINE_FORGE_PROFILE_DEFAULT_TEST_TOKEN: "test-token",
     USINE_FORGE_PROFILE_DEFAULT_API_URL: "http://127.0.0.1:9",

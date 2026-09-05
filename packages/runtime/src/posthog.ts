@@ -28,6 +28,7 @@ export interface PostHogEvent {
 export interface PostHogCaptureConfig {
   readonly apiKey: string;
   readonly captureUrl: string;
+  readonly deployment: string;
 }
 export type PostHogFetch = typeof fetch;
 
@@ -35,17 +36,26 @@ export function postHogConfigFromEnvironment(
   environment: NodeJS.ProcessEnv,
 ): PostHogCaptureConfig | null {
   const apiKey = environment.USINE_POSTHOG_API_KEY?.trim();
-  return apiKey
-    ? { apiKey, captureUrl: environment.USINE_POSTHOG_API_URL?.trim() || DEFAULT_POSTHOG_BATCH_URL }
+  const deployment = environment.USINE_POSTHOG_DEPLOYMENT?.trim();
+  return apiKey && deployment
+    ? {
+        apiKey,
+        captureUrl: environment.USINE_POSTHOG_API_URL?.trim() || DEFAULT_POSTHOG_BATCH_URL,
+        deployment,
+      }
     : null;
 }
 
 export function campaignEvidenceToPostHogEvents(
   campaign: CampaignResource,
   evidence: CampaignEvidencePage,
+  deployment: string,
 ): readonly PostHogEvent[] {
+  const deploymentLabel = deployment.trim();
+  if (!deploymentLabel) return [];
   const distinctId = campaign.campaignId;
   const properties = {
+    deployment: deploymentLabel,
     schema_version: evidence.schemaVersion,
     campaign_id: distinctId,
     goal_id: campaign.goalId,
@@ -91,11 +101,11 @@ export function campaignEvidenceToPostHogEvents(
       : []),
     ...evidence.runs
       .filter((run) => run.outcome !== "unknown")
-      .map((run) => roleRunEvent(distinctId, run)),
+      .map((run) => roleRunEvent(deploymentLabel, distinctId, run)),
     ...(evidence.cursor === null
-      ? evidence.touches.map((touch) => touchEvent(distinctId, touch))
+      ? evidence.touches.map((touch) => touchEvent(deploymentLabel, distinctId, touch))
       : []),
-    ...evidence.deliveries.map((delivery) => deliveryEvent(distinctId, delivery)),
+    ...evidence.deliveries.map((delivery) => deliveryEvent(deploymentLabel, distinctId, delivery)),
   ];
 }
 
@@ -112,7 +122,7 @@ export async function captureCampaignEvidence(
   if (!campaign || !evidence) return;
   const events: PostHogEvent[] = [];
   while (evidence) {
-    events.push(...campaignEvidenceToPostHogEvents(campaign, evidence));
+    events.push(...campaignEvidenceToPostHogEvents(campaign, evidence, config.deployment));
     if (evidence.nextCursor === null) break;
     evidence = await lookupCampaignEvidence(stateDirectory, campaignId, {
       cursor: evidence.nextCursor,
@@ -176,14 +186,20 @@ export function reportPostHogFailure(_error: unknown): void {
   console.error("PostHog recording failed; factory lifecycle continues");
 }
 
-function roleRunEvent(distinctId: string, run: CampaignEvidenceRun): PostHogEvent {
+function roleRunEvent(
+  deployment: string,
+  distinctId: string,
+  run: CampaignEvidenceRun,
+): PostHogEvent {
   const roleRunUuid = stableUuid("$ai_generation", {
+    deployment,
     campaign_id: distinctId,
     invocation_id: run.invocationId,
   });
   const cacheDimensionsKnown =
     run.usage.cachedInputTokens !== null && run.usage.uncachedInputTokens !== null;
   const properties = {
+    deployment,
     schema_version: 1,
     campaign_id: distinctId,
     invocation_id: run.invocationId,
@@ -222,12 +238,17 @@ function roleRunEvent(distinctId: string, run: CampaignEvidenceRun): PostHogEven
   };
 }
 
-function touchEvent(distinctId: string, touch: CampaignEvidenceTouch): PostHogEvent {
+function touchEvent(
+  deployment: string,
+  distinctId: string,
+  touch: CampaignEvidenceTouch,
+): PostHogEvent {
   return makeEvent(
     "usine_campaign_guardian_touch",
     distinctId,
     timestampForEpochMs(touch.occurredAtEpochMs),
     {
+      deployment,
       schema_version: 1,
       campaign_id: distinctId,
       touch_id: touch.touchId,
@@ -237,12 +258,17 @@ function touchEvent(distinctId: string, touch: CampaignEvidenceTouch): PostHogEv
   );
 }
 
-function deliveryEvent(distinctId: string, delivery: CampaignAcceptedDelivery): PostHogEvent {
+function deliveryEvent(
+  deployment: string,
+  distinctId: string,
+  delivery: CampaignAcceptedDelivery,
+): PostHogEvent {
   return makeEvent(
     "usine_campaign_delivery",
     distinctId,
     timestampForEpochMs(delivery.occurredAtEpochMs),
     {
+      deployment,
       schema_version: 1,
       campaign_id: distinctId,
       goal_version: delivery.goalVersion,
