@@ -50,7 +50,7 @@ export async function lookupCampaignEvidence(
     const pageRuns = requested.sources.flatMap((source) => usageRuns(source));
     const allRuns = sourceSet.sources.flatMap((source) => usageRuns(source));
     const allTouches = touches(sourceSet.firstPage);
-    const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source.task));
+    const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source));
     const report: CampaignEvidencePage = {
       schemaVersion: 1,
       campaignId: requested.campaign.campaignId,
@@ -120,6 +120,8 @@ function projectRun(run: UsageInvocation, source: CampaignEvidenceSource): Campa
     adapter: run.adapter,
     model: run.model,
     outcome: run.outcome,
+    taskState: source.task.state,
+    taskBlocker: source.task.blockerClassification,
     occurredAtEpochMs: run.occurredAtEpochMs,
     elapsedMs: run.elapsedMs,
     usage: run.usage,
@@ -150,10 +152,14 @@ function touches(source: CampaignEvidenceSourcesPage): CampaignEvidenceTouch[] {
   return [...planTouches, ...source.decisionTouches];
 }
 
-function acceptedDelivery(task: CampaignEvidenceSource["task"]): CampaignAcceptedDelivery[] {
+function acceptedDelivery(source: CampaignEvidenceSource): CampaignAcceptedDelivery[] {
+  const task = source.task;
   const association = task.campaign;
   const accepted = acceptedTaskDelivery(task);
   if (!association || !accepted) return [];
+  const deliveryEvent = source.events.find(
+    (event) => event.data.type === "delivery_completed" && event.data.sha === accepted.delivery.sha,
+  );
   return [
     {
       taskId: task.taskId,
@@ -166,6 +172,7 @@ function acceptedDelivery(task: CampaignEvidenceSource["task"]): CampaignAccepte
       attestationId: accepted.delivery.attestationId,
       merged: accepted.mergedHeadSha !== null,
       mergeCommitSha: accepted.mergedHeadSha,
+      occurredAtEpochMs: deliveryEvent?.occurredAtEpochMs ?? null,
     },
   ];
 }
@@ -220,7 +227,7 @@ function totals(
   runs: readonly CampaignEvidenceRun[],
   allTouches: readonly CampaignEvidenceTouch[],
 ): CampaignEvidenceTotals {
-  const deliveries = sourceSet.sources.flatMap((source) => acceptedDelivery(source.task));
+  const deliveries = sourceSet.sources.flatMap((source) => acceptedDelivery(source));
   return {
     invocations: runs.length,
     elapsedMs: sumNullable(runs.map((run) => run.elapsedMs)),

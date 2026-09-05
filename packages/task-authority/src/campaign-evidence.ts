@@ -30,6 +30,28 @@ const evidenceRun = Schema.Struct({
   adapter: Schema.String,
   model: Schema.String,
   outcome: Schema.Literals(["succeeded", "failed", "cancelled", "blocked", "unknown"]),
+  taskState: Schema.Literals([
+    "admitted",
+    "waiting",
+    "candidate",
+    "checked",
+    "reviewed",
+    "reviewed_pr",
+    "merged",
+    "blocked",
+  ]),
+  taskBlocker: Schema.NullOr(
+    Schema.Literals([
+      "elapsed_budget",
+      "invalid_phase",
+      "missing_evidence",
+      "provider_failure",
+      "project_check_failure",
+      "review_inconclusive",
+      "delivery_failure",
+      "unknown",
+    ]),
+  ),
   occurredAtEpochMs: Schema.Int,
   elapsedMs: Schema.NullOr(Schema.Natural),
   usage: usageAmounts,
@@ -66,6 +88,7 @@ const acceptedDelivery = Schema.Struct({
   attestationId: Schema.String,
   merged: Schema.Boolean,
   mergeCommitSha: Schema.NullOr(exactSha),
+  occurredAtEpochMs: Schema.NullOr(Schema.Int),
 });
 
 export const campaignEvidencePageSchema = Schema.Struct({

@@ -73,6 +73,7 @@ import {
   ForgeProfileResolutionError,
   type RuntimePolicy,
 } from "./runtime.js";
+import { createCampaignEvidenceRecorder } from "./posthog.js";
 import {
   UsineApi,
   type ApiError,
@@ -229,6 +230,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
+  const campaignEvidenceRecorder = createCampaignEvidenceRecorder(
+    stateDirectory,
+    options.environment,
+  );
   const eventHub = new TransientEventHub();
   let eventDispatch = Promise.resolve();
   let coordinateCampaigns: () => Promise<void> = async () => undefined;
@@ -239,6 +244,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         const result = await lookupTaskStatus(stateDirectory, event.taskId);
         const repositoryId = result?.repository?.id;
         if (repositoryId) eventHub.publish({ taskId: event.taskId, repositoryId, event });
+        if (result?.campaign?.campaignId)
+          campaignEvidenceRecorder.schedule(result.campaign.campaignId);
       })
       .catch(() => undefined);
     if (event.data.type === "task_terminal") void coordinateCampaigns().catch(() => undefined);
@@ -296,6 +303,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")
             launchTask(admission);
         }
+        campaignEvidenceRecorder.scheduleAll();
       });
       campaignCoordination = run.catch(() => undefined);
       return run;

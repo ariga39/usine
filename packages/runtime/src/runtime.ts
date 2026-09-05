@@ -66,6 +66,16 @@ export {
   MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   type CampaignEvidenceRequest,
 } from "./campaign-evidence.js";
+export {
+  campaignEvidenceToPostHogEvents,
+  captureCampaignEvidence,
+  createCampaignEvidenceRecorder,
+  postHogConfigFromEnvironment,
+  sendPostHogEvents,
+  type CampaignEvidenceRecorder,
+  type PostHogCaptureConfig,
+  type PostHogEvent,
+} from "./posthog.js";
 
 /** Maximum UTF-8 bytes read from one submitted Task Contract file. */
 export const MAX_TASK_CONTRACT_BYTES = 1_048_576;
