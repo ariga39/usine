@@ -66,6 +66,15 @@ export function campaignEvidenceToPostHogEvents(
     repair_batches: evidence.totals.repairBatches,
     guardian_touches: evidence.totals.guardianTouches,
     accepted_deliveries: evidence.totals.acceptedDeliveries,
+    terminal_reason: campaign.decisionRequest?.reason ?? null,
+    terminal_tasks_elapsed_budget: evidence.totals.terminalTaskCounts.elapsed_budget,
+    terminal_tasks_invalid_phase: evidence.totals.terminalTaskCounts.invalid_phase,
+    terminal_tasks_missing_evidence: evidence.totals.terminalTaskCounts.missing_evidence,
+    terminal_tasks_provider_failure: evidence.totals.terminalTaskCounts.provider_failure,
+    terminal_tasks_project_check_failure: evidence.totals.terminalTaskCounts.project_check_failure,
+    terminal_tasks_review_inconclusive: evidence.totals.terminalTaskCounts.review_inconclusive,
+    terminal_tasks_delivery_failure: evidence.totals.terminalTaskCounts.delivery_failure,
+    terminal_tasks_unknown: evidence.totals.terminalTaskCounts.unknown,
     input_tokens: evidence.totals.usage.inputTokens,
     cached_input_tokens: evidence.totals.usage.cachedInputTokens,
     uncached_input_tokens: evidence.totals.usage.uncachedInputTokens,
@@ -80,11 +89,13 @@ export function campaignEvidenceToPostHogEvents(
     ...(evidence.cursor === null
       ? [makeEvent("usine_campaign_progress", distinctId, timestamp, properties)]
       : []),
-    ...evidence.runs.map((run) => roleRunEvent(distinctId, run)),
+    ...evidence.runs
+      .filter((run) => run.outcome !== "unknown")
+      .map((run) => roleRunEvent(distinctId, run)),
     ...(evidence.cursor === null
       ? evidence.touches.map((touch) => touchEvent(distinctId, touch))
       : []),
-    ...evidence.deliveries.map((delivery) => deliveryEvent(distinctId, delivery, timestamp)),
+    ...evidence.deliveries.map((delivery) => deliveryEvent(distinctId, delivery)),
   ];
 }
 
@@ -226,22 +237,23 @@ function touchEvent(distinctId: string, touch: CampaignEvidenceTouch): PostHogEv
   );
 }
 
-function deliveryEvent(
-  distinctId: string,
-  delivery: CampaignAcceptedDelivery,
-  timestamp: string | null,
-): PostHogEvent {
-  return makeEvent("usine_campaign_delivery", distinctId, timestamp, {
-    schema_version: 1,
-    campaign_id: distinctId,
-    goal_version: delivery.goalVersion,
-    outcome_id: delivery.outcomeId,
-    task_id: delivery.taskId,
-    effect: delivery.effect,
-    pull_request: delivery.pullRequest,
-    merged: delivery.merged,
-    merge_commit_present: delivery.mergeCommitSha !== null,
-  });
+function deliveryEvent(distinctId: string, delivery: CampaignAcceptedDelivery): PostHogEvent {
+  return makeEvent(
+    "usine_campaign_delivery",
+    distinctId,
+    timestampForEpochMs(delivery.occurredAtEpochMs),
+    {
+      schema_version: 1,
+      campaign_id: distinctId,
+      goal_version: delivery.goalVersion,
+      outcome_id: delivery.outcomeId,
+      task_id: delivery.taskId,
+      effect: delivery.effect,
+      pull_request: delivery.pullRequest,
+      merged: delivery.merged,
+      merge_commit_present: delivery.mergeCommitSha !== null,
+    },
+  );
 }
 
 function makeEvent(

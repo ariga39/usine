@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import type { UsageAmounts, UsageReportSource } from "./usage-report.js";
+import type { TaskBlockerClassification } from "./task-state.js";
 
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 
@@ -66,6 +67,18 @@ const acceptedDelivery = Schema.Struct({
   attestationId: Schema.String,
   merged: Schema.Boolean,
   mergeCommitSha: Schema.NullOr(exactSha),
+  occurredAtEpochMs: Schema.NullOr(Schema.Int),
+});
+
+const terminalTaskCounts = Schema.Struct({
+  elapsed_budget: Schema.Natural,
+  invalid_phase: Schema.Natural,
+  missing_evidence: Schema.Natural,
+  provider_failure: Schema.Natural,
+  project_check_failure: Schema.Natural,
+  review_inconclusive: Schema.Natural,
+  delivery_failure: Schema.Natural,
+  unknown: Schema.Natural,
 });
 
 export const campaignEvidencePageSchema = Schema.Struct({
@@ -86,6 +99,7 @@ export const campaignEvidencePageSchema = Schema.Struct({
     blockedProposals: Schema.Natural,
     guardianTouches: Schema.Natural,
     acceptedDeliveries: Schema.Natural,
+    terminalTaskCounts: terminalTaskCounts,
     usage: usageAmounts,
   }),
   touches: Schema.Array(campaignTouch),
@@ -100,6 +114,10 @@ export type CampaignEvidenceTouch = CampaignEvidencePage["touches"][number];
 export type CampaignAcceptedDelivery = CampaignEvidencePage["deliveries"][number];
 
 export type CampaignEvidenceUsage = UsageAmounts;
+
+export type CampaignEvidenceTerminalTaskCounts = {
+  readonly [classification in TaskBlockerClassification]: number;
+};
 
 export interface CampaignEvidenceCampaign {
   readonly campaignId: string;

@@ -131,6 +131,16 @@ function evidence(): CampaignEvidencePage {
       blockedProposals: 0,
       guardianTouches: 1,
       acceptedDeliveries: 1,
+      terminalTaskCounts: {
+        elapsed_budget: 0,
+        invalid_phase: 0,
+        missing_evidence: 0,
+        provider_failure: 0,
+        project_check_failure: 0,
+        review_inconclusive: 0,
+        delivery_failure: 0,
+        unknown: 0,
+      },
       usage,
     },
     touches: [
@@ -148,6 +158,7 @@ function evidence(): CampaignEvidencePage {
         attestationId: "private-attestation",
         merged: true,
         mergeCommitSha: "b".repeat(40),
+        occurredAtEpochMs: 1_700_000_000_200,
       },
     ],
   };
@@ -179,7 +190,7 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
       token_coverage: "complete",
     },
   });
-  expect(delivery).toMatchObject({ timestamp: roleRun.timestamp });
+  expect(delivery).toMatchObject({ timestamp: "2023-11-14T22:13:20.200Z" });
   expect(roleRun.properties).not.toHaveProperty("$ai_input");
   expect(roleRun.properties).not.toHaveProperty("$ai_output");
   expect(roleRun.properties).not.toHaveProperty("$ai_is_cumulative");
@@ -190,6 +201,13 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
   expect(first[0]?.properties).not.toHaveProperty("blocked_runs");
   expect(first[0]?.properties).not.toHaveProperty("unknown_runs");
   expect(first[0]?.properties).not.toHaveProperty("task_count");
+  expect(first[0]).toMatchObject({
+    properties: {
+      terminal_reason: null,
+      terminal_tasks_delivery_failure: 0,
+      terminal_tasks_unknown: 0,
+    },
+  });
   const changedRun = campaignEvidenceToPostHogEvents(campaign(), {
     ...evidence(),
     runs: [{ ...evidence().runs[0]!, model: "another-observed-model" }],
@@ -220,6 +238,42 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
     "raw",
   ])
     expect(serialized).not.toContain(omitted);
+});
+
+test("projects blocked Task classification without its raw blocker", () => {
+  const blocked = campaignEvidenceToPostHogEvents(
+    {
+      ...campaign(),
+      status: "blocked",
+      decisionRequest: {
+        requestId: "request-1",
+        reason: "branches_blocked",
+        outcomeIds: ["outcome-1"],
+      },
+    },
+    {
+      ...evidence(),
+      totals: {
+        ...evidence().totals,
+        terminalTaskCounts: { ...evidence().totals.terminalTaskCounts, delivery_failure: 1 },
+      },
+    },
+  )[0]!;
+  expect(blocked.properties).toMatchObject({
+    terminal_reason: "branches_blocked",
+    terminal_tasks_delivery_failure: 1,
+  });
+  expect(JSON.stringify(blocked)).not.toContain("private diagnostic");
+});
+
+test("omits in-flight unknown Role Runs but emits the closed run", () => {
+  const unknown = campaignEvidenceToPostHogEvents(campaign(), {
+    ...evidence(),
+    runs: [{ ...evidence().runs[0]!, outcome: "unknown" }],
+  });
+  expect(unknown.some((event) => event.event === "$ai_generation")).toBe(false);
+  const closed = campaignEvidenceToPostHogEvents(campaign(), evidence());
+  expect(closed.some((event) => event.event === "$ai_generation")).toBe(true);
 });
 
 test("continuation Campaign evidence maps only Role Runs and deliveries", () => {
@@ -254,6 +308,20 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     },
   });
   expect(roleRun).not.toHaveProperty("distinct_id");
+  const blockedRequest = await waitForRequest(
+    fixture.posthog,
+    (value) =>
+      value.batch?.some(
+        (event) =>
+          event.event === "usine_campaign_progress" &&
+          event.properties?.terminal_tasks_unknown === 1,
+      ) === true,
+  );
+  const blockedProgress = blockedRequest.batch!.find(
+    (event) => event.event === "usine_campaign_progress",
+  )!;
+  expect(blockedProgress.properties).toMatchObject({ terminal_tasks_unknown: 1 });
+  expect(JSON.stringify(blockedProgress)).not.toContain("fixture blocker");
   const beforeRestart = fixture.posthog.requests.length;
   await fixture.usine.close();
   usineServers.pop();
