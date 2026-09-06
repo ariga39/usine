@@ -66,7 +66,7 @@ function proposal(proposalId: string, outcomeId: string, effects = ["github"]) {
   };
 }
 
-async function fixture() {
+async function fixture(mode: "successful" | "interrupted" = "successful") {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory);
@@ -98,6 +98,82 @@ async function fixture() {
     port: 0,
     execute: async ({ authority, result, contract }) => {
       const index = executions++;
+      if (mode === "interrupted") {
+        const sessionId = `${result.taskId}-interrupted-implementer`;
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-session-started`,
+          occurredAtEpochMs: 511_537,
+          data: {
+            type: "coding_session_started",
+            role: "implementer",
+            activation: 1,
+            sessionId,
+            requestedProfile: "implementer",
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-usage-observed`,
+          occurredAtEpochMs: 511_538,
+          data: {
+            type: "coding_usage_observed",
+            role: "implementer",
+            activation: 1,
+            sessionId,
+            source: "provider",
+            semantics: "replacement",
+            actualModel: { model: "provider/gpt-5", provider: "provider:actual" },
+            usage: {
+              inputTokens: 120,
+              cachedInputTokens: 20,
+              uncachedInputTokens: 100,
+              outputTokens: 8,
+            },
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-session-interrupted`,
+          occurredAtEpochMs: 511_539,
+          data: {
+            type: "coding_session_interrupted",
+            role: "implementer",
+            activation: 1,
+            sessionId,
+            phase: "turn",
+            failureClass: "transient_transport",
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-session-completed`,
+          occurredAtEpochMs: 511_540,
+          data: {
+            type: "coding_session_completed",
+            role: "implementer",
+            activation: 1,
+            outcome: "failed",
+            sessionId,
+            requestedProfile: "implementer",
+            effectiveProfile: {
+              profileName: "implementer",
+              configSha256: "c".repeat(64),
+              adapter: "sdk",
+              model: "configured-model",
+              modelProvider: "configured-provider",
+              actualModel: "provider/gpt-5",
+              actualModelProvider: "provider:actual",
+              reasoningEffort: "high",
+              developerInstructionsSha256: null,
+              serviceTier: "default",
+            },
+            usage: null,
+          },
+        });
+        const blocked = await authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "provider interruption",
+        );
+        finish();
+        return blocked;
+      }
       const implementationUsage =
         index === 0
           ? { inputTokens: 12, cachedInputTokens: 3, uncachedInputTokens: 9, outputTokens: 7 }
@@ -342,4 +418,42 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
       limit: 1,
     }),
   ).rejects.toBeInstanceOf(CampaignEvidenceCursorError);
+});
+
+test("retains failed interrupted usage in public Campaign runs and totals", async () => {
+  const { stateDirectory, contractPath, server, finished } = await fixture("interrupted");
+  const published = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, published.campaignId, proposal("interrupted", "outcome-one"));
+  await handoffCampaign(server.url, published.campaignId);
+  await finished;
+
+  const expectedUsage = {
+    inputTokens: 120,
+    cachedInputTokens: 20,
+    uncachedInputTokens: 100,
+    cacheWriteInputTokens: null,
+    outputTokens: 8,
+    reasoningOutputTokens: null,
+    coverage: "complete" as const,
+  };
+  const persisted = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+  expect(persisted?.coverage).toBe("complete");
+  expect(persisted?.runs).toEqual([
+    expect.objectContaining({
+      role: "implementer",
+      outcome: "failed",
+      elapsedMs: 3,
+      usage: expectedUsage,
+    }),
+  ]);
+  expect(persisted?.totals).toMatchObject({
+    invocations: 1,
+    elapsedMs: 3,
+    usage: expectedUsage,
+  });
+
+  const publicEvidence = await campaignEvidence(server.url, published.campaignId);
+  expect(publicEvidence?.coverage).toBe("complete");
+  expect(publicEvidence?.runs).toEqual(persisted?.runs);
+  expect(publicEvidence?.totals).toEqual(persisted?.totals);
 });

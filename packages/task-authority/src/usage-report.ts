@@ -414,7 +414,8 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
       run.session = data;
       run.completedAtEpochMs = event.occurredAtEpochMs;
-      if (data.usage !== undefined) run.providerUsage = data.usage;
+      // An absent final provider snapshot must not erase prior incremental usage.
+      if (data.usage !== undefined && data.usage !== null) run.providerUsage = data.usage;
       if (data.effectiveProfile?.actualModel) run.actualModel = data.effectiveProfile.actualModel;
       if (data.effectiveProfile?.actualModelProvider)
         run.actualModelProvider = data.effectiveProfile.actualModelProvider;

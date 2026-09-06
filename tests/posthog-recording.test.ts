@@ -265,6 +265,50 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
     expect(serialized).not.toContain(omitted);
 });
 
+test("projects failed interrupted usage with every token dimension and matching coverage", () => {
+  const usage = {
+    inputTokens: 120,
+    cachedInputTokens: 20,
+    uncachedInputTokens: 100,
+    cacheWriteInputTokens: null,
+    outputTokens: 8,
+    reasoningOutputTokens: null,
+    coverage: "complete" as const,
+  };
+  const page = {
+    ...evidence(),
+    coverage: "complete" as const,
+    runs: [{ ...evidence().runs[0]!, outcome: "failed" as const, elapsedMs: 511_537, usage }],
+    totals: { ...evidence().totals, invocations: 1, elapsedMs: 511_537, usage },
+  };
+
+  const events = campaignEvidenceToPostHogEvents(campaign(), page, "deployment-test");
+  const progress = events.find((event) => event.event === "usine_campaign_progress")!;
+  const roleRun = events.find((event) => event.event === "$ai_generation")!;
+  expect(roleRun).toMatchObject({
+    properties: {
+      outcome: "failed",
+      $ai_input_tokens: 120,
+      $ai_cache_read_input_tokens: 20,
+      uncached_input_tokens: 100,
+      $ai_cache_creation_input_tokens: null,
+      $ai_output_tokens: 8,
+      reasoning_output_tokens: null,
+      token_coverage: "complete",
+    },
+  });
+  expect(progress.properties).toMatchObject({
+    token_coverage: "complete",
+    evidence_coverage: "complete",
+    input_tokens: 120,
+    cached_input_tokens: 20,
+    uncached_input_tokens: 100,
+    cache_write_input_tokens: null,
+    output_tokens: 8,
+    reasoning_output_tokens: null,
+  });
+});
+
 test("namespaces stable event and AI trace identities by deployment", () => {
   const first = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-alpha");
   const retry = campaignEvidenceToPostHogEvents(campaign(), evidence(), "deployment-alpha");

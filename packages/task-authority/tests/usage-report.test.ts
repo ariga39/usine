@@ -290,6 +290,152 @@ describe("usage report projection", () => {
     });
   });
 
+  test("retains interrupted implementer and reviewer usage at complete, partial, and unavailable coverage", () => {
+    const interruptedSource = (input: {
+      taskId: string;
+      role: "implementer" | "reviewer";
+      sessionId: string;
+      startedAtEpochMs: number;
+      usage: {
+        inputTokens?: number;
+        cachedInputTokens?: number;
+        uncachedInputTokens?: number;
+        outputTokens?: number;
+      } | null;
+      semantics: "delta" | "replacement";
+    }): UsageReportSource => {
+      const roleFields = input.role === "reviewer" ? { reviewCycle: 1 } : {};
+      const events: TaskEvent[] = [
+        event(input.taskId, 1, input.startedAtEpochMs, {
+          type: "coding_session_started",
+          role: input.role,
+          activation: 1,
+          ...roleFields,
+          sessionId: input.sessionId,
+          requestedProfile: `${input.role}-profile`,
+        }),
+        ...(input.usage === null
+          ? []
+          : [
+              event(input.taskId, 2, input.startedAtEpochMs + 1, {
+                type: "coding_usage_observed",
+                role: input.role,
+                activation: 1,
+                ...roleFields,
+                sessionId: input.sessionId,
+                source: "provider",
+                semantics: input.semantics,
+                actualModel: { model: "provider/gpt-5", provider: "provider:actual" },
+                usage: input.usage,
+              }),
+            ]),
+        event(input.taskId, 3, input.startedAtEpochMs + 2, {
+          type: "coding_session_interrupted",
+          role: input.role,
+          activation: 1,
+          sessionId: input.sessionId,
+          phase: "turn",
+          failureClass: "transient_transport",
+        }),
+        event(input.taskId, 4, input.startedAtEpochMs + 3, {
+          type: "coding_session_completed",
+          role: input.role,
+          activation: 1,
+          ...roleFields,
+          outcome: "failed",
+          sessionId: input.sessionId,
+          requestedProfile: `${input.role}-profile`,
+          usage: null,
+        }),
+      ];
+      return { task: task(input.taskId), events };
+    };
+    const report = deriveUsageReport(
+      [
+        interruptedSource({
+          taskId: "interrupted-complete-task",
+          role: "implementer",
+          sessionId: "interrupted-complete",
+          startedAtEpochMs: 511_537,
+          semantics: "replacement",
+          usage: {
+            inputTokens: 120,
+            cachedInputTokens: 20,
+            uncachedInputTokens: 100,
+            outputTokens: 8,
+          },
+        }),
+        interruptedSource({
+          taskId: "interrupted-partial-task",
+          role: "reviewer",
+          sessionId: "interrupted-partial",
+          startedAtEpochMs: 600,
+          semantics: "delta",
+          usage: { inputTokens: 4, outputTokens: 2 },
+        }),
+        interruptedSource({
+          taskId: "interrupted-unavailable-task",
+          role: "implementer",
+          sessionId: "interrupted-unavailable",
+          startedAtEpochMs: 700,
+          semantics: "replacement",
+          usage: null,
+        }),
+      ],
+      { taskId: null, repositoryId: "usage-repository", fromEpochMs: null, toEpochMs: null },
+    );
+
+    expect(report.invocations).toHaveLength(3);
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-complete-task"),
+    ).toMatchObject({
+      role: "implementer",
+      outcome: "failed",
+      elapsedMs: 3,
+      usage: {
+        inputTokens: 120,
+        cachedInputTokens: 20,
+        uncachedInputTokens: 100,
+        cacheWriteInputTokens: null,
+        outputTokens: 8,
+        reasoningOutputTokens: null,
+        coverage: "complete",
+      },
+    });
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-partial-task"),
+    ).toMatchObject({
+      role: "reviewer",
+      outcome: "failed",
+      reviewCycle: 1,
+      usage: {
+        inputTokens: 4,
+        cachedInputTokens: null,
+        uncachedInputTokens: null,
+        cacheWriteInputTokens: null,
+        outputTokens: 2,
+        reasoningOutputTokens: null,
+        coverage: "partial",
+      },
+    });
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-unavailable-task"),
+    ).toMatchObject({
+      role: "implementer",
+      outcome: "failed",
+      usage: {
+        inputTokens: null,
+        cachedInputTokens: null,
+        uncachedInputTokens: null,
+        cacheWriteInputTokens: null,
+        outputTokens: null,
+        reasoningOutputTokens: null,
+        coverage: "unavailable",
+      },
+    });
+    expect(report.coverage).toBe("partial");
+  });
+
   test("shares delta merging across all six usage dimensions", () => {
     expect(mergeProviderNeutralUsage(null, { inputTokens: 3, outputTokens: 4 })).toEqual({
       inputTokens: 3,
