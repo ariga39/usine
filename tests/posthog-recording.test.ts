@@ -443,17 +443,21 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     true,
   );
   expect(roleRun).not.toHaveProperty("distinct_id");
+  const afterPlanningCapture = fixture.posthog.requests.length;
   const blockedRequest = await waitForRequest(
     fixture.posthog,
     (value) =>
       value.batch?.some(
         (event) =>
           event.event === "usine_campaign_progress" &&
+          event.properties?.campaign_status === "blocked" &&
           event.properties?.terminal_tasks_unknown === 1,
       ) === true,
+    afterPlanningCapture,
   );
   const blockedProgress = blockedRequest.batch!.find(
-    (event) => event.event === "usine_campaign_progress",
+    (event) =>
+      event.event === "usine_campaign_progress" && event.properties?.campaign_status === "blocked",
   )!;
   expect(planningProgress.properties?.campaign_revision).toEqual(expect.any(Number));
   expect(blockedProgress.properties?.campaign_revision).toEqual(expect.any(Number));

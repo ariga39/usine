@@ -637,27 +637,32 @@ async function reconcile(
       };
     }
   }
+  const updatedAt = nextCampaignUpdatedAt(campaign.updatedAt);
   if (
     campaign.status !== campaignStatus ||
     JSON.stringify(campaign.decisionRequest ?? null) !== JSON.stringify(decisionRequest)
   ) {
     await database
       .update(campaigns)
-      .set({ status: campaignStatus, decisionRequest, updatedAt: new Date() })
+      .set({ status: campaignStatus, decisionRequest, updatedAt })
       .where(eq(campaigns.campaignId, campaignId));
     changed = true;
   }
   if (superseded !== campaign.superseded) {
     await database
       .update(campaigns)
-      .set({ superseded, updatedAt: new Date() })
+      .set({ superseded, updatedAt })
       .where(eq(campaigns.campaignId, campaignId));
   }
   if (changed || superseded !== campaign.superseded)
     await database
       .update(campaigns)
-      .set({ revision: sql`${campaigns.revision} + 1`, updatedAt: new Date() })
+      .set({ revision: sql`${campaigns.revision} + 1`, updatedAt })
       .where(eq(campaigns.campaignId, campaignId));
+}
+
+function nextCampaignUpdatedAt(previous: Date): Date {
+  return new Date(Math.max(Date.now(), previous.getTime() + 1));
 }
 
 function isTerminalCampaignStatus(status: ReturnType<typeof decodeCampaignStatus>): boolean {
@@ -1041,7 +1046,7 @@ export async function handoffCampaign(
         .set({
           planHandedOff: true,
           revision: sql`${campaigns.revision} + 1`,
-          updatedAt: new Date(),
+          updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
         })
         .where(eq(campaigns.campaignId, campaignId));
     }
@@ -1072,13 +1077,14 @@ export async function abandonCampaign(
       decodeCampaignStatus(campaign.status) !== "accepted" &&
       decodeCampaignStatus(campaign.status) !== "abandoned"
     ) {
+      const updatedAt = nextCampaignUpdatedAt(campaign.updatedAt);
       await database
         .update(campaigns)
-        .set({ status: "abandoned", decisionRequest: null, updatedAt: new Date() })
+        .set({ status: "abandoned", decisionRequest: null, updatedAt })
         .where(eq(campaigns.campaignId, campaignId));
       await database
         .update(campaigns)
-        .set({ revision: sql`${campaigns.revision} + 1`, updatedAt: new Date() })
+        .set({ revision: sql`${campaigns.revision} + 1`, updatedAt })
         .where(eq(campaigns.campaignId, campaignId));
     }
     resource = await resourceFromDatabase(database, campaignId);
