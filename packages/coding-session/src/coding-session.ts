@@ -45,6 +45,7 @@ import {
   type SessionArchiveCaptureStatus,
   type SessionArchiveOptions,
 } from "./session-archive.js";
+import { recoverReviewerOutput } from "./role-output.js";
 
 type ResolvedCodexProfile = ReturnType<typeof normalizeCodexProfileSelection>;
 
@@ -562,6 +563,10 @@ export class CodexCodingSession {
       const providerUsage = result.usage ?? observedUsage;
       archive?.setProviderResult(result.finalResponse, usageFrom(providerUsage));
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
+      if (!parsed.success && effectiveRequest.role === "reviewer") {
+        const recovered = recoverReviewerOutput(result.finalResponse);
+        if (recovered !== undefined) parsed = effectiveRequest.outputSchema.safeParse(recovered);
+      }
       if (!parsed.success) {
         if (!this.options.roleOutputTransform) {
           return {
