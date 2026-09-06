@@ -290,6 +290,77 @@ describe("usage report projection", () => {
     });
   });
 
+  test("retains incremental provider usage when interruption completion has no final usage", () => {
+    const taskId = "interrupted-provider-usage-task";
+    const report = deriveUsageReport(
+      [
+        {
+          task: task(taskId),
+          events: [
+            event(taskId, 1, 100, {
+              type: "coding_session_started",
+              role: "implementer",
+              activation: 1,
+              sessionId: "interrupted-provider-usage",
+              requestedProfile: "profile-1",
+            }),
+            event(taskId, 2, 511_537, {
+              type: "coding_usage_observed",
+              role: "implementer",
+              activation: 1,
+              sessionId: "interrupted-provider-usage",
+              source: "provider",
+              semantics: "replacement",
+              actualModel: { model: "provider/gpt-5", provider: "provider:actual" },
+              usage: {
+                inputTokens: 120,
+                cachedInputTokens: 20,
+                uncachedInputTokens: 100,
+                outputTokens: 8,
+              },
+            }),
+            event(taskId, 3, 511_538, {
+              type: "coding_session_interrupted",
+              role: "implementer",
+              activation: 1,
+              sessionId: "interrupted-provider-usage",
+              phase: "turn",
+              failureClass: "transient_transport",
+            }),
+            event(taskId, 4, 511_539, {
+              type: "coding_session_completed",
+              role: "implementer",
+              activation: 1,
+              outcome: "failed",
+              sessionId: "interrupted-provider-usage",
+              requestedProfile: "profile-1",
+              usage: null,
+            }),
+          ],
+        },
+      ],
+      { taskId: null, repositoryId: "usage-repository", fromEpochMs: null, toEpochMs: null },
+    );
+
+    expect(report.invocations).toEqual([
+      expect.objectContaining({
+        taskId,
+        outcome: "failed",
+        elapsedMs: 511_439,
+        usage: {
+          inputTokens: 120,
+          cachedInputTokens: 20,
+          uncachedInputTokens: 100,
+          cacheWriteInputTokens: null,
+          outputTokens: 8,
+          reasoningOutputTokens: null,
+          coverage: "complete",
+        },
+      }),
+    ]);
+    expect(report.coverage).toBe("complete");
+  });
+
   test("shares delta merging across all six usage dimensions", () => {
     expect(mergeProviderNeutralUsage(null, { inputTokens: 3, outputTokens: 4 })).toEqual({
       inputTokens: 3,
