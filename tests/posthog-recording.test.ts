@@ -1,11 +1,13 @@
 import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
 import { startUsineServer } from "@usine/runtime";
 import {
+  captureCampaignEvidence,
   campaignEvidenceToPostHogEvents,
   postHogConfigFromEnvironment,
 } from "../packages/runtime/src/posthog.js";
@@ -234,10 +236,19 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
   ).find((event) => event.event === "$ai_generation");
   expect(changedRun?.uuid).toBe(roleRun.uuid);
   const changedProgress = campaignEvidenceToPostHogEvents(
-    { ...campaign(), status: "abandoned" },
-    evidence(),
+    { ...campaign(), status: "abandoned", revision: 5 },
+    { ...evidence(), progress: { ...evidence().progress, revision: 5 } },
     "deployment-test",
   )[0];
+  const touch = first.find((event) => event.event === "usine_campaign_guardian_touch")!;
+  const changedTouch = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      touches: [{ ...evidence().touches[0]!, type: "decision" }],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "usine_campaign_guardian_touch");
   const changedDelivery = campaignEvidenceToPostHogEvents(
     campaign(),
     {
@@ -246,8 +257,19 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
     },
     "deployment-test",
   ).find((event) => event.event === "usine_campaign_delivery");
+  const changedDeliverySha = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      deliveries: [{ ...evidence().deliveries[0]!, sha: "c".repeat(40) }],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "usine_campaign_delivery");
   expect(changedProgress?.uuid).not.toBe(first[0]!.uuid);
+  expect(changedTouch?.uuid).not.toBe(touch.uuid);
+  // Existing delivery UUIDs hash the projected properties; the durable SHA remains omitted.
   expect(changedDelivery?.uuid).not.toBe(delivery.uuid);
+  expect(changedDeliverySha?.uuid).toBe(delivery.uuid);
   const serialized = JSON.stringify(first);
   for (const omitted of [
     "private-contract-hash",
@@ -475,6 +497,9 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
   );
   const roleRun = request.batch!.find((event) => event.event === "$ai_generation")!;
+  expect(new Set(request.batch!.map((event) => event.event))).toEqual(
+    new Set(["usine_campaign_progress", "$ai_generation", "usine_campaign_guardian_touch"]),
+  );
   const planningProgress = request.batch!.find(
     (event) =>
       event.event === "usine_campaign_progress" && event.properties?.campaign_status === "planning",
@@ -522,12 +547,52 @@ test("captures persisted evidence from Task events using the Batch protocol", as
   expect(planningProgress.properties?.campaign_revision).toEqual(expect.any(Number));
   expect(blockedProgress.properties?.campaign_revision).toEqual(expect.any(Number));
   expect(campaignRevision(blockedProgress)).toBeGreaterThan(campaignRevision(planningProgress));
+  expect(blockedProgress.uuid).not.toBe(planningProgress.uuid);
   expect(Date.parse(blockedProgress.timestamp!)).toBeGreaterThan(
     Date.parse(planningProgress.timestamp!),
   );
   expect(blockedProgress.properties).toMatchObject({ terminal_tasks_unknown: 1 });
   expect(JSON.stringify(blockedProgress)).not.toContain("fixture blocker");
-  const beforeRestart = fixture.posthog.requests.length;
+  const stateDirectory = fixture.environment.USINE_STATE_DIR!;
+  const equivalentStateDirectory = join(stateDirectory, "..", basename(stateDirectory));
+  await captureCampaignEvidence(stateDirectory, fixture.published.campaignId, fixture.environment);
+  const replayBaseline = fixture.posthog.requests.length;
+  await Promise.all([
+    captureCampaignEvidence(stateDirectory, fixture.published.campaignId, fixture.environment),
+    captureCampaignEvidence(
+      equivalentStateDirectory,
+      fixture.published.campaignId,
+      fixture.environment,
+    ),
+  ]);
+  expect(fixture.posthog.requests.length).toBe(replayBaseline);
+  const sentEvents = fixture.posthog.requests.flatMap((value) => value.batch ?? []);
+  expect(sentEvents.filter((event) => event.uuid === blockedProgress.uuid)).toHaveLength(1);
+  const database = new DatabaseSync(join(fixture.environment.USINE_STATE_DIR!, "usine.sqlite"));
+  try {
+    const acknowledged = database
+      .prepare("SELECT deployment, event_uuid AS eventUuid FROM posthog_capture_acknowledgements")
+      .all()
+      .map((row) => {
+        if (
+          row === null ||
+          typeof row !== "object" ||
+          !("deployment" in row) ||
+          !("eventUuid" in row) ||
+          typeof row.deployment !== "string" ||
+          typeof row.eventUuid !== "string"
+        )
+          throw new Error("invalid PostHog acknowledgement row");
+        return { deployment: row.deployment, eventUuid: row.eventUuid };
+      });
+    expect(new Set(acknowledged.map((row) => `${row.deployment}:${row.eventUuid}`))).toEqual(
+      new Set(
+        sentEvents.map((event) => `${String(event.properties?.deployment)}:${String(event.uuid)}`),
+      ),
+    );
+  } finally {
+    database.close();
+  }
   await fixture.usine.close();
   usineServers.pop();
   const restarted = await startUsineServer({
@@ -536,21 +601,51 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     port: 0,
   });
   usineServers.push(restarted);
-  const backfill = await waitForRequest(
-    fixture.posthog,
-    (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
-    beforeRestart,
+  await captureCampaignEvidence(
+    fixture.environment.USINE_STATE_DIR!,
+    fixture.published.campaignId,
+    fixture.environment,
   );
-  const backfilledRoleRun = backfill.batch!.find((event) => event.event === "$ai_generation")!;
-  expect(backfilledRoleRun).toMatchObject({ uuid: roleRun.uuid, timestamp: roleRun.timestamp });
+  expect(fixture.posthog.requests.length).toBe(replayBaseline);
 });
 
 test("a failed PostHog capture does not block the Campaign event entry", async () => {
   const fixture = await campaignFixture(503);
   await waitForRequest(fixture.posthog, (value) => value.batch?.length === 4);
+  const beforeRetry = fixture.posthog.requests.length;
+  await expect(
+    captureCampaignEvidence(
+      fixture.environment.USINE_STATE_DIR!,
+      fixture.published.campaignId,
+      fixture.environment,
+    ),
+  ).rejects.toThrow("PostHog batch request failed");
+  expect(fixture.posthog.requests.length).toBe(beforeRetry + 1);
+  expect(acknowledgementCount(fixture.environment.USINE_STATE_DIR!)).toBe(0);
 });
 
-async function campaignFixture(postHogStatus: number) {
+test("suppresses an acknowledged Campaign delivery on repeated capture", async () => {
+  const fixture = await campaignFixture(200, true);
+  const request = await waitForRequest(
+    fixture.posthog,
+    (value) => value.batch?.some((event) => event.event === "usine_campaign_delivery") === true,
+  );
+  const delivery = request.batch!.find((event) => event.event === "usine_campaign_delivery")!;
+  const beforeRepeat = fixture.posthog.requests.length;
+  await captureCampaignEvidence(
+    fixture.environment.USINE_STATE_DIR!,
+    fixture.published.campaignId,
+    fixture.environment,
+  );
+  expect(fixture.posthog.requests.length).toBe(beforeRepeat);
+  const sentDeliveries = fixture.posthog.requests
+    .flatMap((value) => value.batch ?? [])
+    .filter((event) => event.event === "usine_campaign_delivery");
+  expect(sentDeliveries).toHaveLength(1);
+  expect(sentDeliveries[0]?.uuid).toBe(delivery.uuid);
+});
+
+async function campaignFixture(postHogStatus: number, deliver = false) {
   const root = await mkdtemp(join(tmpdir(), "usine-posthog-campaign-"));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory);
@@ -599,7 +694,7 @@ async function campaignFixture(postHogStatus: number) {
     environment,
     host: "127.0.0.1",
     port: 0,
-    execute: async ({ authority, result }) => {
+    execute: async ({ authority, contract: taskContract, result }) => {
       await authority.appendObservation(result.taskId, {
         eventId: `${result.taskId}-role-run`,
         occurredAtEpochMs: 1_700_000_000_100,
@@ -622,9 +717,50 @@ async function campaignFixture(postHogStatus: number) {
           usage: { inputTokens: 4, cachedInputTokens: 1, uncachedInputTokens: 3, outputTokens: 2 },
         },
       });
-      return authority.block(
-        { taskId: result.taskId, revision: result.revision },
-        "fixture blocker",
+      if (!deliver)
+        return authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "fixture blocker",
+        );
+      const activation = await authority.reserveActivation(
+        result.taskId,
+        taskContract.budget.maxImplementerActivations,
+      );
+      const repositoryPath = result.repository?.path;
+      if (!repositoryPath) throw new Error("fixture repository path missing");
+      const sha = (
+        await execa("git", ["-C", repositoryPath, "rev-parse", "HEAD"], {
+          cwd: repositoryPath,
+        })
+      ).stdout.trim();
+      const candidate = await authority.recordCandidate(
+        { taskId: result.taskId, revision: activation.result.revision },
+        { sha, baseSha: taskContract.baseSha, fence: activation.activation },
+      );
+      await authority.recordCheck(
+        { taskId: result.taskId, revision: candidate.revision },
+        { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+      );
+      const reviewAttempt = await authority.reserveReviewAttempt(
+        result.taskId,
+        taskContract.budget.maxReviewCycles,
+        "fixture-reviewer",
+      );
+      const reviewed = await authority.recordReview(
+        { taskId: result.taskId, revision: reviewAttempt.result.revision },
+        { sha, verdict: "approved", summary: "fixture approved", findings: [] },
+        "fixture-reviewer",
+      );
+      return authority.recordDelivery(
+        { taskId: result.taskId, revision: reviewed.revision },
+        {
+          sha,
+          effect: "github",
+          prNumber: 1,
+          url: "https://example.invalid/pull/1",
+          attestationId: "fixture-delivery",
+          merge: null,
+        },
       );
     },
   });
@@ -693,4 +829,15 @@ async function waitForRequest(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("PostHog request was not received");
+}
+
+function acknowledgementCount(stateDirectory: string): number {
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    return database
+      .prepare("SELECT deployment, event_uuid FROM posthog_capture_acknowledgements")
+      .all().length;
+  } finally {
+    database.close();
+  }
 }

@@ -25,5 +25,11 @@ export {
 export type { TaskIdCursor, TaskIdPage } from "./task-id-cursor.js";
 export { applyMigrations } from "./apply-migrations.js";
 export { openSqliteDatabase } from "./sqlite-database.js";
-export { campaigns, campaignProposals, campaignTouches, repositories } from "./schema.js";
+export {
+  campaigns,
+  campaignProposals,
+  campaignTouches,
+  posthogCaptureAcknowledgements,
+  repositories,
+} from "./schema.js";
 export { deadlineExpired, ElapsedBudgetError, remainingUntil } from "./remaining-until.js";
