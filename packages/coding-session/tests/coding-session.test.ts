@@ -1766,22 +1766,14 @@ describe("Coding Session", () => {
     ]);
   });
 
-  test("normalizes one prose-wrapped reviewer response through the coordinator transform", async () => {
+  test("normalizes an unrecoverable reviewer response through the coordinator transform", async () => {
     const reviewer = {
       sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",
       verdict: "approved",
       summary: "The candidate satisfies the task contract.",
       findings: [],
     } as const;
-    const finalResponse = [
-      "The fresh review is complete.",
-      "",
-      "```json",
-      JSON.stringify(reviewer),
-      "```",
-      "",
-      "No further findings.",
-    ].join("\n");
+    const finalResponse = "The review is wrapped in harmless prose.";
     let transformCalls = 0;
     const session = new CodexCodingSession(
       async () => testClient(async () => sdkTurn(finalResponse)),
@@ -1816,6 +1808,84 @@ describe("Coding Session", () => {
       output: reviewer,
       failure: null,
     });
+  });
+
+  test("preserves an authored wrong SHA during reviewer recovery", async () => {
+    const reviewer = {
+      sha: "b".repeat(40),
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse = [
+      "The fresh review is complete.",
+      JSON.stringify(reviewer),
+      "No further findings.",
+    ].join("\n");
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      attempt: reviewerAttempt,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: reviewer,
+      failure: null,
+    });
+  });
+
+  test("bypasses the normalizer for a recoverable reviewer result", async () => {
+    const reviewer = {
+      sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse = `Review complete:\n${JSON.stringify(reviewer)}\nNo further findings.`;
+    let transformCalls = 0;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          transformCalls += 1;
+          throw new Error("normalizer should not be called");
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      attempt: reviewerAttempt,
+      environment: { CI: "true" },
+    });
+
+    expect(transformCalls).toBe(0);
+    expect(observation).toMatchObject({ status: "completed", output: reviewer, failure: null });
   });
 
   test("uses chat completions for the schema-constrained production transform", async () => {
@@ -2076,6 +2146,54 @@ describe("Coding Session", () => {
   });
 
   test.each([
+    [
+      "contradictory reviewer objects",
+      JSON.stringify({
+        sha,
+        verdict: "approved",
+        summary: "first",
+        findings: [],
+      }) +
+        "\n" +
+        JSON.stringify({
+          sha,
+          verdict: "changes_requested",
+          summary: "second",
+          findings: ["fix"],
+        }),
+    ],
+    [
+      "malformed object without a later result",
+      `Reviewer result: {"sha":"${sha}","verdict":"approved"`,
+    ],
+    [
+      "non-schema object without a later result",
+      `Reviewer result: ${JSON.stringify({
+        sha,
+        verdict: "approved",
+        summary: "ok",
+        findings: [],
+        extra: "not allowed",
+      })}`,
+    ],
+    [
+      "malformed object before a valid result",
+      `Reviewer result: {"sha":"${sha}","verdict":"approved"\n${JSON.stringify({
+        sha,
+        verdict: "approved",
+        summary: "valid later result",
+        findings: [],
+      })}`,
+    ],
+    [
+      "non-schema object before a valid result",
+      `${JSON.stringify({ type: "reviewer-result", value: "not a verdict" })}\n${JSON.stringify({
+        sha,
+        verdict: "approved",
+        summary: "valid later result",
+        findings: [],
+      })}`,
+    ],
     ["malformed JSON", "{malformed"],
     ["wrong status", JSON.stringify({ status: "finished", summary: "done" })],
     ["missing summary", JSON.stringify({ status: "proposed" })],
