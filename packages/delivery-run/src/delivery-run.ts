@@ -415,14 +415,16 @@ export async function executeDeliveryRun(
       if (!result.review || !result.check || !result.candidateSha)
         return blockTask(services, result, "reviewed phase is incomplete");
       if (result.review.verdict === "changes_requested") {
-        if (
-          result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles ||
-          result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
-        )
+        const implementationBudgetExhausted =
+          result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations;
+        const reviewBudgetExhausted =
+          result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles;
+        if (implementationBudgetExhausted || reviewBudgetExhausted)
           return blockTask(
             services,
             result,
             "review changes requested after recovery budget was exhausted",
+            implementationBudgetExhausted ? "implementation_budget" : "elapsed_budget",
           );
         // This marker is durable, so a restart cannot count the same finding
         // batch twice before activating its repair writer.

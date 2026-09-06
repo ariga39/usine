@@ -1719,6 +1719,54 @@ describe("Delivery Run durable phase recovery", () => {
     expect(fake.getStored().evidence.changesRequestedBatches).toBe(1);
   });
 
+  test("classifies changes-requested after the final implementer activation as implementation budget", async () => {
+    const id = "review-repair-implementation-budget";
+    const taskContract = {
+      ...contract(id),
+      budget: { ...contract(id).budget, maxImplementerActivations: 1, maxReviewCycles: 1 },
+    };
+    const fake = fakeAuthority({
+      ...persistedResult("reviewed", id),
+      review: { sha, verdict: "changes_requested", summary: "repair", findings: ["repair"] },
+    });
+    const input = {
+      contract: taskContract,
+      contractHash: "review-repair-implementation-budget-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("blocked review must not rerun the check");
+        },
+        reviewWithObservation: async () => {
+          throw new Error("blocked review must not rerun the review");
+        },
+      },
+      {
+        deliver: async () => {
+          throw new Error("changes-requested review must not be delivered");
+        },
+      },
+    );
+
+    const result = await executeDeliveryRun(input, services);
+
+    expect(result).toMatchObject({
+      state: "blocked",
+      blockerClassification: "implementation_budget",
+      evidence: { implementerActivations: 1, reviewCycles: 1 },
+    });
+    expect(taskResourceFromResult(result).blocker).toEqual({
+      classification: "implementation_budget",
+    });
+    expect(result.deadlineEpochMs).toBeGreaterThan(Date.now());
+    expect(await executeDeliveryRun(input, services)).toEqual(result);
+  });
+
   test("records one repair batch when a recovered changes-requested verdict is retried", async () => {
     const id = "review-repair-after-transient-recovery";
     const taskContract = {
