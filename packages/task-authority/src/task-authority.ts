@@ -30,6 +30,7 @@ import {
   type TaskExecutionInput,
   type TaskResult,
   type TaskWaiting,
+  type TaskFailureClass,
 } from "./task-state.js";
 import { deadlineExpired } from "./remaining-until.js";
 import {
@@ -88,6 +89,16 @@ export interface TaskAuthorityOptions {
 export interface TaskListPageRequest {
   readonly cursor: string | null;
   readonly limit: number;
+}
+
+export type ReviewAttemptTakeoverStatus = "claimed" | "budget_exhausted";
+export interface ReviewAttemptReservationResult {
+  result: TaskResult;
+  claimed: boolean;
+  cycle: number | null;
+}
+export interface ReviewAttemptTakeoverResult extends ReviewAttemptReservationResult {
+  status: ReviewAttemptTakeoverStatus;
 }
 
 export class TaskCapacityError extends Error {
@@ -510,7 +521,8 @@ export class TaskAuthority {
       }
       if (isTerminalState(result.state)) continue;
       activeTaskCount += 1;
-      if (isWaitingState(result.state)) continue;
+      if (isWaitingState(result.state) && result.waiting?.reason !== "review_interruption")
+        continue;
       if (!row.rawContract || !result.repository) continue;
       restartable.push({
         result,
@@ -652,6 +664,7 @@ export class TaskAuthority {
         candidateFence: null,
         check: null,
         review: null,
+        reviewAttempt: null,
         delivery: null,
         blocker: null,
         blockerClassification: null,
@@ -737,8 +750,139 @@ export class TaskAuthority {
     return this.persistFact(observation, { type: "check", check });
   }
 
-  recordReview(observation: TaskObservation, review: ReviewVerdict): Promise<TaskResult> {
-    return this.persistFact(observation, { type: "review", review });
+  recordReview(
+    observation: TaskObservation,
+    review: ReviewVerdict,
+    ownerId: string,
+  ): Promise<TaskResult> {
+    return this.persistFact(observation, { type: "review", review, ownerId });
+  }
+
+  recordReviewInterruption(
+    observation: TaskObservation,
+    sha: string,
+    failureClass: TaskFailureClass,
+    ownerId: string,
+  ): Promise<TaskResult> {
+    return this.persistFact(observation, {
+      type: "review_interrupted",
+      sha,
+      failureClass,
+      ownerId,
+    });
+  }
+
+  releaseReviewAttempt(observation: TaskObservation, ownerId: string): Promise<TaskResult> {
+    return this.persistFact(observation, { type: "review_released", ownerId });
+  }
+
+  async reserveReviewAttempt(
+    taskId: string,
+    budget: number,
+    ownerId: string,
+  ): Promise<ReviewAttemptReservationResult> {
+    const reserve = async (database: AuthorityDatabase) => {
+      const current = await TaskAuthority.currentTask(database, taskId);
+      if (!current) throw new Error("task is not admitted");
+      const prior = decodePersistedTaskResult(current.result);
+      if (prior.state === "reviewing")
+        return { result: prior, claimed: false, cycle: null, events: [] };
+      if (
+        prior.state !== "checked" &&
+        !(prior.state === "waiting" && prior.waiting?.reason === "review_interruption")
+      )
+        throw new Error("task is not ready for a review attempt");
+      const cycle = prior.evidence.reviewCycles + 1;
+      if (cycle > budget) throw new Error("review budget exhausted");
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
+      });
+      if (!lease || lease.taskId !== prior.taskId)
+        throw new Error("repository writer lease is stale");
+      const next = applyTaskFact(prior, {
+        type: "review_started",
+        ownerId,
+      });
+      const saved: TaskResult = {
+        ...next,
+        revision: prior.revision + 1,
+        deadlineEpochMs: prior.deadlineEpochMs,
+      };
+      await database
+        .update(taskRuns)
+        .set({ result: saved, updatedAt: new Date() })
+        .where(eq(taskRuns.taskId, taskId));
+      const events = await TaskAuthority.appendFactEvents(
+        database,
+        prior,
+        { type: "review_started", ownerId },
+        saved,
+      );
+      return { result: saved, claimed: true, cycle, events };
+    };
+    const reserved = await this.inTransaction(reserve);
+    this.emit(reserved.events);
+    return {
+      result: reserved.result,
+      claimed: reserved.claimed,
+      cycle: reserved.cycle,
+    };
+  }
+
+  async takeOverReviewAttempt(
+    taskId: string,
+    budget: number,
+    ownerId: string,
+  ): Promise<ReviewAttemptTakeoverResult> {
+    const takeover = async (database: AuthorityDatabase) => {
+      const current = await TaskAuthority.currentTask(database, taskId);
+      if (!current) throw new Error("task is not admitted");
+      const prior = decodePersistedTaskResult(current.result);
+      if (prior.state !== "reviewing") throw new Error("task is not reviewing");
+      const lease = await database.query.repositoryLeases.findFirst({
+        where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
+      });
+      if (!lease || lease.taskId !== prior.taskId)
+        throw new Error("repository writer lease is stale");
+      const cycle = prior.evidence.reviewCycles + 1;
+      if (cycle > budget)
+        return {
+          result: prior,
+          claimed: false,
+          cycle: null,
+          status: "budget_exhausted" as const,
+          events: [] as TaskEvent[],
+        };
+      const next = applyTaskFact(prior, {
+        type: "review_started",
+        ownerId,
+        takeover: true,
+      });
+      const saved: TaskResult = {
+        ...next,
+        revision: prior.revision + 1,
+        deadlineEpochMs: prior.deadlineEpochMs,
+      };
+      await database
+        .update(taskRuns)
+        .set({ result: saved, updatedAt: new Date() })
+        .where(eq(taskRuns.taskId, taskId));
+      const events = await TaskAuthority.appendFactEvents(
+        database,
+        prior,
+        { type: "review_started", ownerId, takeover: true },
+        saved,
+      );
+      return { result: saved, claimed: true, cycle, status: "claimed" as const, events };
+    };
+    const recovered = await this.inTransaction(takeover);
+    this.emit(recovered.events);
+    return {
+      result: recovered.result,
+      claimed: recovered.claimed,
+      cycle: recovered.cycle,
+      status: recovered.status,
+    };
   }
 
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult> {
@@ -831,6 +975,8 @@ export class TaskAuthority {
       if (!current) throw new Error("task is not admitted");
       const prior = decodePersistedTaskResult(current.result);
       if (!isWaitingState(prior.state) || !prior.waiting)
+        throw new TaskRetryConflictError("task_not_waiting", prior.state);
+      if (prior.waiting.reason === "review_interruption")
         throw new TaskRetryConflictError("task_not_waiting", prior.state);
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
@@ -1025,8 +1171,40 @@ function factEvent(
         data: {
           type: "review_completed",
           sha: fact.review.sha,
-          cycle: Math.max(1, prior.evidence.reviewCycles + 1),
+          cycle: Math.max(1, prior.evidence.reviewCycles),
           verdict: fact.review.verdict,
+          ...(fact.review.failureClass ? { failureClass: fact.review.failureClass } : {}),
+        },
+      };
+    case "review_started":
+      return {
+        eventId: `review-started:${prior.revision}`,
+        occurredAtEpochMs,
+        data: {
+          type: "review_started",
+          sha: prior.candidateSha!,
+          cycle: Math.max(1, prior.evidence.reviewCycles + 1),
+        },
+      };
+    case "review_released":
+      return {
+        eventId: `review-released:${prior.revision}`,
+        occurredAtEpochMs,
+        data: {
+          type: "review_released",
+          sha: prior.candidateSha!,
+          cycle: Math.max(1, prior.evidence.reviewCycles),
+        },
+      };
+    case "review_interrupted":
+      return {
+        eventId: `review:${prior.revision}`,
+        occurredAtEpochMs,
+        data: {
+          type: "review_interrupted",
+          sha: fact.sha,
+          cycle: Math.max(1, prior.evidence.reviewCycles),
+          failureClass: fact.failureClass,
         },
       };
     case "delivery":
@@ -1060,6 +1238,7 @@ function factEvent(
           type: "task_waiting",
           reason: fact.waiting.reason,
           activation: fact.waiting.activation,
+          ...(fact.waiting.failureClass ? { failureClass: fact.waiting.failureClass } : {}),
         },
       };
     case "retry":

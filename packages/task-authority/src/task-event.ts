@@ -210,10 +210,27 @@ const eventData = Schema.Union([
     exitCode: Schema.Int,
   }),
   Schema.Struct({
+    type: Schema.Literal("review_started"),
+    sha: exactSha,
+    cycle: Schema.Natural,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("review_interrupted"),
+    sha: exactSha,
+    cycle: Schema.Natural,
+    failureClass: Schema.Literals(TASK_FAILURE_CLASSES),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("review_released"),
+    sha: exactSha,
+    cycle: Schema.Natural,
+  }),
+  Schema.Struct({
     type: Schema.Literal("review_completed"),
     sha: exactSha,
     cycle: Schema.Natural,
     verdict: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
+    failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
   }),
   Schema.Struct({ type: Schema.Literal("repair_batch_recorded"), cycle: Schema.Natural }),
   Schema.Struct({
@@ -232,8 +249,13 @@ const eventData = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("task_waiting"),
-    reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
+    reason: Schema.Literals([
+      "network_interruption",
+      "delivery_reconciliation",
+      "review_interruption",
+    ]),
     activation: Schema.Natural,
+    failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
   }),
   Schema.Struct({
     type: Schema.Literal("task_retry_accepted"),

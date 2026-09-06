@@ -2,6 +2,10 @@ import { Schema } from "effect";
 import {
   TASK_BLOCKER_CLASSIFICATIONS,
   TASK_FAILURE_CLASSES,
+  PUBLIC_TASK_STATES,
+  PUBLIC_TASK_WAITING_REASONS,
+  publicTaskRetryableFromResult,
+  publicTaskStateFromResult,
   type TaskBlockerClassification,
   type TaskResult,
 } from "./task-state.js";
@@ -28,16 +32,18 @@ export function isTaskStateQuarantinedError(error: unknown): error is TaskStateQ
 }
 
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
-const taskState = Schema.Literals([
+const persistedTaskState = Schema.Literals([
   "admitted",
   "waiting",
   "candidate",
   "checked",
+  "reviewing",
   "reviewed",
   "reviewed_pr",
   "merged",
   "blocked",
 ]);
+const publicTaskState = Schema.Literals(PUBLIC_TASK_STATES);
 const checkResult = Schema.Struct({
   sha: exactSha,
   status: Schema.Literals(["passed", "failed"]),
@@ -84,17 +90,23 @@ const repositorySnapshot = Schema.Struct({
   gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
 });
 const taskWaiting = Schema.Struct({
-  reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
-  resumeState: Schema.Literals(["admitted", "checked", "reviewed"]),
+  reason: Schema.Literals([
+    "network_interruption",
+    "delivery_reconciliation",
+    "review_interruption",
+  ]),
+  resumeState: Schema.Literals(["admitted", "checked", "reviewed", "reviewing"]),
   activation: Schema.Natural,
+  failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
 });
+const publicTaskWaitingReason = Schema.Literals(PUBLIC_TASK_WAITING_REASONS);
 const taskBlockerClassification = Schema.Literals(TASK_BLOCKER_CLASSIFICATIONS);
 const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
-  state: taskState,
+  state: persistedTaskState,
   campaign: Schema.optional(
     Schema.Struct({
       campaignId: Schema.String,
@@ -108,6 +120,7 @@ const taskResultFields = {
   candidateFence: Schema.NullOr(Schema.Natural),
   check: Schema.NullOr(checkResult),
   review: Schema.NullOr(reviewVerdict),
+  reviewAttempt: Schema.optional(Schema.NullOr(Schema.Struct({ ownerId: Schema.String }))),
   delivery: Schema.NullOr(deliveryEffect),
   blocker: Schema.NullOr(Schema.String),
   blockerClassification: Schema.NullOr(taskBlockerClassification),
@@ -172,7 +185,7 @@ export const taskListItemSchema = Schema.Struct({
   taskId: Schema.String,
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
-  state: taskState,
+  state: publicTaskState,
   candidateSha: Schema.NullOr(exactSha),
   activeActivation: Schema.NullOr(Schema.Natural),
   retryable: Schema.Boolean,
@@ -207,7 +220,7 @@ const publicBlockerDiagnostic = Schema.Struct({
   classification: taskBlockerClassification,
 });
 const publicTaskWaiting = Schema.Struct({
-  reason: Schema.Literals(["network_interruption", "delivery_reconciliation"]),
+  reason: publicTaskWaitingReason,
 });
 const publicTaskRepository = Schema.Struct({
   id: Schema.String,
@@ -221,7 +234,7 @@ export const taskResourceSchema = Schema.Struct({
   contractHash: Schema.String,
   revision: Schema.Natural,
   deadlineEpochMs: Schema.Int,
-  state: taskState,
+  state: publicTaskState,
   campaign: Schema.optional(
     Schema.Struct({
       campaignId: Schema.String,
@@ -335,6 +348,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
           ...(decoded.review.failureClass ? { failureClass: decoded.review.failureClass } : {}),
         }
       : null,
+    reviewAttempt: "reviewAttempt" in decoded ? (decoded.reviewAttempt ?? null) : null,
     delivery: decoded.delivery
       ? {
           sha: decoded.delivery.sha,
@@ -395,10 +409,10 @@ export function taskListItemFromResult(result: TaskResult): TaskListItem {
     taskId: result.taskId,
     revision: result.revision,
     deadlineEpochMs: result.deadlineEpochMs,
-    state: result.state,
+    state: publicTaskStateFromResult(result),
     candidateSha: result.candidateSha,
     activeActivation: result.activeActivation,
-    retryable: result.waiting != null,
+    retryable: publicTaskRetryableFromResult(result),
     writer: { repositoryIdentity: result.writer.repositoryIdentity },
     evidence: { ...result.evidence },
   };

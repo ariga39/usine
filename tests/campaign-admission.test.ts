@@ -14,6 +14,7 @@ import {
   type TaskResult,
 } from "@usine/task-authority";
 import {
+  campaignEvidence,
   getCampaign,
   handoffCampaign,
   proposeCampaign,
@@ -21,6 +22,8 @@ import {
   registerRepository,
   retryTask,
   serverSnapshot,
+  taskEvidence,
+  taskEvents,
   taskStatus,
 } from "../apps/cli/src/server-client.js";
 
@@ -230,13 +233,19 @@ async function acceptCampaignTask(
     { taskId: result.taskId, revision: activation.result.revision },
     { sha, baseSha: contract.baseSha, fence: activation.activation },
   );
-  const checked = await authority.recordCheck(
+  await authority.recordCheck(
     { taskId: result.taskId, revision: candidate.revision },
     { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
   );
+  const reviewAttempt = await authority.reserveReviewAttempt(
+    result.taskId,
+    contract.budget.maxReviewCycles,
+    "campaign-fixture-reviewer",
+  );
   const reviewed = await authority.recordReview(
-    { taskId: result.taskId, revision: checked.revision },
+    { taskId: result.taskId, revision: reviewAttempt.result.revision },
     { sha, verdict: "approved", summary: "fixture approved", findings: [] },
+    "campaign-fixture-reviewer",
   );
   return authority.recordDelivery(
     { taskId: result.taskId, revision: reviewed.revision },
@@ -275,13 +284,19 @@ async function reviewCampaignTask(
     { taskId: result.taskId, revision: activation.result.revision },
     { sha, baseSha: contract.baseSha, fence: activation.activation },
   );
-  const checked = await authority.recordCheck(
+  await authority.recordCheck(
     { taskId: result.taskId, revision: candidate.revision },
     { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
   );
+  const reviewAttempt = await authority.reserveReviewAttempt(
+    result.taskId,
+    contract.budget.maxReviewCycles,
+    "campaign-fixture-reviewer",
+  );
   return authority.recordReview(
-    { taskId: result.taskId, revision: checked.revision },
+    { taskId: result.taskId, revision: reviewAttempt.result.revision },
     { sha, verdict: "approved", summary: "fixture approved", findings: [] },
+    "campaign-fixture-reviewer",
   );
 }
 
@@ -2049,6 +2064,282 @@ describe("durable Ready frontier", () => {
       await server.close();
     }
   });
+
+  test("recovers a handed-off Campaign after a durable reviewer interruption and restart", async () => {
+    let executions = 0;
+    let interrupted!: () => void;
+    const reviewerInterrupted = new Promise<void>((resolve) => {
+      interrupted = resolve;
+    });
+    const campaignGoal = oneOutcomeFrontierGoal("campaign-repository");
+    const fixtureValue = await frontierFixture(
+      {
+        ...campaignGoal,
+        budget: { ...campaignGoal.budget, maxReviewCycles: 2 },
+      },
+      "user:campaign-366",
+      async (context) => {
+        executions += 1;
+        if (executions !== 1) throw new Error("the first server must own the crash fixture");
+        const { authority, contract, result } = context;
+        const activation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        const repositoryPath = result.repository?.path;
+        if (!repositoryPath) throw new Error("review recovery fixture has no repository snapshot");
+        const candidateSha = (
+          await execa("git", ["-C", repositoryPath, "rev-parse", "HEAD"], {
+            cwd: repositoryPath,
+          })
+        ).stdout.trim();
+        const candidate = await authority.recordCandidate(
+          { taskId: result.taskId, revision: activation.result.revision },
+          { sha: candidateSha, baseSha: contract.baseSha, fence: activation.activation },
+        );
+        await authority.recordCheck(
+          { taskId: result.taskId, revision: candidate.revision },
+          {
+            sha: candidateSha,
+            status: "passed",
+            command: "true",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        );
+        const reserved = await authority.reserveReviewAttempt(
+          result.taskId,
+          contract.budget.maxReviewCycles,
+          context.executionOwnerId,
+        );
+        const sessionId = `${result.taskId}-review-interrupted`;
+        await authority.appendObservation(result.taskId, {
+          eventId: `${sessionId}:started`,
+          occurredAtEpochMs: Date.now(),
+          data: {
+            type: "coding_session_started",
+            role: "reviewer",
+            activation: 0,
+            reviewCycle: reserved.cycle!,
+            sessionId,
+            requestedProfile: "reviewer-profile",
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${sessionId}:interrupted`,
+          occurredAtEpochMs: Date.now(),
+          data: {
+            type: "coding_session_interrupted",
+            role: "reviewer",
+            activation: 0,
+            sessionId,
+            phase: "turn",
+            failureClass: "transient_transport",
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${sessionId}:completed`,
+          occurredAtEpochMs: Date.now(),
+          data: {
+            type: "coding_session_completed",
+            role: "reviewer",
+            activation: 0,
+            reviewCycle: reserved.cycle!,
+            outcome: "failed",
+            sessionId,
+            requestedProfile: "reviewer-profile",
+          },
+        });
+        const waiting = await authority.recordReviewInterruption(
+          { taskId: result.taskId, revision: reserved.result.revision },
+          candidateSha,
+          "transient_transport",
+          context.executionOwnerId,
+        );
+        expect(waiting.review).toBeNull();
+        interrupted();
+        await new Promise<void>((resolve) =>
+          context.signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        return waiting;
+      },
+    );
+    const { contractPath, environment, server } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const proposal = frontierProposal(
+        "review-recovery",
+        "outcome-one",
+        [],
+        false,
+        "campaign-repository",
+        1,
+      );
+      await proposeCampaign(server.url, published.campaignId, {
+        ...proposal,
+        budget: { ...proposal.budget, maxReviewCycles: 2 },
+      });
+      await handoffCampaign(server.url, published.campaignId);
+      await reviewerInterrupted;
+
+      const handedOff = await getCampaign(server.url, published.campaignId);
+      const taskId = handedOff?.proposals?.[0]?.ready?.taskId;
+      expect(taskId).toBe("campaign-campaign-366-v1-review-recovery");
+      await expect(taskStatus(server.url, taskId!)).resolves.toMatchObject({
+        state: "checked",
+        candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/),
+        check: { status: "passed" },
+        review: null,
+        waiting: null,
+        retryable: false,
+      });
+      expect(handedOff?.proposals).toHaveLength(1);
+      await server.close();
+
+      const restarted = await startUsineServer({
+        environment,
+        execute: async (context) => {
+          const repository = context.result.repository;
+          if (!repository) throw new Error("review recovery restart has no repository snapshot");
+          const contract = resolveTaskContract(context.contract, repository);
+          const services: DeliveryRunServices = {
+            authority: context.authority,
+            workspace: {
+              quarantinePriorWriters: async () => undefined,
+              prepareWriter: async (workspaceTaskId, activation, baseSha) => ({
+                taskId: workspaceTaskId,
+                activation,
+                path: repository.path,
+                baseSha,
+              }),
+              freeze: async () => {
+                throw new Error("replacement reviewer must not freeze a Candidate");
+              },
+              quarantine: async () => undefined,
+            },
+            session: {
+              run: async () => {
+                throw new Error("replacement reviewer must not run an implementer");
+              },
+            },
+            quality: {
+              check: async () => {
+                throw new Error("replacement reviewer must not rerun the project check");
+              },
+              reviewWithObservation: async (_contract, candidateSha, check, cycle) => {
+                expect(cycle).toBe(2);
+                expect(check).toMatchObject({ sha: candidateSha, status: "passed" });
+                return {
+                  review: {
+                    sha: candidateSha,
+                    verdict: "approved" as const,
+                    summary: "replacement approved",
+                    findings: [],
+                  },
+                  usage: null,
+                };
+              },
+            },
+            forge: {
+              deliver: async (_contract, candidateSha, check, review) => {
+                expect(check.sha).toBe(candidateSha);
+                expect(review).toMatchObject({ sha: candidateSha, verdict: "approved" });
+                return {
+                  sha: candidateSha,
+                  effect: "github" as const,
+                  prNumber: 400,
+                  url: "https://example.invalid/pull/400",
+                  attestationId: "campaign-400-replacement",
+                };
+              },
+            },
+          };
+          return executeDeliveryRun(
+            {
+              contract,
+              contractHash: context.result.contractHash,
+              repositoryIdentity: context.result.writer.repositoryIdentity,
+              deadlineEpochMs: context.result.deadlineEpochMs,
+              implementer: context.policy.roles.implementer,
+              reviewer: context.policy.roles.reviewer,
+              executionOwnerId: context.executionOwnerId,
+            },
+            services,
+          );
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        let completed = false;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const task = await taskStatus(restarted.url, taskId!);
+          completed = task?.state === "reviewed_pr";
+          if (completed) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(completed).toBe(true);
+        const events = (await taskEvents(restarted.url, taskId!)).events;
+        expect(events.filter((event) => event.data.type === "review_started")).toHaveLength(2);
+        expect(events.filter((event) => event.data.type === "review_interrupted")).toHaveLength(1);
+        expect(events.filter((event) => event.data.type === "review_completed")).toHaveLength(1);
+        const sessionIds = events
+          .filter(
+            (event) =>
+              event.data.type === "coding_session_started" && event.data.role === "reviewer",
+          )
+          .map((event) =>
+            event.data.type === "coding_session_started" ? event.data.sessionId : "",
+          );
+        expect(new Set(sessionIds).size).toBe(2);
+        const completedTask = await taskStatus(restarted.url, taskId!);
+        const taskEvidenceResult = await taskEvidence(restarted.url, taskId!);
+        expect(taskEvidenceResult?.roleRuns.reviewer).toHaveLength(2);
+        expect(taskEvidenceResult?.roleRuns.reviewer.map((run) => run.outcome.status)).toEqual([
+          "failed",
+          "succeeded",
+        ]);
+        expect(
+          taskEvidenceResult?.roleRuns.reviewer.map((run) => run.outcome.candidateSha),
+        ).toEqual([completedTask?.candidateSha, completedTask?.candidateSha]);
+        let publicCampaignEvidence = await campaignEvidence(restarted.url, published.campaignId);
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if (publicCampaignEvidence?.runs.filter((run) => run.role === "reviewer").length === 2)
+            break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          publicCampaignEvidence = await campaignEvidence(restarted.url, published.campaignId);
+        }
+        expect(publicCampaignEvidence?.runs.filter((run) => run.role === "reviewer")).toEqual([
+          expect.objectContaining({ outcome: "failed", reviewCycle: 1 }),
+          expect.objectContaining({ outcome: "succeeded", reviewCycle: 2 }),
+        ]);
+        const completedCampaign = await getCampaign(restarted.url, published.campaignId);
+        expect(completedCampaign).toMatchObject({
+          campaignId: published.campaignId,
+          status: "accepted",
+          proposals: [
+            {
+              proposalId: "review-recovery",
+              status: "ready",
+              ready: { taskId },
+            },
+          ],
+          outcomes: [
+            {
+              id: "outcome-one",
+              status: "accepted",
+              evidence: { outcomeId: "outcome-one", taskId },
+            },
+          ],
+        });
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  }, 30_000);
 
   test("runs the fixed handoff through every Outcome and accepts only accepted Task delivery", async () => {
     let executions = 0;

@@ -631,6 +631,7 @@ export async function executeAdmittedTask(
   suppliedPolicy: RuntimePolicy,
   signal?: AbortSignal,
   onEvent?: (event: TaskEvent) => void,
+  executionOwnerId?: string,
 ): Promise<TaskResult> {
   if (signal?.aborted) throw new Error("task execution was aborted");
   const policy = suppliedPolicy;
@@ -644,7 +645,11 @@ export async function executeAdmittedTask(
   try {
     const existing = await authority.lookup(contract.id);
     if (!existing) throw new Error("task is not admitted");
-    if (isTerminalState(existing.state) || isWaitingState(existing.state)) return existing;
+    if (
+      isTerminalState(existing.state) ||
+      (isWaitingState(existing.state) && existing.waiting?.reason !== "review_interruption")
+    )
+      return existing;
     if (hashTaskContract(input.rawContract) !== existing.contractHash)
       throw new Error("persisted task contract bytes do not match admission");
     if (!existing.repository) throw new Error("admitted task has no repository snapshot");
@@ -678,6 +683,7 @@ export async function executeAdmittedTask(
       authority,
       deadlineEpochMs: existing.deadlineEpochMs,
       signal,
+      executionOwnerId,
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -707,6 +713,7 @@ async function executeWithServices(options: {
   authority: TaskAuthority;
   deadlineEpochMs: number;
   signal?: AbortSignal;
+  executionOwnerId?: string;
 }): Promise<TaskResult> {
   const {
     contract,
@@ -718,6 +725,7 @@ async function executeWithServices(options: {
     forgePolicy,
     authority,
     deadlineEpochMs,
+    executionOwnerId,
   } = options;
   const workspace = new CandidateWorkspace({
     repository,
@@ -796,6 +804,7 @@ async function executeWithServices(options: {
     implementer: policy.roles.implementer,
     reviewer: policy.roles.reviewer,
     signal: options.signal,
+    executionOwnerId,
   };
   try {
     return await executeDeliveryRun(workflowInput, {

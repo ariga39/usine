@@ -1,8 +1,13 @@
+import { Schema } from "effect";
 import { describe, expect, test } from "vite-plus/test";
 import {
   applyTaskFact,
   canTransition,
   TASK_BLOCKER_CLASSIFICATIONS,
+  taskListItemFromResult,
+  taskListPageSchema,
+  taskResourceFromResult,
+  taskResourceSchema,
   taskFailureClassFromProvider,
   type TaskResult,
 } from "@usine/task-authority";
@@ -68,6 +73,7 @@ describe("Task Authority module contract", () => {
             findings: [],
             failureClass: "unknown",
           },
+          ownerId: "owner-a",
         }),
       ).toThrow("failure class requires an inconclusive verdict");
     },
@@ -82,6 +88,117 @@ describe("Task Authority module contract", () => {
     expect(canTransition("admitted", "waiting")).toBe(true);
     expect(canTransition("reviewed_pr", "candidate")).toBe(false);
     expect(canTransition("reviewed", "merged")).toBe(true);
+  });
+
+  test("durably fences one interrupted review before its fresh replacement", () => {
+    const started = applyTaskFact(checkedTask(), { type: "review_started", ownerId: "owner-a" });
+    expect(started).toMatchObject({
+      state: "reviewing",
+      candidateSha: sha,
+      check: { sha },
+      reviewAttempt: { ownerId: "owner-a" },
+      evidence: { reviewCycles: 1 },
+    });
+
+    const interrupted = applyTaskFact(started, {
+      type: "review_interrupted",
+      sha,
+      failureClass: "transient_transport",
+      ownerId: "owner-a",
+    });
+    expect(interrupted).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "review_interruption",
+        resumeState: "reviewing",
+        failureClass: "transient_transport",
+      },
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+      review: null,
+      evidence: { reviewCycles: 1 },
+    });
+    expect(() =>
+      applyTaskFact(
+        {
+          ...interrupted,
+          waiting: { ...interrupted.waiting!, activation: 2 },
+        },
+        { type: "review_started", ownerId: "owner-b" },
+      ),
+    ).toThrow("stale or unchecked candidate");
+
+    const replacement = applyTaskFact(interrupted, {
+      type: "review_started",
+      ownerId: "owner-b",
+    });
+    expect(replacement).toMatchObject({
+      state: "reviewing",
+      waiting: null,
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+      review: null,
+    });
+    expect(() =>
+      applyTaskFact(started, {
+        type: "review_interrupted",
+        sha: "b".repeat(40),
+        failureClass: "transient_transport",
+        ownerId: "owner-a",
+      }),
+    ).toThrow("stale or unchecked candidate");
+    expect(() =>
+      applyTaskFact(started, {
+        type: "review",
+        review: { sha, verdict: "approved", summary: "stale owner", findings: [] },
+        ownerId: "owner-b",
+      }),
+    ).toThrow("not owned");
+  });
+
+  test("keeps internal reviewer recovery out of public schema-v3 Task projections", () => {
+    const started = applyTaskFact(checkedTask(), { type: "review_started", ownerId: "owner-a" });
+    const interrupted = applyTaskFact(started, {
+      type: "review_interrupted",
+      sha,
+      failureClass: "transient_transport",
+      ownerId: "owner-a",
+    });
+
+    for (const internal of [started, interrupted]) {
+      const resource = taskResourceFromResult(internal);
+      const encodedResource = Schema.encodeUnknownSync(taskResourceSchema)(resource);
+      const decodedResource = Schema.decodeUnknownSync(taskResourceSchema)(encodedResource);
+      const listItem = taskListItemFromResult(internal);
+      const encodedList = Schema.encodeUnknownSync(taskListPageSchema)({
+        tasks: [listItem],
+        cursor: null,
+        nextCursor: null,
+      });
+      const decodedList = Schema.decodeUnknownSync(taskListPageSchema)(encodedList);
+
+      expect(encodedResource).toMatchObject({
+        schemaVersion: 3,
+        state: "checked",
+        waiting: null,
+        retryable: false,
+      });
+      expect(encodedList.tasks[0]).toMatchObject({ state: "checked", retryable: false });
+      expect(JSON.stringify({ encodedResource, encodedList })).not.toMatch(
+        /reviewing|review_interruption/,
+      );
+      expect(decodedResource.state).toBe("checked");
+      expect(decodedList.tasks[0]?.state).toBe("checked");
+      expect(() =>
+        Schema.decodeUnknownSync(taskResourceSchema)({ ...encodedResource, state: "reviewing" }),
+      ).toThrow();
+      expect(() =>
+        Schema.decodeUnknownSync(taskResourceSchema)({
+          ...encodedResource,
+          waiting: { reason: "review_interruption" },
+        }),
+      ).toThrow();
+    }
   });
 
   test("makes a turn network interruption waiting until an explicit retry fact", () => {

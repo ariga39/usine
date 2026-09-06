@@ -181,18 +181,19 @@ async function fixture(
           return checked;
         }
         if (mode.failureClass === "cancellation") throw new Error("cancellation must not block");
-        const reviewed = await authority.recordReview(
-          { taskId: result.taskId, revision: checked.revision },
-          {
-            sha: candidateSha,
-            verdict: "inconclusive",
-            summary: "private provider diagnostic",
-            findings: [],
-            failureClass: mode.failureClass,
-          },
+        const reviewAttempt = await authority.reserveReviewAttempt(
+          result.taskId,
+          contract.budget.maxReviewCycles,
+          "campaign-evidence-reviewer",
+        );
+        const interrupted = await authority.recordReviewInterruption(
+          { taskId: result.taskId, revision: reviewAttempt.result.revision },
+          candidateSha,
+          mode.failureClass,
+          "campaign-evidence-reviewer",
         );
         const blocked = await authority.block(
-          { taskId: result.taskId, revision: reviewed.revision },
+          { taskId: result.taskId, revision: interrupted.revision },
           "private provider diagnostic",
           mode.failureClass,
         );
@@ -338,18 +339,24 @@ async function fixture(
         { taskId: result.taskId, revision: reserved.result.revision },
         { sha: firstSha, baseSha: contract.baseSha, fence: reserved.activation },
       );
-      const checked = await authority.recordCheck(
+      await authority.recordCheck(
         { taskId: result.taskId, revision: candidate.revision },
         { sha: firstSha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
       );
+      const reviewAttempt = await authority.reserveReviewAttempt(
+        result.taskId,
+        contract.budget.maxReviewCycles,
+        "campaign-evidence-reviewer",
+      );
       const reviewed = await authority.recordReview(
-        { taskId: result.taskId, revision: checked.revision },
+        { taskId: result.taskId, revision: reviewAttempt.result.revision },
         {
           sha: firstSha,
           verdict: index === 0 ? "changes_requested" : "approved",
           summary: "fixture review",
           findings: index === 0 ? ["repair"] : [],
         },
+        "campaign-evidence-reviewer",
       );
       let final = reviewed;
       if (index === 0) {
@@ -362,7 +369,7 @@ async function fixture(
           { taskId: result.taskId, revision: repaired.result.revision },
           { sha: "f".repeat(40), baseSha: firstSha, fence: repaired.activation },
         );
-        const repairedCheck = await authority.recordCheck(
+        await authority.recordCheck(
           { taskId: result.taskId, revision: repairedCandidate.revision },
           {
             sha: "f".repeat(40),
@@ -373,9 +380,15 @@ async function fixture(
             stderr: "",
           },
         );
+        const repairedReviewAttempt = await authority.reserveReviewAttempt(
+          result.taskId,
+          contract.budget.maxReviewCycles,
+          "campaign-evidence-reviewer",
+        );
         final = await authority.recordReview(
-          { taskId: result.taskId, revision: repairedCheck.revision },
+          { taskId: result.taskId, revision: repairedReviewAttempt.result.revision },
           { sha: "f".repeat(40), verdict: "approved", summary: "repaired", findings: [] },
+          "campaign-evidence-reviewer",
         );
       }
       const delivered = await authority.recordDelivery(
@@ -595,10 +608,20 @@ test.each([
         }),
       }),
     );
+    if (outcome === "failed") {
+      expect(history.events).toContainEqual(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: "review_interrupted",
+            failureClass,
+          }),
+        }),
+      );
+      expect(history.events.some((event) => event.data.type === "review_completed")).toBe(false);
+    }
     const evidence = await taskEvidence(server.url, taskId!);
     expect(evidence?.roleRuns.reviewer[0]?.effort.failureClass).toBe(failureClass);
-    if (outcome === "cancelled") expect(evidence?.task.review).toBeNull();
-    else expect(evidence?.task.review).toMatchObject({ failureClass });
+    expect(evidence?.task.review).toBeNull();
 
     const campaign = await getCampaign(server.url, published.campaignId);
     const postHog = campaignEvidenceToPostHogEvents(campaign!, persisted!, "deployment-test");

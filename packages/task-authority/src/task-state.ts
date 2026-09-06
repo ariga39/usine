@@ -7,10 +7,23 @@ export type TaskState =
   | "waiting"
   | "candidate"
   | "checked"
+  | "reviewing"
   | "reviewed"
   | "reviewed_pr"
   | "merged"
   | "blocked";
+
+export const PUBLIC_TASK_STATES = [
+  "admitted",
+  "waiting",
+  "candidate",
+  "checked",
+  "reviewed",
+  "reviewed_pr",
+  "merged",
+  "blocked",
+] as const;
+export type PublicTaskState = (typeof PUBLIC_TASK_STATES)[number];
 
 export interface CheckResult {
   sha: string;
@@ -28,6 +41,10 @@ export interface ReviewVerdict {
   findings: string[];
   /** Sanitized provider interruption evidence, when review did not complete. */
   failureClass?: TaskFailureClass;
+}
+
+export interface ReviewAttemptReservation {
+  ownerId: string;
 }
 
 export interface DeliveryEffect {
@@ -64,6 +81,8 @@ export interface TaskResult {
   candidateFence: number | null;
   check: CheckResult | null;
   review: ReviewVerdict | null;
+  /** Internal durable reviewer ownership; omitted from public Task projections. */
+  reviewAttempt?: ReviewAttemptReservation | null;
   delivery: DeliveryEffect | null;
   /** Exact coordinator diagnostic; this never crosses into public projections. */
   blocker: string | null;
@@ -89,12 +108,21 @@ export interface TaskCampaignAssociation {
   outcomeId: string;
 }
 
-export type TaskWaitingReason = "network_interruption" | "delivery_reconciliation";
-export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed";
+export type TaskWaitingReason =
+  | "network_interruption"
+  | "delivery_reconciliation"
+  | "review_interruption";
+export const PUBLIC_TASK_WAITING_REASONS = [
+  "network_interruption",
+  "delivery_reconciliation",
+] as const;
+export type PublicTaskWaitingReason = (typeof PUBLIC_TASK_WAITING_REASONS)[number];
+export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed" | "reviewing";
 export interface TaskWaiting {
   reason: TaskWaitingReason;
   resumeState: TaskWaitingResumeState;
   activation: number;
+  failureClass?: TaskFailureClass;
 }
 
 export interface TaskRepositoryResource {
@@ -177,7 +205,7 @@ export interface PublicBlockerDiagnostic {
 }
 
 export interface PublicTaskWaiting {
-  reason: TaskWaitingReason;
+  reason: PublicTaskWaitingReason;
 }
 
 export interface TaskResource {
@@ -186,7 +214,7 @@ export interface TaskResource {
   contractHash: string;
   revision: number;
   deadlineEpochMs: number;
-  state: TaskState;
+  state: PublicTaskState;
   campaign?: TaskCampaignAssociation;
   mergeAuthorized: boolean;
   candidateSha: string | null;
@@ -203,6 +231,29 @@ export interface TaskResource {
   evidence: TaskResult["evidence"];
 }
 
+export function publicTaskStateFromResult(
+  result: Pick<TaskResult, "state" | "waiting">,
+): PublicTaskState {
+  return result.state === "reviewing" || result.waiting?.reason === "review_interruption"
+    ? "checked"
+    : result.state;
+}
+
+export function publicTaskWaitingFromResult(
+  result: Pick<TaskResult, "waiting">,
+): PublicTaskWaiting | null {
+  return result.waiting && result.waiting.reason !== "review_interruption"
+    ? { reason: result.waiting.reason }
+    : null;
+}
+
+export function publicTaskRetryableFromResult(result: Pick<TaskResult, "waiting">): boolean {
+  return (
+    result.waiting?.reason === "network_interruption" ||
+    result.waiting?.reason === "delivery_reconciliation"
+  );
+}
+
 export function taskResourceFromResult(result: TaskResult): TaskResource {
   return {
     schemaVersion: 3,
@@ -210,7 +261,10 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
     contractHash: result.contractHash,
     revision: result.revision,
     deadlineEpochMs: result.deadlineEpochMs,
-    state: result.state,
+    // `reviewing` is an internal reservation state. Public schema v3 keeps
+    // exposing the existing checked projection while history carries the
+    // distinct reviewer-run evidence.
+    state: publicTaskStateFromResult(result),
     ...(result.campaign ? { campaign: { ...result.campaign } } : {}),
     mergeAuthorized: result.mergeAuthorized,
     candidateSha: result.candidateSha,
@@ -238,8 +292,8 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
         }
       : null,
     blocker: result.blockerClassification ? { classification: result.blockerClassification } : null,
-    waiting: result.waiting ? { reason: result.waiting.reason } : null,
-    retryable: result.waiting != null,
+    waiting: publicTaskWaitingFromResult(result),
+    retryable: publicTaskRetryableFromResult(result),
     activeActivation: result.activeActivation,
     writer: { ...result.writer },
     repository: result.repository
@@ -303,7 +357,19 @@ export interface TaskObservation {
 export type TaskFact =
   | { type: "candidate"; candidate: CandidateFact }
   | { type: "check"; check: CheckResult }
-  | { type: "review"; review: ReviewVerdict }
+  | { type: "review"; review: ReviewVerdict; ownerId: string }
+  | {
+      type: "review_started";
+      ownerId: string;
+      takeover?: boolean;
+    }
+  | { type: "review_released"; ownerId: string }
+  | {
+      type: "review_interrupted";
+      sha: string;
+      failureClass: TaskFailureClass;
+      ownerId: string;
+    }
   | { type: "delivery"; delivery: DeliveryEffect }
   | { type: "repair_batch" }
   | { type: "waiting"; waiting: TaskWaiting }
@@ -326,9 +392,10 @@ export interface TaskExecutionInput {
 
 const transitions: Record<TaskState, readonly TaskState[]> = {
   admitted: ["admitted", "candidate", "waiting", "blocked"],
-  waiting: ["waiting", "blocked"],
+  waiting: ["waiting", "reviewing", "blocked"],
   candidate: ["candidate", "checked", "waiting", "blocked"],
-  checked: ["checked", "candidate", "reviewed", "waiting", "blocked"],
+  checked: ["checked", "candidate", "reviewing", "reviewed", "waiting", "blocked"],
+  reviewing: ["reviewing", "checked", "reviewed", "waiting", "blocked"],
   reviewed: ["reviewed", "candidate", "reviewed_pr", "merged", "waiting", "blocked"],
   merged: ["merged"],
   reviewed_pr: ["reviewed_pr"],
@@ -382,8 +449,10 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
     case "review": {
       if (fact.review.failureClass !== undefined && fact.review.verdict !== "inconclusive")
         throw new Error("review failure class requires an inconclusive verdict");
-      if (!canTransition(result.state, "reviewed"))
-        throw new Error(`illegal task state transition: ${result.state} -> reviewed`);
+      if (result.state !== "reviewing")
+        throw new Error("review requires an owned reviewing reservation");
+      if (!result.reviewAttempt || result.reviewAttempt.ownerId !== fact.ownerId)
+        throw new Error("review attempt is not owned by this reviewer");
       if (
         !result.candidateSha ||
         !result.check ||
@@ -397,8 +466,97 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         ...result,
         state: "reviewed",
         review: fact.review,
+        reviewAttempt: null,
         delivery: null,
-        evidence: { ...result.evidence, reviewCycles: result.evidence.reviewCycles + 1 },
+      };
+    }
+    case "review_started": {
+      if (!canTransition(result.state, "reviewing"))
+        throw new Error(`illegal task state transition: ${result.state} -> reviewing`);
+      if (!fact.ownerId) throw new Error("review attempt reservation is invalid");
+      const takeover = fact.takeover === true;
+      if (takeover !== (result.state === "reviewing"))
+        throw new Error("review attempt takeover is invalid");
+      if (
+        !result.candidateSha ||
+        !result.check ||
+        result.check.status !== "passed" ||
+        result.check.sha !== result.candidateSha ||
+        (result.state === "waiting" &&
+          (result.waiting?.reason !== "review_interruption" ||
+            result.waiting.activation !== result.candidateFence)) ||
+        (!takeover && result.reviewAttempt != null)
+      )
+        throw new Error("review attempt belongs to a stale or unchecked candidate");
+      return {
+        ...result,
+        state: "reviewing",
+        waiting: null,
+        review: null,
+        reviewAttempt: { ownerId: fact.ownerId },
+        delivery: null,
+        blocker: null,
+        blockerClassification: null,
+        evidence: {
+          ...result.evidence,
+          reviewCycles: result.evidence.reviewCycles + 1,
+        },
+      };
+    }
+    case "review_released": {
+      if (!canTransition(result.state, "checked"))
+        throw new Error(`illegal task state transition: ${result.state} -> checked`);
+      if (
+        !result.candidateSha ||
+        !result.check ||
+        result.check.status !== "passed" ||
+        result.check.sha !== result.candidateSha ||
+        !result.reviewAttempt ||
+        result.reviewAttempt.ownerId !== fact.ownerId
+      )
+        throw new Error("review release belongs to a stale or unchecked candidate");
+      return {
+        ...result,
+        state: "checked",
+        waiting: null,
+        review: null,
+        reviewAttempt: null,
+        delivery: null,
+        blocker: null,
+        blockerClassification: null,
+        evidence: {
+          ...result.evidence,
+          reviewCycles: Math.max(0, result.evidence.reviewCycles - 1),
+        },
+      };
+    }
+    case "review_interrupted": {
+      if (result.state !== "reviewing")
+        throw new Error(`illegal task state transition: ${result.state} -> waiting`);
+      if (!result.reviewAttempt || result.reviewAttempt.ownerId !== fact.ownerId)
+        throw new Error("review attempt is not owned by this reviewer");
+      if (
+        !result.candidateSha ||
+        !result.check ||
+        result.check.status !== "passed" ||
+        fact.sha !== result.candidateSha ||
+        fact.sha !== result.check.sha ||
+        result.candidateFence === null
+      )
+        throw new Error("review interruption belongs to a stale or unchecked candidate");
+      requireExactSha(fact.sha);
+      return {
+        ...result,
+        state: "waiting",
+        review: null,
+        reviewAttempt: null,
+        waiting: {
+          reason: "review_interruption",
+          resumeState: "reviewing",
+          activation: result.candidateFence,
+          failureClass: fact.failureClass,
+        },
+        activeActivation: null,
       };
     }
     case "delivery": {
@@ -448,15 +606,17 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       const validActivation =
         fact.waiting.reason === "network_interruption"
           ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
-          : result.state === "reviewed" &&
-            result.activeActivation === null &&
-            result.candidateFence === fact.waiting.activation &&
-            result.candidateSha !== null &&
-            result.check?.sha === result.candidateSha &&
-            result.check.status === "passed" &&
-            result.review?.sha === result.candidateSha &&
-            result.review.verdict === "approved" &&
-            fact.waiting.activation > 0;
+          : fact.waiting.reason === "delivery_reconciliation"
+            ? result.state === "reviewed" &&
+              result.activeActivation === null &&
+              result.candidateFence === fact.waiting.activation &&
+              result.candidateSha !== null &&
+              result.check?.sha === result.candidateSha &&
+              result.check.status === "passed" &&
+              result.review?.sha === result.candidateSha &&
+              result.review.verdict === "approved" &&
+              fact.waiting.activation > 0
+            : false;
       if (
         !validActivation ||
         !Number.isSafeInteger(fact.waiting.activation) ||
@@ -488,6 +648,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         blockerClassification: fact.classification ?? classifyTaskBlocker(fact.blocker),
         waiting: null,
         activeActivation: null,
+        reviewAttempt: null,
       };
   }
   throw new Error("unknown task fact");
