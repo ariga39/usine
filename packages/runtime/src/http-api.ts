@@ -68,10 +68,16 @@ const campaignAbandonmentUnauthorizedError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(false),
 }).pipe(HttpApiSchema.status(403));
-const quarantineError = Schema.Struct({
-  taskId: Schema.String,
-  error: Schema.Literal("task_state_quarantined"),
-}).pipe(HttpApiSchema.status(503));
+const quarantineError = Schema.Union([
+  Schema.Struct({
+    taskId: Schema.String,
+    error: Schema.Literal("task_state_quarantined"),
+  }),
+  Schema.Struct({
+    campaignId: Schema.String,
+    error: Schema.Literal("campaign_state_quarantined"),
+  }),
+]).pipe(HttpApiSchema.status(503));
 const forgeError = Schema.Struct({
   code: Schema.Literals(["malformed", "unauthorized", "repository_mismatch"]),
   message: Schema.String,

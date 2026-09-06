@@ -14,11 +14,13 @@ import {
   type TaskResult,
 } from "@usine/task-authority";
 import {
+  abandonCampaign,
   campaignEvidence,
   getCampaign,
   handoffCampaign,
   proposeCampaign,
   publishCampaign,
+  recordCampaignDecisionTouch,
   registerRepository,
   retryTask,
   serverSnapshot,
@@ -949,7 +951,12 @@ describe("Campaign publication boundary", () => {
     const restarted = await start(stateDirectory);
     try {
       await expect(getCampaign(restarted.url, published.campaignId)).rejects.toMatchObject({
-        status: 500,
+        status: 503,
+        diagnostic: "campaign_state_quarantined",
+      });
+      await expect(getCampaign(restarted.url, published.campaignId)).rejects.toMatchObject({
+        status: 503,
+        diagnostic: "campaign_state_quarantined",
       });
     } finally {
       await restarted.close();
@@ -975,10 +982,123 @@ describe("Campaign publication boundary", () => {
     const restarted = await start(stateDirectory);
     try {
       await expect(getCampaign(restarted.url, published.campaignId)).rejects.toMatchObject({
-        status: 500,
+        status: 503,
+        diagnostic: "campaign_state_quarantined",
       });
     } finally {
       await restarted.close();
+    }
+  });
+
+  test.each(["status", "decision_request"] as const)(
+    "returns one typed quarantine across Campaign public paths for corrupt %s",
+    async (field) => {
+      const { stateDirectory, contractPath } = await fixture();
+      const server = await start(stateDirectory);
+      const published = await publishCampaign(server.url, { contractPath });
+      const corruptDecisionRequest = JSON.stringify({ reason: "corrupt" });
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      database
+        .prepare(`UPDATE campaigns SET ${field} = ? WHERE campaign_id = ?`)
+        .run(field === "status" ? "corrupt" : corruptDecisionRequest, published.campaignId);
+      database.close();
+
+      const proposal = {
+        proposalId: "quarantined-proposal",
+        outcomeId: "outcome-root",
+        dependsOn: [],
+        repositoryId: "campaign-repository",
+        instructions: "Do not execute this proposal.",
+        acceptance: ["The proposal remains unadmitted."],
+        nonGoals: [],
+        effects: ["github"],
+        budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+        merge: false,
+      };
+      const publicReads = [
+        () => getCampaign(server.url, published.campaignId),
+        () => campaignEvidence(server.url, published.campaignId),
+        () => proposeCampaign(server.url, published.campaignId, proposal),
+        () => handoffCampaign(server.url, published.campaignId),
+        () => abandonCampaign(server.url, published.campaignId),
+        () => recordCampaignDecisionTouch(server.url, published.campaignId, "quarantine-touch"),
+      ];
+      try {
+        for (const read of publicReads)
+          await expect(read()).rejects.toMatchObject({
+            status: 503,
+            diagnostic: "campaign_state_quarantined",
+          });
+
+        const preserved = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        const row = preserved
+          .prepare("SELECT status, decision_request FROM campaigns WHERE campaign_id = ?")
+          .get(published.campaignId) as { status: string; decision_request: string | null };
+        preserved.close();
+        expect(row.status).toBe(field === "status" ? "corrupt" : "planning");
+        expect(row.decision_request).toBe(
+          field === "decision_request" ? corruptDecisionRequest : null,
+        );
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  test("one corrupt Campaign does not block healthy Campaign reconciliation or admission", async () => {
+    const fixtureValue = await frontierFixture(
+      undefined,
+      "user:campaign-366",
+      async ({ result }) => result,
+    );
+    const { root, stateDirectory, contractPath, server } = fixtureValue;
+    try {
+      const corrupt = await publishCampaign(server.url, { contractPath });
+      const corruptDatabase = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      corruptDatabase
+        .prepare("UPDATE campaigns SET status = ? WHERE campaign_id = ?")
+        .run("corrupt", corrupt.campaignId);
+      corruptDatabase.close();
+
+      const healthyContractPath = join(root, "healthy-goal.json");
+      await writeFile(
+        healthyContractPath,
+        JSON.stringify({
+          ...frontierGoal("campaign-repository"),
+          id: "campaign-healthy",
+          authority: { ...frontierGoal("campaign-repository").authority },
+        }),
+      );
+      await execa("git", ["add", "healthy-goal.json"], { cwd: root });
+      await execa("git", ["commit", "-m", "authorize healthy goal"], { cwd: root });
+
+      const healthy = await publishCampaign(server.url, { contractPath: healthyContractPath });
+      await proposeCampaign(
+        server.url,
+        healthy.campaignId,
+        frontierProposal("healthy-proposal", "outcome-one"),
+      );
+      const handedOff = await handoffCampaign(server.url, healthy.campaignId);
+      expect(handedOff.proposals?.[0]?.ready?.taskId).toBe(
+        "campaign-campaign-healthy-v1-healthy-proposal",
+      );
+      await expect(getCampaign(server.url, healthy.campaignId)).resolves.toMatchObject({
+        campaignId: healthy.campaignId,
+        planHandedOff: true,
+      });
+
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      const corruptRow = database
+        .prepare("SELECT status FROM campaigns WHERE campaign_id = ?")
+        .get(corrupt.campaignId) as { status: string };
+      const healthyProposal = database
+        .prepare("SELECT task_id FROM campaign_proposals WHERE campaign_id = ?")
+        .get(healthy.campaignId) as { task_id: string | null };
+      database.close();
+      expect(corruptRow.status).toBe("corrupt");
+      expect(healthyProposal.task_id).toBe("campaign-campaign-healthy-v1-healthy-proposal");
+    } finally {
+      await server.close();
     }
   });
 });

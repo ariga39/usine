@@ -575,6 +575,8 @@ function statusForCode(code: string | undefined): number {
       return 409;
     case "task_state_quarantined":
       return 503;
+    case "campaign_state_quarantined":
+      return 503;
     default:
       return 500;
   }

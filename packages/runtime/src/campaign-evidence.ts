@@ -20,7 +20,10 @@ import {
   type UsageInvocation,
 } from "@usine/task-authority";
 import { Schema } from "effect";
+import { eq } from "drizzle-orm";
 import { resolve } from "node:path";
+import { campaigns } from "@usine/task-authority";
+import { decodeCampaignState } from "./campaign.js";
 
 export {
   CampaignEvidenceCursorError,
@@ -45,6 +48,10 @@ export async function lookupCampaignEvidence(
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
+    const campaign = await handle.database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (campaign) decodeCampaignState(campaign);
     const authority = new TaskAuthority(handle.database);
     const requested = await authority.listCampaignEvidenceSources(campaignId, request);
     if (!requested) return null;
