@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { resolve } from "node:path";
 import { listCampaignIds, lookupCampaign } from "./campaign.js";
 import { lookupCampaignEvidence, MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE } from "./campaign-evidence.js";
+import { openSqliteDatabase, posthogCaptureAcknowledgements } from "@usine/task-authority";
 import type {
   CampaignAcceptedDelivery,
   CampaignEvidencePage,
@@ -32,6 +35,8 @@ export interface PostHogCaptureConfig {
   readonly deployment: string;
 }
 export type PostHogFetch = typeof fetch;
+
+const captureQueues = new Map<string, Promise<void>>();
 
 export function postHogConfigFromEnvironment(
   environment: NodeJS.ProcessEnv,
@@ -125,19 +130,25 @@ export async function captureCampaignEvidence(
 ): Promise<void> {
   const config = postHogConfigFromEnvironment(environment);
   if (!config) return;
-  const campaign = await lookupCampaign(stateDirectory, campaignId);
-  let evidence = await lookupCampaignEvidence(stateDirectory, campaignId);
-  if (!campaign || !evidence) return;
-  const events: PostHogEvent[] = [];
-  while (evidence) {
-    events.push(...campaignEvidenceToPostHogEvents(campaign, evidence, config.deployment));
-    if (evidence.nextCursor === null) break;
-    evidence = await lookupCampaignEvidence(stateDirectory, campaignId, {
-      cursor: evidence.nextCursor,
-      limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
-    });
-  }
-  await sendPostHogEvents(config, events, fetchImplementation);
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  return enqueueCapture(databasePath, async () => {
+    const campaign = await lookupCampaign(stateDirectory, campaignId);
+    let evidence = await lookupCampaignEvidence(stateDirectory, campaignId);
+    if (!campaign || !evidence) return;
+    const events: PostHogEvent[] = [];
+    while (evidence) {
+      events.push(...campaignEvidenceToPostHogEvents(campaign, evidence, config.deployment));
+      if (evidence.nextCursor === null) break;
+      evidence = await lookupCampaignEvidence(stateDirectory, campaignId, {
+        cursor: evidence.nextCursor,
+        limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
+      });
+    }
+    const pending = await unacknowledgedEvents(databasePath, config.deployment, events);
+    if (pending.length === 0) return;
+    await sendPostHogEvents(config, pending, fetchImplementation);
+    await acknowledgeEvents(databasePath, config.deployment, pending);
+  });
 }
 
 export async function recordAllCampaignEvidence(
@@ -300,6 +311,63 @@ function makeEvent(
   properties: Readonly<Record<string, PostHogProperty>>,
 ): PostHogEvent {
   return { event, distinctId, uuid: stableUuid(event, properties), timestamp, properties };
+}
+
+function enqueueCapture<T>(stateDirectory: string, operation: () => Promise<T>): Promise<T> {
+  const previous = captureQueues.get(stateDirectory) ?? Promise.resolve();
+  const current = previous.then(operation);
+  const settled = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  captureQueues.set(stateDirectory, settled);
+  void settled.then(() => {
+    if (captureQueues.get(stateDirectory) === settled) captureQueues.delete(stateDirectory);
+  });
+  return current;
+}
+
+async function unacknowledgedEvents(
+  databasePath: string,
+  deployment: string,
+  events: readonly PostHogEvent[],
+): Promise<PostHogEvent[]> {
+  if (events.length === 0) return [];
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const acknowledged = await handle.database
+      .select({ eventUuid: posthogCaptureAcknowledgements.eventUuid })
+      .from(posthogCaptureAcknowledgements)
+      .where(eq(posthogCaptureAcknowledgements.deployment, deployment));
+    const acknowledgedUuids = new Set(acknowledged.map((row) => row.eventUuid));
+    return events.filter((event) => !acknowledgedUuids.has(event.uuid));
+  } finally {
+    handle.close();
+  }
+}
+
+async function acknowledgeEvents(
+  databasePath: string,
+  deployment: string,
+  events: readonly PostHogEvent[],
+): Promise<void> {
+  if (events.length === 0) return;
+  const handle = openSqliteDatabase(databasePath);
+  try {
+    await handle.exclusiveTransaction(() =>
+      handle.database
+        .insert(posthogCaptureAcknowledgements)
+        .values(
+          [...new Set(events.map((event) => event.uuid))].map((eventUuid) => ({
+            deployment,
+            eventUuid,
+          })),
+        )
+        .onConflictDoNothing(),
+    );
+  } finally {
+    handle.close();
+  }
 }
 
 function stableUuid(

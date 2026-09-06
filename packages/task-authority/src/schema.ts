@@ -152,3 +152,17 @@ export const campaignTouches = sqliteTable(
     campaignTouchPrimaryKey: primaryKey({ columns: [table.campaignId, table.touchId] }),
   }),
 );
+
+/** Minimum durable acknowledgement owned by the optional PostHog observer. */
+export const posthogCaptureAcknowledgements = sqliteTable(
+  "posthog_capture_acknowledgements",
+  {
+    deployment: text("deployment").notNull(),
+    eventUuid: text("event_uuid").notNull(),
+  },
+  (table) => ({
+    posthogCaptureAcknowledgementPrimaryKey: primaryKey({
+      columns: [table.deployment, table.eventUuid],
+    }),
+  }),
+);
