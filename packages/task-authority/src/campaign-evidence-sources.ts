@@ -103,6 +103,8 @@ export async function listCampaignEvidenceSources(
     goalId: campaignRow.goalId,
     goalVersion: campaignRow.goalVersion,
     publishedAtEpochMs: campaignRow.createdAt.getTime(),
+    revision: campaignRow.revision,
+    updatedAtEpochMs: campaignRow.updatedAt.getTime(),
   };
   const proposals: CampaignEvidenceProposal[] = proposalRows.map((row) => ({
     proposalId: row.proposalId,

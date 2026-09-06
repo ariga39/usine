@@ -64,6 +64,7 @@ test("the generated client round-trips the Campaign evidence contract", async ()
     goalVersion: 1,
     cursor: null,
     nextCursor: null,
+    progress: { revision: 7, occurredAtEpochMs: 1700000000000 },
     coverage: "complete" as const,
     runs: [],
     aggregates: [],

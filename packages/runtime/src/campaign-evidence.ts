@@ -60,6 +60,10 @@ export async function lookupCampaignEvidence(
       goalVersion: requested.campaign.goalVersion,
       cursor: request.cursor,
       nextCursor: requested.nextCursor,
+      progress: {
+        revision: requested.campaign.revision,
+        occurredAtEpochMs: requested.campaign.updatedAtEpochMs,
+      },
       coverage: coverageForRuns(pageRuns),
       runs: pageRuns,
       aggregates: aggregateRuns(pageRuns),

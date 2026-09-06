@@ -58,6 +58,7 @@ export function campaignEvidenceToPostHogEvents(
     deployment: deploymentLabel,
     schema_version: evidence.schemaVersion,
     campaign_id: distinctId,
+    campaign_revision: evidence.progress.revision,
     goal_id: campaign.goalId,
     goal_version: campaign.goalVersion,
     campaign_status: campaign.status,
@@ -95,7 +96,7 @@ export function campaignEvidenceToPostHogEvents(
     token_coverage: evidence.totals.usage.coverage,
     evidence_coverage: evidence.coverage,
   } satisfies Readonly<Record<string, PostHogProperty>>;
-  const timestamp = timestampForEvidence(evidence);
+  const timestamp = timestampForEpochMs(evidence.progress.occurredAtEpochMs);
   return [
     ...(evidence.cursor === null
       ? [makeEvent("usine_campaign_progress", distinctId, timestamp, properties)]
@@ -306,13 +307,6 @@ function stableUuid(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
 
-function timestampForEvidence(evidence: CampaignEvidencePage): string | null {
-  const timestamps = [
-    ...evidence.runs.map((run) => run.occurredAtEpochMs),
-    ...evidence.touches.map((touch) => touch.occurredAtEpochMs),
-  ];
-  return timestamps.length === 0 ? null : timestampForEpochMs(Math.max(...timestamps));
-}
 function timestampForEpochMs(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
