@@ -201,7 +201,7 @@ async function changesRequestedResult(
   taskId: string,
   contractHash: string,
 ): Promise<TaskResult> {
-  const admitted = await authority.admit({
+  await authority.admit({
     contract: makeContract(taskId),
     contractHash,
     repositoryIdentity: `authority/${taskId}`,
