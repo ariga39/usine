@@ -147,14 +147,20 @@ describe("resource-oriented Task CLI", () => {
             stderr: "private check stderr",
           },
         );
+        const reviewAttempt = await authority.reserveReviewAttempt(
+          result.taskId,
+          contract.budget.maxReviewCycles,
+          "task-resource-fixture-reviewer",
+        );
         const reviewed = await authority.recordReview(
-          { taskId: result.taskId, revision: checked.revision },
+          { taskId: result.taskId, revision: reviewAttempt.result.revision },
           {
             sha: checked.candidateSha!,
             verdict: "changes_requested",
             summary: "review sentinel private content REVIEW-PRIVATE-ALPHA",
             findings: ["finding sentinel private content FINDING-PRIVATE-BETA"],
           },
+          "task-resource-fixture-reviewer",
         );
         const current = await authority.lookup(result.taskId);
         if (!current) throw new Error("task disappeared during resource CLI test");
@@ -213,8 +219,8 @@ describe("resource-oriented Task CLI", () => {
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as { sequence: number; data: { type: string } });
-      expect(watchedEvents.map((event) => event.sequence)).toEqual([8, 9]);
-      expect(watchedEvents[1]?.data).toEqual({ type: "task_terminal", state: "blocked" });
+      expect(watchedEvents.map((event) => event.sequence)).toEqual([8, 9, 10]);
+      expect(watchedEvents[2]?.data).toEqual({ type: "task_terminal", state: "blocked" });
       expect(JSON.parse(watch.stdout)).toMatchObject({ taskId, state: "blocked" });
 
       const get = await runCli(cliPath, root, environment, ["task", "get", taskId, "--json"]);

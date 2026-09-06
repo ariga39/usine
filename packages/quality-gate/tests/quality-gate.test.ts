@@ -138,13 +138,7 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   });
   sessionStatus = "failed";
   const failedReviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
-  expect(failedReviewAttempt.review).toMatchObject({
-    sha: base,
-    verdict: "inconclusive",
-    summary: "provider failed",
-    findings: [],
-    failureClass: "transient_capacity",
-  });
+  expect(failedReviewAttempt.review).toBeNull();
   expect(failedReviewAttempt.interruption).toEqual({
     phase: "turn",
     failureClass: "transient_capacity",

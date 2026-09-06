@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import type { TaskEvent, TaskResource, TaskState } from "@usine/task-authority";
+import type { PublicTaskState, TaskEvent, TaskResource } from "@usine/task-authority";
 
-function result(taskId: string, revision: number, state: TaskState): TaskResource {
+function result(taskId: string, revision: number, state: PublicTaskState): TaskResource {
   return {
     schemaVersion: 3,
     taskId,
@@ -38,7 +38,7 @@ function event(taskId: string, sequence: number, data: TaskEvent["data"]): TaskE
 describe("CLI follow boundary", () => {
   test("replays cursor events and prints one authoritative terminal result", async () => {
     const taskId = "follow-test";
-    let state: TaskState = "admitted";
+    let state: PublicTaskState = "admitted";
     let sequence = 0;
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");

@@ -101,7 +101,7 @@ export function deriveTaskEvidence(task: TaskResource, events: readonly TaskEven
       candidateByActivation.set(event.data.fence, event.data.sha);
       continue;
     }
-    if (event.data.type === "review_completed") {
+    if (event.data.type === "review_completed" || event.data.type === "review_interrupted") {
       reviewByCycle.set(event.data.cycle, event.data.sha);
       continue;
     }

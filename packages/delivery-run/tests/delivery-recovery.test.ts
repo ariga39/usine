@@ -76,6 +76,7 @@ function persistedResult(
         : null,
     review:
       state === "reviewed" ? { sha, verdict: "approved", summary: "approved", findings: [] } : null,
+    repairBatchRecorded: false,
     delivery: null,
     blocker: null,
     blockerClassification: null,
@@ -101,7 +102,9 @@ function fakeAuthority(initial: TaskResult) {
   ) => {
     if (observation.taskId !== stored.taskId || observation.revision !== stored.revision)
       throw new Error("stale task revision");
-    stored = { ...applyTaskFact(stored, fact), revision: stored.revision + 1 };
+    const next = applyTaskFact(stored, fact);
+    if (next === stored) return stored;
+    stored = { ...next, revision: stored.revision + 1 };
     return stored;
   };
   const authority = {
@@ -115,7 +118,50 @@ function fakeAuthority(initial: TaskResult) {
     recordReview: (
       observation: { taskId: string; revision: number },
       review: TaskResult["review"],
-    ) => transition(observation, { type: "review", review: review! }),
+      ownerId: string,
+    ) => transition(observation, { type: "review", review: review!, ownerId }),
+    recordReviewInterruption: (
+      observation: { taskId: string; revision: number },
+      candidateSha: string,
+      failureClass: NonNullable<TaskResult["waiting"]>["failureClass"],
+      ownerId: string,
+    ) =>
+      transition(observation, {
+        type: "review_interrupted",
+        sha: candidateSha,
+        failureClass: failureClass!,
+        ownerId,
+      }),
+    releaseReviewAttempt: (observation: { taskId: string; revision: number }, ownerId: string) =>
+      transition(observation, { type: "review_released", ownerId }),
+    reserveReviewAttempt: async (taskId: string, budget: number, ownerId: string) => {
+      if (stored.state === "reviewing") return { result: stored, claimed: false, cycle: null };
+      const cycle = stored.evidence.reviewCycles + 1;
+      if (cycle > budget) throw new Error("review budget exhausted");
+      if (
+        stored.state !== "checked" &&
+        !(stored.state === "waiting" && stored.waiting?.reason === "review_interruption")
+      )
+        throw new Error("task is not ready for a review attempt");
+      if (taskId !== stored.taskId) throw new Error("wrong task");
+      stored = {
+        ...applyTaskFact(stored, { type: "review_started", ownerId }),
+        revision: stored.revision + 1,
+      };
+      return { result: stored, claimed: true, cycle };
+    },
+    takeOverReviewAttempt: async (taskId: string, budget: number, ownerId: string) => {
+      if (taskId !== stored.taskId) throw new Error("wrong task");
+      if (stored.state !== "reviewing") throw new Error("task is not reviewing");
+      const cycle = stored.evidence.reviewCycles + 1;
+      if (cycle > budget)
+        return { result: stored, claimed: false, cycle: null, status: "budget_exhausted" as const };
+      stored = {
+        ...applyTaskFact(stored, { type: "review_started", ownerId, takeover: true }),
+        revision: stored.revision + 1,
+      };
+      return { result: stored, claimed: true, cycle, status: "claimed" as const };
+    },
     recordRepairBatch: (observation: { taskId: string; revision: number }) =>
       transition(observation, { type: "repair_batch" }),
     recordWaiting: (
@@ -201,6 +247,378 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("automatically makes one fresh transient reviewer attempt for the same candidate and check", async () => {
+    const id = "transient-review-recovery";
+    const fake = fakeAuthority(persistedResult("checked", id));
+    const cycles: number[] = [];
+    let reviews = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "transient-review-recovery-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+        reviewer: { ...implementer, role: "reviewer", sandbox: "read-only" },
+      },
+      {
+        ...servicesFor(
+          fake.authority,
+          {
+            check: async () => {
+              throw new Error("check must not rerun during reviewer recovery");
+            },
+            reviewWithObservation: async (_contract, candidateSha, check, cycle, onObservation) => {
+              expect(check).toMatchObject({ sha: candidateSha, status: "passed" });
+              cycles.push(cycle);
+              await onObservation?.({ type: "thread_started" });
+              reviews += 1;
+              if (reviews === 1)
+                return {
+                  review: {
+                    sha: candidateSha,
+                    verdict: "inconclusive" as const,
+                    summary: "provider interruption",
+                    findings: [],
+                    failureClass: "transient_transport" as const,
+                  },
+                  usage: null,
+                  interruption: {
+                    phase: "turn" as const,
+                    failureClass: "transient_transport" as const,
+                  },
+                };
+              return {
+                review: {
+                  sha: candidateSha,
+                  verdict: "approved" as const,
+                  summary: "approved",
+                  findings: [],
+                },
+                usage: null,
+              };
+            },
+          },
+          {
+            deliver: async (_contract, candidateSha, check, review) => {
+              expect(check.sha).toBe(candidateSha);
+              expect(review).toMatchObject({ sha: candidateSha, verdict: "approved" });
+              return {
+                sha: candidateSha,
+                effect: "github" as const,
+                prNumber: 80,
+                url: "https://example.invalid/pr/80",
+                attestationId: "transient-review",
+              };
+            },
+          },
+        ),
+      },
+    );
+
+    expect(result).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+      review: { sha, verdict: "approved" },
+      evidence: { reviewCycles: 2 },
+    });
+    expect(cycles).toEqual([1, 2]);
+    expect(reviews).toBe(2);
+    expect(
+      fake.getObservations().filter(({ data }) => data.type === "coding_session_started"),
+    ).toHaveLength(2);
+    expect(
+      fake.getObservations().filter(({ data }) => data.type === "coding_thread_started"),
+    ).toHaveLength(2);
+  });
+
+  test("does not replace an interrupted reviewer when the review budget is exhausted", async () => {
+    const id = "transient-review-budget";
+    const limited = { ...contract(id), budget: { ...contract(id).budget, maxReviewCycles: 1 } };
+    const fake = fakeAuthority(persistedResult("checked", id));
+    let reviews = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: limited,
+        contractHash: "transient-review-budget-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("check must not rerun");
+          },
+          reviewWithObservation: async (_contract, candidateSha) => {
+            reviews += 1;
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "inconclusive" as const,
+                summary: "provider interruption",
+                findings: [],
+                failureClass: "transient_transport" as const,
+              },
+              usage: null,
+              interruption: {
+                phase: "turn" as const,
+                failureClass: "transient_transport" as const,
+              },
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            throw new Error("delivery must not run");
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({ state: "blocked", blockerClassification: "elapsed_budget" });
+    expect(reviews).toBe(1);
+  });
+
+  test("consumes repeated transient reviewer interruptions through the configured budget", async () => {
+    const id = "transient-review-repeated-budget";
+    const bounded = { ...contract(id), budget: { ...contract(id).budget, maxReviewCycles: 3 } };
+    const fake = fakeAuthority(persistedResult("checked", id));
+    let reviews = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: bounded,
+        contractHash: "transient-review-repeated-budget-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("check must not rerun");
+          },
+          reviewWithObservation: async () => {
+            reviews += 1;
+            return {
+              review: null,
+              usage: null,
+              interruption: {
+                phase: "turn" as const,
+                failureClass: "timeout" as const,
+              },
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            throw new Error("delivery must not run");
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "blocked",
+      blockerClassification: "elapsed_budget",
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+      review: null,
+      evidence: { reviewCycles: 3 },
+    });
+    expect(reviews).toBe(3);
+  });
+
+  test("does not replace an interrupted reviewer after the frozen deadline", async () => {
+    const id = "transient-review-deadline";
+    const fake = fakeAuthority(persistedResult("checked", id));
+    const originalInterruption = fake.authority.recordReviewInterruption;
+    let reviews = 0;
+    fake.authority.recordReviewInterruption = async (
+      observation,
+      candidateSha,
+      failureClass,
+      ownerId,
+    ) => {
+      const interrupted = await originalInterruption(
+        observation,
+        candidateSha,
+        failureClass,
+        ownerId,
+      );
+      interrupted.deadlineEpochMs = Date.now() - 1;
+      return interrupted;
+    };
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "transient-review-deadline-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("check must not rerun");
+          },
+          reviewWithObservation: async (_contract, candidateSha) => {
+            reviews += 1;
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "inconclusive" as const,
+                summary: "provider interruption",
+                findings: [],
+                failureClass: "timeout" as const,
+              },
+              usage: null,
+              interruption: { phase: "turn" as const, failureClass: "timeout" as const },
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            throw new Error("delivery must not run");
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({ state: "blocked", blockerClassification: "elapsed_budget" });
+    expect(reviews).toBe(1);
+  });
+
+  test("re-enters a durable reviewer interruption after restart without changing the candidate", async () => {
+    const id = "transient-review-restart";
+    const fake = fakeAuthority(persistedResult("checked", id));
+    const originalReserve = fake.authority.reserveReviewAttempt;
+    let pauseRecovery = true;
+    let reviews = 0;
+    fake.authority.reserveReviewAttempt = async (taskId, budget, ownerId) => {
+      if (fake.getStored().state === "waiting" && pauseRecovery) {
+        pauseRecovery = false;
+        return { result: fake.getStored(), claimed: false, cycle: null };
+      }
+      return originalReserve(taskId, budget, ownerId);
+    };
+    const input = {
+      contract: contract(id),
+      contractHash: "transient-review-restart-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+      reviewer: { ...implementer, role: "reviewer" as const, sandbox: "read-only" as const },
+    };
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not rerun after restart");
+        },
+        reviewWithObservation: async (_contract, candidateSha, _check, cycle) => {
+          reviews += 1;
+          if (reviews === 1)
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "inconclusive" as const,
+                summary: "transient interruption",
+                findings: [],
+                failureClass: "network" as const,
+              },
+              usage: null,
+              interruption: { phase: "turn" as const, failureClass: "network" as const },
+            };
+          expect(cycle).toBe(2);
+          return {
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved",
+              findings: [],
+            },
+            usage: null,
+          };
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          effect: "github" as const,
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "transient-review-restart",
+        }),
+      },
+    );
+
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "review_interruption", failureClass: "network" },
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+    });
+    const delivered = await executeDeliveryRun(input, services);
+    expect(delivered).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: sha,
+      check: { sha, status: "passed" },
+      review: { sha, verdict: "approved" },
+    });
+    expect(reviews).toBe(2);
+  });
+
+  test("does not replace a reviewer interrupted by a non-transient provider class", async () => {
+    const id = "non-transient-review";
+    const fake = fakeAuthority(persistedResult("checked", id));
+    let reviews = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "non-transient-review-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            throw new Error("check must not rerun");
+          },
+          reviewWithObservation: async (_contract, candidateSha) => {
+            reviews += 1;
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "inconclusive" as const,
+                summary: "configuration failure",
+                findings: [],
+                failureClass: "configuration" as const,
+              },
+              usage: null,
+              interruption: { phase: "startup" as const, failureClass: "configuration" as const },
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            throw new Error("delivery must not run");
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({ state: "blocked", blockerClassification: "configuration" });
+    expect(reviews).toBe(1);
+  });
+
   test("waits for explicit delivery reconciliation and retries the approved bundle", async () => {
     const id = `delivery-reconciliation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fake = fakeAuthority(persistedResult("reviewed", id));
@@ -1299,6 +1717,127 @@ describe("Delivery Run durable phase recovery", () => {
     expect(reviewed).toEqual([sha]);
     expect(delivered).toEqual([sha]);
     expect(fake.getStored().evidence.changesRequestedBatches).toBe(1);
+  });
+
+  test("records one repair batch when a recovered changes-requested verdict is retried", async () => {
+    const id = "review-repair-after-transient-recovery";
+    const taskContract = {
+      ...contract(id),
+      budget: { ...contract(id).budget, maxImplementerActivations: 3, maxReviewCycles: 3 },
+    };
+    const fake = fakeAuthority(persistedResult("checked", id));
+    let repairBatchCalls = 0;
+    const recordRepairBatch = fake.authority.recordRepairBatch;
+    fake.authority.recordRepairBatch = async (observation) => {
+      repairBatchCalls += 1;
+      return recordRepairBatch(observation);
+    };
+    let reviews = 0;
+    let repairSessions = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          status: "passed" as const,
+          command: "true",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+        reviewWithObservation: async (_contract, candidateSha, _check, cycle) => {
+          reviews += 1;
+          if (reviews === 1)
+            return {
+              review: null,
+              usage: null,
+              interruption: { phase: "turn" as const, failureClass: "network" as const },
+            };
+          if (reviews === 2)
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "changes_requested" as const,
+                summary: "repair the candidate",
+                findings: ["repair the candidate"],
+              },
+              usage: null,
+            };
+          expect(cycle).toBe(3);
+          return {
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved after repair retry",
+              findings: [],
+            },
+            usage: null,
+          };
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          effect: "github" as const,
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "repair-after-recovery",
+        }),
+      },
+    );
+    services.session = {
+      run: async () => {
+        repairSessions += 1;
+        if (repairSessions === 1)
+          return {
+            status: "failed" as const,
+            output: null,
+            summary: "repair network interruption",
+            failure: "repair network interruption",
+            phase: "turn" as const,
+            failureClass: "network" as const,
+          };
+        return {
+          status: "completed" as const,
+          output: { status: "proposed" as const, summary: "repaired" },
+          summary: "repair completed",
+          failure: null,
+        };
+      },
+    };
+    services.workspace.freeze = async (workspace, previousSha) => ({
+      sha,
+      baseSha: previousSha,
+      workspace,
+    });
+
+    const input = {
+      contract: taskContract,
+      contractHash: "review-repair-after-transient-recovery-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption", resumeState: "reviewed" },
+      review: { verdict: "changes_requested" },
+      evidence: { reviewCycles: 2, changesRequestedBatches: 1 },
+      repairBatchRecorded: true,
+    });
+
+    await fake.retry();
+    const delivered = await executeDeliveryRun(input, services);
+    expect(delivered).toMatchObject({
+      state: "reviewed_pr",
+      review: { verdict: "approved" },
+      evidence: { reviewCycles: 3, changesRequestedBatches: 1 },
+    });
+    expect(delivered.repairBatchRecorded).toBe(false);
+    expect(repairBatchCalls).toBe(2);
+    expect(repairSessions).toBe(2);
+    expect(reviews).toBe(3);
   });
 
   test.each(["candidate", "checked", "reviewed"] as const)(

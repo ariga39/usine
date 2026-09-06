@@ -26,6 +26,7 @@ import {
   type ReviewVerdict,
   type ResolvedTaskContract,
   type TaskBlockerClassification,
+  type TaskFailureClass,
   type TaskObservation,
   type TaskResult,
   type TaskObservationEventInput,
@@ -47,6 +48,7 @@ export interface DeliveryRunInput {
   implementer: RolePolicy;
   reviewer?: RolePolicy;
   signal?: AbortSignal;
+  executionOwnerId?: string;
 }
 
 interface DeliveryRunAuthority {
@@ -57,7 +59,33 @@ interface DeliveryRunAuthority {
   ): Promise<{ result: TaskResult; activation: number }>;
   recordCandidate(observation: TaskObservation, candidate: CandidateFact): Promise<TaskResult>;
   recordCheck(observation: TaskObservation, check: CheckResult): Promise<TaskResult>;
-  recordReview(observation: TaskObservation, review: ReviewVerdict): Promise<TaskResult>;
+  recordReview(
+    observation: TaskObservation,
+    review: ReviewVerdict,
+    ownerId: string,
+  ): Promise<TaskResult>;
+  recordReviewInterruption(
+    observation: TaskObservation,
+    sha: string,
+    failureClass: TaskFailureClass,
+    ownerId: string,
+  ): Promise<TaskResult>;
+  releaseReviewAttempt(observation: TaskObservation, ownerId: string): Promise<TaskResult>;
+  reserveReviewAttempt(
+    taskId: string,
+    budget: number,
+    ownerId: string,
+  ): Promise<{ result: TaskResult; claimed: boolean; cycle: number | null }>;
+  takeOverReviewAttempt(
+    taskId: string,
+    budget: number,
+    ownerId: string,
+  ): Promise<{
+    result: TaskResult;
+    claimed: boolean;
+    cycle: number | null;
+    status: "claimed" | "budget_exhausted";
+  }>;
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
   recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
@@ -130,6 +158,7 @@ export async function executeDeliveryRun(
   services: DeliveryRunServices,
 ): Promise<TaskResult> {
   throwIfAborted(input.signal);
+  const executionOwnerId = input.executionOwnerId ?? randomUUID();
   let result = await services.authority.admit({
     contract: input.contract,
     contractHash: input.contractHash,
@@ -143,12 +172,34 @@ export async function executeDeliveryRun(
   // This is intentionally a reducer over the durable result.  A restart must
   // resume the phase represented by SQLite, never infer progress from a
   // worker process or start from the contract base again.
+  let claimedReviewCycle: number | null = null;
   for (;;) {
     if (isTerminalState(result.state)) return result;
     if (deadlineExpired(result.deadlineEpochMs))
       return blockTask(services, result, "elapsed budget exhausted");
 
-    if (isWaitingState(result.state)) return result;
+    if (isWaitingState(result.state)) {
+      if (result.waiting?.reason !== "review_interruption") return result;
+      const failureClass = result.waiting.failureClass;
+      if (!failureClass || !isTransientReviewerFailure(failureClass))
+        return blockTask(
+          services,
+          result,
+          "review interruption is not retryable",
+          reviewBlockerClassification(failureClass),
+        );
+      if (result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles)
+        return blockTask(services, result, "review budget exhausted", "elapsed_budget");
+      const recovery = await services.authority.reserveReviewAttempt(
+        result.taskId,
+        input.contract.budget.maxReviewCycles,
+        executionOwnerId,
+      );
+      if (!recovery.claimed) return recovery.result;
+      result = recovery.result;
+      claimedReviewCycle = recovery.cycle;
+      continue;
+    }
 
     if (result.state === "admitted") {
       result = await activateImplementer(input, services, result, input.contract.baseSha, null, []);
@@ -194,11 +245,46 @@ export async function executeDeliveryRun(
         );
         continue;
       }
-      const cycle = Math.min(
+      if (result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles)
+        return blockTask(services, result, "review budget exhausted", "elapsed_budget");
+      const reservation = await services.authority.reserveReviewAttempt(
+        result.taskId,
         input.contract.budget.maxReviewCycles,
-        Math.max(1, result.evidence.reviewCycles + 1),
+        executionOwnerId,
       );
-      let review: ReviewVerdict;
+      if (!reservation.claimed) return reservation.result;
+      result = reservation.result;
+      claimedReviewCycle = reservation.cycle;
+      continue;
+    }
+
+    if (result.state === "reviewing") {
+      if (claimedReviewCycle === null) {
+        const takeover = await services.authority.takeOverReviewAttempt(
+          result.taskId,
+          input.contract.budget.maxReviewCycles,
+          executionOwnerId,
+        );
+        if (!takeover.claimed) {
+          if (takeover.status === "budget_exhausted")
+            return blockTask(
+              services,
+              takeover.result,
+              "review budget exhausted",
+              "elapsed_budget",
+            );
+          return takeover.result;
+        }
+        result = takeover.result;
+        claimedReviewCycle = takeover.cycle;
+      }
+      const cycle = claimedReviewCycle;
+      if (cycle === null) return result;
+      claimedReviewCycle = null;
+      if (!result.check || !result.candidateSha)
+        return blockTask(services, result, "reviewing phase is incomplete");
+      let review: ReviewVerdict | undefined;
+      let reviewInterruption: ReviewAttemptObservation["interruption"];
       let reviewArchive: ReviewAttemptObservation["archive"];
       let reviewRequestedProfile: string | undefined;
       let reviewEffectiveProfile: ReviewAttemptObservation["effectiveProfile"];
@@ -256,7 +342,8 @@ export async function executeDeliveryRun(
             reviewObservationCounter,
             observation.interruption,
           );
-        review = observation.review;
+        review = observation.review ?? undefined;
+        reviewInterruption = observation.interruption;
         throwIfAborted(input.signal);
       } catch (error) {
         await emitObservation(services, result.taskId, {
@@ -274,7 +361,13 @@ export async function executeDeliveryRun(
             ...(reviewNormalizer ? { normalizer: reviewNormalizer } : {}),
           },
         });
-        if (input.signal?.aborted) throw error;
+        if (input.signal?.aborted) {
+          await services.authority.releaseReviewAttempt(
+            { taskId: result.taskId, revision: result.revision },
+            executionOwnerId,
+          );
+          throw error;
+        }
         return blockTask(services, result, error instanceof Error ? error.message : String(error));
       }
       await emitObservation(services, result.taskId, {
@@ -285,7 +378,12 @@ export async function executeDeliveryRun(
           role: input.reviewer?.role ?? "reviewer",
           activation: reviewActivation,
           reviewCycle: cycle,
-          outcome: review.verdict === "inconclusive" ? "failed" : "succeeded",
+          outcome:
+            reviewInterruption || !review
+              ? "failed"
+              : review.verdict === "inconclusive"
+                ? "failed"
+                : "succeeded",
           sessionId: reviewSessionId,
           requestedProfile: reviewRequestedProfile ?? input.reviewer?.profile,
           ...(reviewEffectiveProfile ? { effectiveProfile: reviewEffectiveProfile } : {}),
@@ -294,10 +392,22 @@ export async function executeDeliveryRun(
           ...(reviewArchive ? { archive: reviewArchive } : {}),
         },
       });
-      result = await services.authority.recordReview(
-        { taskId: result.taskId, revision: result.revision },
-        review,
-      );
+      if (reviewInterruption) {
+        result = await services.authority.recordReviewInterruption(
+          { taskId: result.taskId, revision: result.revision },
+          result.candidateSha,
+          reviewInterruption.failureClass,
+          executionOwnerId,
+        );
+      } else if (review) {
+        result = await services.authority.recordReview(
+          { taskId: result.taskId, revision: result.revision },
+          review,
+          executionOwnerId,
+        );
+      } else {
+        return blockTask(services, result, "review produced no verdict");
+      }
       continue;
     }
 
@@ -306,7 +416,6 @@ export async function executeDeliveryRun(
         return blockTask(services, result, "reviewed phase is incomplete");
       if (result.review.verdict === "changes_requested") {
         if (
-          result.evidence.changesRequestedBatches > result.evidence.reviewCycles ||
           result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles ||
           result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
         )
@@ -319,12 +428,10 @@ export async function executeDeliveryRun(
         // batch twice before activating its repair writer.
         const candidateSha = result.candidateSha;
         const findings = result.review.findings;
-        if (result.evidence.changesRequestedBatches < result.evidence.reviewCycles) {
-          result = await services.authority.recordRepairBatch({
-            taskId: result.taskId,
-            revision: result.revision,
-          });
-        }
+        result = await services.authority.recordRepairBatch({
+          taskId: result.taskId,
+          revision: result.revision,
+        });
         result = await activateImplementer(input, services, result, candidateSha, null, findings);
         continue;
       }
@@ -373,6 +480,25 @@ export async function executeDeliveryRun(
 
     return blockTask(services, result, "unknown durable task phase");
   }
+}
+
+function isTransientReviewerFailure(
+  failureClass: TaskFailureClass,
+): failureClass is "transient_capacity" | "transient_transport" | "network" | "timeout" {
+  return (
+    failureClass === "transient_capacity" ||
+    failureClass === "transient_transport" ||
+    failureClass === "network" ||
+    failureClass === "timeout"
+  );
+}
+
+function reviewBlockerClassification(
+  failureClass: TaskFailureClass | undefined,
+): TaskBlockerClassification {
+  return failureClass === "cancellation" || failureClass === undefined
+    ? "review_inconclusive"
+    : failureClass;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

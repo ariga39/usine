@@ -680,8 +680,8 @@ function runReport(
   elapsedMs: number,
   observedToolFailures: number,
 ): ReviewerEvaluationRunReport {
-  const verdict = observation?.review.verdict ?? null;
-  const actualSha = observation?.review.sha ?? null;
+  const verdict = observation?.review?.verdict ?? null;
+  const actualSha = observation?.review?.sha ?? null;
   const correct = actualSha === item.candidateSha && verdict === item.label.verdict;
   const archiveReason = archiveEvidenceReason(observation?.archive ?? null);
   const incomplete =
@@ -712,7 +712,7 @@ function runReport(
     observed: {
       sha: actualSha,
       verdict,
-      findingCount: observation?.review.findings.length ?? null,
+      findingCount: observation?.review?.findings.length ?? null,
     },
     correctness: incomplete ? "inconclusive" : correct ? "correct" : "incorrect",
     hardRegression,

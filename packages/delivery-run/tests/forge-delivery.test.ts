@@ -380,9 +380,15 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       { taskId: candidate.taskId, revision: candidate.revision },
       { ...passingCheck, sha: fixture.candidateSha },
     );
+    const reviewAttempt = await authority.reserveReviewAttempt(
+      candidate.taskId,
+      input.contract.budget.maxReviewCycles,
+      "forge-fixture-reviewer",
+    );
     const reviewed = await authority.recordReview(
-      { taskId: checked.taskId, revision: checked.revision },
+      { taskId: checked.taskId, revision: reviewAttempt.result.revision },
       { ...approvedReview, sha: fixture.candidateSha },
+      "forge-fixture-reviewer",
     );
     expect(reviewed.state).toBe("reviewed");
 
@@ -489,7 +495,16 @@ describe.sequential("Forge Delivery controlled protocol", () => {
       { taskId: candidate.taskId, revision: candidate.revision },
       check,
     );
-    await authority.recordReview({ taskId: checked.taskId, revision: checked.revision }, review);
+    const reviewAttempt = await authority.reserveReviewAttempt(
+      checked.taskId,
+      input.contract.budget.maxReviewCycles,
+      "forge-fixture-reviewer",
+    );
+    await authority.recordReview(
+      { taskId: checked.taskId, revision: reviewAttempt.result.revision },
+      review,
+      "forge-fixture-reviewer",
+    );
     try {
       const result = await executeDeliveryRun(input, {
         authority,

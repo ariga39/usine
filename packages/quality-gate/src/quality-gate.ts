@@ -41,7 +41,7 @@ export interface QualityGateOptions {
 }
 
 export interface ReviewAttemptObservation {
-  review: ReviewVerdict;
+  review: ReviewVerdict | null;
   usage: SessionUsage | null;
   normalizer?: RoleOutputNormalizerObservation;
   requestedProfile?: string;
@@ -140,7 +140,9 @@ export class QualityGate {
     check: CheckResult,
     cycle: number,
   ): Promise<ReviewVerdict> {
-    return (await this.reviewWithObservation(contract, sha, check, cycle)).review;
+    const review = (await this.reviewWithObservation(contract, sha, check, cycle)).review;
+    if (!review) throw new Error("review did not produce a verdict");
+    return review;
   }
 
   async reviewWithObservation(
@@ -182,15 +184,7 @@ export class QualityGate {
         });
         if (observation.status !== "completed" || !observation.output)
           return {
-            review: {
-              sha,
-              verdict: "inconclusive",
-              summary: observation.failure ?? observation.summary,
-              findings: [],
-              ...(observation.failureClass
-                ? { failureClass: taskFailureClassFromProvider(observation.failureClass) }
-                : {}),
-            },
+            review: null,
             usage: observation.usage ?? null,
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
             effectiveProfile: observation.effectiveProfile,

@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
@@ -103,6 +104,7 @@ export interface ServerExecutionContext {
   authority: TaskAuthority;
   policy: RuntimePolicy;
   signal: AbortSignal;
+  executionOwnerId: string;
 }
 
 export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskResult>;
@@ -235,6 +237,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
   const eventHub = new TransientEventHub();
+  const executionOwnerId = randomUUID();
   let eventDispatch = Promise.resolve();
   let coordinateCampaigns: () => Promise<void> = async () => undefined;
   let campaignCoordination = Promise.resolve();
@@ -293,6 +296,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
               options.execute,
               signal,
               onEvent,
+              executionOwnerId,
             ),
           catch: (cause) => cause,
         }).pipe(Effect.asVoid),
@@ -414,6 +418,7 @@ async function executeServerTask(
   execute: ServerExecution | undefined,
   signal: AbortSignal,
   onEvent: (event: TaskEvent) => void,
+  executionOwnerId: string,
 ): Promise<TaskResult> {
   let policy: RuntimePolicy;
   try {
@@ -425,7 +430,14 @@ async function executeServerTask(
     return blockPersistedTask(stateDirectory, task.result.taskId, error, onEvent);
   }
   if (!execute) {
-    return executeAdmittedTask(task.input, task.contract, policy, signal, onEvent);
+    return executeAdmittedTask(
+      task.input,
+      task.contract,
+      policy,
+      signal,
+      onEvent,
+      executionOwnerId,
+    );
   }
 
   const databasePath = resolve(stateDirectory, "usine.sqlite");
@@ -444,6 +456,7 @@ async function executeServerTask(
         authority,
         policy,
         signal,
+        executionOwnerId,
       });
     } catch (error) {
       const latest = await authority.lookup(current.taskId);

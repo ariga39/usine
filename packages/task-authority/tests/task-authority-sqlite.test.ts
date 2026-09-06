@@ -174,9 +174,15 @@ async function terminalResult(
       stderr: "",
     },
   );
+  const reviewAttempt = await authority.reserveReviewAttempt(
+    checked.taskId,
+    3,
+    "authority-fixture-reviewer",
+  );
   const reviewed = await authority.recordReview(
-    { taskId: checked.taskId, revision: checked.revision },
+    { taskId: checked.taskId, revision: reviewAttempt.result.revision },
     { sha: candidateSha, verdict: "approved", summary: "approved", findings: [] },
+    "authority-fixture-reviewer",
   );
   return authority.recordDelivery(
     { taskId: reviewed.taskId, revision: reviewed.revision },
@@ -188,6 +194,67 @@ async function terminalResult(
       attestationId: "authority-test",
     },
   );
+}
+
+async function changesRequestedResult(
+  authority: TaskAuthority,
+  taskId: string,
+  contractHash: string,
+): Promise<TaskResult> {
+  const admitted = await authority.admit({
+    contract: makeContract(taskId),
+    contractHash,
+    repositoryIdentity: `authority/${taskId}`,
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+  const activation = await authority.reserveActivation(taskId, 3);
+  const candidate = await authority.recordCandidate(
+    { taskId, revision: activation.result.revision },
+    { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+  );
+  const checked = await authority.recordCheck(
+    { taskId, revision: candidate.revision },
+    {
+      sha: "b".repeat(40),
+      status: "passed",
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    },
+  );
+  const reserved = await authority.reserveReviewAttempt(taskId, 3, "upgrade-reviewer");
+  return authority.recordReview(
+    { taskId, revision: reserved.result.revision },
+    { sha: checked.candidateSha!, verdict: "changes_requested", summary: "repair", findings: [] },
+    "upgrade-reviewer",
+  );
+}
+
+function removeRepairBatchMarker(
+  path: string,
+  taskId: string,
+  changesRequestedBatches: number,
+  reviewCycles: number,
+): void {
+  const inspection = new DatabaseSync(path);
+  const row = inspection.prepare("SELECT result FROM task_runs WHERE task_id = ?").get(taskId) as {
+    result: string;
+  };
+  const persisted = JSON.parse(row.result) as {
+    evidence: { changesRequestedBatches: number; reviewCycles: number };
+    repairBatchRecorded?: boolean;
+  };
+  delete persisted.repairBatchRecorded;
+  persisted.evidence = {
+    ...persisted.evidence,
+    changesRequestedBatches,
+    reviewCycles,
+  };
+  inspection
+    .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+    .run(JSON.stringify(persisted), taskId);
+  inspection.close();
 }
 
 describe("Task Authority SQLite concurrency and terminal leases", () => {
@@ -487,7 +554,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       { taskId, revision: reservation.result.revision },
       { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: reservation.activation },
     );
-    const checked = await authority.recordCheck(
+    await authority.recordCheck(
       { taskId, revision: candidate.revision },
       {
         sha: candidate.candidateSha!,
@@ -498,9 +565,15 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         stderr: "",
       },
     );
+    const reviewAttempt = await authority.reserveReviewAttempt(
+      taskId,
+      3,
+      "authority-fixture-reviewer",
+    );
     const reviewed = await authority.recordReview(
-      { taskId, revision: checked.revision },
+      { taskId, revision: reviewAttempt.result.revision },
       { sha: candidate.candidateSha!, verdict: "approved", summary: "approved", findings: [] },
+      "authority-fixture-reviewer",
     );
     const waiting = await authority.recordWaiting(
       { taskId, revision: reviewed.revision },
@@ -842,6 +915,135 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         code: "task_state_quarantined",
         message: "durable task state quarantined",
       });
+    },
+  );
+
+  test("persists one repair batch for a changes-requested verdict across retry", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-repair-idempotency-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const contractHash = "c".repeat(64);
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash,
+      repositoryIdentity: `authority/repair-idempotency-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const activation = await authority.reserveActivation(taskId, 3);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    await authority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const reserved = await authority.reserveReviewAttempt(taskId, 2, "repair-reviewer");
+    const reviewed = await authority.recordReview(
+      { taskId, revision: reserved.result.revision },
+      {
+        sha: "b".repeat(40),
+        verdict: "changes_requested",
+        summary: "repair",
+        findings: ["repair"],
+      },
+      "repair-reviewer",
+    );
+    const recorded = await authority.recordRepairBatch({ taskId, revision: reviewed.revision });
+    const repairActivation = await authority.reserveActivation(taskId, 3);
+    const waiting = await authority.recordWaiting(
+      { taskId, revision: repairActivation.result.revision },
+      {
+        reason: "network_interruption",
+        resumeState: "reviewed",
+        activation: repairActivation.activation,
+      },
+    );
+    const retried = await authority.retryTask(taskId, 3);
+    const duplicate = await authority.recordRepairBatch({ taskId, revision: retried.revision });
+
+    expect(recorded).toMatchObject({
+      repairBatchRecorded: true,
+      evidence: { changesRequestedBatches: 1 },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption" },
+    });
+    expect(duplicate).toMatchObject({
+      state: "reviewed",
+      review: { verdict: "changes_requested" },
+      repairBatchRecorded: true,
+      evidence: { changesRequestedBatches: 1 },
+    });
+    expect(duplicate.revision).toBe(retried.revision);
+    const events = await authority.listEvents(taskId);
+    expect(events.filter((event) => event.data.type === "repair_batch_recorded")).toHaveLength(1);
+  }, 30_000);
+
+  test.each([
+    {
+      label: "projects equality as an already-recorded old repair batch",
+      changesRequestedBatches: 2,
+      reviewCycles: 2,
+      expectedRecorded: true,
+      expectedBatches: 2,
+      expectedRevisionDelta: 0,
+      expectedRepairEvents: 0,
+    },
+    {
+      label: "projects a lower count as an unrecorded old repair batch",
+      changesRequestedBatches: 1,
+      reviewCycles: 2,
+      expectedRecorded: false,
+      expectedBatches: 2,
+      expectedRevisionDelta: 1,
+      expectedRepairEvents: 1,
+    },
+  ])(
+    "$label",
+    async ({
+      changesRequestedBatches,
+      reviewCycles,
+      expectedRecorded,
+      expectedBatches,
+      expectedRevisionDelta,
+      expectedRepairEvents,
+    }) => {
+      const path = await makeDatabase();
+      const authority = authorityAt(path);
+      const taskId = `authority-repair-upgrade-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const reviewed = await changesRequestedResult(authority, taskId, "e".repeat(64));
+      removeRepairBatchMarker(path, taskId, changesRequestedBatches, reviewCycles);
+
+      const decoded = await authority.lookup(taskId);
+      if (!decoded) throw new Error("reviewed task is missing after durable upgrade projection");
+      expect(decoded.repairBatchRecorded).toBe(expectedRecorded);
+      const beforeEvents = await authority.listEvents(taskId);
+
+      const persisted = await authority.recordRepairBatch({
+        taskId,
+        revision: decoded.revision,
+      });
+
+      expect(persisted.repairBatchRecorded).toBe(true);
+      expect(persisted.evidence.changesRequestedBatches).toBe(expectedBatches);
+      expect(persisted.revision).toBe(decoded.revision + expectedRevisionDelta);
+      const repairEvents = (await authority.listEvents(taskId)).filter(
+        (event) => event.data.type === "repair_batch_recorded",
+      );
+      expect(repairEvents).toHaveLength(expectedRepairEvents);
+      expect(reviewed.review?.verdict).toBe("changes_requested");
+      expect(
+        beforeEvents.filter((event) => event.data.type === "repair_batch_recorded"),
+      ).toHaveLength(0);
     },
   );
 
@@ -1439,12 +1641,19 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       authority.recordReview(
         { taskId, revision: checkedTwo.revision },
         { sha: "b".repeat(40), verdict: "approved", summary: "old", findings: [] },
+        "authority-fixture-reviewer",
       ),
-    ).rejects.toThrow("stale");
+    ).rejects.toThrow("owned");
 
+    const reviewAttempt = await authority.reserveReviewAttempt(
+      taskId,
+      3,
+      "authority-fixture-reviewer",
+    );
     const reviewed = await authority.recordReview(
-      { taskId, revision: checkedTwo.revision },
+      { taskId, revision: reviewAttempt.result.revision },
       { sha: "c".repeat(40), verdict: "approved", summary: "approved", findings: [] },
+      "authority-fixture-reviewer",
     );
     await expect(
       authority.recordDelivery(
@@ -1477,7 +1686,7 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       { taskId, revision: reservation.result.revision },
       { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: reservation.activation },
     );
-    const checked = await authority.recordCheck(
+    await authority.recordCheck(
       { taskId, revision: candidate.revision },
       {
         sha: "b".repeat(40),
@@ -1488,9 +1697,15 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         stderr: "",
       },
     );
+    const reviewAttempt = await authority.reserveReviewAttempt(
+      taskId,
+      3,
+      "authority-fixture-reviewer",
+    );
     const reviewed = await authority.recordReview(
-      { taskId, revision: checked.revision },
+      { taskId, revision: reviewAttempt.result.revision },
       { sha: "b".repeat(40), verdict: "approved", summary: "approved", findings: [] },
+      "authority-fixture-reviewer",
     );
     const delivery = {
       sha: "b".repeat(40),
@@ -1590,6 +1805,157 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     ).toMatchObject({
       implementerActivations: 2,
     });
+  }, 30_000);
+
+  test("atomically claims one reviewer and releases an interrupted reservation", async () => {
+    const path = await makeDatabase();
+    const firstAuthority = authorityAt(path);
+    const secondAuthority = authorityAt(path);
+    const taskId = `authority-review-race-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const input = {
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: `authority/review-race-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    };
+    const admitted = await firstAuthority.admit(input);
+    const activation = await firstAuthority.reserveActivation(taskId, 3);
+    const candidate = await firstAuthority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    await firstAuthority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+
+    const reservations = await Promise.all([
+      firstAuthority.reserveReviewAttempt(taskId, 2, "authority-race-owner-a"),
+      secondAuthority.reserveReviewAttempt(taskId, 2, "authority-race-owner-b"),
+    ]);
+    expect(reservations.filter(({ claimed }) => claimed)).toHaveLength(1);
+    expect(reservations.map(({ result }) => result.state)).toEqual(["reviewing", "reviewing"]);
+    const reviewing = reservations.find(({ claimed }) => claimed)?.result;
+    expect(reviewing).toMatchObject({
+      candidateSha: "b".repeat(40),
+      check: { sha: "b".repeat(40), status: "passed" },
+      evidence: { reviewCycles: 1 },
+    });
+
+    const released = await firstAuthority.releaseReviewAttempt(
+      {
+        taskId,
+        revision: reviewing!.revision,
+      },
+      reviewing!.reviewAttempt!.ownerId,
+    );
+    expect(released).toMatchObject({
+      state: "checked",
+      candidateSha: "b".repeat(40),
+      check: { sha: "b".repeat(40), status: "passed" },
+      evidence: { reviewCycles: 0 },
+    });
+    const replacement = await secondAuthority.reserveReviewAttempt(
+      taskId,
+      2,
+      "authority-race-owner-replacement",
+    );
+    expect(replacement).toMatchObject({ claimed: true, cycle: 1 });
+    const events = await firstAuthority.listEvents(taskId);
+    expect(events.filter((event) => event.data.type === "review_started")).toHaveLength(2);
+    expect(events.filter((event) => event.data.type === "review_released")).toHaveLength(1);
+    expect(admitted.taskId).toBe(taskId);
+  }, 30_000);
+
+  test("takes over a durable reviewing reservation after restart and fences stale completion", async () => {
+    const path = await makeDatabase();
+    const firstAuthority = authorityAt(path);
+    const secondAuthority = authorityAt(path);
+    const taskId = `authority-review-takeover-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admitted = await firstAuthority.admit({
+      contract: makeContract(taskId),
+      contractHash: "b".repeat(64),
+      repositoryIdentity: `authority/review-takeover-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const activation = await firstAuthority.reserveActivation(taskId, 3);
+    const candidate = await firstAuthority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    const checked = await firstAuthority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const firstReservation = await firstAuthority.reserveReviewAttempt(
+      taskId,
+      3,
+      "process-owner-a",
+    );
+    expect(firstReservation).toMatchObject({
+      claimed: true,
+      cycle: 1,
+      result: {
+        state: "reviewing",
+        reviewAttempt: { ownerId: "process-owner-a" },
+        evidence: { reviewCycles: 1 },
+      },
+    });
+
+    // The first process exits after reservation and before Quality Gate can
+    // produce either a verdict or an interruption fact.
+    const takeover = await secondAuthority.takeOverReviewAttempt(taskId, 3, "process-owner-b");
+    expect(takeover).toMatchObject({
+      claimed: true,
+      cycle: 2,
+      result: {
+        state: "reviewing",
+        candidateSha: "b".repeat(40),
+        check: { sha: "b".repeat(40), status: "passed" },
+        reviewAttempt: { ownerId: "process-owner-b" },
+        evidence: { reviewCycles: 2 },
+      },
+    });
+    await expect(
+      firstAuthority.recordReview(
+        { taskId, revision: firstReservation.result.revision },
+        { sha: "b".repeat(40), verdict: "approved", summary: "stale", findings: [] },
+        "process-owner-a",
+      ),
+    ).rejects.toThrow("stale task revision");
+
+    const reviewed = await secondAuthority.recordReview(
+      { taskId, revision: takeover.result.revision },
+      { sha: "b".repeat(40), verdict: "approved", summary: "fresh", findings: [] },
+      "process-owner-b",
+    );
+    expect(reviewed).toMatchObject({
+      state: "reviewed",
+      candidateSha: "b".repeat(40),
+      check: { sha: "b".repeat(40), status: "passed" },
+      review: { sha: "b".repeat(40), verdict: "approved" },
+      reviewAttempt: null,
+      evidence: { reviewCycles: 2 },
+    });
+    const events = await firstAuthority.listEvents(taskId);
+    expect(events.filter((event) => event.data.type === "review_started")).toHaveLength(2);
+    expect(events.filter((event) => event.data.type === "review_completed")).toHaveLength(1);
+    expect(admitted.taskId).toBe(taskId);
+    expect(checked.candidateSha).toBe("b".repeat(40));
   }, 30_000);
 
   test.each(["blocked", "reviewed_pr"] as const)(
