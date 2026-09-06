@@ -31,6 +31,41 @@ const sessionInfoSchema = z.object({ id: z.string().min(1) });
 const promptAdmissionSchema = z.object({ sessionID: z.string().min(1) });
 const PERMISSION_REPLY_TIMEOUT_MS = 1_000;
 
+class OpenCode2ProtocolError extends Error {}
+class OpenCode2CallbackError extends Error {
+  constructor(readonly cause: unknown) {
+    super("OpenCode2 callback failed");
+    this.name = "OpenCode2CallbackError";
+  }
+}
+
+function protocolViolation(message: string): never {
+  throw new OpenCode2ProtocolError(message);
+}
+
+function parseProtocol<T>(parse: () => T): T {
+  try {
+    return parse();
+  } catch {
+    return protocolViolation("OpenCode2 event was invalid");
+  }
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function invokeOpenCode2Callback<TArgs extends readonly unknown[]>(
+  callback: ((...args: TArgs) => Promise<void> | void) | undefined,
+  ...args: TArgs
+): Promise<void> {
+  try {
+    await callback?.(...args);
+  } catch (error) {
+    throw new OpenCode2CallbackError(error);
+  }
+}
+
 function noOpGracefulInterrupt(): Promise<void> {
   return Promise.resolve();
 }
@@ -214,15 +249,19 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
             return;
           }
           fail(
-            new CodingSessionInterruption("turn", "transport", "OpenCode2 permission stream ended"),
+            new CodingSessionInterruption(
+              promptAdmitted ? "turn" : "thread",
+              promptAdmitted ? "transient_transport" : "transport",
+              "OpenCode2 permission stream ended",
+            ),
           );
         } catch {
           fail(
             context.signal.aborted
               ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
               : new CodingSessionInterruption(
-                  "turn",
-                  "transport",
+                  promptAdmitted ? "turn" : "thread",
+                  promptAdmitted ? "transient_transport" : "transport",
                   "OpenCode2 permission stream failed",
                 ),
           );
@@ -241,19 +280,22 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
           for await (const rawEvent of events.stream) {
             const event = parseSessionEvent(rawEvent);
             if (event.data.sessionID !== createdSessionID)
-              throw new Error("OpenCode2 event identity mismatch");
+              protocolViolation("OpenCode2 event identity mismatch");
             if (!promptAdmitted && event.type !== "session.next.prompt.admitted")
-              throw new Error("OpenCode2 event arrived before prompt admission");
+              protocolViolation("OpenCode2 event arrived before prompt admission");
             if (event.type === "session.next.prompt.admitted") {
-              const data = promptAdmittedDataSchema.parse(event.data);
+              const data = parseProtocol(() => promptAdmittedDataSchema.parse(event.data));
               promptAdmitted = true;
-              context.onPhase?.("turn");
-              await context.onObservation?.({ type: "turn_started", turn: 1 });
+              await invokeOpenCode2Callback(context.onPhase, "turn");
+              await invokeOpenCode2Callback(context.onObservation, {
+                type: "turn_started",
+                turn: 1,
+              });
               if (data.sessionID !== createdSessionID)
-                throw new Error("OpenCode2 event identity mismatch");
+                protocolViolation("OpenCode2 event identity mismatch");
             } else if (event.type === "session.next.shell.ended") {
-              const data = shellEndedDataSchema.parse(event.data);
-              await context.onItemCompleted?.({
+              const data = parseProtocol(() => shellEndedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
                 type: "command_execution",
                 id: data.callID,
                 status: "completed",
@@ -263,44 +305,44 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
               event.type === "session.next.tool.success" ||
               event.type === "session.next.tool.failed"
             ) {
-              const data = toolCompletionDataSchema.parse(event.data);
+              const data = parseProtocol(() => toolCompletionDataSchema.parse(event.data));
               const identity = toolCalls.get(data.callID);
-              if (!identity) throw new Error("OpenCode2 tool completion had no preceding call");
+              if (!identity) protocolViolation("OpenCode2 tool completion had no preceding call");
               const evidence = toolEvidence(event.type, data, identity, context);
-              await context.onItemCompleted?.(evidence);
+              await invokeOpenCode2Callback(context.onItemCompleted, evidence);
             } else if (event.type === "session.next.tool.called") {
-              const data = toolCalledDataSchema.parse(event.data);
+              const data = parseProtocol(() => toolCalledDataSchema.parse(event.data));
               toolCalls.set(data.callID, { input: data.input, tool: data.tool });
             } else if (event.type === "session.next.text.ended") {
-              const data = textEndedDataSchema.parse(event.data);
+              const data = parseProtocol(() => textEndedDataSchema.parse(event.data));
               if (currentStepID !== data.assistantMessageID)
-                throw new Error("OpenCode2 text ended outside its step");
+                protocolViolation("OpenCode2 text ended outside its step");
               finalResponse = data.text;
               currentStepHasText = true;
-              await context.onItemCompleted?.({
+              await invokeOpenCode2Callback(context.onItemCompleted, {
                 type: "agent_message",
                 id: data.textID,
                 status: "completed",
                 text: data.text,
               });
             } else if (event.type === "session.next.reasoning.ended") {
-              const data = reasoningEndedDataSchema.parse(event.data);
-              await context.onItemCompleted?.({
+              const data = parseProtocol(() => reasoningEndedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
                 type: "reasoning",
                 id: data.reasoningID,
                 status: "completed",
                 text: data.text,
               });
             } else if (event.type === "session.next.step.started") {
-              const data = stepStartedDataSchema.parse(event.data);
+              const data = parseProtocol(() => stepStartedDataSchema.parse(event.data));
               currentStepID = data.assistantMessageID;
               currentStepHasText = false;
               if (data.model)
                 actualModel = { model: data.model.id, provider: data.model.providerID };
             } else if (event.type === "session.next.step.ended") {
-              const data = stepEndedDataSchema.parse(event.data);
+              const data = parseProtocol(() => stepEndedDataSchema.parse(event.data));
               if (currentStepID !== data.assistantMessageID)
-                throw new Error("OpenCode2 step ended outside its step");
+                protocolViolation("OpenCode2 step ended outside its step");
               if (data.finish === "stop" && !currentStepHasText) {
                 fail(
                   new CodingSessionInterruption(
@@ -329,7 +371,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                   : { reasoningOutputTokens: data.tokens.reasoning }),
               };
               usage = mergeProviderNeutralUsage(usage, stepUsage);
-              await context.onUsage?.({
+              await invokeOpenCode2Callback(context.onUsage, {
                 usage: stepUsage,
                 semantics: "delta",
                 ...(actualModel ? { actualModel } : {}),
@@ -339,14 +381,14 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
                 complete();
               }
             } else if (event.type === "session.next.step.failed") {
-              const data = stepFailedDataSchema.parse(event.data);
-              await context.onItemCompleted?.({
+              const data = parseProtocol(() => stepFailedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
                 type: "other",
                 id: event.id,
                 status: "failed",
               });
               if (data.sessionID !== createdSessionID)
-                throw new Error("OpenCode2 event identity mismatch");
+                protocolViolation("OpenCode2 event identity mismatch");
               fail(providerFailure("turn"));
               return;
             }
@@ -356,19 +398,25 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
               context.signal.aborted
                 ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
                 : new CodingSessionInterruption(
-                    "turn",
-                    "transport",
+                    promptAdmitted ? "turn" : "thread",
+                    promptAdmitted ? "transient_transport" : "transport",
                     "OpenCode2 event stream ended before completion",
                   ),
             );
         } catch (error) {
-          fail(
-            context.signal.aborted
-              ? new CodingSessionInterruption("turn", "cancellation", "coding session cancelled")
-              : error instanceof CodingSessionInterruption
-                ? error
-                : new CodingSessionInterruption("turn", "transport"),
-          );
+          if (context.signal.aborted)
+            fail(new CodingSessionInterruption("turn", "cancellation", "coding session cancelled"));
+          else if (error instanceof OpenCode2CallbackError) fail(asError(error.cause));
+          else if (error instanceof OpenCode2ProtocolError)
+            fail(new CodingSessionInterruption("turn", "transport", error.message));
+          else if (error instanceof CodingSessionInterruption) fail(error);
+          else
+            fail(
+              new CodingSessionInterruption(
+                promptAdmitted ? "turn" : "thread",
+                promptAdmitted ? "transient_transport" : "transport",
+              ),
+            );
         }
       };
       void processEvents();
@@ -384,8 +432,9 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         },
         { responseStyle: "data", throwOnError: true, signal: context.signal },
       );
-      if (promptAdmissionSchema.parse(prompt.data).sessionID !== createdSessionID)
-        throw new Error("OpenCode2 prompt identity mismatch");
+      const promptAdmission = parseProtocol(() => promptAdmissionSchema.parse(prompt.data));
+      if (promptAdmission.sessionID !== createdSessionID)
+        protocolViolation("OpenCode2 prompt identity mismatch");
       const cancellationWait = cancellation(context.signal, gracefulInterrupt);
       try {
         const waitForIdle = client.v2.session.wait(
@@ -412,6 +461,8 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         primaryFailure = error;
       } else if (error instanceof OpenCode2SandboxUnavailableError) {
         primaryFailure = new CodingSessionInterruption("startup", "configuration", error.message);
+      } else if (error instanceof OpenCode2ProtocolError) {
+        primaryFailure = new CodingSessionInterruption(phase, "transport", error.message);
       } else if (context.signal.aborted) {
         await gracefulInterrupt();
         primaryFailure = new CodingSessionInterruption(
@@ -632,8 +683,10 @@ type SessionEvent = z.infer<typeof sessionEventSchema>;
 type ToolCompletionData = z.infer<typeof toolCompletionDataSchema>;
 
 function parseSessionEvent(rawEvent: unknown): SessionEvent {
-  const payload = sessionEventPayloadSchema.parse(rawEvent);
-  return sessionEventSchema.parse(JSON.parse(payload));
+  return parseProtocol(() => {
+    const payload = sessionEventPayloadSchema.parse(rawEvent);
+    return sessionEventSchema.parse(JSON.parse(payload));
+  });
 }
 
 const globalPermissionEventSchema = z.object({

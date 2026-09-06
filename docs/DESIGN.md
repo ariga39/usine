@@ -173,7 +173,7 @@ The legal state names are `admitted`, `waiting`, `candidate`, `checked`, `review
 | State | Meaning | Normal next facts |
 |---|---|---|
 | `admitted` | Contract admitted, lease held, no accepted Candidate yet. | Candidate, waiting, or blocked. |
-| `waiting` | The implementer suffered the one currently retryable turn-phase network interruption, or delivery ended with an unresolved external effect. The record stores the resume state and activation. | Explicit retry resumes the recorded phase; delivery reconciliation resumes `reviewed` with the same approved bundle; expiry or invalidity blocks. |
+| `waiting` | The implementer suffered a retryable turn-phase network or transient transport interruption, or delivery ended with an unresolved external effect. The record stores the resume state and activation. | Explicit retry resumes the recorded phase; delivery reconciliation resumes `reviewed` with the same approved bundle; expiry or invalidity blocks. |
 | `candidate` | A clean exact Candidate SHA was accepted under the current activation fence. | Check, a repair Candidate path, waiting, or blocked. |
 | `checked` | A Check Result for the current Candidate exists. | Fresh review, repair activation after a failed check, waiting, or blocked. |
 | `reviewed` | A review verdict for a passing check exists. | One aggregated repair activation, delivery, waiting, or blocked. |
@@ -186,7 +186,7 @@ Task Authority's reducer and the Candidate Workspace enforce the following lifec
 - A new Candidate clears check, review, delivery, and blocker evidence. The reducer requires its fence to equal the reserved activation and, after the first Candidate, requires its parent to be the accepted prior Candidate. Candidate Workspace separately requires the initial Candidate to descend from the contract base.
 - A check must belong to the current Candidate. A review requires a passing check for that same SHA. A delivery requires a passing check and an `approved` review for that same SHA.
 - `changes_requested` findings are recorded as one repair batch before one implementer activation. Individual findings do not each wake an agent.
-- Only an implementer failure in the `turn` phase with `failureClass: "network"`, or the Forge boundary's typed unresolved delivery outcome, may become `waiting`. Reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission do not implicitly retry.
+- Only an implementer failure in the `turn` phase with `failureClass: "network"` or `"transient_transport"`, or the Forge boundary's typed unresolved delivery outcome, may become `waiting`. Deterministic protocol transport failures, reviewer interruption, configuration failure, project-check failure, other provider failures, restart, and same-ID submission remain fail-closed and do not implicitly retry.
 - `task retry` is an explicit compare-and-set transition. It preserves the original contract, Repository authority, and deadline and returns to the stored resume state; the subsequent Delivery Run reserves the next activation only for implementer recovery. Delivery reconciliation reuses the same approved Candidate/check/review bundle. Deadline exhaustion blocks the retry, while an exhausted activation budget is rejected only for implementer recovery.
 - `reviewed_pr` is the no-merge terminal. `merged` requires both immutable merge authority and a Delivery Effect whose approved head and PR number match the reviewed delivery; the merge commit SHA must also be exact.
 

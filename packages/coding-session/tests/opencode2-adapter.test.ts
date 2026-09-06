@@ -92,6 +92,7 @@ async function fixture(
     | "startup-failure"
     | "startup-abort"
     | "no-response"
+    | "stream-closed"
     | "no-reasoning"
     | "out-of-order"
     | "step-failure"
@@ -273,6 +274,7 @@ const server = createServer((req, res) => {
         idle = true;
         if (waitResponse) { response(waitResponse, 204); waitResponse = undefined; }
       }
+      if (${JSON.stringify(mode)} === "stream-closed") eventResponse?.end();
     });
     return;
   }
@@ -864,6 +866,7 @@ describe("OpenCode2 bounded adapter", () => {
   test.each([
     ["no-response", "transport"],
     ["out-of-order", "transport"],
+    ["stream-closed", "transient_transport"],
     ["step-failure", "unknown"],
   ] as const)(
     "maps %s as a typed failure and settles its direct child",

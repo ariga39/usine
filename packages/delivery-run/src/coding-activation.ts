@@ -159,7 +159,8 @@ async function runCodingAttempt(
       retryable:
         input.implementer.role === "implementer" &&
         observation.phase === "turn" &&
-        observation.failureClass === "network",
+        (observation.failureClass === "network" ||
+          observation.failureClass === "transient_transport"),
     };
   }
   const output = observation.output;

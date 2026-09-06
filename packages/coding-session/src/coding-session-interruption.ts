@@ -2,6 +2,7 @@ export type CodingSessionPhase = "startup" | "thread" | "turn" | "output";
 
 export type CodingSessionFailureClass =
   | "transport"
+  | "transient_transport"
   | "network"
   | "rate_limit"
   | "timeout"
@@ -30,6 +31,8 @@ export function classifyAdapterFailure(error: unknown): CodingSessionFailureClas
     return "authority";
   if (/(config|profile|invalid option|unknown option|unsupported|capability)/.test(message))
     return "configuration";
-  if (/(transport|protocol|stream|closed|malformed)/.test(message)) return "transport";
+  if (/(protocol|malformed|identity|out[- ]of[- ]order|schema)/.test(message)) return "transport";
+  if (/(stream|closed|eof|transport[- ](?:closure|closed))/.test(message))
+    return "transient_transport";
   return "unknown";
 }

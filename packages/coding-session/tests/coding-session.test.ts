@@ -129,6 +129,7 @@ async function fakeAppServerEnvironment(
     | "interrupt"
     | "mismatch"
     | "malformed"
+    | "malformed-response"
     | "transport"
     | "capability"
     | "thread-failure"
@@ -239,6 +240,10 @@ const handle = (message) => {
     send({ jsonrpc: "2.0", id: message.id, result: { thread: { id: "thread-fixture" } } });
     setImmediate(() => send({ method: "thread/started", params: { thread: { id: "thread-fixture" } } }));
   } else if (message.method === "turn/start") {
+    if (mode === "malformed-response") {
+      send({ jsonrpc: "2.0", id: message.id });
+      return;
+    }
     if (mode === "capability") {
       send({ method: "server/request", id: 99, params: { capability: "unsupported" } });
       return;
@@ -1165,6 +1170,35 @@ describe("Coding Session", () => {
     },
   );
 
+  test("fails closed on a syntactically valid JSON-RPC response without result or error", async () => {
+    const fixture = await fakeAppServerEnvironment("malformed-response");
+    const session = new CodexCodingSession(undefined, {
+      environment: fixture.environment,
+      sessionArchive: { stateDirectory: fixture.stateDirectory },
+      adapterSelectionEnvironment: {
+        USINE_CODEX_APP_SERVER_PROFILES: "reviewer-profile",
+      },
+    });
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: join(fixture.stateDirectory, "reviewer"),
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      attempt: reviewerAttempt,
+    });
+    expect(observation).toMatchObject({
+      status: "failed",
+      output: null,
+      phase: "turn",
+      failureClass: "transport",
+    });
+    await expectAppServerChildSettled(fixture);
+  });
+
   test("classifies bounded app-server stderr without exposing its contents", async () => {
     const fixture = await fakeAppServerEnvironment("stderr");
     const session = new CodexCodingSession(undefined, {
@@ -2010,7 +2044,9 @@ describe("Coding Session", () => {
     ["request timed out", "timeout"],
     ["invalid profile configuration", "configuration"],
     ["permission denied by provider", "authority"],
-    ["transport closed unexpectedly", "transport"],
+    ["transport closed unexpectedly", "transient_transport"],
+    ["malformed protocol response", "transport"],
+    ["coding session stream failed", "transient_transport"],
     ["unclassified provider failure", "unknown"],
   ] as const)("projects provider failure %s as %s", async (message, failureClass) => {
     const session = new CodexCodingSession(
