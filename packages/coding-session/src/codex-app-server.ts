@@ -663,7 +663,7 @@ function appServerFailureClass(
     case "timeout":
       return "timeout";
     case "transport":
-      return "transient_transport";
+      return "transport";
     case "transient_transport":
       return "transient_transport";
     default:
