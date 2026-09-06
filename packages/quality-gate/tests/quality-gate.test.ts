@@ -80,6 +80,9 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
           usage: null,
           summary: "ok",
           failure: sessionStatus === "failed" ? "provider failed" : null,
+          ...(sessionStatus === "failed"
+            ? { phase: "turn" as const, failureClass: "rate_limit" as const }
+            : {}),
         };
       },
     },
@@ -134,12 +137,17 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     findings: [],
   });
   sessionStatus = "failed";
-  const failedReview = await gate.review(task, base, check, 1);
-  expect(failedReview).toMatchObject({
+  const failedReviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
+  expect(failedReviewAttempt.review).toMatchObject({
     sha: base,
     verdict: "inconclusive",
     summary: "provider failed",
     findings: [],
+    failureClass: "transient_capacity",
+  });
+  expect(failedReviewAttempt.interruption).toEqual({
+    phase: "turn",
+    failureClass: "transient_capacity",
   });
 });
 

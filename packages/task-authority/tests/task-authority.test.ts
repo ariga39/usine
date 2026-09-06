@@ -1,11 +1,82 @@
 import { describe, expect, test } from "vite-plus/test";
-import { applyTaskFact, canTransition, type TaskResult } from "@usine/task-authority";
+import {
+  applyTaskFact,
+  canTransition,
+  TASK_BLOCKER_CLASSIFICATIONS,
+  taskFailureClassFromProvider,
+  type TaskResult,
+} from "@usine/task-authority";
 import type { TaskContract } from "@usine/task-authority";
 
 const sha = "a".repeat(40);
 const contract = { id: "authority-module-test" } as TaskContract;
 
+function checkedTask(): TaskResult {
+  return {
+    schemaVersion: 4,
+    taskId: contract.id,
+    contractHash: "hash",
+    revision: 4,
+    deadlineEpochMs: 10_000,
+    state: "checked",
+    mergeAuthorized: false,
+    candidateSha: sha,
+    candidateFence: 1,
+    check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+    review: null,
+    delivery: null,
+    blocker: null,
+    blockerClassification: null,
+    waiting: null,
+    activeActivation: null,
+    writer: { repositoryIdentity: "owner/repo" },
+    evidence: {
+      implementerActivations: 1,
+      reviewCycles: 0,
+      changesRequestedBatches: 0,
+      restartRecoveries: 0,
+    },
+  };
+}
+
 describe("Task Authority module contract", () => {
+  test.each([
+    ["rate_limit", "transient_capacity"],
+    ["transport", "protocol"],
+    ["transient_transport", "transient_transport"],
+    ["network", "network"],
+    ["timeout", "timeout"],
+    ["configuration", "configuration"],
+    ["authority", "authority"],
+    ["cancellation", "cancellation"],
+    ["unknown", "unknown"],
+    ["provider detail with secret", "unknown"],
+  ] as const)("sanitizes provider class %s as %s", (providerClass, expected) => {
+    expect(taskFailureClassFromProvider(providerClass)).toBe(expected);
+  });
+
+  test.each(["approved", "changes_requested"] as const)(
+    "rejects a failure class on a %s review",
+    (verdict) => {
+      expect(() =>
+        applyTaskFact(checkedTask(), {
+          type: "review",
+          review: {
+            sha,
+            verdict,
+            summary: "incomplete review",
+            findings: [],
+            failureClass: "unknown",
+          },
+        }),
+      ).toThrow("failure class requires an inconclusive verdict");
+    },
+  );
+
+  test("does not treat cancellation as a terminal blocker classification", () => {
+    expect(TASK_BLOCKER_CLASSIFICATIONS).not.toContain("cancellation");
+  });
+
   test("accepts only legal lifecycle transitions", () => {
     expect(canTransition("admitted", "candidate")).toBe(true);
     expect(canTransition("admitted", "waiting")).toBe(true);

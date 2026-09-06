@@ -810,6 +810,41 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
+  test.each(["approved", "changes_requested"] as const)(
+    "quarantines a persisted %s review with a failure class",
+    async (verdict) => {
+      const path = await makeDatabase();
+      const authority = authorityAt(path);
+      const taskId = `authority-invalid-review-${verdict}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const admitted = await authority.admit({
+        contract: makeContract(taskId),
+        contractHash: `authority-invalid-review-${verdict}`,
+        repositoryIdentity: `authority/invalid-review-${verdict}-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      const inspection = new DatabaseSync(path);
+      inspection.prepare("UPDATE task_runs SET result = ? WHERE task_id = ?").run(
+        JSON.stringify({
+          ...admitted,
+          review: {
+            sha: "a".repeat(40),
+            verdict,
+            summary: "invalid persisted review",
+            findings: [],
+            failureClass: "unknown",
+          },
+        }),
+        taskId,
+      );
+      inspection.close();
+
+      await expect(authority.lookup(taskId)).rejects.toMatchObject({
+        code: "task_state_quarantined",
+        message: "durable task state quarantined",
+      });
+    },
+  );
+
   test("decodes the prior version-two result without a waiting field", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);

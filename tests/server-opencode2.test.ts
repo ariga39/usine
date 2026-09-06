@@ -110,7 +110,7 @@ describe("server-owned OpenCode2 execution", () => {
       const admitted = await submitTask(server.url, submission);
       const terminal = await waitForTerminalTask(server.url, admitted.taskId);
       expect(terminal.state).toBe("blocked");
-      expect(terminal.blocker).toEqual({ classification: "provider_failure" });
+      expect(terminal.blocker).toEqual({ classification: "configuration" });
       const events = (await taskEvents(server.url, taskId, 0, 100)).events;
       const completed = events.find((event) => event.data.type === "coding_session_completed");
       expect(completed?.data).toMatchObject({

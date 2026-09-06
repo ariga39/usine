@@ -13,6 +13,7 @@ import {
   type TaskContract,
   type TaskEvent,
   type TaskResult,
+  type UsageInvocation,
   type UsageReportSource,
 } from "../src/index.js";
 
@@ -172,6 +173,52 @@ function successfulSource(): UsageReportSource {
 }
 
 describe("usage report projection", () => {
+  test("sorts aggregates by failure class after grouping by it", () => {
+    const usage = {
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      uncachedInputTokens: 1,
+      cacheWriteInputTokens: 0,
+      outputTokens: 1,
+      reasoningOutputTokens: 0,
+      coverage: "complete" as const,
+    };
+    const base: UsageInvocation = {
+      invocationId: "aggregate-sort-invocation",
+      taskId: "aggregate-sort-task",
+      pullRequest: null,
+      repositoryId: "repository",
+      repository: "owner/repository",
+      role: "reviewer",
+      activation: 0,
+      reviewCycle: 1,
+      profile: "profile",
+      configuredModel: "model",
+      configuredProvider: "provider",
+      provider: "provider",
+      adapter: "adapter",
+      model: "model",
+      serviceTier: "standard",
+      reasoningEffort: "high",
+      outcome: "failed",
+      occurredAtEpochMs: 1,
+      elapsedMs: 1,
+      usage,
+    };
+    const report = deriveUsageReportFromInvocations(
+      [
+        { ...base, invocationId: "transport", failureClass: "transient_transport" },
+        { ...base, invocationId: "capacity", failureClass: "transient_capacity" },
+      ],
+      { taskId: null, repositoryId: null, fromEpochMs: null, toEpochMs: null },
+    );
+
+    expect(report.aggregates.map((aggregate) => aggregate.failureClass)).toEqual([
+      "transient_capacity",
+      "transient_transport",
+    ]);
+  });
+
   test("retains detailed successful, partial, unavailable, and normalizer rows without double counting", () => {
     const partialTaskId = "partial-task";
     const unavailableTaskId = "unavailable-task";
@@ -391,6 +438,7 @@ describe("usage report projection", () => {
     ).toMatchObject({
       role: "implementer",
       outcome: "failed",
+      failureClass: "transient_transport",
       elapsedMs: 3,
       usage: {
         inputTokens: 120,
@@ -407,6 +455,7 @@ describe("usage report projection", () => {
     ).toMatchObject({
       role: "reviewer",
       outcome: "failed",
+      failureClass: "transient_transport",
       reviewCycle: 1,
       usage: {
         inputTokens: 4,
@@ -423,6 +472,7 @@ describe("usage report projection", () => {
     ).toMatchObject({
       role: "implementer",
       outcome: "failed",
+      failureClass: "transient_transport",
       usage: {
         inputTokens: null,
         cachedInputTokens: null,

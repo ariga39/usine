@@ -128,6 +128,7 @@ function projectRun(run: UsageInvocation, source: CampaignEvidenceSource): Campa
     adapter: run.adapter,
     model: run.model,
     outcome: run.outcome,
+    failureClass: run.failureClass ?? null,
     occurredAtEpochMs: run.occurredAtEpochMs,
     elapsedMs: run.elapsedMs,
     usage: run.usage,
@@ -196,6 +197,7 @@ function aggregateRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidenceAg
       run.model,
       run.provider,
       run.adapter,
+      run.failureClass ?? "none",
     ].join("\u0000");
     groups.set(key, [...(groups.get(key) ?? []), run]);
   }
@@ -212,6 +214,7 @@ function aggregateRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidenceAg
         model: first.model,
         provider: first.provider,
         adapter: first.adapter,
+        failureClass: first.failureClass ?? null,
         invocations: group.length,
         elapsedMs: sumNullable(group.map((run) => run.elapsedMs)),
         usage: sumUsage(group.map((run) => run.usage)),
@@ -231,6 +234,7 @@ function aggregateSortKey(aggregate: CampaignEvidenceAggregate): string {
     aggregate.model,
     aggregate.provider,
     aggregate.adapter,
+    aggregate.failureClass ?? "none",
   ].join("\u0000");
 }
 
@@ -270,6 +274,13 @@ function terminalTaskCounts(
     invalid_phase: 0,
     missing_evidence: 0,
     provider_failure: 0,
+    transient_capacity: 0,
+    transient_transport: 0,
+    network: 0,
+    timeout: 0,
+    configuration: 0,
+    authority: 0,
+    protocol: 0,
     project_check_failure: 0,
     review_inconclusive: 0,
     delivery_failure: 0,
@@ -278,7 +289,7 @@ function terminalTaskCounts(
   for (const source of sources) {
     if (!isTerminalState(source.task.state)) continue;
     const classification = source.task.blockerClassification;
-    if (classification !== null) counts[classification] += 1;
+    if (classification !== null) counts[classification] = (counts[classification] ?? 0) + 1;
   }
   return counts;
 }

@@ -26,6 +26,8 @@ export interface ReviewVerdict {
   verdict: "approved" | "changes_requested" | "inconclusive";
   summary: string;
   findings: string[];
+  /** Sanitized provider interruption evidence, when review did not complete. */
+  failureClass?: TaskFailureClass;
 }
 
 export interface DeliveryEffect {
@@ -108,24 +110,66 @@ export interface PublicCheckResult {
   exitCode: number;
 }
 
+/** Stable, bounded provider failure classes owned by Task Authority. */
+export const TASK_FAILURE_CLASSES = [
+  "transient_capacity",
+  "transient_transport",
+  "network",
+  "timeout",
+  "configuration",
+  "authority",
+  "protocol",
+  "cancellation",
+  "unknown",
+] as const;
+export type TaskFailureClass = (typeof TASK_FAILURE_CLASSES)[number];
+
+export type TaskTerminalFailureClass = Exclude<TaskFailureClass, "cancellation">;
+export const TASK_TERMINAL_FAILURE_CLASSES = TASK_FAILURE_CLASSES.filter(
+  (failureClass): failureClass is TaskTerminalFailureClass => failureClass !== "cancellation",
+);
+
 export const TASK_BLOCKER_CLASSIFICATIONS = [
   "elapsed_budget",
   "implementation_budget",
   "invalid_phase",
   "missing_evidence",
   "provider_failure",
+  ...TASK_TERMINAL_FAILURE_CLASSES,
   "project_check_failure",
   "review_inconclusive",
   "delivery_failure",
-  "unknown",
 ] as const;
 export type TaskBlockerClassification = (typeof TASK_BLOCKER_CLASSIFICATIONS)[number];
+
+/** Convert Coding Session's adapter-local vocabulary at the Task boundary. */
+export function taskFailureClassFromProvider(value: string): TaskFailureClass {
+  switch (value) {
+    case "rate_limit":
+      return "transient_capacity";
+    case "transport":
+      return "protocol";
+    case "transient_transport":
+    case "network":
+    case "timeout":
+    case "configuration":
+    case "authority":
+    case "cancellation":
+    case "unknown":
+    case "transient_capacity":
+    case "protocol":
+      return value;
+    default:
+      return "unknown";
+  }
+}
 
 export interface PublicReviewVerdict {
   sha: string;
   verdict: ReviewVerdict["verdict"];
   classification: ReviewVerdict["verdict"];
   findingCount: number;
+  failureClass?: TaskFailureClass;
 }
 
 export interface PublicBlockerDiagnostic {
@@ -180,6 +224,7 @@ export function taskResourceFromResult(result: TaskResult): TaskResource {
           verdict: result.review.verdict,
           classification: result.review.verdict,
           findingCount: result.review.findings.length,
+          ...(result.review.failureClass ? { failureClass: result.review.failureClass } : {}),
         }
       : null,
     delivery: result.delivery
@@ -263,7 +308,7 @@ export type TaskFact =
   | { type: "repair_batch" }
   | { type: "waiting"; waiting: TaskWaiting }
   | { type: "retry" }
-  | { type: "blocked"; blocker: string };
+  | { type: "blocked"; blocker: string; classification?: TaskBlockerClassification };
 
 export interface AuthorityInput {
   contract: TaskContract;
@@ -335,6 +380,8 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       return { ...result, state: "checked", check: fact.check, review: null, delivery: null };
     }
     case "review": {
+      if (fact.review.failureClass !== undefined && fact.review.verdict !== "inconclusive")
+        throw new Error("review failure class requires an inconclusive verdict");
       if (!canTransition(result.state, "reviewed"))
         throw new Error(`illegal task state transition: ${result.state} -> reviewed`);
       if (
@@ -438,7 +485,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         ...result,
         state: "blocked",
         blocker: fact.blocker,
-        blockerClassification: classifyTaskBlocker(fact.blocker),
+        blockerClassification: fact.classification ?? classifyTaskBlocker(fact.blocker),
         waiting: null,
         activeActivation: null,
       };

@@ -8,6 +8,7 @@ import type {
   CampaignEvidenceTouch,
   CampaignResource,
 } from "@usine/task-authority";
+import { TASK_TERMINAL_FAILURE_CLASSES } from "@usine/task-authority";
 
 const DEFAULT_POSTHOG_BATCH_URL = "https://us.i.posthog.com/batch/";
 const POSTHOG_CAPTURE_TIMEOUT_MS = 10_000;
@@ -54,6 +55,11 @@ export function campaignEvidenceToPostHogEvents(
   const deploymentLabel = deployment.trim();
   if (!deploymentLabel) return [];
   const distinctId = campaign.campaignId;
+  const terminalFailureProperties: Record<string, number> = {};
+  for (const classification of TASK_TERMINAL_FAILURE_CLASSES) {
+    terminalFailureProperties[`terminal_tasks_${classification}`] =
+      evidence.totals.terminalTaskCounts[classification] ?? 0;
+  }
   const properties = {
     deployment: deploymentLabel,
     schema_version: evidence.schemaVersion,
@@ -86,7 +92,7 @@ export function campaignEvidenceToPostHogEvents(
     terminal_tasks_project_check_failure: evidence.totals.terminalTaskCounts.project_check_failure,
     terminal_tasks_review_inconclusive: evidence.totals.terminalTaskCounts.review_inconclusive,
     terminal_tasks_delivery_failure: evidence.totals.terminalTaskCounts.delivery_failure,
-    terminal_tasks_unknown: evidence.totals.terminalTaskCounts.unknown,
+    ...terminalFailureProperties,
     input_tokens: evidence.totals.usage.inputTokens,
     cached_input_tokens: evidence.totals.usage.cachedInputTokens,
     uncached_input_tokens: evidence.totals.usage.uncachedInputTokens,
@@ -221,6 +227,7 @@ function roleRunEvent(
     adapter: run.adapter,
     $ai_model: run.model,
     outcome: run.outcome,
+    failure_class: run.failureClass ?? null,
     aggregation_scope: "role_run",
     elapsed_ms: run.elapsedMs,
     $ai_latency: run.elapsedMs === null ? null : run.elapsedMs / 1000,

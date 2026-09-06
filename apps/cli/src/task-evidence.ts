@@ -1,4 +1,9 @@
-import type { TaskEvent, TaskResource } from "@usine/task-authority";
+import {
+  taskFailureClassFromProvider,
+  type TaskEvent,
+  type TaskFailureClass,
+  type TaskResource,
+} from "@usine/task-authority";
 
 export type EvidenceRole = "implementer" | "reviewer";
 export type EvidenceOutcomeStatus = "succeeded" | "failed" | "cancelled" | "blocked" | "unknown";
@@ -23,17 +28,7 @@ export interface RoleRunEffort {
   elapsedMs: number | null;
   counts: { turns: number; tools: number; mcpTools: number };
   phase: "startup" | "thread" | "turn" | "output" | null;
-  failureClass:
-    | "transport"
-    | "transient_transport"
-    | "network"
-    | "rate_limit"
-    | "timeout"
-    | "cancellation"
-    | "configuration"
-    | "authority"
-    | "unknown"
-    | null;
+  failureClass: TaskFailureClass | null;
   observations: {
     type:
       | "thread_started"
@@ -156,7 +151,7 @@ export function deriveTaskEvidence(task: TaskResource, events: readonly TaskEven
       run.terminalObserved = true;
     } else if (data.type === "coding_session_interrupted") {
       run.effort.phase = data.phase;
-      run.effort.failureClass = data.failureClass;
+      run.effort.failureClass = taskFailureClassFromProvider(data.failureClass);
       run.outcome.status = data.failureClass === "cancellation" ? "cancelled" : "failed";
       run.interruptedAtEpochMs = event.occurredAtEpochMs;
       run.terminalAtEpochMs = event.occurredAtEpochMs;
@@ -383,7 +378,7 @@ export function renderTaskEvidence(evidence: TaskEvidence, json: boolean): strin
     `Task outcome: ${evidence.task.relation} (${evidence.task.candidateSha ?? "unavailable"})`,
     `Task candidate: ${evidence.task.candidateSha ?? "unavailable"} fence=${evidence.task.candidateFence ?? "unavailable"}`,
     `Task check: ${evidence.task.check ? `${evidence.task.check.status} ${evidence.task.check.sha} exit=${evidence.task.check.exitCode}` : "unavailable"}`,
-    `Task review: ${evidence.task.review ? `${evidence.task.review.verdict} ${evidence.task.review.sha} findings=${evidence.task.review.findingCount}` : "unavailable"}`,
+    `Task review: ${evidence.task.review ? `${evidence.task.review.verdict} ${evidence.task.review.sha} findings=${evidence.task.review.findingCount} failure-class=${evidence.task.review.failureClass ?? "none"}` : "unavailable"}`,
     `Task repair batches: ${evidence.task.repairBatches ?? "unavailable"}`,
     `Task delivery: ${evidence.task.delivery ? `github ${evidence.task.delivery.sha} pr=${evidence.task.delivery.prNumber} merged=${evidence.task.delivery.merged}` : "unavailable"}`,
     "IMPLEMENTER ROLE RUNS",
@@ -399,7 +394,7 @@ function renderRoleRun(run: RoleRunEvidence): string {
     `  ${run.role === "reviewer" ? `review-cycle=${run.reviewCycle ?? "unknown"}` : `activation=${run.activation ?? "unknown"}`} requested-profile=${run.requestedProfile ?? "unknown"}`,
     `    effective=${run.effectiveProfile.profileName ?? "unavailable"} configured-model=${run.effectiveProfile.model ?? "unavailable"} configured-provider=${run.effectiveProfile.modelProvider ?? "unavailable"} actual-model=${run.effectiveProfile.actualModel ?? "unavailable"} actual-provider=${run.effectiveProfile.actualModelProvider ?? "unavailable"} adapter=${run.effectiveProfile.adapter ?? "unavailable"} reasoning=${run.effectiveProfile.reasoningEffort ?? "unavailable"}`,
     `    status=${run.outcome.status} usage=${run.usage ? JSON.stringify(run.usage) : "unavailable"} archive=${run.archive.archiveId ?? "unavailable"} (${run.archive.status})`,
-    `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} elapsed-ms=${run.effort.elapsedMs ?? "unknown"} turns=${run.effort.counts.turns} tools=${run.effort.counts.tools} mcp-tools=${run.effort.counts.mcpTools} phase=${run.effort.phase ?? "unknown"}`,
+    `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} elapsed-ms=${run.effort.elapsedMs ?? "unknown"} turns=${run.effort.counts.turns} tools=${run.effort.counts.tools} mcp-tools=${run.effort.counts.mcpTools} phase=${run.effort.phase ?? "unknown"} failure-class=${run.effort.failureClass ?? "none"}`,
     `    relation=${run.outcome.taskRelation}`,
   ].join("\n");
 }

@@ -278,8 +278,22 @@ test("projects failed interrupted usage with every token dimension and matching 
   const page = {
     ...evidence(),
     coverage: "complete" as const,
-    runs: [{ ...evidence().runs[0]!, outcome: "failed" as const, elapsedMs: 511_537, usage }],
-    totals: { ...evidence().totals, invocations: 1, elapsedMs: 511_537, usage },
+    runs: [
+      {
+        ...evidence().runs[0]!,
+        outcome: "failed" as const,
+        failureClass: "transient_capacity" as const,
+        elapsedMs: 511_537,
+        usage,
+      },
+    ],
+    totals: {
+      ...evidence().totals,
+      invocations: 1,
+      elapsedMs: 511_537,
+      terminalTaskCounts: { ...evidence().totals.terminalTaskCounts, transient_capacity: 1 },
+      usage,
+    },
   };
 
   const events = campaignEvidenceToPostHogEvents(campaign(), page, "deployment-test");
@@ -288,6 +302,7 @@ test("projects failed interrupted usage with every token dimension and matching 
   expect(roleRun).toMatchObject({
     properties: {
       outcome: "failed",
+      failure_class: "transient_capacity",
       $ai_input_tokens: 120,
       $ai_cache_read_input_tokens: 20,
       uncached_input_tokens: 100,
@@ -298,6 +313,7 @@ test("projects failed interrupted usage with every token dimension and matching 
     },
   });
   expect(progress.properties).toMatchObject({
+    terminal_tasks_transient_capacity: 1,
     token_coverage: "complete",
     evidence_coverage: "complete",
     input_tokens: 120,

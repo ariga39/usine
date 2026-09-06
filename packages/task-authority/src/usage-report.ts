@@ -2,7 +2,12 @@ import { and, asc, gte, inArray, lt, sql } from "drizzle-orm";
 import { taskEvents, taskRuns } from "./schema.js";
 import { decodeRawPersistedTaskResult } from "./task-state-schema.js";
 import { decodeTaskEvent, type TaskEvent } from "./task-event.js";
-import type { TaskResult } from "./task-state.js";
+import {
+  TASK_FAILURE_CLASSES,
+  taskFailureClassFromProvider,
+  type TaskFailureClass,
+  type TaskResult,
+} from "./task-state.js";
 import { Schema } from "effect";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
@@ -57,6 +62,7 @@ export interface UsageInvocation {
   readonly serviceTier: UsageDimension;
   readonly reasoningEffort: UsageDimension;
   readonly outcome: UsageOutcome;
+  readonly failureClass?: TaskFailureClass | null;
   readonly occurredAtEpochMs: number;
   readonly elapsedMs: number | null;
   readonly usage: UsageAmounts;
@@ -77,6 +83,7 @@ export interface UsageAggregate {
   readonly serviceTier: UsageDimension;
   readonly reasoningEffort: UsageDimension;
   readonly outcome: UsageOutcome;
+  readonly failureClass?: TaskFailureClass | null;
   readonly invocations: number;
   readonly usage: UsageAmounts;
 }
@@ -137,6 +144,7 @@ const usageInvocationSchema = Schema.Struct({
   serviceTier: Schema.String,
   reasoningEffort: Schema.String,
   outcome: Schema.Literals(["succeeded", "failed", "cancelled", "blocked", "unknown"]),
+  failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
   occurredAtEpochMs: Schema.Int,
   elapsedMs: Schema.NullOr(Schema.Natural),
   usage: usageAmountsSchema,
@@ -156,6 +164,7 @@ const usageAggregateSchema = Schema.Struct({
   serviceTier: Schema.String,
   reasoningEffort: Schema.String,
   outcome: Schema.Literals(["succeeded", "failed", "cancelled", "blocked", "unknown"]),
+  failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
   invocations: Schema.Natural,
   usage: usageAmountsSchema,
 });
@@ -237,6 +246,7 @@ interface MutableInvocation {
   requestedProfile: string | null;
   session: CompletedSession | null;
   interrupted: InterruptedSession | null;
+  failureClass: TaskFailureClass | null;
   providerUsage: SessionUsage | null;
   actualModel: string | null;
   actualModelProvider: string | null;
@@ -409,6 +419,7 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
     } else if (data.type === "coding_session_interrupted") {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
       run.interrupted = data;
+      run.failureClass = taskFailureClassFromProvider(data.failureClass);
       run.completedAtEpochMs ??= event.occurredAtEpochMs;
     } else if (data.type === "coding_session_completed") {
       const run = getOrCreateRun(runs, source.task.taskId, event, data);
@@ -458,6 +469,7 @@ function getOrCreateRun(
     requestedProfile: "requestedProfile" in data ? (data.requestedProfile ?? null) : null,
     session: null,
     interrupted: null,
+    failureClass: null,
     providerUsage: null,
     actualModel: null,
     actualModelProvider: null,
@@ -505,6 +517,7 @@ function invocationFromRun(
     role: run.role,
     activation: run.activation,
     reviewCycle: run.reviewCycle,
+    failureClass: run.failureClass,
     profile: normalizer
       ? USAGE_DIMENSION_UNAVAILABLE
       : (effective?.profileName ?? run.requestedProfile ?? USAGE_DIMENSION_UNAVAILABLE),
@@ -581,6 +594,7 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
       row.serviceTier,
       row.reasoningEffort,
       row.outcome,
+      row.failureClass ?? "none",
     ].join("\u0000");
     const current = grouped.get(key) ?? [];
     current.push(row);
@@ -604,6 +618,7 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
         serviceTier: first.serviceTier,
         reasoningEffort: first.reasoningEffort,
         outcome: first.outcome,
+        failureClass: first.failureClass,
         invocations: group.length,
         usage: aggregateUsage(group.map((row) => row.usage)),
       } satisfies UsageAggregate;
@@ -680,5 +695,6 @@ function aggregateKey(value: UsageAggregate): string {
     value.serviceTier,
     value.reasoningEffort,
     value.outcome,
+    value.failureClass ?? "none",
   ].join("\u0000");
 }

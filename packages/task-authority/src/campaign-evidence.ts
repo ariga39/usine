@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 import type { UsageAmounts, UsageReportSource } from "./usage-report.js";
-import type { TaskBlockerClassification } from "./task-state.js";
+import { TASK_FAILURE_CLASSES, type TaskBlockerClassification } from "./task-state.js";
 
 const exactSha = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/));
 
@@ -33,6 +33,7 @@ const evidenceRun = Schema.Struct({
   adapter: Schema.String,
   model: Schema.String,
   outcome: Schema.Literals(["succeeded", "failed", "cancelled", "blocked", "unknown"]),
+  failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
   occurredAtEpochMs: Schema.Int,
   elapsedMs: Schema.NullOr(Schema.Natural),
   usage: usageAmounts,
@@ -48,6 +49,7 @@ const evidenceAggregate = Schema.Struct({
   model: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
+  failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
   invocations: Schema.Natural,
   elapsedMs: Schema.NullOr(Schema.Natural),
   usage: usageAmounts,
@@ -85,6 +87,13 @@ const terminalTaskCounts = Schema.Struct({
   invalid_phase: Schema.Natural,
   missing_evidence: Schema.Natural,
   provider_failure: Schema.Natural,
+  transient_capacity: Schema.optional(Schema.Natural),
+  transient_transport: Schema.optional(Schema.Natural),
+  network: Schema.optional(Schema.Natural),
+  timeout: Schema.optional(Schema.Natural),
+  configuration: Schema.optional(Schema.Natural),
+  authority: Schema.optional(Schema.Natural),
+  protocol: Schema.optional(Schema.Natural),
   project_check_failure: Schema.Natural,
   review_inconclusive: Schema.Natural,
   delivery_failure: Schema.Natural,
@@ -126,9 +135,24 @@ export type CampaignAcceptedDelivery = CampaignEvidencePage["deliveries"][number
 
 export type CampaignEvidenceUsage = UsageAmounts;
 
-export type CampaignEvidenceTerminalTaskCounts = {
+type AllTerminalTaskCounts = {
   readonly [classification in TaskBlockerClassification]: number;
 };
+type LegacyTerminalTaskClassification =
+  | "elapsed_budget"
+  | "implementation_budget"
+  | "invalid_phase"
+  | "missing_evidence"
+  | "provider_failure"
+  | "project_check_failure"
+  | "review_inconclusive"
+  | "delivery_failure"
+  | "unknown";
+export type CampaignEvidenceTerminalTaskCounts = Pick<
+  AllTerminalTaskCounts,
+  LegacyTerminalTaskClassification
+> &
+  Partial<Omit<AllTerminalTaskCounts, LegacyTerminalTaskClassification>>;
 
 export interface CampaignEvidenceCampaign {
   readonly campaignId: string;

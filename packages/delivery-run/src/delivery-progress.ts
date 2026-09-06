@@ -1,9 +1,7 @@
+import type { CodingSessionObservation, CodingSessionPhase } from "@usine/coding-session";
 import type {
-  CodingSessionFailureClass,
-  CodingSessionObservation,
-  CodingSessionPhase,
-} from "@usine/coding-session";
-import type {
+  TaskBlockerClassification,
+  TaskFailureClass,
   TaskObservationEventData,
   TaskObservationEventInput,
   TaskResult,
@@ -119,7 +117,10 @@ export function emitCodingInterruption(
   sessionId: string,
   eventPrefix: string,
   counter: { value: number },
-  interruption: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass },
+  interruption: {
+    phase: CodingSessionPhase;
+    failureClass: TaskFailureClass;
+  },
 ): Promise<void> {
   return emitObservation(services, taskId, {
     eventId: `${eventPrefix}:${counter.value++}:coding_session_interrupted`,
@@ -139,6 +140,11 @@ export async function blockTask(
   services: DeliveryRunServices,
   result: TaskResult,
   blocker: string,
+  classification?: TaskBlockerClassification,
 ): Promise<TaskResult> {
-  return services.authority.block({ taskId: result.taskId, revision: result.revision }, blocker);
+  return services.authority.block(
+    { taskId: result.taskId, revision: result.revision },
+    blocker,
+    classification,
+  );
 }
