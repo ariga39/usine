@@ -2010,8 +2010,9 @@ describe("Coding Session", () => {
     ["request timed out", "timeout"],
     ["invalid profile configuration", "configuration"],
     ["permission denied by provider", "authority"],
-    ["transport closed unexpectedly", "transport"],
+    ["transport closed unexpectedly", "transient_transport"],
     ["malformed protocol response", "transport"],
+    ["coding session stream failed", "transient_transport"],
     ["unclassified provider failure", "unknown"],
   ] as const)("projects provider failure %s as %s", async (message, failureClass) => {
     const session = new CodexCodingSession(

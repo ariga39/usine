@@ -52,6 +52,12 @@ export class CodexAppServerAdapter implements CodingSessionAdapter {
 
 class AppServerCancelled extends Error {}
 class AppServerProtocolError extends Error {}
+class AppServerCallbackError extends Error {
+  constructor(readonly cause: unknown) {
+    super("app-server callback failed");
+    this.name = "AppServerCallbackError";
+  }
+}
 
 const jsonRpcMessageSchema = z
   .object({
@@ -364,7 +370,7 @@ async function runCodexAppServer({
           observation: Parameters<NonNullable<CodingSessionAdapterRequest["onObservation"]>>[0],
         ) =>
           Effect.tryPromise({
-            try: async () => await onObservation?.(observation),
+            try: async () => await invokeAppServerCallback(onObservation, observation),
             catch: asError,
           });
         const assertIdentity = (eventThreadId: string, eventTurnId: string): void => {
@@ -437,9 +443,11 @@ async function runCodexAppServer({
                     if (item.type === "agentMessage" && typeof item.text === "string")
                       finalResponse = item.text;
                     yield* Effect.tryPromise({
-                      try: async () => {
-                        await onItemCompleted?.(appServerCompletedEvidence(item));
-                      },
+                      try: async () =>
+                        await invokeAppServerCallback(
+                          onItemCompleted,
+                          appServerCompletedEvidence(item),
+                        ),
                       catch: asError,
                     });
                     break;
@@ -470,9 +478,11 @@ async function runCodexAppServer({
                     };
                     if (usage)
                       yield* Effect.tryPromise({
-                        try: async () => {
-                          await onUsage?.({ usage: usage!, semantics: "replacement" });
-                        },
+                        try: async () =>
+                          await invokeAppServerCallback(onUsage, {
+                            usage: usage!,
+                            semantics: "replacement",
+                          }),
                         catch: asError,
                       });
                     break;
@@ -512,9 +522,11 @@ async function runCodexAppServer({
               throw new Error("app-server protocol message has no response or method");
             } catch (error) {
               yield* failTerminal(
-                error instanceof AppServerProtocolError
-                  ? error
-                  : new AppServerProtocolError(asError(error).message),
+                error instanceof AppServerCallbackError
+                  ? asError(error.cause)
+                  : error instanceof AppServerProtocolError
+                    ? error
+                    : new AppServerProtocolError(asError(error).message),
               );
               return;
             }
@@ -621,6 +633,17 @@ function waitForChildSettlement(childSettled: Promise<void>, timeoutMs: number):
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error("app-server request failed");
+}
+
+async function invokeAppServerCallback<TArgs extends readonly unknown[]>(
+  callback: ((...args: TArgs) => Promise<void> | void) | undefined,
+  ...args: TArgs
+): Promise<void> {
+  try {
+    await callback?.(...args);
+  } catch (error) {
+    throw new AppServerCallbackError(error);
+  }
 }
 
 function appServerFailureClass(

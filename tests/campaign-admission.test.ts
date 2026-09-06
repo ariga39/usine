@@ -2021,7 +2021,7 @@ describe("durable Ready frontier", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       await expect(taskStatus(server.url, admittedTaskId!)).resolves.toMatchObject({
-        state: "accepted",
+        state: "reviewed_pr",
         delivery: { effect: "github" },
       });
       await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({

@@ -31,11 +31,8 @@ export function classifyAdapterFailure(error: unknown): CodingSessionFailureClas
     return "authority";
   if (/(config|profile|invalid option|unknown option|unsupported|capability)/.test(message))
     return "configuration";
-  if (
-    /(protocol|malformed|identity|out[- ]of[- ]order|schema|transport|stream|closed|eof)/.test(
-      message,
-    )
-  )
-    return "transport";
+  if (/(protocol|malformed|identity|out[- ]of[- ]order|schema)/.test(message)) return "transport";
+  if (/(stream|closed|eof|transport[- ](?:closure|closed))/.test(message))
+    return "transient_transport";
   return "unknown";
 }
