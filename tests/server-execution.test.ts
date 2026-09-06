@@ -259,7 +259,7 @@ describe("server-owned execution", () => {
                 summary: "temporary provider outage with raw-secret-marker",
                 failure: "temporary provider outage with raw-secret-marker",
                 phase: "turn" as const,
-                failureClass: "network" as const,
+                failureClass: "transport" as const,
               }),
             },
             quality: {
@@ -301,7 +301,7 @@ describe("server-owned execution", () => {
         activation: 1,
         sessionId: "coding-session:1:implementer",
         phase: "turn",
-        failureClass: "network",
+        failureClass: "transport",
       });
       expect(JSON.stringify(events)).not.toContain("raw-secret-marker");
     } finally {
@@ -363,10 +363,10 @@ describe("server-owned execution", () => {
                   ? {
                       status: "failed" as const,
                       output: null,
-                      summary: "network interruption",
-                      failure: "network interruption",
+                      summary: "transport interruption",
+                      failure: "transport interruption",
                       phase: "turn" as const,
-                      failureClass: "network" as const,
+                      failureClass: "transport" as const,
                     }
                   : {
                       status: "completed" as const,
