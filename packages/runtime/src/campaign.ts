@@ -73,6 +73,50 @@ export class CampaignContentConflictError extends Error {
   }
 }
 
+export const CAMPAIGN_STATE_QUARANTINE_DIAGNOSTIC = "durable Campaign state quarantined";
+
+export class CampaignStateQuarantinedError extends Error {
+  readonly code = "campaign_state_quarantined";
+
+  constructor(readonly campaignId: string) {
+    super(CAMPAIGN_STATE_QUARANTINE_DIAGNOSTIC);
+    this.name = "CampaignStateQuarantinedError";
+  }
+}
+
+export function isCampaignStateQuarantinedError(
+  error: unknown,
+): error is CampaignStateQuarantinedError {
+  return (
+    error instanceof Error &&
+    error.name === "CampaignStateQuarantinedError" &&
+    "code" in error &&
+    error.code === "campaign_state_quarantined"
+  );
+}
+
+interface CampaignStateInput {
+  readonly campaignId: string;
+  readonly status: unknown;
+  readonly decisionRequest: unknown;
+}
+
+interface DecodedCampaignState {
+  readonly status: ReturnType<typeof decodeCampaignStatus>;
+  readonly decisionRequest: CampaignDecisionRequest | null;
+}
+
+export function decodeCampaignState(input: CampaignStateInput): DecodedCampaignState {
+  try {
+    return {
+      status: decodeCampaignStatus(input.status),
+      decisionRequest: decodeCampaignDecisionRequest(input.decisionRequest),
+    };
+  } catch {
+    throw new CampaignStateQuarantinedError(input.campaignId);
+  }
+}
+
 export class CampaignProposalConflictError extends Error {
   readonly code = "campaign_proposal_conflict";
   readonly retryable = false;
@@ -526,15 +570,15 @@ async function reconcile(
     where: eq(campaigns.campaignId, campaignId),
   });
   if (!campaign) throw new Error("campaign not found");
-  let campaignStatus: ReturnType<typeof decodeCampaignStatus>;
-  let decisionRequest: CampaignDecisionRequest | null;
+  let campaignState: DecodedCampaignState;
   try {
-    campaignStatus = decodeCampaignStatus(campaign.status);
-    decisionRequest = decodeCampaignDecisionRequest(campaign.decisionRequest);
+    campaignState = decodeCampaignState(campaign);
   } catch {
     // Preserve corrupt durable state for the owning read path to report.
     return;
   }
+  let campaignStatus = campaignState.status;
+  let decisionRequest = campaignState.decisionRequest;
   const contract = goalContractSchema.parse(campaign.contract);
   const newerCampaign = await database
     .select({ goalVersion: max(campaigns.goalVersion) })
@@ -820,7 +864,7 @@ async function admitReadyCampaignTasks(
       if (!campaignRow.planHandedOff) continue;
       let campaignStatus: ReturnType<typeof decodeCampaignStatus>;
       try {
-        campaignStatus = decodeCampaignStatus(campaignRow.status);
+        campaignStatus = decodeCampaignState(campaignRow).status;
       } catch {
         continue;
       }
@@ -900,6 +944,7 @@ async function resourceFromDatabase(
     where: eq(campaigns.campaignId, campaignId),
   });
   if (!campaign) throw new Error("campaign not found");
+  const campaignState = decodeCampaignState(campaign);
   const rows = await database
     .select()
     .from(campaignProposals)
@@ -911,12 +956,12 @@ async function resourceFromDatabase(
   return campaignResourceFromContract(
     contract,
     campaign.contractHash,
-    decodeCampaignStatus(campaign.status),
+    campaignState.status,
     campaign.revision,
     {
       proposals: rows.map(proposalResource),
       planHandedOff: campaign.planHandedOff,
-      decisionRequest: decodeCampaignDecisionRequest(campaign.decisionRequest),
+      decisionRequest: campaignState.decisionRequest,
       outcomeEvidence,
     },
   );
@@ -989,7 +1034,8 @@ export async function proposeCampaign(
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!campaign) throw new CampaignNotFoundError();
-    if (campaign.planHandedOff || isTerminalCampaignStatus(decodeCampaignStatus(campaign.status)))
+    const campaignState = decodeCampaignState(campaign);
+    if (campaign.planHandedOff || isTerminalCampaignStatus(campaignState.status))
       throw new CampaignHandoffError(campaignId);
     const existing = await database.query.campaignProposals.findFirst({
       where: and(
@@ -1037,10 +1083,8 @@ export async function handoffCampaign(
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!campaign) throw new CampaignNotFoundError();
-    if (
-      !campaign.planHandedOff &&
-      !isTerminalCampaignStatus(decodeCampaignStatus(campaign.status))
-    ) {
+    const campaignState = decodeCampaignState(campaign);
+    if (!campaign.planHandedOff && !isTerminalCampaignStatus(campaignState.status)) {
       await database
         .update(campaigns)
         .set({
@@ -1069,14 +1113,12 @@ export async function abandonCampaign(
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!campaign) throw new CampaignNotFoundError();
+    const campaignState = decodeCampaignState(campaign);
     const contract = goalContractSchema.parse(campaign.contract);
     const configured = environment[CAMPAIGN_ABANDONMENT_SOURCE_ENV]?.trim();
     if (!configured || configured !== contract.authority.source)
       throw new CampaignAbandonmentError();
-    if (
-      decodeCampaignStatus(campaign.status) !== "accepted" &&
-      decodeCampaignStatus(campaign.status) !== "abandoned"
-    ) {
+    if (campaignState.status !== "accepted" && campaignState.status !== "abandoned") {
       const updatedAt = nextCampaignUpdatedAt(campaign.updatedAt);
       await database
         .update(campaigns)
@@ -1138,6 +1180,7 @@ export async function recordCampaignDecisionTouch(
       where: eq(campaigns.campaignId, campaignId),
     });
     if (!campaign) throw new CampaignNotFoundError();
+    decodeCampaignState(campaign);
     await database
       .insert(campaignTouches)
       .values({

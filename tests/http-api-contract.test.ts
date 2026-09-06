@@ -192,3 +192,31 @@ test("the shared error contract encodes quarantined Tasks as HTTP 503", async ()
     error: "task_state_quarantined",
   });
 });
+
+test("the shared error contract encodes quarantined Campaigns as HTTP 503", async () => {
+  const handlers = HttpApiBuilder.group(UsineApi, "campaigns", (group) =>
+    group.handleAll({
+      publish: () => Effect.die("unused"),
+      get: () =>
+        Effect.fail({
+          campaignId: "campaign-quarantined:v1",
+          error: "campaign_state_quarantined" as const,
+        }),
+      propose: () => Effect.die("unused"),
+      handoff: () => Effect.die("unused"),
+      abandon: () => Effect.die("unused"),
+      evidence: () => Effect.die("unused"),
+      touch: () => Effect.die("unused"),
+    }),
+  );
+  const request = Effect.scoped(
+    Effect.gen(function* () {
+      const client = yield* HttpApiTest.groups(UsineApi, ["campaigns"]);
+      return yield* client.campaigns.get({ params: { campaignId: "campaign-quarantined:v1" } });
+    }).pipe(Effect.provide(Layer.mergeAll(handlers, HttpServer.layerServices))),
+  );
+  await expect(Effect.runPromise(request)).rejects.toEqual({
+    campaignId: "campaign-quarantined:v1",
+    error: "campaign_state_quarantined",
+  });
+});

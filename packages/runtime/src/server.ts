@@ -33,6 +33,7 @@ import {
   CampaignNotFoundError,
   CampaignAbandonmentError,
   CampaignHandoffError,
+  isCampaignStateQuarantinedError,
   GoalContractInputError,
   abandonCampaign,
   handoffCampaign,
@@ -755,6 +756,8 @@ function apiError(error: unknown): ApiError {
     return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CampaignAbandonmentError)
     return { code: error.code, message: error.message, retryable: false };
+  if (isCampaignStateQuarantinedError(error))
+    return { campaignId: error.campaignId, error: "campaign_state_quarantined" };
   if (isTaskStateQuarantinedError(error)) {
     if (error.taskId !== undefined)
       return { taskId: error.taskId, error: "task_state_quarantined" };

@@ -175,6 +175,8 @@ export {
   handoffCampaign,
   abandonCampaign,
   CampaignAbandonmentError,
+  CampaignStateQuarantinedError,
+  isCampaignStateQuarantinedError,
   readGoalContract,
   proposeCampaign,
 } from "./campaign.js";
