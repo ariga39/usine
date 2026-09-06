@@ -74,6 +74,11 @@ const acceptedDelivery = Schema.Struct({
   occurredAtEpochMs: Schema.NullOr(Schema.Int),
 });
 
+const campaignProgress = Schema.Struct({
+  revision: Schema.Natural,
+  occurredAtEpochMs: Schema.Int,
+});
+
 const terminalTaskCounts = Schema.Struct({
   elapsed_budget: Schema.Natural,
   implementation_budget: Schema.Natural,
@@ -93,6 +98,7 @@ export const campaignEvidencePageSchema = Schema.Struct({
   goalVersion: Schema.Int,
   cursor: Schema.NullOr(Schema.String),
   nextCursor: Schema.NullOr(Schema.String),
+  progress: campaignProgress,
   coverage: Schema.Literals(["complete", "partial", "unavailable"]),
   runs: Schema.Array(evidenceRun),
   aggregates: Schema.Array(evidenceAggregate),
@@ -129,6 +135,8 @@ export interface CampaignEvidenceCampaign {
   readonly goalId: string;
   readonly goalVersion: number;
   readonly publishedAtEpochMs: number;
+  readonly revision: number;
+  readonly updatedAtEpochMs: number;
 }
 
 export interface CampaignEvidenceProposal {

@@ -29,6 +29,12 @@ interface FakePostHog {
   readonly status: number;
 }
 
+function campaignRevision(event: CapturedBatchEvent): number {
+  const value = event.properties?.campaign_revision;
+  if (typeof value !== "number") throw new Error("Campaign revision is missing");
+  return value;
+}
+
 const servers: Array<ReturnType<typeof createServer>> = [];
 const usineServers: Array<{ close: () => Promise<void> }> = [];
 
@@ -103,6 +109,7 @@ function evidence(): CampaignEvidencePage {
     goalVersion: 1,
     cursor: null,
     nextCursor: null,
+    progress: { revision: 4, occurredAtEpochMs: 1_700_000_000_200 },
     coverage: "complete",
     runs: [
       {
@@ -281,6 +288,35 @@ test("namespaces stable event and AI trace identities by deployment", () => {
   expect(otherTrace).not.toBe(firstTrace);
 });
 
+test("orders Campaign progress from durable revision and occurrence facts", () => {
+  const stages = [
+    { status: "planning" as const, revision: 2, occurredAtEpochMs: 1_700_000_000_300 },
+    { status: "blocked" as const, revision: 3, occurredAtEpochMs: 1_700_000_000_400 },
+    { status: "accepted" as const, revision: 4, occurredAtEpochMs: 1_700_000_000_500 },
+  ];
+  const progress = stages.map(({ status, revision, occurredAtEpochMs }) =>
+    campaignEvidenceToPostHogEvents(
+      { ...campaign(), status, revision },
+      { ...evidence(), progress: { revision, occurredAtEpochMs } },
+      "deployment-test",
+    ).find((event) => event.event === "usine_campaign_progress"),
+  );
+
+  expect(progress.map((event) => event?.properties.campaign_revision)).toEqual([2, 3, 4]);
+  expect(progress.map((event) => event?.timestamp)).toEqual([
+    "2023-11-14T22:13:20.300Z",
+    "2023-11-14T22:13:20.400Z",
+    "2023-11-14T22:13:20.500Z",
+  ]);
+  expect(progress[2]).toEqual(
+    campaignEvidenceToPostHogEvents(
+      { ...campaign(), status: "accepted", revision: 4 },
+      { ...evidence(), progress: { revision: 4, occurredAtEpochMs: 1_700_000_000_500 } },
+      "deployment-test",
+    ).find((event) => event.event === "usine_campaign_progress"),
+  );
+});
+
 test("does not opt into PostHog without a non-empty deployment label", () => {
   expect(postHogConfigFromEnvironment({ USINE_POSTHOG_API_KEY: "test-project-key" })).toBeNull();
   expect(
@@ -379,6 +415,10 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
   );
   const roleRun = request.batch!.find((event) => event.event === "$ai_generation")!;
+  const planningProgress = request.batch!.find(
+    (event) =>
+      event.event === "usine_campaign_progress" && event.properties?.campaign_status === "planning",
+  )!;
   expect(request.url).toBe("/batch/");
   expect(roleRun).toMatchObject({
     uuid: expect.stringMatching(
@@ -403,18 +443,28 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     true,
   );
   expect(roleRun).not.toHaveProperty("distinct_id");
+  const afterPlanningCapture = fixture.posthog.requests.length;
   const blockedRequest = await waitForRequest(
     fixture.posthog,
     (value) =>
       value.batch?.some(
         (event) =>
           event.event === "usine_campaign_progress" &&
+          event.properties?.campaign_status === "blocked" &&
           event.properties?.terminal_tasks_unknown === 1,
       ) === true,
+    afterPlanningCapture,
   );
   const blockedProgress = blockedRequest.batch!.find(
-    (event) => event.event === "usine_campaign_progress",
+    (event) =>
+      event.event === "usine_campaign_progress" && event.properties?.campaign_status === "blocked",
   )!;
+  expect(planningProgress.properties?.campaign_revision).toEqual(expect.any(Number));
+  expect(blockedProgress.properties?.campaign_revision).toEqual(expect.any(Number));
+  expect(campaignRevision(blockedProgress)).toBeGreaterThan(campaignRevision(planningProgress));
+  expect(Date.parse(blockedProgress.timestamp!)).toBeGreaterThan(
+    Date.parse(planningProgress.timestamp!),
+  );
   expect(blockedProgress.properties).toMatchObject({ terminal_tasks_unknown: 1 });
   expect(JSON.stringify(blockedProgress)).not.toContain("fixture blocker");
   const beforeRestart = fixture.posthog.requests.length;
