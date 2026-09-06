@@ -379,6 +379,11 @@ test("captures persisted evidence from Task events using the Batch protocol", as
     (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
   );
   const roleRun = request.batch!.find((event) => event.event === "$ai_generation")!;
+  const planningProgress = request.batch!.find(
+    (event) =>
+      event.event === "usine_campaign_progress" &&
+      event.properties?.campaign_status === "planning",
+  )!;
   expect(request.url).toBe("/batch/");
   expect(roleRun).toMatchObject({
     uuid: expect.stringMatching(
@@ -415,6 +420,14 @@ test("captures persisted evidence from Task events using the Batch protocol", as
   const blockedProgress = blockedRequest.batch!.find(
     (event) => event.event === "usine_campaign_progress",
   )!;
+  expect(planningProgress.properties?.campaign_revision).toEqual(expect.any(Number));
+  expect(blockedProgress.properties?.campaign_revision).toEqual(expect.any(Number));
+  expect(blockedProgress.properties!.campaign_revision).toBeGreaterThan(
+    planningProgress.properties!.campaign_revision as number,
+  );
+  expect(Date.parse(blockedProgress.timestamp!)).toBeGreaterThan(
+    Date.parse(planningProgress.timestamp!),
+  );
   expect(blockedProgress.properties).toMatchObject({ terminal_tasks_unknown: 1 });
   expect(JSON.stringify(blockedProgress)).not.toContain("fixture blocker");
   const beforeRestart = fixture.posthog.requests.length;
