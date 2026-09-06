@@ -386,6 +386,28 @@ describe("Task event stream", () => {
     expect(JSON.stringify(events)).not.toContain("provider-secret");
   });
 
+  test("normalizes legacy provider interruption classes in durable history", async () => {
+    const taskId = `events-interruption-normalized-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    await authority.appendObservation(taskId, {
+      eventId: "coding-interruption-capacity",
+      occurredAtEpochMs: 205,
+      data: {
+        type: "coding_session_interrupted",
+        role: "reviewer",
+        activation: 0,
+        sessionId: "review-session:1",
+        phase: "turn",
+        failureClass: "rate_limit",
+      },
+    });
+
+    const event = (await authority.listEvents(taskId)).at(-1);
+    expect(event).toMatchObject({
+      data: { type: "coding_session_interrupted", failureClass: "transient_capacity" },
+    });
+  });
+
   test("keeps a complete coding activation observation sequence beside its authoritative result", async () => {
     const taskId = `activation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);

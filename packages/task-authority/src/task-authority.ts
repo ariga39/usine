@@ -24,6 +24,7 @@ import {
   type CheckResult,
   type DeliveryEffect,
   type ReviewVerdict,
+  type TaskBlockerClassification,
   type TaskFact,
   type TaskObservation,
   type TaskExecutionInput,
@@ -752,8 +753,12 @@ export class TaskAuthority {
     return this.persistFact(observation, { type: "waiting", waiting });
   }
 
-  block(observation: TaskObservation, blocker: string): Promise<TaskResult> {
-    return this.persistFact(observation, { type: "blocked", blocker });
+  block(
+    observation: TaskObservation,
+    blocker: string,
+    classification?: TaskBlockerClassification,
+  ): Promise<TaskResult> {
+    return this.persistFact(observation, { type: "blocked", blocker, classification });
   }
 
   async reserveActivation(

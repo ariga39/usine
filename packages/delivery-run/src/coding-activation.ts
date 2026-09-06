@@ -4,8 +4,10 @@ import {
   deadlineExpired,
   type CheckResult,
   type TaskObservationEventData,
+  type TaskFailureClass,
   type TaskResult,
   type TaskWaitingResumeState,
+  taskFailureClassFromProvider,
   originalTaskContract,
 } from "@usine/task-authority";
 import type { DeliveryRunInput, DeliveryRunServices } from "./delivery-run.js";
@@ -38,7 +40,13 @@ type CodingAttempt =
       result: TaskResult;
       candidate: { sha: string; baseSha: string; workspace: WriterWorkspace };
     }
-  | { status: "failed"; result: TaskResult; reason: string; retryable: boolean };
+  | {
+      status: "failed";
+      result: TaskResult;
+      reason: string;
+      retryable: boolean;
+      failureClass?: TaskFailureClass;
+    };
 
 async function runCodingAttempt(
   input: DeliveryRunInput,
@@ -138,7 +146,10 @@ async function runCodingAttempt(
         sessionId,
         `coding:${reservation.activation}`,
         observationCounter,
-        { phase: observation.phase, failureClass: observation.failureClass },
+        {
+          phase: observation.phase,
+          failureClass: taskFailureClassFromProvider(observation.failureClass),
+        },
       );
     await emit({
       type: "coding_session_completed",
@@ -156,6 +167,9 @@ async function runCodingAttempt(
       status: "failed",
       result: reservation.result,
       reason: "implementer coding session failed",
+      failureClass: observation.failureClass
+        ? taskFailureClassFromProvider(observation.failureClass)
+        : undefined,
       retryable:
         input.implementer.role === "implementer" &&
         observation.phase === "turn" &&
@@ -259,6 +273,7 @@ export async function activateImplementer(
     return blockTask(services, result, error instanceof Error ? error.message : String(error));
   }
   if (attempt.status === "failed") {
+    if (attempt.failureClass === "cancellation") return attempt.result;
     if (
       attempt.retryable &&
       attempt.result.evidence.implementerActivations <
@@ -282,7 +297,7 @@ export async function activateImplementer(
         },
       );
     }
-    return blockTask(services, attempt.result, attempt.reason);
+    return blockTask(services, attempt.result, attempt.reason, attempt.failureClass);
   }
   await services.workspace.quarantine(attempt.candidate.workspace);
   return attempt.result;

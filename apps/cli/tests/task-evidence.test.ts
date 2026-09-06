@@ -599,6 +599,46 @@ describe("task evidence", () => {
     expect(renderTaskEvidence(evidence, false)).toContain("archive=unavailable (unavailable)");
   });
 
+  test("keeps the bounded interruption class in Task evidence and prose", () => {
+    const taskId = "review-interruption-evidence-task";
+    const task = {
+      taskId,
+      state: "blocked",
+      candidateSha: null,
+      review: {
+        sha: "a".repeat(40),
+        verdict: "inconclusive",
+        classification: "inconclusive",
+        findingCount: 0,
+        failureClass: "transient_capacity",
+      },
+    } as TaskResource;
+    const event = decodeTaskEvent({
+      taskId,
+      sequence: 1,
+      eventId: "review-interruption-evidence",
+      occurredAtEpochMs: 1,
+      data: {
+        type: "coding_session_interrupted",
+        role: "reviewer",
+        activation: 1,
+        sessionId: "review-session",
+        phase: "turn",
+        failureClass: "rate_limit",
+      },
+    });
+
+    const evidence = deriveTaskEvidence(task, [event]);
+    expect(evidence.roleRuns.reviewer[0]).toMatchObject({
+      outcome: { status: "failed" },
+      effort: { failureClass: "transient_capacity" },
+    });
+    expect(evidence.task.review).toMatchObject({ failureClass: "transient_capacity" });
+    const rendered = renderTaskEvidence(evidence, false);
+    expect(rendered).toContain("failure-class=transient_capacity");
+    expect(rendered).not.toContain("rate_limit");
+  });
+
   test("renders separate implementer and reviewer Role Runs for one exact Task outcome", () => {
     const evidence: TaskEvidence = {
       schemaVersion: 1,

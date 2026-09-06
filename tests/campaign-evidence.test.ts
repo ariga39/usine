@@ -8,14 +8,19 @@ import {
   lookupCampaignEvidence,
   startUsineServer,
 } from "@usine/runtime";
+import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
 import {
   campaignEvidence,
+  getCampaign,
   handoffCampaign,
   proposeCampaign,
   publishCampaign,
   recordCampaignDecisionTouch,
   registerRepository,
+  taskEvidence,
+  taskEvents,
 } from "../apps/cli/src/server-client.js";
+import type { TaskFailureClass } from "@usine/task-authority";
 
 const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -66,7 +71,21 @@ function proposal(proposalId: string, outcomeId: string, effects = ["github"]) {
   };
 }
 
-async function fixture(mode: "successful" | "interrupted" = "successful") {
+type ReviewerInterruptionFixture = {
+  readonly providerClass:
+    | "rate_limit"
+    | "transient_transport"
+    | "transport"
+    | "configuration"
+    | "cancellation"
+    | "unknown";
+  readonly failureClass: TaskFailureClass;
+  readonly outcome: "failed" | "cancelled";
+};
+
+async function fixture(
+  mode: "successful" | "interrupted" | ReviewerInterruptionFixture = "successful",
+) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory);
@@ -98,6 +117,88 @@ async function fixture(mode: "successful" | "interrupted" = "successful") {
     port: 0,
     execute: async ({ authority, result, contract }) => {
       const index = executions++;
+      if (typeof mode !== "string") {
+        const reserved = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        const candidateSha = "a".repeat(40);
+        const candidate = await authority.recordCandidate(
+          { taskId: result.taskId, revision: reserved.result.revision },
+          { sha: candidateSha, baseSha: contract.baseSha, fence: reserved.activation },
+        );
+        const checked = await authority.recordCheck(
+          { taskId: result.taskId, revision: candidate.revision },
+          {
+            sha: candidateSha,
+            status: "passed",
+            command: "true",
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          },
+        );
+        const sessionId = `${result.taskId}-interrupted-reviewer`;
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-reviewer-session-started`,
+          occurredAtEpochMs: 511_537,
+          data: {
+            type: "coding_session_started",
+            role: "reviewer",
+            activation: 0,
+            reviewCycle: 1,
+            sessionId,
+            requestedProfile: "reviewer",
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-reviewer-session-interrupted`,
+          occurredAtEpochMs: 511_538,
+          data: {
+            type: "coding_session_interrupted",
+            role: "reviewer",
+            activation: 0,
+            sessionId,
+            phase: "turn",
+            failureClass: mode.providerClass,
+          },
+        });
+        await authority.appendObservation(result.taskId, {
+          eventId: `${result.taskId}-reviewer-session-completed`,
+          occurredAtEpochMs: 511_539,
+          data: {
+            type: "coding_session_completed",
+            role: "reviewer",
+            activation: 0,
+            reviewCycle: 1,
+            outcome: mode.outcome,
+            sessionId,
+            requestedProfile: "reviewer",
+          },
+        });
+        if (mode.outcome === "cancelled") {
+          finish();
+          return checked;
+        }
+        if (mode.failureClass === "cancellation") throw new Error("cancellation must not block");
+        const reviewed = await authority.recordReview(
+          { taskId: result.taskId, revision: checked.revision },
+          {
+            sha: candidateSha,
+            verdict: "inconclusive",
+            summary: "private provider diagnostic",
+            findings: [],
+            failureClass: mode.failureClass,
+          },
+        );
+        const blocked = await authority.block(
+          { taskId: result.taskId, revision: reviewed.revision },
+          "private provider diagnostic",
+          mode.failureClass,
+        );
+        finish();
+        return blocked;
+      }
       if (mode === "interrupted") {
         const sessionId = `${result.taskId}-interrupted-implementer`;
         await authority.appendObservation(result.taskId, {
@@ -457,3 +558,56 @@ test("retains failed interrupted usage in public Campaign runs and totals", asyn
   expect(publicEvidence?.runs).toEqual(persisted?.runs);
   expect(publicEvidence?.totals).toEqual(persisted?.totals);
 });
+
+test.each([
+  ["transient capacity", "rate_limit", "transient_capacity", "failed"],
+  ["transport closure", "transient_transport", "transient_transport", "failed"],
+  ["malformed protocol", "transport", "protocol", "failed"],
+  ["unusable profile", "configuration", "configuration", "failed"],
+  ["cancellation", "cancellation", "cancellation", "cancelled"],
+  ["unknown", "unknown", "unknown", "failed"],
+] as const)(
+  "keeps %s distinct across persisted Task history, Task evidence, Campaign evidence, and PostHog",
+  async (_label, providerClass, failureClass, outcome) => {
+    const { stateDirectory, contractPath, server, finished } = await fixture({
+      providerClass,
+      failureClass,
+      outcome,
+    });
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(server.url, published.campaignId, proposal("interrupted", "outcome-one"));
+    await handoffCampaign(server.url, published.campaignId);
+    await finished;
+
+    const persisted = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+    const run = persisted?.runs[0];
+    expect(run).toMatchObject({ role: "reviewer", outcome, failureClass });
+    if (outcome === "failed") expect(persisted?.totals.terminalTaskCounts[failureClass]).toBe(1);
+    else expect(persisted?.totals.terminalTaskCounts).not.toHaveProperty("cancellation");
+    const taskId = run?.taskId;
+    expect(taskId).toBeDefined();
+    const history = await taskEvents(server.url, taskId!, 0, 100);
+    expect(history.events).toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "coding_session_interrupted",
+          failureClass,
+        }),
+      }),
+    );
+    const evidence = await taskEvidence(server.url, taskId!);
+    expect(evidence?.roleRuns.reviewer[0]?.effort.failureClass).toBe(failureClass);
+    if (outcome === "cancelled") expect(evidence?.task.review).toBeNull();
+    else expect(evidence?.task.review).toMatchObject({ failureClass });
+
+    const campaign = await getCampaign(server.url, published.campaignId);
+    const postHog = campaignEvidenceToPostHogEvents(campaign!, persisted!, "deployment-test");
+    const progress = postHog.find((event) => event.event === "usine_campaign_progress");
+    const roleRun = postHog.find((event) => event.event === "$ai_generation");
+    expect(roleRun?.properties.failure_class).toBe(failureClass);
+    if (outcome === "failed")
+      expect(progress?.properties[`terminal_tasks_${failureClass}`]).toBe(1);
+    else expect(progress?.properties).not.toHaveProperty("terminal_tasks_cancellation");
+    expect(JSON.stringify(postHog)).not.toContain("private provider diagnostic");
+  },
+);

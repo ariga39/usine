@@ -1,5 +1,9 @@
 import { Schema } from "effect";
-import { TASK_BLOCKER_CLASSIFICATIONS } from "./task-state.js";
+import {
+  TASK_BLOCKER_CLASSIFICATIONS,
+  TASK_FAILURE_CLASSES,
+  taskFailureClassFromProvider,
+} from "./task-state.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
 const safeObservationId = Schema.String.check(
@@ -76,16 +80,12 @@ function isSafeEvidenceIdentity(value: string): boolean {
 
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
+// Accept the pre-401 adapter vocabulary while decoding old history. New
+// observations are normalized to Task Authority's stable vocabulary below.
 const codingSessionFailureClass = Schema.Literals([
+  ...TASK_FAILURE_CLASSES,
   "transport",
-  "transient_transport",
-  "network",
   "rate_limit",
-  "timeout",
-  "cancellation",
-  "configuration",
-  "authority",
-  "unknown",
 ]);
 
 const eventData = Schema.Union([
@@ -414,9 +414,29 @@ export type TaskEvent = Schema.Schema.Type<typeof taskEventSchema>;
 export type TaskEventPage = Schema.Schema.Type<typeof taskEventPageSchema>;
 
 export function decodeTaskObservationEventInput(input: unknown): TaskObservationEventInput {
-  return Schema.decodeUnknownSync(taskObservationEventInput, { onExcessProperty: "error" })(input);
+  const decoded = Schema.decodeUnknownSync(taskObservationEventInput, {
+    onExcessProperty: "error",
+  })(input);
+  if (decoded.data.type === "coding_session_interrupted")
+    return {
+      ...decoded,
+      data: {
+        ...decoded.data,
+        failureClass: taskFailureClassFromProvider(decoded.data.failureClass),
+      },
+    };
+  return decoded;
 }
 
 export function decodeTaskEvent(input: unknown): TaskEvent {
-  return Schema.decodeUnknownSync(taskEventSchema, { onExcessProperty: "error" })(input);
+  const decoded = Schema.decodeUnknownSync(taskEventSchema, { onExcessProperty: "error" })(input);
+  if (decoded.data.type === "coding_session_interrupted")
+    return {
+      ...decoded,
+      data: {
+        ...decoded.data,
+        failureClass: taskFailureClassFromProvider(decoded.data.failureClass),
+      },
+    };
+  return decoded;
 }

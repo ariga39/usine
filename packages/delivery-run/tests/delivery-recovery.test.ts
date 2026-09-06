@@ -126,8 +126,16 @@ function fakeAuthority(initial: TaskResult) {
       observation: { taskId: string; revision: number },
       delivery: TaskResult["delivery"],
     ) => transition(observation, { type: "delivery", delivery: delivery! }),
-    block: (observation: { taskId: string; revision: number }, blocker: string) =>
-      transition(observation, { type: "blocked", blocker }),
+    block: (
+      observation: { taskId: string; revision: number },
+      blocker: string,
+      classification?: TaskResult["blockerClassification"],
+    ) =>
+      transition(observation, {
+        type: "blocked",
+        blocker,
+        classification: classification ?? undefined,
+      }),
     appendObservation: async (_taskId: string, observation: TaskObservationEventInput) => {
       observations.push(observation);
     },
@@ -721,7 +729,7 @@ describe("Delivery Run durable phase recovery", () => {
     expect(result.state).toBe(expectedState);
     if (expectedState === "waiting")
       expect(result.waiting).toMatchObject({ reason: "network_interruption" });
-    else expect(result.blockerClassification).toBe("provider_failure");
+    else expect(result.blockerClassification).toBe("protocol");
   });
 
   test("blocks an implementer startup transport interruption", async () => {
@@ -765,7 +773,7 @@ describe("Delivery Run durable phase recovery", () => {
     );
     expect(blocked).toMatchObject({
       state: "blocked",
-      blockerClassification: "provider_failure",
+      blockerClassification: "protocol",
       evidence: { implementerActivations: 1 },
     });
   });

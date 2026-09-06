@@ -2,7 +2,6 @@ import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import {
   reviewerOutputSchema,
-  type CodingSessionFailureClass,
   type CodingSessionPhase,
   type EffectiveSessionProfile,
   type RolePolicy,
@@ -16,6 +15,8 @@ import {
   remainingUntil,
   type CheckResult,
   type ReviewVerdict,
+  taskFailureClassFromProvider,
+  type TaskFailureClass,
 } from "@usine/task-authority";
 
 type SessionUsage = ProviderNeutralUsage;
@@ -45,7 +46,7 @@ export interface ReviewAttemptObservation {
   normalizer?: RoleOutputNormalizerObservation;
   requestedProfile?: string;
   effectiveProfile?: EffectiveSessionProfile;
-  interruption?: { phase: CodingSessionPhase; failureClass: CodingSessionFailureClass };
+  interruption?: { phase: CodingSessionPhase; failureClass: TaskFailureClass };
   archive?: {
     archiveId: string;
     status: SessionArchiveCaptureStatus;
@@ -186,6 +187,9 @@ export class QualityGate {
               verdict: "inconclusive",
               summary: observation.failure ?? observation.summary,
               findings: [],
+              ...(observation.failureClass
+                ? { failureClass: taskFailureClassFromProvider(observation.failureClass) }
+                : {}),
             },
             usage: observation.usage ?? null,
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
@@ -195,7 +199,7 @@ export class QualityGate {
               ? {
                   interruption: {
                     phase: observation.phase,
-                    failureClass: observation.failureClass,
+                    failureClass: taskFailureClassFromProvider(observation.failureClass),
                   },
                 }
               : {}),

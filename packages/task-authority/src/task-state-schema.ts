@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import {
   TASK_BLOCKER_CLASSIFICATIONS,
+  TASK_FAILURE_CLASSES,
   type TaskBlockerClassification,
   type TaskResult,
 } from "./task-state.js";
@@ -50,6 +51,7 @@ const reviewVerdict = Schema.Struct({
   verdict: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
   summary: Schema.String,
   findings: Schema.Array(Schema.String),
+  failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
 });
 const mergeEffect = Schema.Struct({
   prNumber: Schema.Natural,
@@ -199,6 +201,7 @@ const publicReviewVerdict = Schema.Struct({
   verdict: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
   classification: Schema.Literals(["approved", "changes_requested", "inconclusive"]),
   findingCount: Schema.Natural,
+  failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
 });
 const publicBlockerDiagnostic = Schema.Struct({
   classification: taskBlockerClassification,
@@ -309,6 +312,8 @@ function projectBlockerClassification(
 }
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
+  if (decoded.review?.failureClass !== undefined && decoded.review.verdict !== "inconclusive")
+    throw new Error("review failure class requires an inconclusive verdict");
   return {
     schemaVersion: TASK_RESULT_SCHEMA_VERSION,
     taskId: decoded.taskId,
@@ -327,6 +332,7 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
           verdict: decoded.review.verdict,
           summary: decoded.review.summary,
           findings: [...decoded.review.findings],
+          ...(decoded.review.failureClass ? { failureClass: decoded.review.failureClass } : {}),
         }
       : null,
     delivery: decoded.delivery

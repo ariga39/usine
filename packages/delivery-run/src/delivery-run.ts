@@ -25,6 +25,7 @@ import {
   type DeliveryEffect,
   type ReviewVerdict,
   type ResolvedTaskContract,
+  type TaskBlockerClassification,
   type TaskObservation,
   type TaskResult,
   type TaskObservationEventInput,
@@ -60,7 +61,11 @@ interface DeliveryRunAuthority {
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
   recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
-  block(observation: TaskObservation, blocker: string): Promise<TaskResult>;
+  block(
+    observation: TaskObservation,
+    blocker: string,
+    classification?: TaskBlockerClassification,
+  ): Promise<TaskResult>;
   appendObservation(taskId: string, input: TaskObservationEventInput): Promise<unknown>;
 }
 
@@ -323,8 +328,15 @@ export async function executeDeliveryRun(
         result = await activateImplementer(input, services, result, candidateSha, null, findings);
         continue;
       }
-      if (result.review.verdict === "inconclusive")
-        return blockTask(services, result, `review inconclusive: ${result.review.summary}`);
+      if (result.review.verdict === "inconclusive") {
+        if (result.review.failureClass === "cancellation") return result;
+        return blockTask(
+          services,
+          result,
+          `review inconclusive: ${result.review.summary}`,
+          result.review.failureClass ?? "review_inconclusive",
+        );
+      }
       // ForgeDelivery probes before every effect. Its typed unresolved outcome
       // keeps the approved review durable for explicit retry of this exact
       // bundle without another implementer or reviewer.
