@@ -2011,6 +2011,7 @@ describe("Coding Session", () => {
     ["invalid profile configuration", "configuration"],
     ["permission denied by provider", "authority"],
     ["transport closed unexpectedly", "transport"],
+    ["malformed protocol response", "transport"],
     ["unclassified provider failure", "unknown"],
   ] as const)("projects provider failure %s as %s", async (message, failureClass) => {
     const session = new CodexCodingSession(

@@ -25,6 +25,7 @@ const archiveCaptureStatusSchema = z.enum(["stored", "truncated", "failed", "pru
 const failureClassSchema = z
   .enum([
     "transport",
+    "transient_transport",
     "network",
     "rate_limit",
     "timeout",

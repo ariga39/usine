@@ -78,6 +78,7 @@ const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
 const codingSessionFailureClass = Schema.Literals([
   "transport",
+  "transient_transport",
   "network",
   "rate_limit",
   "timeout",

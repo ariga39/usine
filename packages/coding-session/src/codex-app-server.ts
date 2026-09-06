@@ -51,6 +51,7 @@ export class CodexAppServerAdapter implements CodingSessionAdapter {
 }
 
 class AppServerCancelled extends Error {}
+class AppServerProtocolError extends Error {}
 
 const jsonRpcMessageSchema = z
   .object({
@@ -502,7 +503,7 @@ async function runCodexAppServer({
                     break;
                   }
                   case "error":
-                    throw new Error("app-server stream failed");
+                    throw new AppServerProtocolError("app-server stream reported an error");
                   default:
                     break;
                 }
@@ -510,7 +511,11 @@ async function runCodexAppServer({
               }
               throw new Error("app-server protocol message has no response or method");
             } catch (error) {
-              yield* failTerminal(asError(error));
+              yield* failTerminal(
+                error instanceof AppServerProtocolError
+                  ? error
+                  : new AppServerProtocolError(asError(error).message),
+              );
               return;
             }
           }
@@ -559,7 +564,10 @@ async function runCodexAppServer({
       if (error instanceof AppServerCancelled || signal?.aborted)
         throw new CodingSessionInterruption(phase, "cancellation", "coding session cancelled");
       const classification = stderr.classification();
-      const failureClass = appServerFailureClass(classification ?? classifyAdapterFailure(error));
+      const failureClass =
+        error instanceof AppServerProtocolError
+          ? ("transport" as const)
+          : appServerFailureClass(classification ?? classifyAdapterFailure(error));
       throw new CodingSessionInterruption(
         phase,
         failureClass,
@@ -632,7 +640,9 @@ function appServerFailureClass(
     case "timeout":
       return "timeout";
     case "transport":
-      return "transport";
+      return "transient_transport";
+    case "transient_transport":
+      return "transient_transport";
     default:
       return classification;
   }

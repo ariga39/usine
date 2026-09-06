@@ -25,6 +25,7 @@ export interface RoleRunEffort {
   phase: "startup" | "thread" | "turn" | "output" | null;
   failureClass:
     | "transport"
+    | "transient_transport"
     | "network"
     | "rate_limit"
     | "timeout"

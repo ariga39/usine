@@ -676,6 +676,54 @@ describe("Delivery Run durable phase recovery", () => {
     expect(sessions).toBe(1);
   });
 
+  test.each([
+    ["waits on a transient turn transport interruption", "transient_transport", "waiting"],
+    ["blocks a deterministic turn transport interruption", "transport", "blocked"],
+  ] as const)("%s", async (_label, failureClass, expectedState) => {
+    const id = `transport-class-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("admitted", id));
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not start");
+        },
+        reviewWithObservation: async () => {
+          throw new Error("review must not start");
+        },
+      },
+      {
+        deliver: async () => {
+          throw new Error("delivery must not start");
+        },
+      },
+    );
+    services.session = {
+      run: async () => ({
+        status: "failed" as const,
+        output: null,
+        summary: "typed transport interruption",
+        failure: "typed transport interruption",
+        phase: "turn" as const,
+        failureClass,
+      }),
+    };
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: `transport-class-hash-${expectedState}`,
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      services,
+    );
+    expect(result.state).toBe(expectedState);
+    if (expectedState === "waiting")
+      expect(result.waiting).toMatchObject({ reason: "network_interruption" });
+    else expect(result.blockerClassification).toBe("provider_failure");
+  });
+
   test("blocks an implementer startup transport interruption", async () => {
     const id = `blocked-startup-transport-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fake = fakeAuthority(persistedResult("admitted", id));

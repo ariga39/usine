@@ -6,13 +6,20 @@ import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
 import { registerRepositoryResource, startUsineServer } from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import { openSqliteDatabase, TaskAuthority, type TaskResult } from "@usine/task-authority";
+import { executeDeliveryRun, type DeliveryRunServices } from "@usine/delivery-run";
+import {
+  openSqliteDatabase,
+  resolveTaskContract,
+  TaskAuthority,
+  type TaskResult,
+} from "@usine/task-authority";
 import {
   getCampaign,
   handoffCampaign,
   proposeCampaign,
   publishCampaign,
   registerRepository,
+  retryTask,
   serverSnapshot,
   taskStatus,
 } from "../apps/cli/src/server-client.js";
@@ -121,6 +128,7 @@ function frontierProposal(
   dependsOn: string[] = [],
   merge = false,
   repositoryId = "campaign-repository",
+  maxImplementerActivations = 1,
 ) {
   return {
     proposalId,
@@ -131,7 +139,11 @@ function frontierProposal(
     acceptance: [`${proposalId} is complete.`],
     nonGoals: [],
     effects: ["github"],
-    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+    budget: {
+      maxImplementerActivations,
+      maxReviewCycles: 1,
+      maxElapsedMs: 10_000,
+    },
     merge,
   };
 }
@@ -139,6 +151,15 @@ function frontierProposal(
 function mergeFrontierGoal(repositoryId: string) {
   const contract = frontierGoal(repositoryId);
   return { ...contract, authority: { ...contract.authority, merge: true } };
+}
+
+function oneOutcomeFrontierGoal(repositoryId: string) {
+  const contract = frontierGoal(repositoryId);
+  return {
+    ...contract,
+    outcomes: [contract.outcomes[0]],
+    budget: { ...contract.budget, maxImplementerActivations: 2 },
+  };
 }
 
 async function frontierFixture(
@@ -1890,6 +1911,142 @@ describe("durable Ready frontier", () => {
       }
     } finally {
       await server.close().catch(() => undefined);
+    }
+  });
+
+  test("keeps a handed-off Campaign live through bounded turn recovery", async () => {
+    let executions = 0;
+    const fixtureValue = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        executions += 1;
+        if (executions === 1) {
+          const repository = context.result.repository;
+          if (!repository) throw new Error("Campaign fixture task has no repository snapshot");
+          const contract = resolveTaskContract(context.contract, repository);
+          const services: DeliveryRunServices = {
+            authority: context.authority,
+            workspace: {
+              quarantinePriorWriters: async () => undefined,
+              prepareWriter: async (taskId, activation, baseSha) => ({
+                taskId,
+                activation,
+                path: repository.path,
+                baseSha,
+              }),
+              freeze: async () => {
+                throw new Error("fixture interruption must not freeze a Candidate");
+              },
+              quarantine: async () => undefined,
+            },
+            session: {
+              run: async () => ({
+                status: "failed" as const,
+                output: null,
+                summary: "turn stream closed",
+                failure: "turn stream closed",
+                phase: "turn" as const,
+                failureClass: "transient_transport" as const,
+              }),
+            },
+            quality: {
+              check: async () => {
+                throw new Error("fixture check must not start");
+              },
+              reviewWithObservation: async () => {
+                throw new Error("fixture review must not start");
+              },
+            },
+            forge: {
+              deliver: async () => {
+                throw new Error("fixture delivery must not start");
+              },
+            },
+          };
+          return executeDeliveryRun(
+            {
+              contract,
+              contractHash: context.result.contractHash,
+              repositoryIdentity: context.result.writer.repositoryIdentity,
+              deadlineEpochMs: context.result.deadlineEpochMs,
+              implementer: context.policy.roles.implementer,
+            },
+            services,
+          );
+        }
+        return acceptCampaignTask(context);
+      },
+    );
+    const { contractPath, server, stateDirectory } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("turn-recovery", "outcome-one", [], false, "campaign-repository", 2),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+
+      let admittedTaskId: string | undefined;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        admittedTaskId ??= current?.proposals?.[0]?.ready?.taskId ?? undefined;
+        if (admittedTaskId) {
+          const task = await taskStatus(server.url, admittedTaskId);
+          if (task?.state === "waiting") break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(admittedTaskId).toBe(`campaign-campaign-366-v1-turn-recovery`);
+      await expect(taskStatus(server.url, admittedTaskId!)).resolves.toMatchObject({
+        state: "waiting",
+        waiting: { reason: "network_interruption" },
+        retryable: true,
+      });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        campaignId: published.campaignId,
+        status: "planning",
+        planHandedOff: true,
+        outcomes: [{ id: "outcome-one", status: "planned", evidence: null }],
+      });
+
+      await expect(retryTask(server.url, admittedTaskId!)).resolves.toMatchObject({
+        state: "admitted",
+        retryable: false,
+      });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await expect(taskStatus(server.url, admittedTaskId!)).resolves.toMatchObject({
+        state: "accepted",
+        delivery: { effect: "github" },
+      });
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        campaignId: published.campaignId,
+        status: "accepted",
+        planHandedOff: true,
+        outcomes: [
+          {
+            id: "outcome-one",
+            status: "accepted",
+            evidence: { outcomeId: "outcome-one", taskId: admittedTaskId },
+          },
+        ],
+      });
+      expect(executions).toBe(2);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(database.prepare("SELECT count(*) AS count FROM campaigns").get()).toEqual({
+          count: 1,
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      await server.close();
     }
   });
 
