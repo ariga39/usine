@@ -278,127 +278,119 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       const processEvents = async (): Promise<void> => {
         try {
           for await (const rawEvent of events.stream) {
-            try {
-              const event = parseSessionEvent(rawEvent);
-              if (event.data.sessionID !== createdSessionID)
+            const event = parseSessionEvent(rawEvent);
+            if (event.data.sessionID !== createdSessionID)
+              protocolViolation("OpenCode2 event identity mismatch");
+            if (!promptAdmitted && event.type !== "session.next.prompt.admitted")
+              protocolViolation("OpenCode2 event arrived before prompt admission");
+            if (event.type === "session.next.prompt.admitted") {
+              const data = parseProtocol(() => promptAdmittedDataSchema.parse(event.data));
+              promptAdmitted = true;
+              await invokeOpenCode2Callback(context.onPhase, "turn");
+              await invokeOpenCode2Callback(context.onObservation, {
+                type: "turn_started",
+                turn: 1,
+              });
+              if (data.sessionID !== createdSessionID)
                 protocolViolation("OpenCode2 event identity mismatch");
-              if (!promptAdmitted && event.type !== "session.next.prompt.admitted")
-                protocolViolation("OpenCode2 event arrived before prompt admission");
-              if (event.type === "session.next.prompt.admitted") {
-                const data = parseProtocol(() => promptAdmittedDataSchema.parse(event.data));
-                promptAdmitted = true;
-                await invokeOpenCode2Callback(context.onPhase, "turn");
-                await invokeOpenCode2Callback(context.onObservation, {
-                  type: "turn_started",
-                  turn: 1,
-                });
-                if (data.sessionID !== createdSessionID)
-                  protocolViolation("OpenCode2 event identity mismatch");
-              } else if (event.type === "session.next.shell.ended") {
-                const data = parseProtocol(() => shellEndedDataSchema.parse(event.data));
-                await invokeOpenCode2Callback(context.onItemCompleted, {
-                  type: "command_execution",
-                  id: data.callID,
-                  status: "completed",
-                  output: jsonField(data.output),
-                });
-              } else if (
-                event.type === "session.next.tool.success" ||
-                event.type === "session.next.tool.failed"
-              ) {
-                const data = parseProtocol(() => toolCompletionDataSchema.parse(event.data));
-                const identity = toolCalls.get(data.callID);
-                if (!identity) protocolViolation("OpenCode2 tool completion had no preceding call");
-                const evidence = toolEvidence(event.type, data, identity, context);
-                await invokeOpenCode2Callback(context.onItemCompleted, evidence);
-              } else if (event.type === "session.next.tool.called") {
-                const data = parseProtocol(() => toolCalledDataSchema.parse(event.data));
-                toolCalls.set(data.callID, { input: data.input, tool: data.tool });
-              } else if (event.type === "session.next.text.ended") {
-                const data = parseProtocol(() => textEndedDataSchema.parse(event.data));
-                if (currentStepID !== data.assistantMessageID)
-                  protocolViolation("OpenCode2 text ended outside its step");
-                finalResponse = data.text;
-                currentStepHasText = true;
-                await invokeOpenCode2Callback(context.onItemCompleted, {
-                  type: "agent_message",
-                  id: data.textID,
-                  status: "completed",
-                  text: data.text,
-                });
-              } else if (event.type === "session.next.reasoning.ended") {
-                const data = parseProtocol(() => reasoningEndedDataSchema.parse(event.data));
-                await invokeOpenCode2Callback(context.onItemCompleted, {
-                  type: "reasoning",
-                  id: data.reasoningID,
-                  status: "completed",
-                  text: data.text,
-                });
-              } else if (event.type === "session.next.step.started") {
-                const data = parseProtocol(() => stepStartedDataSchema.parse(event.data));
-                currentStepID = data.assistantMessageID;
-                currentStepHasText = false;
-                if (data.model)
-                  actualModel = { model: data.model.id, provider: data.model.providerID };
-              } else if (event.type === "session.next.step.ended") {
-                const data = parseProtocol(() => stepEndedDataSchema.parse(event.data));
-                if (currentStepID !== data.assistantMessageID)
-                  protocolViolation("OpenCode2 step ended outside its step");
-                if (data.finish === "stop" && !currentStepHasText) {
-                  fail(
-                    new CodingSessionInterruption(
-                      "turn",
-                      "transport",
-                      "OpenCode2 completed the terminal step without an assistant response",
-                    ),
-                  );
-                  return;
-                }
-                const uncachedInputTokens = data.tokens.input;
-                const cachedInputTokens = data.tokens.cache?.read;
-                const cacheWriteInputTokens = data.tokens.cache?.write;
-                const stepUsage: ProviderNeutralUsage = {
-                  ...(cachedInputTokens === undefined || cacheWriteInputTokens === undefined
-                    ? {}
-                    : {
-                        inputTokens:
-                          uncachedInputTokens + cachedInputTokens + cacheWriteInputTokens,
-                      }),
-                  ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
-                  uncachedInputTokens,
-                  ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
-                  outputTokens: data.tokens.output + (data.tokens.reasoning ?? 0),
-                  ...(data.tokens.reasoning === undefined
-                    ? {}
-                    : { reasoningOutputTokens: data.tokens.reasoning }),
-                };
-                usage = mergeProviderNeutralUsage(usage, stepUsage);
-                await invokeOpenCode2Callback(context.onUsage, {
-                  usage: stepUsage,
-                  semantics: "delta",
-                  ...(actualModel ? { actualModel } : {}),
-                });
-                if (data.finish === "stop") {
-                  terminalStepCompleted = true;
-                  complete();
-                }
-              } else if (event.type === "session.next.step.failed") {
-                const data = parseProtocol(() => stepFailedDataSchema.parse(event.data));
-                await invokeOpenCode2Callback(context.onItemCompleted, {
-                  type: "other",
-                  id: event.id,
-                  status: "failed",
-                });
-                if (data.sessionID !== createdSessionID)
-                  protocolViolation("OpenCode2 event identity mismatch");
-                fail(providerFailure("turn"));
+            } else if (event.type === "session.next.shell.ended") {
+              const data = parseProtocol(() => shellEndedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
+                type: "command_execution",
+                id: data.callID,
+                status: "completed",
+                output: jsonField(data.output),
+              });
+            } else if (
+              event.type === "session.next.tool.success" ||
+              event.type === "session.next.tool.failed"
+            ) {
+              const data = parseProtocol(() => toolCompletionDataSchema.parse(event.data));
+              const identity = toolCalls.get(data.callID);
+              if (!identity) protocolViolation("OpenCode2 tool completion had no preceding call");
+              const evidence = toolEvidence(event.type, data, identity, context);
+              await invokeOpenCode2Callback(context.onItemCompleted, evidence);
+            } else if (event.type === "session.next.tool.called") {
+              const data = parseProtocol(() => toolCalledDataSchema.parse(event.data));
+              toolCalls.set(data.callID, { input: data.input, tool: data.tool });
+            } else if (event.type === "session.next.text.ended") {
+              const data = parseProtocol(() => textEndedDataSchema.parse(event.data));
+              if (currentStepID !== data.assistantMessageID)
+                protocolViolation("OpenCode2 text ended outside its step");
+              finalResponse = data.text;
+              currentStepHasText = true;
+              await invokeOpenCode2Callback(context.onItemCompleted, {
+                type: "agent_message",
+                id: data.textID,
+                status: "completed",
+                text: data.text,
+              });
+            } else if (event.type === "session.next.reasoning.ended") {
+              const data = parseProtocol(() => reasoningEndedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
+                type: "reasoning",
+                id: data.reasoningID,
+                status: "completed",
+                text: data.text,
+              });
+            } else if (event.type === "session.next.step.started") {
+              const data = parseProtocol(() => stepStartedDataSchema.parse(event.data));
+              currentStepID = data.assistantMessageID;
+              currentStepHasText = false;
+              if (data.model)
+                actualModel = { model: data.model.id, provider: data.model.providerID };
+            } else if (event.type === "session.next.step.ended") {
+              const data = parseProtocol(() => stepEndedDataSchema.parse(event.data));
+              if (currentStepID !== data.assistantMessageID)
+                protocolViolation("OpenCode2 step ended outside its step");
+              if (data.finish === "stop" && !currentStepHasText) {
+                fail(
+                  new CodingSessionInterruption(
+                    "turn",
+                    "transport",
+                    "OpenCode2 completed the terminal step without an assistant response",
+                  ),
+                );
                 return;
               }
-            } catch (error) {
-              if (error instanceof OpenCode2CallbackError) throw error;
-              throw new OpenCode2ProtocolError(
-                error instanceof Error ? error.message : "OpenCode2 event was invalid",
-              );
+              const uncachedInputTokens = data.tokens.input;
+              const cachedInputTokens = data.tokens.cache?.read;
+              const cacheWriteInputTokens = data.tokens.cache?.write;
+              const stepUsage: ProviderNeutralUsage = {
+                ...(cachedInputTokens === undefined || cacheWriteInputTokens === undefined
+                  ? {}
+                  : {
+                      inputTokens: uncachedInputTokens + cachedInputTokens + cacheWriteInputTokens,
+                    }),
+                ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+                uncachedInputTokens,
+                ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }),
+                outputTokens: data.tokens.output + (data.tokens.reasoning ?? 0),
+                ...(data.tokens.reasoning === undefined
+                  ? {}
+                  : { reasoningOutputTokens: data.tokens.reasoning }),
+              };
+              usage = mergeProviderNeutralUsage(usage, stepUsage);
+              await invokeOpenCode2Callback(context.onUsage, {
+                usage: stepUsage,
+                semantics: "delta",
+                ...(actualModel ? { actualModel } : {}),
+              });
+              if (data.finish === "stop") {
+                terminalStepCompleted = true;
+                complete();
+              }
+            } else if (event.type === "session.next.step.failed") {
+              const data = parseProtocol(() => stepFailedDataSchema.parse(event.data));
+              await invokeOpenCode2Callback(context.onItemCompleted, {
+                type: "other",
+                id: event.id,
+                status: "failed",
+              });
+              if (data.sessionID !== createdSessionID)
+                protocolViolation("OpenCode2 event identity mismatch");
+              fail(providerFailure("turn"));
+              return;
             }
           }
           if (!terminalStepCompleted)
