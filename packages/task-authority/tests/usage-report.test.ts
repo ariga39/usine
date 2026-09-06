@@ -386,7 +386,9 @@ describe("usage report projection", () => {
     );
 
     expect(report.invocations).toHaveLength(3);
-    expect(report.invocations.find((row) => row.taskId === "interrupted-complete-task")).toMatchObject({
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-complete-task"),
+    ).toMatchObject({
       role: "implementer",
       outcome: "failed",
       elapsedMs: 3,
@@ -400,7 +402,9 @@ describe("usage report projection", () => {
         coverage: "complete",
       },
     });
-    expect(report.invocations.find((row) => row.taskId === "interrupted-partial-task")).toMatchObject({
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-partial-task"),
+    ).toMatchObject({
       role: "reviewer",
       outcome: "failed",
       reviewCycle: 1,
@@ -414,7 +418,9 @@ describe("usage report projection", () => {
         coverage: "partial",
       },
     });
-    expect(report.invocations.find((row) => row.taskId === "interrupted-unavailable-task")).toMatchObject({
+    expect(
+      report.invocations.find((row) => row.taskId === "interrupted-unavailable-task"),
+    ).toMatchObject({
       role: "implementer",
       outcome: "failed",
       usage: {
