@@ -7,6 +7,7 @@ import {
   applyMigrations,
   openSqliteDatabase,
   TaskAuthority,
+  taskResourceFromResult,
   type ResolvedTaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
@@ -902,7 +903,7 @@ describe("Delivery Run durable phase recovery", () => {
     });
     const input = {
       contract: taskContract,
-      contractHash: "sqlite-terminal-block-hash",
+      contractHash: "a".repeat(64),
       repositoryIdentity,
       deadlineEpochMs: Date.now() + 60_000,
       implementer,
@@ -956,7 +957,16 @@ describe("Delivery Run durable phase recovery", () => {
 
       expect(result.state).toBe("blocked");
       expect(result.blocker).toBe("implementer activation budget exhausted");
-      expect(result.blockerClassification).toBe("elapsed_budget");
+      expect(result.blockerClassification).toBe("implementation_budget");
+      expect(taskResourceFromResult(result).blocker).toEqual({
+        classification: "implementation_budget",
+      });
+      const blockedEvent = (await authority.listEvents(result.taskId)).find(
+        (event) => event.data.type === "task_blocked",
+      );
+      expect(blockedEvent).toMatchObject({
+        data: { type: "task_blocked", reason: "implementation_budget" },
+      });
       expect(result.evidence.implementerActivations).toBe(1);
       expect(blockCalls).toBe(1);
 

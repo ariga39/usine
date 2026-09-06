@@ -138,6 +138,7 @@ function evidence(): CampaignEvidencePage {
       acceptedDeliveries: 1,
       terminalTaskCounts: {
         elapsed_budget: 0,
+        implementation_budget: 0,
         invalid_phase: 0,
         missing_evidence: 0,
         provider_failure: 0,
@@ -212,6 +213,7 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
     properties: {
       terminal_reason: null,
       terminal_tasks_delivery_failure: 0,
+      terminal_tasks_implementation_budget: 0,
       terminal_tasks_unknown: 0,
     },
   });
@@ -320,6 +322,28 @@ test("projects blocked Task classification without its raw blocker", () => {
     terminal_tasks_delivery_failure: 1,
   });
   expect(JSON.stringify(blocked)).not.toContain("private diagnostic");
+});
+
+test("projects implementation budget separately from elapsed budget", () => {
+  const event = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      totals: {
+        ...evidence().totals,
+        terminalTaskCounts: {
+          ...evidence().totals.terminalTaskCounts,
+          implementation_budget: 1,
+        },
+      },
+    },
+    "deployment-test",
+  )[0]!;
+
+  expect(event.properties).toMatchObject({
+    terminal_tasks_elapsed_budget: 0,
+    terminal_tasks_implementation_budget: 1,
+  });
 });
 
 test("omits in-flight unknown Role Runs but emits the closed run", () => {

@@ -76,6 +76,7 @@ const acceptedDelivery = Schema.Struct({
 
 const terminalTaskCounts = Schema.Struct({
   elapsed_budget: Schema.Natural,
+  implementation_budget: Schema.Natural,
   invalid_phase: Schema.Natural,
   missing_evidence: Schema.Natural,
   provider_failure: Schema.Natural,
