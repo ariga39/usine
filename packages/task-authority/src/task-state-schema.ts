@@ -120,6 +120,7 @@ const taskResultFields = {
   candidateFence: Schema.NullOr(Schema.Natural),
   check: Schema.NullOr(checkResult),
   review: Schema.NullOr(reviewVerdict),
+  repairBatchRecorded: Schema.optional(Schema.Boolean),
   reviewAttempt: Schema.optional(Schema.NullOr(Schema.Struct({ ownerId: Schema.String }))),
   delivery: Schema.NullOr(deliveryEffect),
   blocker: Schema.NullOr(Schema.String),
@@ -349,6 +350,11 @@ function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
         }
       : null,
     reviewAttempt: "reviewAttempt" in decoded ? (decoded.reviewAttempt ?? null) : null,
+    repairBatchRecorded:
+      "repairBatchRecorded" in decoded && decoded.repairBatchRecorded !== undefined
+        ? decoded.repairBatchRecorded
+        : decoded.review?.verdict === "changes_requested" &&
+          decoded.evidence.changesRequestedBatches === decoded.evidence.reviewCycles,
     delivery: decoded.delivery
       ? {
           sha: decoded.delivery.sha,

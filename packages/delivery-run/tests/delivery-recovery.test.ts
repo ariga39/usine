@@ -76,6 +76,7 @@ function persistedResult(
         : null,
     review:
       state === "reviewed" ? { sha, verdict: "approved", summary: "approved", findings: [] } : null,
+    repairBatchRecorded: false,
     delivery: null,
     blocker: null,
     blockerClassification: null,
@@ -101,7 +102,9 @@ function fakeAuthority(initial: TaskResult) {
   ) => {
     if (observation.taskId !== stored.taskId || observation.revision !== stored.revision)
       throw new Error("stale task revision");
-    stored = { ...applyTaskFact(stored, fact), revision: stored.revision + 1 };
+    const next = applyTaskFact(stored, fact);
+    if (next === stored) return stored;
+    stored = { ...next, revision: stored.revision + 1 };
     return stored;
   };
   const authority = {
@@ -1714,6 +1717,127 @@ describe("Delivery Run durable phase recovery", () => {
     expect(reviewed).toEqual([sha]);
     expect(delivered).toEqual([sha]);
     expect(fake.getStored().evidence.changesRequestedBatches).toBe(1);
+  });
+
+  test("records one repair batch when a recovered changes-requested verdict is retried", async () => {
+    const id = "review-repair-after-transient-recovery";
+    const taskContract = {
+      ...contract(id),
+      budget: { ...contract(id).budget, maxImplementerActivations: 3, maxReviewCycles: 3 },
+    };
+    const fake = fakeAuthority(persistedResult("checked", id));
+    let repairBatchCalls = 0;
+    const recordRepairBatch = fake.authority.recordRepairBatch;
+    fake.authority.recordRepairBatch = async (observation) => {
+      repairBatchCalls += 1;
+      return recordRepairBatch(observation);
+    };
+    let reviews = 0;
+    let repairSessions = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          status: "passed" as const,
+          command: "true",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+        reviewWithObservation: async (_contract, candidateSha, _check, cycle) => {
+          reviews += 1;
+          if (reviews === 1)
+            return {
+              review: null,
+              usage: null,
+              interruption: { phase: "turn" as const, failureClass: "network" as const },
+            };
+          if (reviews === 2)
+            return {
+              review: {
+                sha: candidateSha,
+                verdict: "changes_requested" as const,
+                summary: "repair the candidate",
+                findings: ["repair the candidate"],
+              },
+              usage: null,
+            };
+          expect(cycle).toBe(3);
+          return {
+            review: {
+              sha: candidateSha,
+              verdict: "approved" as const,
+              summary: "approved after repair retry",
+              findings: [],
+            },
+            usage: null,
+          };
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha) => ({
+          sha: candidateSha,
+          effect: "github" as const,
+          prNumber: 80,
+          url: "https://example.invalid/pr/80",
+          attestationId: "repair-after-recovery",
+        }),
+      },
+    );
+    services.session = {
+      run: async () => {
+        repairSessions += 1;
+        if (repairSessions === 1)
+          return {
+            status: "failed" as const,
+            output: null,
+            summary: "repair network interruption",
+            failure: "repair network interruption",
+            phase: "turn" as const,
+            failureClass: "network" as const,
+          };
+        return {
+          status: "completed" as const,
+          output: { status: "proposed" as const, summary: "repaired" },
+          summary: "repair completed",
+          failure: null,
+        };
+      },
+    };
+    services.workspace.freeze = async (workspace, previousSha) => ({
+      sha,
+      baseSha: previousSha,
+      workspace,
+    });
+
+    const input = {
+      contract: taskContract,
+      contractHash: "review-repair-after-transient-recovery-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer,
+    };
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption", resumeState: "reviewed" },
+      review: { verdict: "changes_requested" },
+      evidence: { reviewCycles: 2, changesRequestedBatches: 1 },
+      repairBatchRecorded: true,
+    });
+
+    await fake.retry();
+    const delivered = await executeDeliveryRun(input, services);
+    expect(delivered).toMatchObject({
+      state: "reviewed_pr",
+      review: { verdict: "approved" },
+      evidence: { reviewCycles: 3, changesRequestedBatches: 1 },
+    });
+    expect(delivered.repairBatchRecorded).toBe(false);
+    expect(repairBatchCalls).toBe(2);
+    expect(repairSessions).toBe(2);
+    expect(reviews).toBe(3);
   });
 
   test.each(["candidate", "checked", "reviewed"] as const)(

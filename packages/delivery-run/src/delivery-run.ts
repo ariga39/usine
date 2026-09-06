@@ -416,7 +416,6 @@ export async function executeDeliveryRun(
         return blockTask(services, result, "reviewed phase is incomplete");
       if (result.review.verdict === "changes_requested") {
         if (
-          result.evidence.changesRequestedBatches > result.evidence.reviewCycles ||
           result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles ||
           result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations
         )
@@ -429,12 +428,10 @@ export async function executeDeliveryRun(
         // batch twice before activating its repair writer.
         const candidateSha = result.candidateSha;
         const findings = result.review.findings;
-        if (result.evidence.changesRequestedBatches < result.evidence.reviewCycles) {
-          result = await services.authority.recordRepairBatch({
-            taskId: result.taskId,
-            revision: result.revision,
-          });
-        }
+        result = await services.authority.recordRepairBatch({
+          taskId: result.taskId,
+          revision: result.revision,
+        });
         result = await activateImplementer(input, services, result, candidateSha, null, findings);
         continue;
       }

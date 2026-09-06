@@ -196,6 +196,67 @@ async function terminalResult(
   );
 }
 
+async function changesRequestedResult(
+  authority: TaskAuthority,
+  taskId: string,
+  contractHash: string,
+): Promise<TaskResult> {
+  const admitted = await authority.admit({
+    contract: makeContract(taskId),
+    contractHash,
+    repositoryIdentity: `authority/${taskId}`,
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+  const activation = await authority.reserveActivation(taskId, 3);
+  const candidate = await authority.recordCandidate(
+    { taskId, revision: activation.result.revision },
+    { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+  );
+  const checked = await authority.recordCheck(
+    { taskId, revision: candidate.revision },
+    {
+      sha: "b".repeat(40),
+      status: "passed",
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    },
+  );
+  const reserved = await authority.reserveReviewAttempt(taskId, 3, "upgrade-reviewer");
+  return authority.recordReview(
+    { taskId, revision: reserved.result.revision },
+    { sha: checked.candidateSha!, verdict: "changes_requested", summary: "repair", findings: [] },
+    "upgrade-reviewer",
+  );
+}
+
+function removeRepairBatchMarker(
+  path: string,
+  taskId: string,
+  changesRequestedBatches: number,
+  reviewCycles: number,
+): void {
+  const inspection = new DatabaseSync(path);
+  const row = inspection.prepare("SELECT result FROM task_runs WHERE task_id = ?").get(taskId) as {
+    result: string;
+  };
+  const persisted = JSON.parse(row.result) as {
+    evidence: { changesRequestedBatches: number; reviewCycles: number };
+    repairBatchRecorded?: boolean;
+  };
+  delete persisted.repairBatchRecorded;
+  persisted.evidence = {
+    ...persisted.evidence,
+    changesRequestedBatches,
+    reviewCycles,
+  };
+  inspection
+    .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+    .run(JSON.stringify(persisted), taskId);
+  inspection.close();
+}
+
 describe("Task Authority SQLite concurrency and terminal leases", () => {
   test("lists every admitted Task through a stable bounded Task-ID cursor", async () => {
     const path = await makeDatabase();
@@ -854,6 +915,135 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
         code: "task_state_quarantined",
         message: "durable task state quarantined",
       });
+    },
+  );
+
+  test("persists one repair batch for a changes-requested verdict across retry", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-repair-idempotency-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const contractHash = "c".repeat(64);
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash,
+      repositoryIdentity: `authority/repair-idempotency-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const activation = await authority.reserveActivation(taskId, 3);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    await authority.recordCheck(
+      { taskId, revision: candidate.revision },
+      {
+        sha: "b".repeat(40),
+        status: "passed",
+        command: "true",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    );
+    const reserved = await authority.reserveReviewAttempt(taskId, 2, "repair-reviewer");
+    const reviewed = await authority.recordReview(
+      { taskId, revision: reserved.result.revision },
+      {
+        sha: "b".repeat(40),
+        verdict: "changes_requested",
+        summary: "repair",
+        findings: ["repair"],
+      },
+      "repair-reviewer",
+    );
+    const recorded = await authority.recordRepairBatch({ taskId, revision: reviewed.revision });
+    const repairActivation = await authority.reserveActivation(taskId, 3);
+    const waiting = await authority.recordWaiting(
+      { taskId, revision: repairActivation.result.revision },
+      {
+        reason: "network_interruption",
+        resumeState: "reviewed",
+        activation: repairActivation.activation,
+      },
+    );
+    const retried = await authority.retryTask(taskId, 3);
+    const duplicate = await authority.recordRepairBatch({ taskId, revision: retried.revision });
+
+    expect(recorded).toMatchObject({
+      repairBatchRecorded: true,
+      evidence: { changesRequestedBatches: 1 },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "network_interruption" },
+    });
+    expect(duplicate).toMatchObject({
+      state: "reviewed",
+      review: { verdict: "changes_requested" },
+      repairBatchRecorded: true,
+      evidence: { changesRequestedBatches: 1 },
+    });
+    expect(duplicate.revision).toBe(retried.revision);
+    const events = await authority.listEvents(taskId);
+    expect(events.filter((event) => event.data.type === "repair_batch_recorded")).toHaveLength(1);
+  }, 30_000);
+
+  test.each([
+    {
+      label: "projects equality as an already-recorded old repair batch",
+      changesRequestedBatches: 2,
+      reviewCycles: 2,
+      expectedRecorded: true,
+      expectedBatches: 2,
+      expectedRevisionDelta: 0,
+      expectedRepairEvents: 0,
+    },
+    {
+      label: "projects a lower count as an unrecorded old repair batch",
+      changesRequestedBatches: 1,
+      reviewCycles: 2,
+      expectedRecorded: false,
+      expectedBatches: 2,
+      expectedRevisionDelta: 1,
+      expectedRepairEvents: 1,
+    },
+  ])(
+    "$label",
+    async ({
+      changesRequestedBatches,
+      reviewCycles,
+      expectedRecorded,
+      expectedBatches,
+      expectedRevisionDelta,
+      expectedRepairEvents,
+    }) => {
+      const path = await makeDatabase();
+      const authority = authorityAt(path);
+      const taskId = `authority-repair-upgrade-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const reviewed = await changesRequestedResult(authority, taskId, "e".repeat(64));
+      removeRepairBatchMarker(path, taskId, changesRequestedBatches, reviewCycles);
+
+      const decoded = await authority.lookup(taskId);
+      if (!decoded) throw new Error("reviewed task is missing after durable upgrade projection");
+      expect(decoded.repairBatchRecorded).toBe(expectedRecorded);
+      const beforeEvents = await authority.listEvents(taskId);
+
+      const persisted = await authority.recordRepairBatch({
+        taskId,
+        revision: decoded.revision,
+      });
+
+      expect(persisted.repairBatchRecorded).toBe(true);
+      expect(persisted.evidence.changesRequestedBatches).toBe(expectedBatches);
+      expect(persisted.revision).toBe(decoded.revision + expectedRevisionDelta);
+      const repairEvents = (await authority.listEvents(taskId)).filter(
+        (event) => event.data.type === "repair_batch_recorded",
+      );
+      expect(repairEvents).toHaveLength(expectedRepairEvents);
+      expect(reviewed.review?.verdict).toBe("changes_requested");
+      expect(
+        beforeEvents.filter((event) => event.data.type === "repair_batch_recorded"),
+      ).toHaveLength(0);
     },
   );
 

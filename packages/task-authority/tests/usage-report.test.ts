@@ -66,6 +66,7 @@ function task(taskId = "usage-task"): TaskResult {
     candidateFence: null,
     check: null,
     review: null,
+    repairBatchRecorded: false,
     delivery: null,
     blocker: null,
     blockerClassification: null,

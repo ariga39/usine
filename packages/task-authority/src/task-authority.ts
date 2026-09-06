@@ -664,6 +664,7 @@ export class TaskAuthority {
         candidateFence: null,
         check: null,
         review: null,
+        repairBatchRecorded: false,
         reviewAttempt: null,
         delivery: null,
         blocker: null,
@@ -715,6 +716,7 @@ export class TaskAuthority {
       if (!lease || lease.taskId !== prior.taskId)
         throw new Error("repository writer lease is stale");
       const next = applyTaskFact(prior, fact);
+      if (next === prior) return { saved: prior, events: [] };
       const saved: TaskResult = {
         ...next,
         revision: prior.revision + 1,

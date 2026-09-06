@@ -81,6 +81,8 @@ export interface TaskResult {
   candidateFence: number | null;
   check: CheckResult | null;
   review: ReviewVerdict | null;
+  /** Authority-owned idempotency fact for the current changes-requested review. */
+  repairBatchRecorded: boolean;
   /** Internal durable reviewer ownership; omitted from public Task projections. */
   reviewAttempt?: ReviewAttemptReservation | null;
   delivery: DeliveryEffect | null;
@@ -432,6 +434,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         candidateFence: fact.candidate.fence,
         check: null,
         review: null,
+        repairBatchRecorded: false,
         delivery: null,
         blocker: null,
         blockerClassification: null,
@@ -444,7 +447,14 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       if (!result.candidateSha || fact.check.sha !== result.candidateSha)
         throw new Error("check belongs to a stale candidate");
       requireExactSha(fact.check.sha);
-      return { ...result, state: "checked", check: fact.check, review: null, delivery: null };
+      return {
+        ...result,
+        state: "checked",
+        check: fact.check,
+        review: null,
+        repairBatchRecorded: false,
+        delivery: null,
+      };
     }
     case "review": {
       if (fact.review.failureClass !== undefined && fact.review.verdict !== "inconclusive")
@@ -466,6 +476,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         ...result,
         state: "reviewed",
         review: fact.review,
+        repairBatchRecorded: false,
         reviewAttempt: null,
         delivery: null,
       };
@@ -493,6 +504,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         state: "reviewing",
         waiting: null,
         review: null,
+        repairBatchRecorded: false,
         reviewAttempt: { ownerId: fact.ownerId },
         delivery: null,
         blocker: null,
@@ -520,6 +532,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         state: "checked",
         waiting: null,
         review: null,
+        repairBatchRecorded: false,
         reviewAttempt: null,
         delivery: null,
         blocker: null,
@@ -549,6 +562,7 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         ...result,
         state: "waiting",
         review: null,
+        repairBatchRecorded: false,
         reviewAttempt: null,
         waiting: {
           reason: "review_interruption",
@@ -593,8 +607,10 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
     case "repair_batch":
       if (result.state !== "reviewed" || result.review?.verdict !== "changes_requested")
         throw new Error("review repair batch is not current");
+      if (result.repairBatchRecorded) return result;
       return {
         ...result,
+        repairBatchRecorded: true,
         evidence: {
           ...result.evidence,
           changesRequestedBatches: result.evidence.changesRequestedBatches + 1,

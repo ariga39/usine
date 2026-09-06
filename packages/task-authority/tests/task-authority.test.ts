@@ -29,6 +29,7 @@ function checkedTask(): TaskResult {
     candidateFence: 1,
     check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
     review: null,
+    repairBatchRecorded: false,
     delivery: null,
     blocker: null,
     blockerClassification: null,
@@ -214,6 +215,7 @@ describe("Task Authority module contract", () => {
       candidateFence: null,
       check: null,
       review: null,
+      repairBatchRecorded: false,
       delivery: null,
       blocker: null,
       blockerClassification: null,
@@ -254,6 +256,7 @@ describe("Task Authority module contract", () => {
       candidateFence: 1,
       check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
       review: { sha, verdict: "approved", summary: "approved", findings: [] },
+      repairBatchRecorded: false,
       delivery: null,
       blocker: null,
       blockerClassification: null,
@@ -297,6 +300,20 @@ describe("Task Authority module contract", () => {
     ).toThrow("waiting activation is stale");
   });
 
+  test("makes a repair batch idempotent for the current changes-requested verdict", () => {
+    const reviewed: TaskResult = {
+      ...checkedTask(),
+      state: "reviewed",
+      review: { sha, verdict: "changes_requested", summary: "repair", findings: ["repair"] },
+    };
+    const recorded = applyTaskFact(reviewed, { type: "repair_batch" });
+    expect(recorded).toMatchObject({
+      repairBatchRecorded: true,
+      evidence: { changesRequestedBatches: 1 },
+    });
+    expect(applyTaskFact(recorded, { type: "repair_batch" })).toBe(recorded);
+  });
+
   test("applies legal facts and rejects stale fences without persistence", () => {
     const admitted: TaskResult = {
       schemaVersion: 4,
@@ -310,6 +327,7 @@ describe("Task Authority module contract", () => {
       candidateFence: null,
       check: null,
       review: null,
+      repairBatchRecorded: false,
       delivery: null,
       blocker: null,
       blockerClassification: null,
@@ -353,6 +371,7 @@ describe("Task Authority module contract", () => {
       candidateFence: 1,
       check: { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
       review: { sha, verdict: "approved", summary: "approved", findings: [] },
+      repairBatchRecorded: false,
       delivery: null,
       blocker: null,
       blockerClassification: null,
