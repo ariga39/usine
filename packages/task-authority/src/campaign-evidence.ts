@@ -20,11 +20,11 @@ const evidenceRun = Schema.Struct({
   invocationId: Schema.String,
   goalVersion: Schema.Int,
   outcomeId: Schema.String,
-  taskId: Schema.String,
+  taskId: Schema.NullOr(Schema.String),
   pullRequest: Schema.NullOr(Schema.Natural),
   repositoryId: Schema.String,
   repository: Schema.String,
-  role: Schema.Literals(["implementer", "reviewer"]),
+  role: Schema.Literals(["implementer", "reviewer", "assessor", "replacement-planner"]),
   activation: Schema.NullOr(Schema.Natural),
   reviewCycle: Schema.NullOr(Schema.Natural),
   configuredProvider: Schema.String,
@@ -33,6 +33,9 @@ const evidenceRun = Schema.Struct({
   actualProvider: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
+  profile: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+  reasoningEffort: Schema.optional(Schema.String),
   model: Schema.String,
   outcome: Schema.Literals(["succeeded", "failed", "cancelled", "blocked", "unknown"]),
   failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
@@ -44,8 +47,8 @@ const evidenceRun = Schema.Struct({
 const evidenceAggregate = Schema.Struct({
   goalVersion: Schema.Int,
   outcomeId: Schema.String,
-  taskId: Schema.String,
-  role: Schema.Literals(["implementer", "reviewer"]),
+  taskId: Schema.NullOr(Schema.String),
+  role: Schema.Literals(["implementer", "reviewer", "assessor", "replacement-planner"]),
   configuredProvider: Schema.String,
   configuredModel: Schema.String,
   actualModel: Schema.String,
@@ -53,6 +56,9 @@ const evidenceAggregate = Schema.Struct({
   model: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
+  profile: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+  reasoningEffort: Schema.optional(Schema.String),
   failureClass: Schema.optional(Schema.NullOr(Schema.Literals(TASK_FAILURE_CLASSES))),
   invocations: Schema.Natural,
   elapsedMs: Schema.NullOr(Schema.Natural),
@@ -175,6 +181,10 @@ export interface CampaignEvidenceProposal {
   readonly blocker: string | null;
   readonly taskId: string | null;
   readonly admittedAtEpochMs: number;
+  readonly replacement?: {
+    readonly assessmentId: string;
+    readonly evidenceHash: string;
+  };
 }
 
 export interface CampaignEvidenceDecisionTouch {
@@ -191,6 +201,7 @@ export interface CampaignEvidenceSourcesPage {
   readonly proposals: readonly CampaignEvidenceProposal[];
   readonly decisionTouches: readonly CampaignEvidenceDecisionTouch[];
   readonly sources: readonly CampaignEvidenceSource[];
+  readonly campaignRuns: readonly CampaignEvidenceRun[];
   readonly cursor: string | null;
   readonly nextCursor: string | null;
 }

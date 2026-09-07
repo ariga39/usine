@@ -9,7 +9,7 @@ import {
   type GoalContract,
   type TaskContract,
 } from "@usine/task-authority";
-import type { CampaignAssessmentFact } from "@usine/task-authority";
+import type { CampaignAssessmentEvidence, CampaignAssessmentFact } from "@usine/task-authority";
 import { z } from "zod";
 import {
   codingSessionAdapterForProfile,
@@ -80,7 +80,7 @@ export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Recor
   return result;
 }
 
-export type SessionRole = "implementer" | "reviewer" | "assessor";
+export type SessionRole = "implementer" | "reviewer" | "assessor" | "replacement-planner";
 export type TaskSessionRole = "implementer" | "reviewer";
 export type SandboxMode = "workspace-write" | "read-only";
 
@@ -157,13 +157,61 @@ export interface CampaignAssessorSessionRequest<
   assessment: CampaignAssessmentSessionContext;
 }
 
+export interface CampaignReplacementPlannerSessionContext {
+  readonly invocationId: string;
+  readonly campaignId: string;
+  readonly goalId: string;
+  readonly goalVersion: number;
+  readonly goal: CampaignAssessmentSessionContext["goal"];
+  readonly outcome: CampaignAssessmentSessionContext["outcome"];
+  readonly assessment: {
+    readonly assessmentId: string;
+    readonly evidenceHash: string;
+    readonly verdict: "gaps";
+    readonly summary: string;
+    readonly gaps: readonly string[];
+    readonly evidence: readonly CampaignAssessmentEvidence[];
+  };
+  readonly evidence: readonly CampaignAssessmentFact[];
+  readonly priorProposals: readonly {
+    readonly proposalId: string;
+    readonly outcomeId: string;
+    readonly repositoryId: string;
+    readonly instructions: string;
+    readonly acceptance: readonly string[];
+    readonly effects: readonly string[];
+    readonly merge: boolean;
+  }[];
+  readonly repositories: readonly {
+    readonly id: string;
+    readonly owner: string;
+    readonly name: string;
+    readonly baseBranch: string;
+    readonly headSha: string | null;
+  }[];
+  readonly remainingBudget: {
+    readonly tasks: number;
+    readonly implementerActivations: number;
+    readonly reviewCycles: number;
+    readonly elapsedMs: number;
+  };
+}
+
+export interface CampaignReplacementPlannerSessionRequest<
+  Output = unknown,
+> extends SessionRequestBase<Output> {
+  role: "replacement-planner";
+  replacement: CampaignReplacementPlannerSessionContext;
+}
+
 /** The existing Task-shaped port used by implementer and reviewer callers. */
 export type SessionRequest<Output = unknown> = TaskSessionRequest<Output>;
 
 /** The provider-neutral port accepted by the concrete Coding Session facade. */
 export type CodingSessionRequest<Output = unknown> =
   | TaskSessionRequest<Output>
-  | CampaignAssessorSessionRequest<Output>;
+  | CampaignAssessorSessionRequest<Output>
+  | CampaignReplacementPlannerSessionRequest<Output>;
 
 export interface CodingSessionMcpServerResolution {
   serverName: string;
@@ -413,13 +461,21 @@ export class CodexCodingSession {
                 contract: request.assessment,
                 prompt: roleRequest.prompt,
               }
-            : {
-                taskId: request.contract.id,
-                role: request.role,
-                attempt: request.attempt,
-                contract: request.contract,
-                prompt: roleRequest.prompt,
-              },
+            : request.role === "replacement-planner"
+              ? {
+                  taskId: request.replacement.invocationId,
+                  role: request.role,
+                  attempt: request.attempt,
+                  contract: request.replacement,
+                  prompt: roleRequest.prompt,
+                }
+              : {
+                  taskId: request.contract.id,
+                  role: request.role,
+                  attempt: request.attempt,
+                  contract: request.contract,
+                  prompt: roleRequest.prompt,
+                },
         )
       : undefined;
     await archive?.begin();

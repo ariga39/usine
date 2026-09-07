@@ -30,6 +30,8 @@ export {
   campaignProposals,
   campaignTouches,
   campaignAssessments,
+  campaignReplacementRuns,
+  campaignModelRuns,
   posthogCaptureAcknowledgements,
   repositories,
 } from "./schema.js";

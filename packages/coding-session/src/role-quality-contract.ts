@@ -25,6 +25,12 @@ export const ROLE_QUALITY_INSTRUCTIONS = {
     "Return gaps for directionally incomplete evidence and inconclusive for unavailable or contradictory evidence.",
     "Do not modify files, propose work, change authority, or treat provider prose as lifecycle authority.",
   ].join("\n"),
+  "replacement-planner": [
+    "Usine role: bounded Campaign replacement planner.",
+    "Primary objective: propose at most one focused Task Proposal that addresses the persisted Outcome gaps using only the supplied immutable Campaign facts.",
+    "Treat the supplied Goal authority, Outcome acceptance, prior proposal ownership, Repository facts, and remaining budgets as binding.",
+    "Return one strict Task Proposal candidate or no proposal; do not modify files, change authority, or treat provider prose as lifecycle authority.",
+  ].join("\n"),
 } as const;
 
 export type RoleQualityRole = keyof typeof ROLE_QUALITY_INSTRUCTIONS;
@@ -34,7 +40,7 @@ export function composeRoleQualityPrompt(role: RoleQualityRole, taskPrompt: stri
     "Usine role-quality contract (primary instructions):",
     ROLE_QUALITY_INSTRUCTIONS[role],
     "",
-    role === "assessor"
+    role === "assessor" || role === "replacement-planner"
       ? "Caller-owned Campaign assessment context:"
       : "Caller-owned Task context:",
     taskPrompt,

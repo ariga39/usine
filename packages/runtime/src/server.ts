@@ -52,6 +52,10 @@ import {
   type CampaignOutcomeAssessor,
 } from "./campaign-assessor.js";
 import {
+  createCampaignReplacementGenerator,
+  type CampaignReplacementGenerator,
+} from "./campaign-replacement.js";
+import {
   CampaignEvidenceCursorError,
   lookupCampaignEvidence,
   MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
@@ -120,6 +124,7 @@ export interface UsineServerOptions {
   environment: NodeJS.ProcessEnv;
   execute?: ServerExecution;
   assessOutcome?: CampaignOutcomeAssessor;
+  generateReplacement?: CampaignReplacementGenerator;
   host?: string;
   port?: number;
 }
@@ -245,6 +250,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
   const assessOutcome = options.assessOutcome ?? createCampaignOutcomeAssessor();
+  const generateReplacement = options.generateReplacement ?? createCampaignReplacementGenerator();
   const eventHub = new TransientEventHub();
   const executionOwnerId = randomUUID();
   let eventDispatch = Promise.resolve();
@@ -320,6 +326,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           options.environment,
           activeTaskCapacity,
           assessOutcome,
+          generateReplacement,
         );
         for (const admission of admissions) {
           if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")

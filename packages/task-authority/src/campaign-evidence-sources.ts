@@ -1,4 +1,5 @@
 import { asc, eq, inArray, sql } from "drizzle-orm";
+import { Schema } from "effect";
 import {
   decodeTaskIdCursor,
   encodeTaskIdCursor,
@@ -9,14 +10,26 @@ import {
   CampaignEvidenceCursorError,
   MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   type CampaignEvidenceCampaign,
+  type CampaignEvidenceRun,
   type CampaignEvidenceDecisionTouch,
   type CampaignEvidencePageRequest,
   type CampaignEvidenceProposal,
   type CampaignEvidenceSource,
   type CampaignEvidenceSourcesPage,
 } from "./campaign-evidence.js";
-import { campaigns, campaignProposals, campaignTouches, taskEvents, taskRuns } from "./schema.js";
-import { decodeCampaignProposalStatus } from "./campaign-contract.js";
+import {
+  campaigns,
+  campaignModelRuns,
+  campaignProposals,
+  campaignTouches,
+  taskEvents,
+  taskRuns,
+} from "./schema.js";
+import {
+  campaignAssessmentUsageSchema,
+  decodeCampaignProposalStatus,
+} from "./campaign-contract.js";
+import { taskFailureClassFromProvider } from "./task-state.js";
 import { decodeRawPersistedTaskResult, isTaskStateQuarantinedError } from "./task-state-schema.js";
 import { decodeTaskEvent } from "./task-event.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
@@ -61,6 +74,14 @@ export async function listCampaignEvidenceSources(
     .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
     .from(taskRuns)
     .orderBy(asc(taskRuns.taskId));
+  const modelRunRows =
+    request.cursor === null
+      ? await database
+          .select()
+          .from(campaignModelRuns)
+          .where(eq(campaignModelRuns.campaignId, campaignId))
+          .orderBy(asc(campaignModelRuns.invocationId))
+      : [];
   const tasks = new Map<string, ReturnType<typeof decodeRawPersistedTaskResult>>();
   for (const row of taskRows) {
     try {
@@ -114,6 +135,14 @@ export async function listCampaignEvidenceSources(
     blocker: row.blocker,
     taskId: row.taskId,
     admittedAtEpochMs: row.createdAt.getTime(),
+    ...(row.replacementAssessmentId && row.replacementEvidenceHash
+      ? {
+          replacement: {
+            assessmentId: row.replacementAssessmentId,
+            evidenceHash: row.replacementEvidenceHash,
+          },
+        }
+      : {}),
   }));
   const decisionTouches: CampaignEvidenceDecisionTouch[] = decisionRows.flatMap((row) =>
     row.type === "decision"
@@ -131,11 +160,74 @@ export async function listCampaignEvidenceSources(
     const task = tasks.get(taskId);
     return task ? [{ task, events: eventsByTask.get(taskId) ?? [] }] : [];
   });
+  const campaignRuns: CampaignEvidenceRun[] = modelRunRows.flatMap((row) => {
+    if (row.status === "pending") return [];
+    const outcome =
+      row.status === "cancelled"
+        ? "cancelled"
+        : row.status === "completed" || row.status === "succeeded"
+          ? "succeeded"
+          : "failed";
+    let usage: Schema.Schema.Type<typeof campaignAssessmentUsageSchema> | null = null;
+    try {
+      usage = row.usage ? Schema.decodeUnknownSync(campaignAssessmentUsageSchema)(row.usage) : null;
+    } catch {
+      usage = null;
+    }
+    return [
+      {
+        invocationId: row.invocationId,
+        goalVersion: campaignRow.goalVersion,
+        outcomeId: row.outcomeId,
+        taskId: null,
+        pullRequest: null,
+        repositoryId: row.repositoryId ?? "unavailable",
+        repository: row.repository ?? "unavailable",
+        role: row.role === "assessor" ? ("assessor" as const) : ("replacement-planner" as const),
+        activation: null,
+        reviewCycle: null,
+        configuredProvider: row.configuredProvider ?? "unavailable",
+        configuredModel: row.configuredModel ?? "unavailable",
+        actualModel: row.actualModel ?? "unavailable",
+        actualProvider: row.actualProvider ?? "unavailable",
+        provider: row.actualProvider ?? "unavailable",
+        adapter: row.adapter ?? "unavailable",
+        model: row.actualModel ?? "unavailable",
+        profile: row.profile ?? "unavailable",
+        serviceTier: row.serviceTier ?? "unavailable",
+        reasoningEffort: row.reasoningEffort ?? "unavailable",
+        outcome,
+        failureClass: row.failureClass ? taskFailureClassFromProvider(row.failureClass) : null,
+        occurredAtEpochMs: row.completedAtEpochMs ?? row.startedAtEpochMs,
+        elapsedMs: row.elapsedMs,
+        usage: {
+          inputTokens: usage?.inputTokens ?? null,
+          cachedInputTokens: usage?.cachedInputTokens ?? null,
+          uncachedInputTokens: usage?.uncachedInputTokens ?? null,
+          cacheWriteInputTokens: usage?.cacheWriteInputTokens ?? null,
+          outputTokens: usage?.outputTokens ?? null,
+          reasoningOutputTokens: usage?.reasoningOutputTokens ?? null,
+          coverage:
+            usage === null
+              ? ("unavailable" as const)
+              : [
+                    usage.inputTokens,
+                    usage.cachedInputTokens,
+                    usage.uncachedInputTokens,
+                    usage.outputTokens,
+                  ].every((value) => value !== null)
+                ? ("complete" as const)
+                : ("partial" as const),
+        },
+      },
+    ];
+  });
   return {
     campaign,
     proposals,
     decisionTouches,
     sources,
+    campaignRuns,
     cursor: request.cursor,
     nextCursor:
       page.nextCursor === null ? null : encodeCampaignEvidenceCursor(page.nextCursor, campaignId),

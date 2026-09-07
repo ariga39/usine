@@ -59,7 +59,7 @@ export const sessionArchiveSchema = z
     schemaVersion: z.literal(1),
     archiveId: z.string().regex(archiveIdPattern),
     taskId: z.string().regex(durableIdPattern),
-    role: z.enum(["implementer", "reviewer", "assessor"]),
+    role: z.enum(["implementer", "reviewer", "assessor", "replacement-planner"]),
     attempt: z.string().regex(durableIdPattern),
     createdAtEpochMs: z.number().int(),
     updatedAtEpochMs: z.number().int(),
@@ -98,7 +98,7 @@ const sessionArchiveTombstoneSchema = z
     schemaVersion: z.literal(1),
     archiveId: z.string().regex(archiveIdPattern),
     taskId: z.string().regex(durableIdPattern),
-    role: z.enum(["implementer", "reviewer", "assessor"]),
+    role: z.enum(["implementer", "reviewer", "assessor", "replacement-planner"]),
     attempt: z.string().regex(durableIdPattern),
     createdAtEpochMs: z.number().int(),
     updatedAtEpochMs: z.number().int(),
@@ -169,7 +169,7 @@ export class SessionArchiveError extends Error {
 
 export interface SessionArchiveRecordInput {
   taskId: string;
-  role: "implementer" | "reviewer" | "assessor";
+  role: "implementer" | "reviewer" | "assessor" | "replacement-planner";
   attempt: string;
   contract: unknown;
   prompt: string;

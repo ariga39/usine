@@ -88,7 +88,7 @@ export type PreparedOutputSchema = object;
  * applied profile, MCP, deadline, environment, and cancellation policy.
  */
 export interface CodingSessionAdapterRequest {
-  readonly role: "implementer" | "reviewer" | "assessor";
+  readonly role: "implementer" | "reviewer" | "assessor" | "replacement-planner";
   readonly workspace: string;
   readonly prompt: string;
   readonly sandbox: "workspace-write" | "read-only";

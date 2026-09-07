@@ -221,7 +221,7 @@ const campaignOutcomeEvidenceSchema = Schema.Struct({
   mergeCommitSha: Schema.NullOr(exactSha),
 });
 
-const campaignAssessmentUsageSchema = Schema.Struct({
+export const campaignAssessmentUsageSchema = Schema.Struct({
   inputTokens: Schema.NullOr(Schema.Natural),
   cachedInputTokens: Schema.NullOr(Schema.Natural),
   uncachedInputTokens: Schema.NullOr(Schema.Natural),
@@ -269,6 +269,11 @@ const campaignDecisionRequestSchema = Schema.Struct({
     "branches_blocked",
     "assessment_gaps",
     "assessment_inconclusive",
+    "replacement_invalid",
+    "replacement_duplicate",
+    "replacement_unavailable",
+    "replacement_budget_exhausted",
+    "replacement_exhausted",
   ]),
   outcomeIds: Schema.Array(Schema.String),
 });
@@ -292,6 +297,14 @@ const campaignProposalSchema = Schema.Struct({
   sequence: Schema.Natural,
   status: campaignProposalStatusSchema,
   blocker: Schema.NullOr(Schema.String),
+  replacement: Schema.optional(
+    Schema.Struct({
+      assessmentId: Schema.String,
+      evidenceHash: Schema.String,
+      role: Schema.Literal("replacement-planner"),
+      usage: Schema.NullOr(campaignAssessmentUsageSchema),
+    }),
+  ),
   ready: Schema.NullOr(
     Schema.Struct({
       repositoryId: Schema.String,

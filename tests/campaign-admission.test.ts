@@ -9,6 +9,7 @@ import {
   registerRepositoryResource,
   startUsineServer,
   type CampaignOutcomeAssessor,
+  type CampaignReplacementGenerator,
 } from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { executeDeliveryRun, type DeliveryRunServices } from "@usine/delivery-run";
@@ -176,7 +177,7 @@ function oneOutcomeFrontierGoal(repositoryId: string) {
   return {
     ...contract,
     outcomes: [contract.outcomes[0]],
-    budget: { ...contract.budget, maxImplementerActivations: 2 },
+    budget: { ...contract.budget, maxImplementerActivations: 2, maxReviewCycles: 2 },
   };
 }
 
@@ -209,6 +210,7 @@ async function frontierFixture(
   activeTaskCapacity = 1,
   register = true,
   assessOutcome?: CampaignOutcomeAssessor,
+  generateReplacement?: CampaignReplacementGenerator,
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-frontier-"));
   const stateDirectory = join(root, "state");
@@ -231,6 +233,7 @@ async function frontierFixture(
     environment,
     execute,
     assessOutcome,
+    generateReplacement,
     host: "127.0.0.1",
     port: 0,
   });
@@ -2702,7 +2705,7 @@ describe("durable Ready frontier", () => {
         expect(campaign?.status).toBe(verdict === "satisfied" ? "accepted" : "blocked");
         if (verdict !== "satisfied")
           expect(campaign?.decisionRequest?.reason).toBe(
-            verdict === "gaps" ? "assessment_gaps" : "assessment_inconclusive",
+            verdict === "gaps" ? "replacement_unavailable" : "assessment_inconclusive",
           );
 
         const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
@@ -2784,7 +2787,7 @@ describe("durable Ready frontier", () => {
       await expect(lookupCampaign(stateDirectory, published.campaignId)).resolves.toMatchObject({
         status: "blocked",
         decisionRequest: {
-          reason: "assessment_gaps",
+          reason: "replacement_unavailable",
           outcomeIds: ["outcome-one", "outcome-two"],
         },
       });
@@ -3049,6 +3052,1104 @@ describe("durable Ready frontier", () => {
       await server.close();
     }
   });
+
+  test("admits one bounded replacement after a gaps assessment and reassesses it", async () => {
+    const base = oneOutcomeFrontierGoal("campaign-repository");
+    const contract = {
+      ...base,
+      budget: { ...base.budget, maxReviewCycles: 2 },
+    };
+    const replacement = frontierProposal("replacement", "outcome-one");
+    let calls = 0;
+    let replacementCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      calls += 1;
+      if (calls === 1)
+        return {
+          verdict: "gaps",
+          summary: "the first bounded task did not close the Outcome",
+          gaps: ["the missing behavior needs one focused replacement"],
+          evidence: [],
+          usage: null,
+        };
+      const delivery = request.evidence.find((item) => item.fact === "delivery");
+      return {
+        verdict: "satisfied",
+        summary: "the replacement closes the Outcome",
+        gaps: [],
+        evidence: delivery ? [{ ...delivery, criterionIndex: 0 }] : [],
+        usage: null,
+      };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      expect(request.assessment).toMatchObject({ verdict: "gaps" });
+      expect(request.evidenceHash).toBe(request.assessment.evidenceHash);
+      expect(request.priorProposals.map((proposal) => proposal.proposalId)).toEqual(["initial"]);
+      expect(request.remainingBudget.tasks).toBe(9);
+      return {
+        proposal: replacement,
+        usage: {
+          inputTokens: 13,
+          cachedInputTokens: 3,
+          uncachedInputTokens: 10,
+          cacheWriteInputTokens: 0,
+          outputTokens: 8,
+          reasoningOutputTokens: 2,
+        },
+      };
+    };
+    const { contractPath, server } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const campaign = await getCampaign(server.url, published.campaignId);
+      expect(calls).toBe(2);
+      expect(replacementCalls).toBe(1);
+      expect(campaign).toMatchObject({
+        status: "accepted",
+        outcomes: [{ id: "outcome-one", status: "accepted" }],
+        proposals: [
+          { proposalId: "initial" },
+          {
+            proposalId: "replacement",
+            replacement: {
+              assessmentId: expect.stringMatching(/^assessment-/),
+              evidenceHash: expect.any(String),
+              role: "replacement-planner",
+              usage: { inputTokens: 13, outputTokens: 8 },
+            },
+          },
+        ],
+      });
+      expect(campaign?.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+        "initial",
+        "replacement",
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("persists runtime assessor and invalid planner runs once in Campaign evidence", async () => {
+    const contract = oneOutcomeFrontierGoal("campaign-repository");
+    let assessorCalls = 0;
+    let replacementCalls = 0;
+    const modelRun = (
+      request: {
+        readonly invocationId: string;
+        readonly repositories: readonly {
+          readonly id: string;
+          readonly owner: string;
+          readonly name: string;
+        }[];
+      },
+      role: "assessor" | "replacement-planner",
+    ) => {
+      const repository = request.repositories[0];
+      if (!repository) throw new Error("Campaign model-run fixture has no repository");
+      const completedAtEpochMs = Date.now();
+      return {
+        invocationId: request.invocationId,
+        role,
+        status: "completed" as const,
+        failureClass: null,
+        startedAtEpochMs: completedAtEpochMs - 4,
+        completedAtEpochMs,
+        elapsedMs: 4,
+        repositoryId: repository.id,
+        repository: `${repository.owner}/${repository.name}`,
+        profile: "campaign-test-profile",
+        configuredProvider: "configured-provider",
+        configuredModel: "configured-model",
+        actualProvider: "attested-provider",
+        actualModel: "attested-model",
+        adapter: "sdk",
+        serviceTier: "standard",
+        reasoningEffort: "medium",
+        usage: {
+          inputTokens: 9,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 7,
+          cacheWriteInputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 1,
+        },
+      };
+    };
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessorCalls += 1;
+      return {
+        verdict: "gaps",
+        summary: "the blocked initial Task leaves one bounded gap",
+        gaps: ["the blocked initial Task leaves one bounded gap"],
+        evidence: [],
+        usage: null,
+        modelRuns: [modelRun(request, "assessor")],
+      };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      return {
+        proposal: { invalid: true },
+        usage: null,
+        modelRuns: [modelRun(request, "replacement-planner")],
+      };
+    };
+    const execute = async ({ authority, result }: CampaignExecutionContext) =>
+      authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "the initial Task is blocked",
+      );
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      execute,
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(assessorCalls).toBe(1);
+      expect(replacementCalls).toBe(1);
+      const evidence = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+      const campaignRuns = evidence!.runs.filter((run) => run.taskId === null);
+      expect(campaignRuns).toHaveLength(2);
+      expect(campaignRuns).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "assessor", outcome: "succeeded" }),
+          expect.objectContaining({ role: "replacement-planner", outcome: "succeeded" }),
+        ]),
+      );
+      const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
+      expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(2);
+      expect(publicReport!.totals.invocations).toBe(evidence!.totals.invocations);
+      const campaign = await getCampaign(server.url, published.campaignId);
+      const postHog = campaignEvidenceToPostHogEvents(campaign!, evidence!, "deployment-test");
+      const modelEvents = postHog.filter((event) => event.event === "$ai_generation");
+      expect(modelEvents).toHaveLength(2);
+      expect(new Set(modelEvents.map((event) => event.properties.invocation_id)).size).toBe(2);
+      expect(modelEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            properties: expect.objectContaining({ role: "assessor", outcome: "succeeded" }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              role: "replacement-planner",
+              outcome: "succeeded",
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("consumes the Campaign Outcome replacement opportunity across a fresh gaps assessment", async () => {
+    const base = oneOutcomeFrontierGoal("campaign-repository");
+    const contract = {
+      ...base,
+      budget: { ...base.budget, maxReviewCycles: 2 },
+    };
+    let assessmentCalls = 0;
+    let replacementCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => {
+      assessmentCalls += 1;
+      return {
+        verdict: "gaps",
+        summary: "the bounded Outcome still has a gap",
+        gaps: ["the one replacement opportunity is already consumed"],
+        evidence: [],
+        usage: null,
+      };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      return { proposal: frontierProposal("replacement", "outcome-one"), usage: null };
+    };
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const first = await getCampaign(server.url, published.campaignId);
+      expect(first).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_exhausted",
+          outcomeIds: ["outcome-one"],
+        },
+        proposals: [{ proposalId: "initial" }, { proposalId: "replacement" }],
+      });
+      expect(assessmentCalls).toBe(2);
+      expect(replacementCalls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one"),
+        ).toEqual({ count: 1 });
+      } finally {
+        database.close();
+      }
+
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        assessOutcome: async () => {
+          throw new Error("a stable exhausted replacement must not reassess");
+        },
+        generateReplacement: async () => {
+          throw new Error("a consumed replacement opportunity must not invoke the planner");
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        if (!first) throw new Error("Campaign disappeared before restart");
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          first,
+        );
+        expect(assessmentCalls).toBe(2);
+        expect(replacementCalls).toBe(1);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("recovers a pending replacement reservation once on restart", async () => {
+    let replacementCalls = 0;
+    let replacementEntered!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
+    let releaseReplacement!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    const assessor: CampaignOutcomeAssessor = async () => ({
+      verdict: "gaps",
+      summary: "the frontier remains incomplete",
+      gaps: ["the reserved replacement did not finish"],
+      evidence: [],
+      usage: null,
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      replacementEntered();
+      await release;
+      return { proposal: null, usage: null };
+    };
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      await replacementStarted;
+      expect(replacementCalls).toBe(1);
+      await server.close();
+
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, assessment_id, evidence_hash, invocation_id, role FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one"),
+        ).toMatchObject({ status: "pending", role: "replacement-planner" });
+      } finally {
+        database.close();
+      }
+
+      const restarted = await startUsineServer({
+        environment,
+        assessOutcome: assessor,
+        generateReplacement: async () => {
+          throw new Error("a pending reservation must be recovered without reinvocation");
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          status: "blocked",
+          decisionRequest: {
+            requestId: `decision:${published.campaignId}`,
+            reason: "replacement_unavailable",
+            outcomeIds: ["outcome-one"],
+          },
+        });
+        expect(replacementCalls).toBe(1);
+        const recovered = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          const row = recovered
+            .prepare(
+              "SELECT status, proposal, usage, completed_at_epoch_ms FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one");
+          expect(row).toMatchObject({
+            status: "unavailable",
+            proposal: null,
+            usage: null,
+            completed_at_epoch_ms: expect.any(Number),
+          });
+        } finally {
+          recovered.close();
+        }
+      } finally {
+        await restarted.close();
+      }
+      releaseReplacement();
+    } finally {
+      releaseReplacement?.();
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("does not treat a dependency-blocked replacement as useful work", async () => {
+    let replacementCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => ({
+      verdict: "gaps",
+      summary: "the blocked branch leaves the Outcome incomplete",
+      gaps: ["a replacement cannot depend on unavailable work"],
+      evidence: [],
+      usage: null,
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      return {
+        proposal: frontierProposal("replacement", "outcome-one", ["initial"]),
+        usage: null,
+      };
+    };
+    const initial = { ...frontierProposal("initial", "outcome-one"), effects: ["shell"] };
+    const { contractPath, server, environment } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) =>
+        context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "the initial branch is unavailable",
+        ),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initial);
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 250; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const first = await getCampaign(server.url, published.campaignId);
+      expect(first).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "branches_blocked",
+          outcomeIds: ["outcome-one"],
+        },
+        proposals: [
+          { proposalId: "initial", status: "blocked" },
+          {
+            proposalId: "replacement",
+            status: "planned",
+            blocker: "proposal dependency has no accepted delivery",
+          },
+        ],
+      });
+      expect(replacementCalls).toBe(1);
+      await server.close();
+
+      const restarted = await startUsineServer({
+        environment,
+        assessOutcome: async () => {
+          throw new Error("a dependency-blocked decision must not reassess");
+        },
+        generateReplacement: async () => {
+          throw new Error("a dependency-blocked decision must not replan");
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        if (!first) throw new Error("Campaign disappeared before restart");
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          first,
+        );
+        expect(replacementCalls).toBe(1);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("revalidates a later Outcome replacement against the consumed Task budget", async () => {
+    let replacementCalls = 0;
+    let plannerRemainingTasks: number | undefined;
+    const assessor: CampaignOutcomeAssessor = async () => ({
+      verdict: "gaps",
+      summary: "both Outcomes remain incomplete",
+      gaps: ["the bounded frontier remains incomplete"],
+      evidence: [],
+      usage: null,
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      plannerRemainingTasks = request.remainingBudget.tasks;
+      return {
+        proposal: frontierProposal(
+          `replacement-${request.outcome.id}`,
+          request.outcome.id,
+          request.outcome.id === "outcome-one" ? ["initial-one"] : [],
+        ),
+        usage: null,
+      };
+    };
+    const contract = {
+      ...frontierGoal("campaign-repository"),
+      budget: { ...frontierGoal("campaign-repository").budget, maxTasks: 3 },
+    };
+    const initialOne = frontierProposal("initial-one", "outcome-one");
+    const initialTwo = frontierProposal("initial-two", "outcome-two");
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) =>
+        context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          "the initial branch is unavailable",
+        ),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initialOne);
+      await proposeCampaign(server.url, published.campaignId, initialTwo);
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(replacementCalls).toBe(1);
+      expect(plannerRemainingTasks).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 3 });
+        expect(
+          database
+            .prepare(
+              "SELECT outcome_id, status FROM campaign_replacement_runs WHERE campaign_id = ? ORDER BY outcome_id",
+            )
+            .all(published.campaignId),
+        ).toEqual([
+          { outcome_id: "outcome-one", status: "admitted" },
+          { outcome_id: "outcome-two", status: "budget_exhausted" },
+        ]);
+      } finally {
+        database.close();
+      }
+      const first = await getCampaign(server.url, published.campaignId);
+      expect(first).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_budget_exhausted",
+        },
+      });
+
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        assessOutcome: async () => {
+          throw new Error("a consumed budget must not reassess");
+        },
+        generateReplacement: async () => {
+          throw new Error("a consumed budget must not replan");
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        if (!first) throw new Error("Campaign disappeared before budget decision persisted");
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          first,
+        );
+        expect(replacementCalls).toBe(1);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("upgrades a persisted assessment-gaps frontier once after restart", async () => {
+    const contract = oneOutcomeFrontierGoal("campaign-repository");
+    const fixtureValue = await frontierFixture(contract);
+    const { contractPath, server, stateDirectory, environment } = fixtureValue;
+    let published;
+    try {
+      published = await publishCampaign(server.url, { contractPath });
+    } finally {
+      await server.close();
+    }
+
+    const outcome = { ...contract.outcomes[0]!, status: "live" as const };
+    const evidenceHash = createHash("sha256")
+      .update(JSON.stringify({ outcome, evidence: [] }), "utf8")
+      .digest("hex");
+    const completedAtEpochMs = Date.now();
+    const assessment = {
+      role: "assessor",
+      assessmentId: "legacy-gaps-assessment",
+      outcomeId: outcome.id,
+      evidenceHash,
+      verdict: "gaps",
+      summary: "the persisted assessment identified an incomplete frontier",
+      gaps: ["the frontier remains incomplete"],
+      evidence: [],
+      usage: null,
+      startedAtEpochMs: completedAtEpochMs - 1,
+      completedAtEpochMs,
+    };
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    try {
+      database
+        .prepare(
+          "INSERT INTO campaign_assessments (campaign_id, outcome_id, role, evidence_hash, assessment_id, assessment, started_at_epoch_ms, completed_at_epoch_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          published.campaignId,
+          outcome.id,
+          "assessor",
+          evidenceHash,
+          assessment.assessmentId,
+          JSON.stringify(assessment),
+          assessment.startedAtEpochMs,
+          assessment.completedAtEpochMs,
+        );
+      database
+        .prepare(
+          "UPDATE campaigns SET plan_handed_off = 1, status = 'blocked', decision_request = ?, assessment_requested = 0 WHERE campaign_id = ?",
+        )
+        .run(
+          JSON.stringify({
+            requestId: `decision:${published.campaignId}`,
+            reason: "assessment_gaps",
+            outcomeIds: [outcome.id],
+          }),
+          published.campaignId,
+        );
+    } finally {
+      database.close();
+    }
+
+    let replacementCalls = 0;
+    const replacement = frontierProposal("upgraded-replacement", outcome.id);
+    const execute = async (context: CampaignExecutionContext) =>
+      context.authority.block(
+        { taskId: context.result.taskId, revision: context.result.revision },
+        "the upgraded replacement is unavailable",
+      );
+    const restarted = await startUsineServer({
+      environment,
+      assessOutcome: async () => {
+        throw new Error("a persisted assessment-gaps frontier must not reassess");
+      },
+      generateReplacement: async () => {
+        replacementCalls += 1;
+        return { proposal: replacement, usage: null };
+      },
+      execute,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      expect(replacementCalls).toBe(1);
+      await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+        proposals: [{ proposalId: replacement.proposalId }],
+      });
+      await restarted.close();
+      const finalRestart = await startUsineServer({
+        environment,
+        assessOutcome: async () => {
+          throw new Error("the upgraded frontier must not reassess");
+        },
+        generateReplacement: async () => {
+          throw new Error("the one upgrade opportunity must not repeat");
+        },
+        execute,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        expect(replacementCalls).toBe(1);
+        await expect(getCampaign(finalRestart.url, published.campaignId)).resolves.toMatchObject({
+          proposals: [{ proposalId: replacement.proposalId }],
+        });
+      } finally {
+        await finalRestart.close();
+      }
+    } finally {
+      await restarted.close().catch(() => undefined);
+    }
+  });
+
+  test("rejects a deferred replacement after Campaign abandonment", async () => {
+    let replacementCalls = 0;
+    let replacementEntered!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
+    let releaseReplacement!: () => void;
+    const replacementRelease = new Promise<void>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    const assessor: CampaignOutcomeAssessor = async () => ({
+      verdict: "gaps",
+      summary: "the delivered leaf does not satisfy the Outcome",
+      gaps: ["the Outcome remains incomplete"],
+      evidence: [],
+      usage: null,
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      replacementEntered();
+      await replacementRelease;
+      return { proposal: frontierProposal("stale-replacement", "outcome-one"), usage: null };
+    };
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      await replacementStarted;
+      environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
+      await expect(abandonCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "abandoned",
+      });
+      releaseReplacement();
+
+      let replacementStatus: string | undefined;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          const row = database
+            .prepare(
+              "SELECT status FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one");
+          if (
+            typeof row === "object" &&
+            row !== null &&
+            "status" in row &&
+            typeof row.status === "string"
+          )
+            replacementStatus = row.status;
+        } finally {
+          database.close();
+        }
+        if (replacementStatus === "invalid") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(replacementCalls).toBe(1);
+      expect(replacementStatus).toBe("invalid");
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 1 });
+      } finally {
+        database.close();
+      }
+      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        status: "abandoned",
+      });
+
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        assessOutcome: async () => {
+          throw new Error("an abandoned Campaign must not reassess");
+        },
+        generateReplacement: async () => {
+          throw new Error("an abandoned Campaign must not replan");
+        },
+        execute: async (context) =>
+          context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "the stale replacement must not execute",
+          ),
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          status: "abandoned",
+        });
+        expect(replacementCalls).toBe(1);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      releaseReplacement?.();
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test.each([
+    {
+      name: "remaining Task budget",
+      contract: {
+        ...oneOutcomeFrontierGoal("campaign-repository"),
+        budget: { ...oneOutcomeFrontierGoal("campaign-repository").budget, maxTasks: 1 },
+      },
+      initial: frontierProposal("initial", "outcome-one"),
+      replacement: frontierProposal("replacement", "outcome-one"),
+      elapsed: false,
+      expectedPlannerCalls: 0,
+    },
+    {
+      name: "remaining activation budget",
+      contract: oneOutcomeFrontierGoal("campaign-repository"),
+      initial: frontierProposal("initial", "outcome-one"),
+      replacement: frontierProposal(
+        "replacement",
+        "outcome-one",
+        [],
+        false,
+        "campaign-repository",
+        2,
+      ),
+      elapsed: false,
+      expectedPlannerCalls: 1,
+    },
+    {
+      name: "remaining review budget",
+      contract: {
+        ...oneOutcomeFrontierGoal("campaign-repository"),
+        budget: { ...oneOutcomeFrontierGoal("campaign-repository").budget, maxReviewCycles: 2 },
+      },
+      initial: frontierProposal("initial", "outcome-one"),
+      replacement: {
+        ...frontierProposal("replacement", "outcome-one"),
+        budget: { ...frontierProposal("replacement", "outcome-one").budget, maxReviewCycles: 2 },
+      },
+      elapsed: false,
+      expectedPlannerCalls: 1,
+    },
+    {
+      name: "remaining elapsed budget",
+      contract: {
+        ...oneOutcomeFrontierGoal("campaign-repository"),
+        budget: { ...oneOutcomeFrontierGoal("campaign-repository").budget, maxElapsedMs: 1_000 },
+      },
+      initial: {
+        ...frontierProposal("initial", "outcome-one"),
+        budget: { ...frontierProposal("initial", "outcome-one").budget, maxElapsedMs: 1_000 },
+      },
+      replacement: frontierProposal("replacement", "outcome-one"),
+      elapsed: true,
+      expectedPlannerCalls: 0,
+    },
+  ] as const)(
+    "rejects replacement when $name is exhausted",
+    async ({ contract, initial, replacement, elapsed, expectedPlannerCalls }) => {
+      let replacementCalls = 0;
+      const assessor: CampaignOutcomeAssessor = async () => ({
+        verdict: "gaps",
+        summary: "the frontier remains incomplete",
+        gaps: ["no remaining budget dimension can admit replacement work"],
+        evidence: [],
+        usage: null,
+      });
+      const replacementGenerator: CampaignReplacementGenerator = async () => {
+        replacementCalls += 1;
+        return { proposal: replacement, usage: null };
+      };
+      const { contractPath, server, stateDirectory } = await frontierFixture(
+        contract,
+        "user:campaign-366",
+        async (context) => acceptCampaignTask(context),
+        1,
+        true,
+        assessor,
+        replacementGenerator,
+      );
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(server.url, published.campaignId, initial);
+        if (elapsed) {
+          // The elapsed case needs only the Campaign clock exhausted; the Task deadline remains valid.
+          const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+          try {
+            database
+              .prepare("UPDATE campaigns SET created_at = ? WHERE campaign_id = ?")
+              .run(Date.now() - 2_000, published.campaignId);
+          } finally {
+            database.close();
+          }
+        }
+        await handoffCampaign(server.url, published.campaignId);
+        for (let attempt = 0; attempt < 250; attempt += 1) {
+          if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+          status: "blocked",
+          decisionRequest: {
+            reason: "replacement_budget_exhausted",
+            outcomeIds: ["outcome-one"],
+          },
+        });
+        expect(replacementCalls).toBe(expectedPlannerCalls);
+        const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            database
+              .prepare("SELECT status FROM campaign_replacement_runs WHERE campaign_id = ?")
+              .get(published.campaignId),
+          ).toMatchObject({ status: "budget_exhausted" });
+        } finally {
+          database.close();
+        }
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  test.each([
+    {
+      name: "strict-schema output",
+      proposal: { ...frontierProposal("replacement", "outcome-one"), unexpected: true },
+      reason: "replacement_invalid",
+      storedStatus: "invalid",
+    },
+    {
+      name: "wrong Outcome",
+      proposal: frontierProposal("replacement", "outcome-two"),
+      reason: "replacement_invalid",
+      storedStatus: "invalid",
+    },
+    {
+      name: "out-of-authority Repository",
+      proposal: { ...frontierProposal("replacement", "outcome-one"), repositoryId: "other" },
+      reason: "replacement_invalid",
+      storedStatus: "invalid",
+    },
+    {
+      name: "out-of-authority effect",
+      proposal: { ...frontierProposal("replacement", "outcome-one"), effects: ["shell"] },
+      reason: "replacement_invalid",
+      storedStatus: "invalid",
+    },
+    {
+      name: "out-of-authority merge",
+      proposal: { ...frontierProposal("replacement", "outcome-one"), merge: true },
+      reason: "replacement_invalid",
+      storedStatus: "invalid",
+    },
+    {
+      name: "duplicate owned work",
+      proposal: frontierProposal("initial", "outcome-one"),
+      reason: "replacement_duplicate",
+      storedStatus: "duplicate",
+    },
+    {
+      name: "remaining budget excess",
+      proposal: {
+        ...frontierProposal("replacement", "outcome-one"),
+        budget: {
+          ...frontierProposal("replacement", "outcome-one").budget,
+          maxImplementerActivations: 2,
+        },
+      },
+      reason: "replacement_budget_exhausted",
+      storedStatus: "budget_exhausted",
+    },
+    {
+      name: "unavailable result",
+      proposal: null,
+      reason: "replacement_unavailable",
+      storedStatus: "unavailable",
+    },
+  ] as const)(
+    "rejects $name and consumes exactly one replacement opportunity",
+    async ({ proposal, reason, storedStatus }) => {
+      let replacementCalls = 0;
+      const assessor: CampaignOutcomeAssessor = async () => ({
+        verdict: "gaps",
+        summary: "the bounded frontier remains incomplete",
+        gaps: ["one replacement opportunity is available"],
+        evidence: [],
+        usage: null,
+      });
+      const replacementGenerator: CampaignReplacementGenerator = async () => {
+        replacementCalls += 1;
+        return { proposal, usage: null };
+      };
+      const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+        oneOutcomeFrontierGoal("campaign-repository"),
+        "user:campaign-366",
+        async (context) => acceptCampaignTask(context),
+        1,
+        true,
+        assessor,
+        replacementGenerator,
+      );
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("initial", "outcome-one"),
+        );
+        await handoffCampaign(server.url, published.campaignId);
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        const first = await getCampaign(server.url, published.campaignId);
+        if (!first) throw new Error("Campaign disappeared before replacement decision persisted");
+        expect(first).toMatchObject({
+          status: "blocked",
+          decisionRequest: {
+            requestId: `decision:${published.campaignId}`,
+            reason,
+            outcomeIds: ["outcome-one"],
+          },
+        });
+        expect(replacementCalls).toBe(1);
+        await server.close();
+
+        const restarted = await startUsineServer({
+          environment,
+          assessOutcome: assessor,
+          generateReplacement: replacementGenerator,
+          host: "127.0.0.1",
+          port: 0,
+        });
+        try {
+          await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+            first,
+          );
+          expect(replacementCalls).toBe(1);
+          const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+          try {
+            expect(
+              database
+                .prepare(
+                  "SELECT status, role, usage FROM campaign_replacement_runs WHERE campaign_id = ?",
+                )
+                .get(published.campaignId),
+            ).toMatchObject({ status: storedStatus, role: "replacement-planner", usage: null });
+          } finally {
+            database.close();
+          }
+        } finally {
+          await restarted.close();
+        }
+      } finally {
+        await server.close().catch(() => undefined);
+      }
+    },
+  );
 
   test("continues an independent branch around a blocked branch", async () => {
     const base = frontierGoal("campaign-repository");

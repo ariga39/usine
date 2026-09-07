@@ -52,6 +52,9 @@ export const campaignProposals = sqliteTable(
     readyBaseSha: text("ready_base_sha"),
     readyRepositoryRevision: integer("ready_repository_revision"),
     taskId: text("task_id"),
+    replacementAssessmentId: text("replacement_assessment_id"),
+    replacementEvidenceHash: text("replacement_evidence_hash"),
+    replacementUsage: text("replacement_usage", { mode: "json" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(unixepoch() * 1000)`)
       .notNull(),
@@ -175,6 +178,58 @@ export const campaignAssessments = sqliteTable(
     }),
   }),
 );
+
+/** Append-only replacement-planner attempt and result for one Campaign/Outcome opportunity. */
+export const campaignReplacementRuns = sqliteTable(
+  "campaign_replacement_runs",
+  {
+    campaignId: text("campaign_id").notNull(),
+    outcomeId: text("outcome_id").notNull(),
+    assessmentId: text("assessment_id").notNull(),
+    evidenceHash: text("evidence_hash").notNull(),
+    invocationId: text("invocation_id").notNull(),
+    role: text("role").notNull().default("replacement-planner"),
+    status: text("status").notNull(),
+    proposal: text("proposal", { mode: "json" }),
+    usage: text("usage", { mode: "json" }),
+    startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
+    completedAtEpochMs: integer("completed_at_epoch_ms"),
+  },
+  (table) => ({
+    campaignReplacementRunIdentity: primaryKey({
+      columns: [table.campaignId, table.outcomeId],
+    }),
+    campaignReplacementRunInvocation: uniqueIndex("campaign_replacement_runs_invocation_index").on(
+      table.invocationId,
+    ),
+  }),
+);
+
+/** Durable provider observation for one Campaign-only assessor or planner run. */
+export const campaignModelRuns = sqliteTable("campaign_model_runs", {
+  invocationId: text("invocation_id").primaryKey(),
+  campaignId: text("campaign_id").notNull(),
+  outcomeId: text("outcome_id").notNull(),
+  role: text("role").notNull(),
+  assessmentId: text("assessment_id"),
+  evidenceHash: text("evidence_hash"),
+  status: text("status").notNull(),
+  failureClass: text("failure_class"),
+  startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
+  completedAtEpochMs: integer("completed_at_epoch_ms"),
+  elapsedMs: integer("elapsed_ms"),
+  repositoryId: text("repository_id"),
+  repository: text("repository"),
+  profile: text("profile"),
+  configuredProvider: text("configured_provider"),
+  configuredModel: text("configured_model"),
+  actualProvider: text("actual_provider"),
+  actualModel: text("actual_model"),
+  adapter: text("adapter"),
+  serviceTier: text("service_tier"),
+  reasoningEffort: text("reasoning_effort"),
+  usage: text("usage", { mode: "json" }),
+});
 
 /** Minimum durable acknowledgement owned by the optional PostHog observer. */
 export const posthogCaptureAcknowledgements = sqliteTable(
