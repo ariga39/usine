@@ -165,7 +165,7 @@ export async function listCampaignEvidenceSources(
     const outcome =
       row.status === "cancelled"
         ? "cancelled"
-        : row.status === "succeeded"
+        : row.status === "completed" || row.status === "succeeded"
           ? "succeeded"
           : "failed";
     let usage: Schema.Schema.Type<typeof campaignAssessmentUsageSchema> | null = null;

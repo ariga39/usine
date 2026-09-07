@@ -3149,6 +3149,134 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("persists runtime assessor and invalid planner runs once in Campaign evidence", async () => {
+    const contract = oneOutcomeFrontierGoal("campaign-repository");
+    let assessorCalls = 0;
+    let replacementCalls = 0;
+    const modelRun = (
+      request: {
+        readonly invocationId: string;
+        readonly repositories: readonly {
+          readonly id: string;
+          readonly owner: string;
+          readonly name: string;
+        }[];
+      },
+      role: "assessor" | "replacement-planner",
+    ) => {
+      const repository = request.repositories[0];
+      if (!repository) throw new Error("Campaign model-run fixture has no repository");
+      const completedAtEpochMs = Date.now();
+      return {
+        invocationId: request.invocationId,
+        role,
+        status: "completed" as const,
+        failureClass: null,
+        startedAtEpochMs: completedAtEpochMs - 4,
+        completedAtEpochMs,
+        elapsedMs: 4,
+        repositoryId: repository.id,
+        repository: `${repository.owner}/${repository.name}`,
+        profile: "campaign-test-profile",
+        configuredProvider: "configured-provider",
+        configuredModel: "configured-model",
+        actualProvider: "attested-provider",
+        actualModel: "attested-model",
+        adapter: "sdk",
+        serviceTier: "standard",
+        reasoningEffort: "medium",
+        usage: {
+          inputTokens: 9,
+          cachedInputTokens: 2,
+          uncachedInputTokens: 7,
+          cacheWriteInputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 1,
+        },
+      };
+    };
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessorCalls += 1;
+      return {
+        verdict: "gaps",
+        summary: "the blocked initial Task leaves one bounded gap",
+        gaps: ["the blocked initial Task leaves one bounded gap"],
+        evidence: [],
+        usage: null,
+        modelRuns: [modelRun(request, "assessor")],
+      };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      return {
+        proposal: { invalid: true },
+        usage: null,
+        modelRuns: [modelRun(request, "replacement-planner")],
+      };
+    };
+    const execute = async ({ authority, result }: CampaignExecutionContext) =>
+      authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "the initial Task is blocked",
+      );
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      execute,
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(assessorCalls).toBe(1);
+      expect(replacementCalls).toBe(1);
+      const evidence = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+      const campaignRuns = evidence!.runs.filter((run) => run.taskId === null);
+      expect(campaignRuns).toHaveLength(2);
+      expect(campaignRuns).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "assessor", outcome: "succeeded" }),
+          expect.objectContaining({ role: "replacement-planner", outcome: "succeeded" }),
+        ]),
+      );
+      const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
+      expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(2);
+      expect(publicReport!.totals.invocations).toBe(evidence!.totals.invocations);
+      const campaign = await getCampaign(server.url, published.campaignId);
+      const postHog = campaignEvidenceToPostHogEvents(campaign!, evidence!, "deployment-test");
+      const modelEvents = postHog.filter((event) => event.event === "$ai_generation");
+      expect(modelEvents).toHaveLength(2);
+      expect(new Set(modelEvents.map((event) => event.properties.invocation_id)).size).toBe(2);
+      expect(modelEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            properties: expect.objectContaining({ role: "assessor", outcome: "succeeded" }),
+          }),
+          expect.objectContaining({
+            properties: expect.objectContaining({
+              role: "replacement-planner",
+              outcome: "succeeded",
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
   test("consumes the Campaign Outcome replacement opportunity across a fresh gaps assessment", async () => {
     const base = oneOutcomeFrontierGoal("campaign-repository");
     const contract = {

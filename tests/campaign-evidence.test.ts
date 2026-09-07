@@ -771,6 +771,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
   ]);
   expect(campaignRuns[0]).toMatchObject({
     role: "assessor",
+    outcome: "succeeded",
     configuredModel: "configured-assessor",
     configuredProvider: "configured-provider",
     actualModel: "actual-assessor",
@@ -787,6 +788,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
   });
   expect(campaignRuns[1]).toMatchObject({
     invocationId: "assessor-invocation:role-output-normalizer",
+    outcome: "succeeded",
     configuredModel: "configured-normalizer",
     configuredProvider: "normalizer-provider",
     actualModel: "actual-normalizer",
