@@ -49,7 +49,6 @@ function goalContract() {
     budget: {
       maxElapsedMs: 60_000,
       maxTasks: 3,
-      maxPlannerActivations: 1,
       maxImplementerActivations: 2,
       maxReviewCycles: 2,
     },

@@ -42,7 +42,6 @@ export const goalContractSchema = z
       .object({
         maxElapsedMs: z.number().int().positive(),
         maxTasks: z.number().int().positive(),
-        maxPlannerActivations: z.number().int().positive().default(1),
         maxImplementerActivations: z.number().int().min(0).max(2).default(0),
         maxReviewCycles: z.number().int().min(0).max(2).default(0),
       })
@@ -140,6 +139,29 @@ export const goalContractSchema = z
   });
 
 export type GoalContract = z.infer<typeof goalContractSchema>;
+
+const legacyPlannerActivationsSchema = z.number().int().positive();
+
+const persistedGoalContractSchema = z.preprocess((input) => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const contract = z.record(z.string(), z.unknown()).safeParse(input);
+  if (!contract.success) return input;
+  const budget = z.record(z.string(), z.unknown()).safeParse(contract.data.budget);
+  if (!budget.success) return input;
+  const legacyPlannerActivations = budget.data.maxPlannerActivations;
+  if (
+    legacyPlannerActivations !== undefined &&
+    !legacyPlannerActivationsSchema.safeParse(legacyPlannerActivations).success
+  )
+    return input;
+  const { maxPlannerActivations: _legacy, ...currentBudget } = budget.data;
+  return { ...contract.data, budget: currentBudget };
+}, goalContractSchema);
+
+/** Decode a durable Goal publication while removing the retired Planner budget field. */
+export function decodePersistedGoalContract(input: unknown): GoalContract {
+  return persistedGoalContractSchema.parse(input);
+}
 
 export const taskProposalSchema = z
   .object({
@@ -267,7 +289,6 @@ export const campaignResourceSchema = Schema.Struct({
   budget: Schema.Struct({
     maxElapsedMs: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
     maxTasks: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxPlannerActivations: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
     maxImplementerActivations: Schema.optional(Schema.Int),
     maxReviewCycles: Schema.optional(Schema.Int),
   }),
@@ -343,7 +364,6 @@ export function campaignResourceFromContract(
     budget: {
       maxElapsedMs: contract.budget.maxElapsedMs,
       maxTasks: contract.budget.maxTasks,
-      maxPlannerActivations: contract.budget.maxPlannerActivations,
       maxImplementerActivations: contract.budget.maxImplementerActivations,
       maxReviewCycles: contract.budget.maxReviewCycles,
     },
