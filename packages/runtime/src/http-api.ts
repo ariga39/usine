@@ -63,6 +63,11 @@ const campaignHandoffConflictError = Schema.Struct({
   message: Schema.String,
   retryable: Schema.Literal(false),
 }).pipe(HttpApiSchema.status(409));
+const campaignCheckpointConflictError = Schema.Struct({
+  code: Schema.Literal("campaign_checkpoint_conflict"),
+  message: Schema.String,
+  retryable: Schema.Literal(false),
+}).pipe(HttpApiSchema.status(409));
 const campaignAbandonmentUnauthorizedError = Schema.Struct({
   code: Schema.Literal("campaign_abandonment_unauthorized"),
   message: Schema.String,
@@ -141,6 +146,7 @@ const campaignPublicationSchema = Schema.Struct({ contractPath: Schema.String })
 const campaignProposalSubmissionSchema = Schema.Unknown;
 const campaignDecisionTouchSchema = Schema.Struct({ touchId: Schema.String });
 const campaignHandoffSchema = Schema.Struct({});
+const campaignCheckpointSchema = Schema.Struct({});
 const campaignAbandonSchema = Schema.Struct({});
 const campaignEvidenceQuery = {
   cursor: Schema.optional(Schema.String),
@@ -179,6 +185,7 @@ const allErrors = [
   campaignContentConflictError,
   campaignProposalConflictError,
   campaignHandoffConflictError,
+  campaignCheckpointConflictError,
   campaignAbandonmentUnauthorizedError,
   quarantineError,
   forgeError,
@@ -269,6 +276,12 @@ const CampaignApi = HttpApiGroup.make("campaigns").add(
   HttpApiEndpoint.post("handoff", "/v1/campaigns/:campaignId/handoff", {
     params: { campaignId: Schema.String },
     payload: campaignHandoffSchema,
+    success: campaignResourceSchema,
+    error: allErrors,
+  }),
+  HttpApiEndpoint.post("checkpoint", "/v1/campaigns/:campaignId/checkpoint", {
+    params: { campaignId: Schema.String },
+    payload: campaignCheckpointSchema,
     success: campaignResourceSchema,
     error: allErrors,
   }),
@@ -367,10 +380,12 @@ export {
   campaignResourceSchema,
   campaignProposalSubmissionSchema,
   campaignHandoffSchema,
+  campaignCheckpointSchema,
   campaignAbandonSchema,
   campaignEvidencePageSchema,
   campaignDecisionTouchSchema,
   campaignProposalConflictError,
+  campaignCheckpointConflictError,
   validationError,
   notFoundError,
   capacityError,

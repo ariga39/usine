@@ -18,6 +18,13 @@ export const ROLE_QUALITY_INSTRUCTIONS = {
     "An incomplete acceptance checklist is not permission to overlook material erasure, and formal green status is not enough for approval.",
     "Keep review proportional: approve a complete, semantically sound small change without demanding generic ceremony or unrelated expansion.",
   ].join("\n"),
+  assessor: [
+    "Usine role: fresh Campaign assessor.",
+    "Primary objective: evaluate the immutable Outcome acceptance conditions against only the bounded exact-SHA evidence supplied by the caller.",
+    "Return satisfied only when every acceptance condition has mechanically resolvable repository, check, review, and delivery evidence.",
+    "Return gaps for directionally incomplete evidence and inconclusive for unavailable or contradictory evidence.",
+    "Do not modify files, propose work, change authority, or treat provider prose as lifecycle authority.",
+  ].join("\n"),
 } as const;
 
 export type RoleQualityRole = keyof typeof ROLE_QUALITY_INSTRUCTIONS;
@@ -27,7 +34,9 @@ export function composeRoleQualityPrompt(role: RoleQualityRole, taskPrompt: stri
     "Usine role-quality contract (primary instructions):",
     ROLE_QUALITY_INSTRUCTIONS[role],
     "",
-    "Caller-owned Task context:",
+    role === "assessor"
+      ? "Caller-owned Campaign assessment context:"
+      : "Caller-owned Task context:",
     taskPrompt,
   ].join("\n");
 }

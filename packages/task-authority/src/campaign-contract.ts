@@ -221,9 +221,55 @@ const campaignOutcomeEvidenceSchema = Schema.Struct({
   mergeCommitSha: Schema.NullOr(exactSha),
 });
 
+const campaignAssessmentUsageSchema = Schema.Struct({
+  inputTokens: Schema.NullOr(Schema.Natural),
+  cachedInputTokens: Schema.NullOr(Schema.Natural),
+  uncachedInputTokens: Schema.NullOr(Schema.Natural),
+  cacheWriteInputTokens: Schema.NullOr(Schema.Natural),
+  outputTokens: Schema.NullOr(Schema.Natural),
+  reasoningOutputTokens: Schema.NullOr(Schema.Natural),
+});
+
+const campaignAssessmentFactFields = {
+  repositoryId: Schema.String,
+  proposalId: Schema.String,
+  taskId: Schema.String,
+  fact: Schema.Literals(["candidate", "check", "review", "delivery"]),
+  status: Schema.String,
+  sha: exactSha,
+};
+
+/** A mechanically resolved fact supplied to the assessor without a criterion claim. */
+export const campaignAssessmentFactSchema = Schema.Struct(campaignAssessmentFactFields);
+
+/** An assessor-owned mapping from one acceptance criterion to one supplied fact. */
+const campaignAssessmentEvidenceSchema = Schema.Struct({
+  criterionIndex: Schema.Natural,
+  ...campaignAssessmentFactFields,
+});
+
+export const campaignAssessmentSchema = Schema.Struct({
+  role: Schema.Literal("assessor"),
+  assessmentId: Schema.String,
+  outcomeId: Schema.String,
+  evidenceHash: Schema.String,
+  verdict: Schema.Literals(["satisfied", "gaps", "inconclusive"]),
+  summary: Schema.String,
+  gaps: Schema.Array(Schema.String),
+  evidence: Schema.Array(campaignAssessmentEvidenceSchema),
+  usage: Schema.NullOr(campaignAssessmentUsageSchema),
+  startedAtEpochMs: Schema.Int,
+  completedAtEpochMs: Schema.Int,
+});
+
 const campaignDecisionRequestSchema = Schema.Struct({
   requestId: Schema.String,
-  reason: Schema.Literals(["plan_exhausted", "branches_blocked"]),
+  reason: Schema.Literals([
+    "plan_exhausted",
+    "branches_blocked",
+    "assessment_gaps",
+    "assessment_inconclusive",
+  ]),
   outcomeIds: Schema.Array(Schema.String),
 });
 
@@ -235,6 +281,7 @@ const campaignOutcomeSchema = Schema.Struct({
   parentId: Schema.NullOr(Schema.String),
   status: Schema.Literals(["planned", "accepted", "superseded"]),
   evidence: Schema.NullOr(campaignOutcomeEvidenceSchema),
+  assessment: Schema.optional(Schema.NullOr(campaignAssessmentSchema)),
 });
 
 const campaignProposalStatusSchema = Schema.Literals(["planned", "ready", "blocked"]);
@@ -303,6 +350,12 @@ export type CampaignOutcome = Schema.Schema.Type<typeof campaignOutcomeSchema>;
 export type CampaignResource = Schema.Schema.Type<typeof campaignResourceSchema>;
 export type CampaignProposalResource = Schema.Schema.Type<typeof campaignProposalSchema>;
 export type CampaignOutcomeEvidence = Schema.Schema.Type<typeof campaignOutcomeEvidenceSchema>;
+export type CampaignAssessment = Schema.Schema.Type<typeof campaignAssessmentSchema>;
+export type CampaignAssessmentFact = Schema.Schema.Type<typeof campaignAssessmentFactSchema>;
+export type CampaignAssessmentEvidence = Schema.Schema.Type<
+  typeof campaignAssessmentEvidenceSchema
+>;
+export type CampaignAssessmentUsage = Schema.Schema.Type<typeof campaignAssessmentUsageSchema>;
 export type CampaignDecisionRequest = Schema.Schema.Type<typeof campaignDecisionRequestSchema>;
 
 export interface CampaignProjection {
@@ -310,6 +363,8 @@ export interface CampaignProjection {
   readonly planHandedOff: boolean;
   readonly decisionRequest: CampaignDecisionRequest | null;
   readonly outcomeEvidence?: ReadonlyMap<string, CampaignOutcomeEvidence>;
+  readonly assessments?: ReadonlyMap<string, CampaignAssessment>;
+  readonly satisfiedOutcomes?: ReadonlySet<string>;
 }
 
 export function decodeCampaignStatus(input: unknown): CampaignStatus {
@@ -340,10 +395,13 @@ export function campaignResourceFromContract(
     status:
       outcome.status === "superseded"
         ? ("superseded" as const)
-        : projection?.outcomeEvidence?.has(outcome.id)
+        : projection?.satisfiedOutcomes?.has(outcome.id)
           ? ("accepted" as const)
           : ("planned" as const),
     evidence: projection?.outcomeEvidence?.get(outcome.id) ?? null,
+    ...(projection?.assessments?.has(outcome.id)
+      ? { assessment: projection.assessments.get(outcome.id) ?? null }
+      : {}),
   }));
   const resource: CampaignResource = {
     schemaVersion: 1,

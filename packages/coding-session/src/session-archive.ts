@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { TaskContract } from "@usine/task-authority";
 import { z } from "zod";
 import type {
   ProviderNeutralCompletedEvidence,
@@ -60,7 +59,7 @@ export const sessionArchiveSchema = z
     schemaVersion: z.literal(1),
     archiveId: z.string().regex(archiveIdPattern),
     taskId: z.string().regex(durableIdPattern),
-    role: z.enum(["implementer", "reviewer"]),
+    role: z.enum(["implementer", "reviewer", "assessor"]),
     attempt: z.string().regex(durableIdPattern),
     createdAtEpochMs: z.number().int(),
     updatedAtEpochMs: z.number().int(),
@@ -99,7 +98,7 @@ const sessionArchiveTombstoneSchema = z
     schemaVersion: z.literal(1),
     archiveId: z.string().regex(archiveIdPattern),
     taskId: z.string().regex(durableIdPattern),
-    role: z.enum(["implementer", "reviewer"]),
+    role: z.enum(["implementer", "reviewer", "assessor"]),
     attempt: z.string().regex(durableIdPattern),
     createdAtEpochMs: z.number().int(),
     updatedAtEpochMs: z.number().int(),
@@ -170,9 +169,9 @@ export class SessionArchiveError extends Error {
 
 export interface SessionArchiveRecordInput {
   taskId: string;
-  role: "implementer" | "reviewer";
+  role: "implementer" | "reviewer" | "assessor";
   attempt: string;
-  contract: TaskContract;
+  contract: unknown;
   prompt: string;
 }
 

@@ -121,6 +121,9 @@ export const campaigns = sqliteTable(
       .default(false),
     superseded: integer("superseded", { mode: "boolean" }).notNull().default(false),
     planHandedOff: integer("plan_handed_off", { mode: "boolean" }).notNull().default(false),
+    assessmentRequested: integer("assessment_requested", { mode: "boolean" })
+      .notNull()
+      .default(false),
     decisionRequest: text("decision_request", { mode: "json" }),
     revision: integer("revision").notNull().default(1),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
@@ -150,6 +153,26 @@ export const campaignTouches = sqliteTable(
   },
   (table) => ({
     campaignTouchPrimaryKey: primaryKey({ columns: [table.campaignId, table.touchId] }),
+  }),
+);
+
+/** Durable read-only Campaign Outcome assessment facts. */
+export const campaignAssessments = sqliteTable(
+  "campaign_assessments",
+  {
+    campaignId: text("campaign_id").notNull(),
+    outcomeId: text("outcome_id").notNull(),
+    role: text("role").notNull().default("assessor"),
+    evidenceHash: text("evidence_hash").notNull(),
+    assessmentId: text("assessment_id").notNull(),
+    assessment: text("assessment", { mode: "json" }).notNull(),
+    startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
+    completedAtEpochMs: integer("completed_at_epoch_ms").notNull(),
+  },
+  (table) => ({
+    campaignAssessmentIdentity: primaryKey({
+      columns: [table.campaignId, table.outcomeId, table.assessmentId],
+    }),
   }),
 );
 

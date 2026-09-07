@@ -11,7 +11,7 @@ const PROBE_REAP_WAIT_MS = 250;
 export interface OpenCode2SandboxRequest {
   readonly workspace: string;
   readonly privateDirectory: string;
-  readonly role: "implementer" | "reviewer";
+  readonly role: "implementer" | "reviewer" | "assessor";
   readonly environment: Record<string, string>;
   readonly signal: AbortSignal;
 }
@@ -23,7 +23,7 @@ export interface OpenCode2SandboxLaunch {
 
 export interface OpenCode2SandboxEvidence {
   readonly host: "darwin-seatbelt";
-  readonly role: "implementer" | "reviewer";
+  readonly role: "implementer" | "reviewer" | "assessor";
   readonly workspaceRead: "verified";
   readonly workspaceWrite: "verified" | "denied";
   readonly externalRead: "denied";
@@ -128,7 +128,7 @@ export function sandboxProfile(input: {
   readonly workspace: string;
   readonly privateDirectory: string;
   readonly opencodeExecutable: string;
-  readonly role: "implementer" | "reviewer";
+  readonly role: "implementer" | "reviewer" | "assessor";
 }): string {
   const workspace = resolve(input.workspace);
   const privateDirectory = resolve(input.privateDirectory);
@@ -160,7 +160,7 @@ type ProbeChildFactory = (command: string, args: readonly string[]) => ChildProc
 export async function runProbe(
   input: {
     readonly profile: string;
-    readonly role: "implementer" | "reviewer";
+    readonly role: "implementer" | "reviewer" | "assessor";
     readonly workspaceProbe: string;
     readonly outsidePath: string;
     readonly privateDirectory: string;

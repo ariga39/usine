@@ -16,7 +16,12 @@ export {
   type EffectiveSessionProfile,
   type CodingSessionObservation,
   type SessionRequest,
+  type CodingSessionRequest,
+  type TaskSessionRequest,
+  type CampaignAssessorSessionRequest,
+  type CampaignAssessmentSessionContext,
   type SessionRole,
+  type TaskSessionRole,
   type RoleOutputNormalizerObservation,
 } from "./coding-session.js";
 export type {

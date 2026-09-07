@@ -88,7 +88,7 @@ export type PreparedOutputSchema = object;
  * applied profile, MCP, deadline, environment, and cancellation policy.
  */
 export interface CodingSessionAdapterRequest {
-  readonly role: "implementer" | "reviewer";
+  readonly role: "implementer" | "reviewer" | "assessor";
   readonly workspace: string;
   readonly prompt: string;
   readonly sandbox: "workspace-write" | "read-only";
@@ -117,10 +117,20 @@ export interface CodingSessionAdapter {
   run(request: CodingSessionAdapterRequest): Promise<CodingSessionAdapterResult>;
 }
 
+function isProviderNeutralJsonValue(value: unknown): value is ProviderNeutralJsonValue {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isProviderNeutralJsonValue);
+  if (typeof value !== "object") return false;
+  return Object.values(value).every(isProviderNeutralJsonValue);
+}
+
 export function providerNeutralJsonValue(value: unknown): ProviderNeutralJsonValue | undefined {
   try {
     const encoded = JSON.stringify(value);
-    return encoded === undefined ? undefined : (JSON.parse(encoded) as ProviderNeutralJsonValue);
+    if (encoded === undefined) return undefined;
+    const decoded: unknown = JSON.parse(encoded);
+    return isProviderNeutralJsonValue(decoded) ? decoded : undefined;
   } catch {
     return undefined;
   }

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
+import { Schema } from "effect";
 import { and, asc, eq, gt, max, sql } from "drizzle-orm";
 import {
   applyMigrations,
   acceptedTaskDelivery,
+  campaignAssessmentSchema,
+  campaignAssessments,
   campaignIdFor,
   campaignProposals,
   campaignTouches,
@@ -28,6 +31,8 @@ import {
   type CampaignProposalResource,
   type CampaignDecisionRequest,
   type CampaignOutcomeEvidence,
+  type CampaignAssessment,
+  type CampaignAssessmentFact,
   type CampaignResource,
   type GoalContract,
   type TaskExecutionInput,
@@ -36,6 +41,11 @@ import {
   type TaskProposal,
   isTerminalState,
 } from "@usine/task-authority";
+import type {
+  CampaignAssessmentRequest,
+  CampaignAssessmentDraft,
+  CampaignOutcomeAssessor,
+} from "./campaign-assessor.js";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { ensurePrivateStateDatabase } from "./private-state.js";
 import { readCommittedContract } from "./verify-committed-contract.js";
@@ -89,7 +99,9 @@ export function isCampaignStateQuarantinedError(
   error: unknown,
 ): error is CampaignStateQuarantinedError {
   return (
-    error instanceof Error &&
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
     error.name === "CampaignStateQuarantinedError" &&
     "code" in error &&
     error.code === "campaign_state_quarantined"
@@ -158,6 +170,15 @@ export class CampaignAbandonmentError extends Error {
   constructor() {
     super("Campaign abandonment requires explicit host authority");
     this.name = "CampaignAbandonmentError";
+  }
+}
+
+export class CampaignCheckpointError extends Error {
+  readonly code = "campaign_checkpoint_conflict";
+  readonly retryable = false;
+  constructor(readonly campaignId: string) {
+    super("Campaign checkpoint requires a handed-off nonterminal plan");
+    this.name = "CampaignCheckpointError";
   }
 }
 
@@ -658,28 +679,88 @@ async function reconcile(
   }
   if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
     const results = await campaignTaskResults(database, rows);
+    const assessments = await campaignAssessmentRows(database, campaignId);
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
-    if (
-      campaign.publicationAuthorized &&
-      liveOutcomes.length > 0 &&
-      liveOutcomes.every((outcome) => outcomeEvidence.has(outcome.id))
-    ) {
-      campaignStatus = "accepted";
-      decisionRequest = null;
-    } else if (!hasUsefulCampaignWork(rows, results)) {
+    const usefulWork = hasUsefulCampaignWork(rows, results);
+    const authorityBlocked = rows.some((row) => row.status === "blocked" && row.blocker !== null);
+    if (!campaign.publicationAuthorized) {
       campaignStatus = "blocked";
       decisionRequest ??= {
         requestId: `decision:${campaign.campaignId}`,
-        reason:
-          rows.some((row) => row.status === "blocked") ||
-          [...results.values()].some((result) => result.state === "blocked")
-            ? "branches_blocked"
-            : "plan_exhausted",
+        reason: "branches_blocked",
+        outcomeIds: liveOutcomes.map((outcome) => outcome.id),
+      };
+    }
+    const currentAssessments = liveOutcomes.map((outcome) => {
+      const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+      const assessment = assessments.get(outcome.id);
+      return {
+        outcome,
+        evidence,
+        assessment,
+        current: assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence),
+      };
+    });
+    const allSatisfied =
+      campaign.publicationAuthorized &&
+      liveOutcomes.length > 0 &&
+      currentAssessments.every(
+        ({ assessment, current, evidence, outcome }) =>
+          current &&
+          outcomeEvidence.has(outcome.id) &&
+          assessmentReferencesResolve(outcome, evidence, assessment),
+      );
+    const allAssessmentsCurrent = currentAssessments.every(({ current }) => current);
+    const assessmentFailure = currentAssessments.find(
+      ({ assessment, current, evidence, outcome }) =>
+        current &&
+        (assessment?.verdict !== "satisfied" ||
+          !outcomeEvidence.has(outcome.id) ||
+          !assessmentReferencesResolve(outcome, evidence, assessment)),
+    );
+    if (campaign.publicationAuthorized && liveOutcomes.length === 0 && !usefulWork) {
+      campaignStatus = "blocked";
+      decisionRequest ??= {
+        requestId: `decision:${campaign.campaignId}`,
+        reason: "plan_exhausted",
+        outcomeIds: [],
+      };
+    } else if (allSatisfied) {
+      campaignStatus = "accepted";
+      decisionRequest = null;
+    } else if (
+      campaign.publicationAuthorized &&
+      allAssessmentsCurrent &&
+      assessmentFailure &&
+      !usefulWork
+    ) {
+      campaignStatus = "blocked";
+      const nextDecisionRequest: CampaignDecisionRequest = {
+        requestId: `decision:${campaign.campaignId}`,
+        reason: authorityBlocked
+          ? "branches_blocked"
+          : assessmentFailure.assessment?.verdict === "gaps"
+            ? "assessment_gaps"
+            : "assessment_inconclusive",
         outcomeIds: liveOutcomes
-          .filter((outcome) => !outcomeEvidence.has(outcome.id))
+          .filter((outcome) => {
+            const item = currentAssessments.find(
+              (candidate) => candidate.outcome.id === outcome.id,
+            );
+            return (
+              !item?.current ||
+              !outcomeEvidence.has(outcome.id) ||
+              !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
+            );
+          })
           .map((outcome) => outcome.id),
       };
+      if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
+        decisionRequest = nextDecisionRequest;
+    } else if (campaign.publicationAuthorized && !usefulWork && liveOutcomes.length > 0) {
+      // The assessor must run before the exhausted frontier becomes terminal.
+      campaignStatus = "planning";
     }
   }
   const updatedAt = nextCampaignUpdatedAt(campaign.updatedAt);
@@ -719,7 +800,14 @@ async function reconcileAll(
   observedRepositoryIds: ReadonlySet<string>,
 ): Promise<void> {
   const rows = await database.select({ campaignId: campaigns.campaignId }).from(campaigns);
-  for (const row of rows) await reconcile(database, row.campaignId, observedRepositoryIds);
+  for (const row of rows) {
+    try {
+      await reconcile(database, row.campaignId, observedRepositoryIds);
+    } catch (error) {
+      if (isCampaignStateQuarantinedError(error)) continue;
+      throw error;
+    }
+  }
 }
 
 async function reconcileWithRepositoryHeads(
@@ -762,6 +850,108 @@ async function campaignTaskResults(
     }
   }
   return results;
+}
+
+function campaignAssessmentEvidence(
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+  results: ReadonlyMap<string, TaskResult>,
+  outcomeId: string,
+): CampaignAssessmentFact[] {
+  const evidence: CampaignAssessmentFact[] = [];
+  for (const row of rows) {
+    const proposal = taskProposalSchema.parse(row.proposal);
+    if (proposal.outcomeId !== outcomeId) continue;
+    const result = results.get(row.proposalId);
+    if (!result?.candidateSha || !EXACT_SHA.test(result.candidateSha)) continue;
+    evidence.push({
+      repositoryId: proposal.repositoryId,
+      proposalId: row.proposalId,
+      taskId: result.taskId,
+      fact: "candidate",
+      status: result.state,
+      sha: result.candidateSha,
+    });
+    if (result.check?.sha === result.candidateSha && EXACT_SHA.test(result.check.sha))
+      evidence.push({
+        repositoryId: proposal.repositoryId,
+        proposalId: row.proposalId,
+        taskId: result.taskId,
+        fact: "check",
+        status: result.check.status,
+        sha: result.check.sha,
+      });
+    if (result.review?.sha === result.candidateSha && EXACT_SHA.test(result.review.sha))
+      evidence.push({
+        repositoryId: proposal.repositoryId,
+        proposalId: row.proposalId,
+        taskId: result.taskId,
+        fact: "review",
+        status: result.review.verdict,
+        sha: result.review.sha,
+      });
+    const accepted = acceptedTaskDelivery(result);
+    if (accepted)
+      evidence.push({
+        repositoryId: proposal.repositoryId,
+        proposalId: row.proposalId,
+        taskId: result.taskId,
+        fact: "delivery",
+        status: result.state,
+        sha: accepted.delivery.sha,
+      });
+  }
+  return evidence;
+}
+
+function assessmentEvidenceHash(
+  outcome: GoalContract["outcomes"][number],
+  evidence: readonly CampaignAssessmentFact[],
+): string {
+  return createHash("sha256").update(JSON.stringify({ outcome, evidence }), "utf8").digest("hex");
+}
+
+function assessmentFactKey(item: CampaignAssessmentFact): string {
+  return `${item.repositoryId}\u0000${item.proposalId}\u0000${item.taskId}\u0000${item.fact}\u0000${item.status}\u0000${item.sha}`;
+}
+
+function assessmentReferencesResolve(
+  outcome: GoalContract["outcomes"][number],
+  evidence: readonly CampaignAssessmentFact[],
+  assessment: CampaignAssessment | undefined,
+): boolean {
+  if (!assessment || assessment.verdict !== "satisfied") return false;
+  const source = new Set(evidence.map(assessmentFactKey));
+  const references = assessment.evidence.filter(
+    (item) =>
+      item.criterionIndex < outcome.acceptance.length && source.has(assessmentFactKey(item)),
+  );
+  return outcome.acceptance.every((_, criterionIndex) =>
+    references.some((item) => item.criterionIndex === criterionIndex && item.fact === "delivery"),
+  );
+}
+
+async function campaignAssessmentRows(
+  database: CampaignDatabase,
+  campaignId: string,
+): Promise<Map<string, CampaignAssessment>> {
+  const rows = await database
+    .select()
+    .from(campaignAssessments)
+    .where(eq(campaignAssessments.campaignId, campaignId));
+  const assessments = new Map<string, CampaignAssessment>();
+  for (const row of rows) {
+    try {
+      if (row.role !== "assessor") continue;
+      const assessment = Schema.decodeUnknownSync(campaignAssessmentSchema)(row.assessment);
+      const current = assessments.get(assessment.outcomeId);
+      if (!current || assessment.completedAtEpochMs > current.completedAtEpochMs)
+        assessments.set(assessment.outcomeId, assessment);
+    } catch {
+      // A corrupt assessment is not evidence and remains visible only to the
+      // owning durable-state diagnostic path.
+    }
+  }
+  return assessments;
 }
 
 function campaignOutcomeEvidence(
@@ -825,10 +1015,238 @@ function hasUsefulCampaignWork(
   return false;
 }
 
+interface AssessmentTarget {
+  readonly campaign: typeof campaigns.$inferSelect;
+  readonly contract: GoalContract;
+  readonly outcome: GoalContract["outcomes"][number];
+  readonly evidence: readonly CampaignAssessmentFact[];
+  readonly repositories: CampaignAssessmentRequest["repositories"];
+  readonly evidenceHash: string;
+  readonly invocationId: string;
+}
+
+async function assessmentTargets(stateDirectory: string): Promise<readonly AssessmentTarget[]> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath, { readOnly: true });
+  try {
+    const campaignRows = await handle.database.select().from(campaigns);
+    const repositoryRows = await handle.database.select().from(repositories);
+    const repositoryById = new Map(repositoryRows.map((row) => [row.id, row]));
+    const targets: AssessmentTarget[] = [];
+    for (const campaign of campaignRows) {
+      let decoded: DecodedCampaignState;
+      try {
+        decoded = decodeCampaignState(campaign);
+      } catch (error) {
+        if (isCampaignStateQuarantinedError(error)) continue;
+        throw error;
+      }
+      if (
+        !campaign.planHandedOff ||
+        isTerminalCampaignStatus(decoded.status) ||
+        !campaign.publicationAuthorized
+      )
+        continue;
+      const contract = decodePersistedGoalContract(campaign.contract);
+      const rows = await handle.database
+        .select()
+        .from(campaignProposals)
+        .where(eq(campaignProposals.campaignId, campaign.campaignId))
+        .orderBy(asc(campaignProposals.sequence));
+      const results = await campaignTaskResults(handle.database, rows);
+      const assessments = await campaignAssessmentRows(handle.database, campaign.campaignId);
+      const exhausted = !hasUsefulCampaignWork(rows, results);
+      if (!exhausted && !campaign.assessmentRequested) continue;
+      for (const outcome of contract.outcomes.filter((candidate) => candidate.status === "live")) {
+        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+        const current = assessments.get(outcome.id);
+        if (!campaign.assessmentRequested && current?.evidenceHash === evidenceHash) continue;
+        const repositoriesForOutcome = new Map<
+          string,
+          CampaignAssessmentRequest["repositories"][number]
+        >();
+        for (const row of rows) {
+          const proposal = taskProposalSchema.parse(row.proposal);
+          if (proposal.outcomeId !== outcome.id) continue;
+          const result = results.get(row.proposalId);
+          const repository = repositoryById.get(proposal.repositoryId);
+          if (!repository || repositoriesForOutcome.has(proposal.repositoryId)) continue;
+          repositoriesForOutcome.set(proposal.repositoryId, {
+            id: proposal.repositoryId,
+            path: result?.repository?.path ?? repository.path,
+            reviewerProfile: repository.reviewerProfile,
+            baseSha:
+              result?.candidateSha ??
+              result?.repository?.headSha ??
+              repository.headSha ??
+              "0000000000000000000000000000000000000000",
+          });
+        }
+        const invocationSeed = [
+          campaign.campaignId,
+          outcome.id,
+          evidenceHash,
+          campaign.assessmentRequested ? String(campaign.updatedAt.getTime()) : "",
+        ].join("\u0000");
+        const invocationId = `assessment-${createHash("sha256")
+          .update(invocationSeed, "utf8")
+          .digest("hex")}`;
+        targets.push({
+          campaign,
+          contract,
+          outcome,
+          evidence,
+          repositories: [...repositoriesForOutcome.values()],
+          evidenceHash,
+          invocationId,
+        });
+      }
+    }
+    return targets;
+  } finally {
+    handle.close();
+  }
+}
+
+function validateAssessment(
+  target: AssessmentTarget,
+  draft: CampaignAssessmentDraft,
+  startedAtEpochMs: number,
+  completedAtEpochMs: number,
+): CampaignAssessment {
+  const source = new Set(target.evidence.map(assessmentFactKey));
+  const references = draft.evidence.filter(
+    (item) =>
+      item.criterionIndex < target.outcome.acceptance.length && source.has(assessmentFactKey(item)),
+  );
+  const criteriaSatisfied = target.outcome.acceptance.every((_, index) =>
+    references.some((item) => item.criterionIndex === index && item.fact === "delivery"),
+  );
+  let verdict = draft.verdict;
+  let summary = draft.summary.slice(0, 2000);
+  let gaps = [...draft.gaps].map((gap) => gap.slice(0, 1000)).slice(0, 32);
+  if (draft.verdict === "satisfied" && !criteriaSatisfied) {
+    verdict = references.length > 0 ? "gaps" : "inconclusive";
+    summary =
+      references.length > 0
+        ? "assessment did not provide exact delivery evidence for every acceptance criterion"
+        : "assessment cited unavailable or contradictory evidence";
+    gaps = [summary];
+  }
+  const assessment = {
+    role: "assessor" as const,
+    assessmentId: target.invocationId,
+    outcomeId: target.outcome.id,
+    evidenceHash: target.evidenceHash,
+    verdict,
+    summary,
+    gaps,
+    evidence: references,
+    usage: draft.usage,
+    startedAtEpochMs,
+    completedAtEpochMs,
+  } satisfies CampaignAssessment;
+  return Schema.decodeUnknownSync(campaignAssessmentSchema)(assessment);
+}
+
+async function persistCampaignAssessment(
+  stateDirectory: string,
+  target: AssessmentTarget,
+  assessment: CampaignAssessment,
+): Promise<void> {
+  const databasePath = resolve(stateDirectory, "usine.sqlite");
+  const handle = openSqliteDatabase(databasePath);
+  try {
+    await handle.exclusiveTransaction(async () => {
+      await handle.database
+        .insert(campaignAssessments)
+        .values({
+          campaignId: target.campaign.campaignId,
+          outcomeId: target.outcome.id,
+          role: "assessor",
+          evidenceHash: target.evidenceHash,
+          assessmentId: assessment.assessmentId,
+          assessment,
+          startedAtEpochMs: assessment.startedAtEpochMs,
+          completedAtEpochMs: assessment.completedAtEpochMs,
+        })
+        .onConflictDoNothing();
+      await handle.database
+        .update(campaigns)
+        .set({
+          assessmentRequested: false,
+          updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
+        })
+        .where(eq(campaigns.campaignId, target.campaign.campaignId));
+    });
+  } finally {
+    handle.close();
+  }
+}
+
+async function assessCampaignTargets(
+  stateDirectory: string,
+  environment: NodeJS.ProcessEnv,
+  assessor: CampaignOutcomeAssessor,
+): Promise<void> {
+  for (const target of await assessmentTargets(stateDirectory)) {
+    const startedAtEpochMs = Date.now();
+    let draft: CampaignAssessmentDraft;
+    try {
+      draft = await assessor({
+        invocationId: target.invocationId,
+        campaignId: target.campaign.campaignId,
+        goalId: target.campaign.goalId,
+        goalVersion: target.campaign.goalVersion,
+        goal: target.contract,
+        outcome: target.outcome,
+        evidence: target.evidence,
+        repositories: target.repositories,
+        deadlineEpochMs: Math.min(
+          Date.now() + 60_000,
+          target.campaign.createdAt.getTime() + (target.contract.budget.maxElapsedMs || 60_000),
+        ),
+        environment,
+      });
+    } catch {
+      draft = {
+        verdict: "inconclusive",
+        summary: "Campaign assessor failed before producing a result",
+        gaps: [],
+        evidence: [],
+        usage: null,
+      };
+    }
+    let assessment: CampaignAssessment;
+    try {
+      assessment = validateAssessment(target, draft, startedAtEpochMs, Date.now());
+    } catch {
+      assessment = validateAssessment(
+        target,
+        {
+          verdict: "inconclusive",
+          summary: "Campaign assessor returned an invalid schema result",
+          gaps: [],
+          evidence: [],
+          usage: null,
+        },
+        startedAtEpochMs,
+        Date.now(),
+      );
+    }
+    await persistCampaignAssessment(stateDirectory, target, assessment);
+  }
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    await reconcileAll(database, observed);
+  });
+}
+
 export async function reconcileCampaigns(
   stateDirectory: string,
   environment: NodeJS.ProcessEnv = {},
   activeTaskCapacity = 1,
+  assessor?: CampaignOutcomeAssessor,
 ): Promise<readonly CampaignTaskAdmission[]> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
@@ -845,6 +1263,7 @@ export async function reconcileCampaigns(
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);
   });
+  if (assessor) await assessCampaignTargets(stateDirectory, environment, assessor);
   return admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
 }
 
@@ -954,6 +1373,21 @@ async function resourceFromDatabase(
   const contract = decodePersistedGoalContract(campaign.contract);
   const results = await campaignTaskResults(database, rows);
   const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
+  const assessments = await campaignAssessmentRows(database, campaignId);
+  const satisfiedOutcomes = new Set(
+    contract.outcomes
+      .filter((outcome) => outcome.status === "live")
+      .filter((outcome) => {
+        const assessment = assessments.get(outcome.id);
+        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        return (
+          outcomeEvidence.has(outcome.id) &&
+          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
+          assessmentReferencesResolve(outcome, evidence, assessment)
+        );
+      })
+      .map((outcome) => outcome.id),
+  );
   return campaignResourceFromContract(
     contract,
     campaign.contractHash,
@@ -964,6 +1398,8 @@ async function resourceFromDatabase(
       planHandedOff: campaign.planHandedOff,
       decisionRequest: campaignState.decisionRequest,
       outcomeEvidence,
+      assessments,
+      satisfiedOutcomes,
     },
   );
 }
@@ -1084,6 +1520,55 @@ export async function handoffCampaign(
         .update(campaigns)
         .set({
           planHandedOff: true,
+          revision: sql`${campaigns.revision} + 1`,
+          updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
+        })
+        .where(eq(campaigns.campaignId, campaignId));
+    }
+    await reconcileAll(database, observed);
+    resource = await resourceFromDatabase(database, campaignId);
+  });
+  return resource!;
+}
+
+/** Request one fresh assessment at the current durable Campaign frontier. */
+export async function checkpointCampaign(
+  stateDirectory: string,
+  campaignId: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<CampaignResource> {
+  const databasePath = await ensurePrivateStateDatabase(stateDirectory);
+  await applyMigrations(databasePath);
+  let resource: CampaignResource | undefined;
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    const campaign = await database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (!campaign) throw new CampaignNotFoundError();
+    const campaignState = decodeCampaignState(campaign);
+    if (!campaign.planHandedOff || isTerminalCampaignStatus(campaignState.status))
+      throw new CampaignCheckpointError(campaignId);
+    const contract = decodePersistedGoalContract(campaign.contract);
+    const rows = await database
+      .select()
+      .from(campaignProposals)
+      .where(eq(campaignProposals.campaignId, campaignId))
+      .orderBy(asc(campaignProposals.sequence));
+    const results = await campaignTaskResults(database, rows);
+    const assessments = await campaignAssessmentRows(database, campaignId);
+    const assessmentNeeded = contract.outcomes
+      .filter((outcome) => outcome.status === "live")
+      .some((outcome) => {
+        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        return (
+          assessments.get(outcome.id)?.evidenceHash !== assessmentEvidenceHash(outcome, evidence)
+        );
+      });
+    if (!campaign.assessmentRequested && assessmentNeeded) {
+      await database
+        .update(campaigns)
+        .set({
+          assessmentRequested: true,
           revision: sql`${campaigns.revision} + 1`,
           updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
         })
