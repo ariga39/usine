@@ -85,6 +85,23 @@ Leave both variables unset when all registered profiles should use the SDK adapt
 
 ### Forge GitHub App profile
 
+Create the Forge App in the GitHub account that owns the registered repository. In GitHub's
+Developer settings, choose **GitHub Apps**, **New GitHub App**, and configure only the delivery
+capability below:
+
+- choose a stable App name/slug and leave webhooks inactive;
+- set repository permissions to Contents: **Read and write**, Pull requests: **Read and write**,
+  and Issues: **Read and write**;
+- subscribe to no events; Usine uses authenticated API reads and explicit delivery effects;
+- create a private key and download the PEM to a host-private path. Never commit or paste it into
+  a registration file.
+
+Install the App on the exact registered owner/name. The App's **About** section shows the App ID;
+after installation, the browser URL ends with the installation ID (for example,
+`/settings/installations/<INSTALLATION_ID>` or
+`/organizations/<OWNER>/settings/installations/<INSTALLATION_ID>`). Record that positive integer
+in the host environment. The installation must be granted access to the registered repository.
+
 The registration's `forgeProfile` is an opaque lowercase kebab-case name. For a registration using `"release"`, the production GitHub App environment uses this exact key family:
 
 ```sh
@@ -110,6 +127,19 @@ Install the Forge App on the registered repository with these repository permiss
 | Contents | Read and write | Read the base and push the isolated candidate branch. |
 | Pull requests | Read and write | Create, inspect, attest, and, when authorized, merge the exact candidate PR. |
 | Issues | Read and write | Publish the exact-SHA attestation as an Issue/PR comment. |
+
+Before the first Task, run the same read-only readiness check used by the operator entry path after
+writing the host-private registration file in the registration section below:
+
+```sh
+node apps/cli/dist/cli.mjs forge readiness "<REGISTRATION_FILE>" --json
+```
+
+Success is reported as `"ready":true`. A nonzero result reports one bounded failure with
+`expected`, `observed`, and `action`; it never prints credentials or provider error details. The
+check authenticates the configured installation, reads its named permissions, and reads the exact
+registered repository with the installation token. It does not enumerate repositories or create a
+branch, Pull Request, comment, review, merge, or other repository effect.
 
 ### Optional GitHub read profile
 
@@ -592,6 +622,7 @@ The CLI writes structured diagnostics to stderr. These exit codes are stable:
 - `invalid_task_contract`: check for extra or missing keys, a lowercase 40-character `baseSha`, an Issue URL whose owner/name and number exactly match `delivery`, non-empty acceptance, valid budgets, and `authorization.delivery: true`. Commit the contract file, leave it unchanged, and ensure `baseSha` is an ancestor of the checkout passed to `submit`.
 - `codex_profile_unusable`: check `CODEX_HOME`, the exact named profile filename, its required `model`, supported optional fields, and whether the profile name was intentionally listed in exactly one of `USINE_CODEX_APP_SERVER_PROFILES` or `USINE_OPENCODE2_PROFILES`.
 - A Forge `unauthorized`, `malformed`, or `repository_mismatch` error: derive the environment prefix from the registration's lowercase kebab-case `forgeProfile` by uppercasing it and replacing hyphens with underscores. Check the App slug, nonblank App ID, positive installation ID, readable private-key path, and exact owner/name binding.
+- `forge_not_ready`: rerun `forge readiness "<REGISTRATION_FILE>" --json` and apply its `expected`, `observed`, and `action` fields before submitting the first Task. The check has no repository write effect.
 - A configured read profile is unavailable: check its separate App credentials, exact `USINE_GITHUB_READ_PROFILE_<PROFILE>_REPOSITORY` binding, and comma-separated role tool names. Read access is optional; it cannot replace the Task Contract's authority.
 - The normalizer is rejected as incomplete: set `USINE_ROLE_OUTPUT_API_KEY`, `USINE_ROLE_OUTPUT_API_URL`, and `USINE_ROLE_OUTPUT_MODEL` together, or unset all three.
 - `task get` shows `waiting` and `retryable: true`: use the explicit `task retry` command. If it shows `blocked`, or retry returns a conflict, inspect `blocker.classification`, `task history`, project-check output in the host's private diagnostics, and the deadline before changing the Task Contract.

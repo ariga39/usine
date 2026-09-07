@@ -148,9 +148,11 @@ async function readBoundedTaskContractFile(contractPath: string): Promise<string
 export {
   runtimePolicyFromEnvironment,
   forgePolicyFromEnvironment,
+  forgeReadinessFromEnvironment,
   githubReadPolicyFromEnvironment,
   ForgeProfileResolutionError,
   type ForgeProfileErrorCode,
+  type ForgeProfileField,
   stateDirectoryFromEnvironment,
   sessionArchiveOptionsFromEnvironment,
   type RuntimePolicy,
@@ -167,6 +169,7 @@ export {
 } from "@usine/coding-session";
 export type { TaskExecutionInput } from "@usine/task-authority";
 export type { ReviewAttemptObservation } from "@usine/quality-gate";
+export type { ForgeReadinessResult } from "@usine/forge-delivery";
 export {
   CampaignContentConflictError,
   CampaignHandoffError,

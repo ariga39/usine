@@ -5,10 +5,15 @@ export {
 } from "./forge-delivery.js";
 export {
   approvalAttestationBody,
+  checkForgeReadiness,
   forgeGitEnvironment,
   ForgeAuthenticationError,
   createGithubApiClient,
   type GithubApiPolicy,
+  type ForgeReadinessOptions,
+  type ForgeAppIdentity,
+  type ForgeReadinessPermission,
+  type ForgeReadinessResult,
   type ForgeDeliveryOptions,
   type ForgePolicy,
 } from "./forge-policy.js";
