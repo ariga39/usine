@@ -10,7 +10,9 @@ import {
   type SessionArchiveOptions,
 } from "@usine/coding-session";
 import {
+  checkForgeReadiness,
   githubReadToolNames,
+  type ForgeReadinessResult,
   type ForgePolicy,
   type GithubApiPolicy,
   type GithubReadToolName,
@@ -52,6 +54,12 @@ export interface GithubReadPolicy {
 }
 
 export type ForgeProfileErrorCode = "malformed" | "unauthorized" | "repository_mismatch";
+export type ForgeProfileField =
+  | "app_slug"
+  | "app_id"
+  | "installation_id"
+  | "private_key"
+  | "repository";
 
 export class ForgeProfileResolutionError extends Error {
   readonly name = "ForgeProfileResolutionError";
@@ -60,6 +68,7 @@ export class ForgeProfileResolutionError extends Error {
     readonly code: ForgeProfileErrorCode,
     readonly profile: string,
     readonly repository: string,
+    readonly field?: ForgeProfileField,
   ) {
     super(
       code === "repository_mismatch"
@@ -207,6 +216,7 @@ export function forgePolicyFromEnvironment(
     "unauthorized",
     profile,
     repository,
+    "app_slug",
   );
   const testToken = environment[`${prefix}TEST_TOKEN`];
   const apiUrl = environment[`${prefix}API_URL`]?.trim();
@@ -218,12 +228,14 @@ export function forgePolicyFromEnvironment(
     "unauthorized",
     profile,
     repository,
+    "repository",
   );
   if (configuredRepository.toLowerCase() !== `${repository.owner}/${repository.name}`.toLowerCase())
     throw new ForgeProfileResolutionError(
       "repository_mismatch",
       profile,
       repositoryIdentity(repository),
+      "repository",
     );
   if (testToken) {
     if (!apiUrl || !isLoopbackHttpUrl(apiUrl))
@@ -236,17 +248,71 @@ export function forgePolicyFromEnvironment(
     "malformed",
     profile,
     repository,
+    "app_id",
   );
   const privateKeyPath = requiredProfileValue(
     environment[`${prefix}PRIVATE_KEY_PATH`],
     "malformed",
     profile,
     repository,
+    "private_key",
   );
   const installationId = Number(environment[`${prefix}INSTALLATION_ID`]);
   if (!Number.isSafeInteger(installationId) || installationId <= 0)
-    throw new ForgeProfileResolutionError("malformed", profile, repositoryIdentity(repository));
+    throw new ForgeProfileResolutionError(
+      "malformed",
+      profile,
+      repositoryIdentity(repository),
+      "installation_id",
+    );
   return { mode: "app", appSlug, appId, installationId, privateKeyPath, gitUrl };
+}
+
+export async function forgeReadinessFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  repository: { owner: string; name: string; forgeProfile: string },
+  options: { fetch?: typeof fetch; deadlineEpochMs?: number; signal?: AbortSignal } = {},
+): Promise<ForgeReadinessResult> {
+  let forge: ForgePolicy;
+  try {
+    forge = forgePolicyFromEnvironment(environment, repository);
+  } catch (error) {
+    return forgeProfileReadinessFailure(error);
+  }
+  return checkForgeReadiness({
+    repository,
+    forge,
+    ...options,
+  });
+}
+
+function forgeProfileReadinessFailure(error: unknown): ForgeReadinessResult {
+  if (error instanceof ForgeProfileResolutionError) {
+    if (error.field === "installation_id")
+      return {
+        ready: false,
+        code: "installation_missing",
+        expected: "a positive Forge App installation ID in host-private configuration",
+        observed: "the configured installation ID is missing or malformed",
+        action: "Record the installed App's installation ID, then rerun readiness.",
+      };
+    if (error.code === "repository_mismatch" || error.field === "repository")
+      return {
+        ready: false,
+        code: "repository_binding_missing",
+        expected: "the host-private Forge profile binding to the registered owner/name",
+        observed: "the configured Forge repository binding does not match the registration",
+        action:
+          "Set the Forge profile repository to the registered owner/name, then rerun readiness.",
+      };
+  }
+  return {
+    ready: false,
+    code: "identity_missing",
+    expected: "a complete host-private Forge App identity",
+    observed: "the Forge App slug, App ID, or private-key configuration is missing or malformed",
+    action: "Configure the Forge App slug, App ID, and private-key path, then rerun readiness.",
+  };
 }
 
 function githubApiPolicyFromEnvironment(
@@ -308,9 +374,11 @@ function requiredProfileValue(
   code: ForgeProfileErrorCode,
   profile: string,
   repository: { owner: string; name: string },
+  field?: ForgeProfileField,
 ): string {
   const result = value?.trim();
-  if (!result) throw new ForgeProfileResolutionError(code, profile, repositoryIdentity(repository));
+  if (!result)
+    throw new ForgeProfileResolutionError(code, profile, repositoryIdentity(repository), field);
   return result;
 }
 

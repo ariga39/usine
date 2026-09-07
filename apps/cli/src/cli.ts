@@ -13,6 +13,7 @@ import { stateDirectoryFromEnvironment } from "@usine/runtime";
 import { profileCommand } from "./profile-evaluation.js";
 import { usageCommand } from "./usage-command.js";
 import { campaignCommand } from "./campaign-command.js";
+import { forgeCommand } from "./forge-command.js";
 
 export function createCliCommand(environment: NodeJS.ProcessEnv = process.env) {
   const serverUrl = serverUrlFromEnvironment(environment);
@@ -25,6 +26,7 @@ export function createCliCommand(environment: NodeJS.ProcessEnv = process.env) {
       profileCommand(serverUrl, environment),
       usageCommand(serverUrl),
       campaignCommand(serverUrl),
+      forgeCommand(environment),
       ...compatibilityRepositoryCommands(serverUrl),
       ...compatibilityTaskCommands(serverUrl),
     ]),

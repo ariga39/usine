@@ -9,7 +9,7 @@ import type {
   UsageReport,
   CampaignEvidencePage,
 } from "@usine/task-authority";
-import type { SessionArchiveManifest } from "@usine/runtime";
+import type { ForgeReadinessResult, SessionArchiveManifest } from "@usine/runtime";
 
 export function renderJson(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -85,6 +85,15 @@ export function renderServerSnapshot(snapshot: ServerSnapshot, json: boolean): s
     `Coding sessions: ${snapshot.codingSessions.length}`,
     "",
   ].join("\n");
+}
+
+export function renderForgeReadiness(
+  result: Extract<ForgeReadinessResult, { ready: true }>,
+  json: boolean,
+): string {
+  return json
+    ? renderJson(result)
+    : `Forge readiness: ready for ${result.repository} (installation ${result.installationId})\n`;
 }
 
 export function renderUsageReport(report: UsageReport, json: boolean): string {

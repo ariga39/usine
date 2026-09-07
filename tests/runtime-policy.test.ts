@@ -3,6 +3,7 @@ import { describe, expect, test } from "vite-plus/test";
 import {
   ForgeProfileResolutionError,
   forgePolicyFromEnvironment,
+  forgeReadinessFromEnvironment,
   githubReadPolicyFromEnvironment,
   runtimePolicyFromEnvironment,
 } from "@usine/runtime";
@@ -365,6 +366,38 @@ describe("runtime composition", () => {
       installationId: 456,
       privateKeyPath: "release.pem",
       gitUrl: "https://github.com/owner/repo.git",
+    });
+  });
+
+  test("returns bounded readiness failures for missing host identity, installation, and binding", async () => {
+    const base = {
+      USINE_FORGE_PROFILE_RELEASE_APP_SLUG: "usine-app",
+      USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/repo",
+    };
+    const missingIdentity = await forgeReadinessFromEnvironment(base, {
+      owner: "owner",
+      name: "repo",
+      forgeProfile: "release",
+    });
+    expect(missingIdentity).toMatchObject({ ready: false, code: "identity_missing" });
+
+    const missingInstallation = await forgeReadinessFromEnvironment(
+      {
+        ...base,
+        USINE_FORGE_PROFILE_RELEASE_APP_ID: "123",
+        USINE_FORGE_PROFILE_RELEASE_PRIVATE_KEY_PATH: "app.pem",
+      },
+      { owner: "owner", name: "repo", forgeProfile: "release" },
+    );
+    expect(missingInstallation).toMatchObject({ ready: false, code: "installation_missing" });
+
+    const mismatchedBinding = await forgeReadinessFromEnvironment(
+      { ...base, USINE_FORGE_PROFILE_RELEASE_REPOSITORY: "owner/other" },
+      { owner: "owner", name: "repo", forgeProfile: "release" },
+    );
+    expect(mismatchedBinding).toMatchObject({
+      ready: false,
+      code: "repository_binding_missing",
     });
   });
 
