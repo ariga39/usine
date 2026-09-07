@@ -6,6 +6,7 @@ import { Effect } from "effect";
 import {
   mergeProviderNeutralUsage,
   remainingUntil,
+  safeEvidenceIdentity,
   type GoalContract,
   type TaskContract,
 } from "@usine/task-authority";
@@ -678,9 +679,9 @@ export class CodexCodingSession {
       if (result.actualModel)
         effectiveProfile = {
           ...effectiveProfile,
-          actualModel: safeModelIdentity(result.actualModel.model),
-          actualProvider: safeModelIdentity(result.actualModel.provider),
-          actualModelProvider: safeModelIdentity(result.actualModel.provider),
+          actualModel: safeEvidenceIdentity(result.actualModel.model),
+          actualProvider: safeEvidenceIdentity(result.actualModel.provider),
+          actualModelProvider: safeEvidenceIdentity(result.actualModel.provider),
         };
       phase = "output";
       archive?.setPhase("output");
@@ -937,41 +938,14 @@ function normalizerObservation(
     modelProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
     configuredModel: safeEvidenceIdentity(transform?.profile?.model) ?? null,
     configuredProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
-    actualModel: safeModelIdentity(actualModel),
-    actualProvider: safeModelIdentity(actualModelProvider),
-    actualModelProvider: safeModelIdentity(actualModelProvider),
+    actualModel: safeEvidenceIdentity(actualModel),
+    actualProvider: safeEvidenceIdentity(actualModelProvider),
+    actualModelProvider: safeEvidenceIdentity(actualModelProvider),
   };
 }
 
 function hashText(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function safeEvidenceIdentity(value: unknown): string | null {
-  return safeModelIdentity(value);
-}
-
-function safeModelIdentity(value: unknown): string | null {
-  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$/.test(value))
-    return null;
-  if (
-    value.includes("://") ||
-    value.includes("\\") ||
-    value.includes("?") ||
-    value.includes("#") ||
-    value.split("/").some((segment) => segment === "." || segment === "..") ||
-    /(?:api[_-]?key|secret|token|password|credential|bearer)/i.test(value)
-  )
-    return null;
-  const firstSegment = value.split("/")[0]!;
-  if (
-    firstSegment.includes(".") &&
-    /^[A-Za-z0-9.-]+$/.test(firstSegment) &&
-    /^[A-Za-z]/.test(firstSegment.split(".").at(-1)!)
-  )
-    return null;
-  if (/:[0-9]+(?:\/|$)/.test(value)) return null;
-  return value;
 }
 
 function unavailableEffectiveProfile(): EffectiveSessionProfile {

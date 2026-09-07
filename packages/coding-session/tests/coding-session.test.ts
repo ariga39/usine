@@ -32,6 +32,7 @@ import {
   reviewerOutputSchema,
   type SessionArchive,
   type CodexProfileResolver,
+  type RoleOutputTransform,
 } from "@usine/coding-session";
 import { decodeTaskObservationEventInput, type TaskContract } from "@usine/task-authority";
 import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
@@ -533,75 +534,141 @@ describe("Coding Session", () => {
     expect(sdkCalls).toBe(1);
   });
 
-  test("maps unsafe effective model and provider identities to null before Task observation", async () => {
-    const session = new CodexCodingSession(
-      async () =>
-        testClient(
-          async () => sdkTurn(JSON.stringify({ status: "proposed", summary: "safe" })),
-          "thread",
-        ),
-      {
-        environment: { CI: "true" },
-        profileResolver: async () =>
-          Object.assign(
-            {
-              model: "https://private.example/v1/model",
-              modelReasoningEffort: "low" as const,
-            },
-            { config: { model_provider: "private.example" } },
-          ),
-      },
-    );
+  test("projects the Task Authority identity corpus consistently across provider and normalizer evidence", async () => {
+    const matrix = [
+      { value: "gpt-5.4", accepted: true },
+      { value: "provider/model", accepted: true },
+      { value: "vendor@model", accepted: true },
+      { value: "1.2/model", accepted: true },
+      { value: "https://private.example/v1/model", accepted: false },
+      { value: "private.example/model", accepted: false },
+      { value: "model?secret", accepted: false },
+      { value: "model#secret", accepted: false },
+      { value: "model\\secret", accepted: false },
+      { value: "model/../secret", accepted: false },
+      { value: "provider/api-key", accepted: false },
+      { value: "provider:443/model", accepted: false },
+      { value: "Bearer-model", accepted: false },
+    ] as const;
 
-    const observation = await session.run({
-      role: "implementer",
-      workspace: "fixtures/writer",
-      contract,
-      prompt: "work",
-      profile: "writer-profile",
-      sandbox: "workspace-write",
-      deadlineEpochMs: Date.now() + 10_000,
-      outputSchema: implementerOutputSchema,
-      attempt: implementerAttempt,
-    });
+    for (const [index, { value, accepted }] of matrix.entries()) {
+      const transform: RoleOutputTransform = async ({ onUsage }) => {
+        await onUsage?.({
+          semantics: "replacement",
+          actualModel: { model: value, provider: value },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        });
+        return { status: "proposed", summary: "normalized" };
+      };
+      Object.defineProperty(transform, "profile", {
+        value: {
+          adapter: "role-output-normalizer",
+          model: value,
+          modelProvider: value,
+        },
+        enumerable: true,
+      });
+      const session = createCodexCodingSessionForTesting(
+        undefined,
+        {
+          environment: { CI: "true" },
+          profileResolver: async () => ({
+            model: value,
+            config: { model_provider: value, service_tier: value },
+          }),
+          roleOutputTransform: transform,
+        },
+        {
+          sdk: {
+            name: "sdk",
+            run: async () => ({
+              finalResponse: "provider prose",
+              usage: null,
+              sessionId: `identity-${index}`,
+              actualModel: { model: value, provider: value },
+            }),
+          },
+        },
+      );
+      const observation = await session.run({
+        role: "implementer",
+        workspace: ".",
+        contract,
+        prompt: "work",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        attempt: `${implementerAttempt}-${index}`,
+      });
 
-    expect(observation.effectiveProfile).toMatchObject({ model: null, modelProvider: null });
-    expect(() =>
-      decodeTaskObservationEventInput({
-        eventId: "unsafe-profile-observation",
-        occurredAtEpochMs: 1,
+      expect(observation.effectiveProfile).toMatchObject({
+        configuredModel: accepted ? value : null,
+        configuredProvider: accepted ? value : null,
+        model: accepted ? value : null,
+        modelProvider: accepted ? value : null,
+        actualModel: accepted ? value : null,
+        actualProvider: accepted ? value : null,
+        actualModelProvider: accepted ? value : null,
+        serviceTier: accepted ? value : null,
+      });
+      expect(observation.normalizer).toMatchObject({
+        model: accepted ? value : null,
+        modelProvider: accepted ? value : null,
+        configuredModel: accepted ? value : null,
+        configuredProvider: accepted ? value : null,
+        actualModel: accepted ? value : null,
+        actualProvider: accepted ? value : null,
+        actualModelProvider: accepted ? value : null,
+      });
+
+      const safeObservation = {
+        eventId: `identity-observation-${index}`,
+        occurredAtEpochMs: index,
         data: {
-          type: "coding_session_completed",
-          role: "implementer",
+          type: "coding_session_completed" as const,
+          role: "implementer" as const,
           activation: 1,
-          outcome: "succeeded",
-          sessionId: "coding-session:1:implementer",
-          requestedProfile: observation.requestedProfile,
+          outcome: "succeeded" as const,
+          sessionId: `identity-${index}`,
+          requestedProfile: "implementer-profile",
+          effectiveProfile: observation.effectiveProfile,
+          normalizer: observation.normalizer,
+        },
+      };
+      expect(() => decodeTaskObservationEventInput(safeObservation)).not.toThrow();
+
+      const rawObservation = {
+        ...safeObservation,
+        eventId: `identity-raw-${index}`,
+        data: {
+          ...safeObservation.data,
           effectiveProfile: {
             ...observation.effectiveProfile,
-            model: "https://private.example/v1/model",
-            modelProvider: "private.example",
+            configuredModel: value,
+            configuredProvider: value,
+            model: value,
+            modelProvider: value,
+            actualModel: value,
+            actualProvider: value,
+            actualModelProvider: value,
+            serviceTier: value,
           },
-          usage: observation.usage,
+          normalizer: {
+            ...observation.normalizer,
+            model: value,
+            modelProvider: value,
+            configuredModel: value,
+            configuredProvider: value,
+            actualModel: value,
+            actualProvider: value,
+            actualModelProvider: value,
+          },
         },
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeTaskObservationEventInput({
-        eventId: "safe-profile-observation",
-        occurredAtEpochMs: 1,
-        data: {
-          type: "coding_session_completed",
-          role: "implementer",
-          activation: 1,
-          outcome: "succeeded",
-          sessionId: "coding-session:1:implementer",
-          requestedProfile: observation.requestedProfile,
-          effectiveProfile: observation.effectiveProfile,
-          usage: observation.usage,
-        },
-      }),
-    ).not.toThrow();
+      };
+      if (accepted) expect(() => decodeTaskObservationEventInput(rawObservation)).not.toThrow();
+      else expect(() => decodeTaskObservationEventInput(rawObservation)).toThrow();
+    }
   });
 
   test("uses a digest-only identity for hidden provider and catalog configuration", async () => {
