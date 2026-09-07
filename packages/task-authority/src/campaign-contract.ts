@@ -230,14 +230,22 @@ const campaignAssessmentUsageSchema = Schema.Struct({
   reasoningOutputTokens: Schema.NullOr(Schema.Natural),
 });
 
-const campaignAssessmentEvidenceSchema = Schema.Struct({
-  criterionIndex: Schema.Natural,
+const campaignAssessmentFactFields = {
   repositoryId: Schema.String,
   proposalId: Schema.String,
   taskId: Schema.String,
   fact: Schema.Literals(["candidate", "check", "review", "delivery"]),
   status: Schema.String,
   sha: exactSha,
+};
+
+/** A mechanically resolved fact supplied to the assessor without a criterion claim. */
+export const campaignAssessmentFactSchema = Schema.Struct(campaignAssessmentFactFields);
+
+/** An assessor-owned mapping from one acceptance criterion to one supplied fact. */
+const campaignAssessmentEvidenceSchema = Schema.Struct({
+  criterionIndex: Schema.Natural,
+  ...campaignAssessmentFactFields,
 });
 
 export const campaignAssessmentSchema = Schema.Struct({
@@ -343,6 +351,7 @@ export type CampaignResource = Schema.Schema.Type<typeof campaignResourceSchema>
 export type CampaignProposalResource = Schema.Schema.Type<typeof campaignProposalSchema>;
 export type CampaignOutcomeEvidence = Schema.Schema.Type<typeof campaignOutcomeEvidenceSchema>;
 export type CampaignAssessment = Schema.Schema.Type<typeof campaignAssessmentSchema>;
+export type CampaignAssessmentFact = Schema.Schema.Type<typeof campaignAssessmentFactSchema>;
 export type CampaignAssessmentEvidence = Schema.Schema.Type<
   typeof campaignAssessmentEvidenceSchema
 >;

@@ -16,11 +16,13 @@ import {
   openSqliteDatabase,
   resolveTaskContract,
   TaskAuthority,
+  type CampaignAssessmentFact,
   type TaskResult,
 } from "@usine/task-authority";
 import {
   abandonCampaign,
   campaignEvidence,
+  checkpointCampaign,
   getCampaign,
   handoffCampaign,
   proposeCampaign,
@@ -37,6 +39,7 @@ import {
   lookupCampaign,
   parseGoalContract,
   publishCampaign as publishCampaignToState,
+  reconcileCampaigns,
 } from "../packages/runtime/src/campaign.js";
 import { lookupCampaignEvidence } from "../packages/runtime/src/campaign-evidence.js";
 import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
@@ -2733,6 +2736,228 @@ describe("durable Ready frontier", () => {
       }
     },
   );
+
+  test("assesses every live Outcome before terminalizing one current assessment failure", async () => {
+    const fixtureValue = await frontierFixture(
+      undefined,
+      "user:campaign-366",
+      undefined,
+      1,
+      true,
+      async () => ({
+        verdict: "gaps",
+        summary: "the fixed frontier remains incomplete",
+        gaps: ["the fixed frontier remains incomplete"],
+        evidence: [],
+        usage: null,
+      }),
+    );
+    const { contractPath, server, stateDirectory, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await handoffCampaign(server.url, published.campaignId);
+      await server.close();
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        database
+          .prepare("DELETE FROM campaign_assessments WHERE campaign_id = ? AND outcome_id = ?")
+          .run(published.campaignId, "outcome-two");
+        database
+          .prepare("UPDATE campaigns SET status = ?, decision_request = NULL WHERE campaign_id = ?")
+          .run("planning", published.campaignId);
+      } finally {
+        database.close();
+      }
+
+      const assessed: string[] = [];
+      await reconcileCampaigns(stateDirectory, environment, 1, async (request) => {
+        assessed.push(request.outcome.id);
+        return {
+          verdict: "inconclusive",
+          summary: "the remaining Outcome has no accepted delivery",
+          gaps: [],
+          evidence: [],
+          usage: null,
+        };
+      });
+
+      await expect(lookupCampaign(stateDirectory, published.campaignId)).resolves.toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          reason: "assessment_gaps",
+          outcomeIds: ["outcome-one", "outcome-two"],
+        },
+      });
+      expect(assessed).toEqual(["outcome-two"]);
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test.each([
+    { name: "accepts the same exact delivery fact for criterion 1", forged: false },
+    { name: "rejects a forged unavailable fact for criterion 1", forged: true },
+  ])("$name in multi-criterion assessment evidence", async ({ forged }) => {
+    const base = oneOutcomeFrontierGoal("campaign-repository");
+    const contract = {
+      ...base,
+      outcomes: [
+        {
+          ...base.outcomes[0]!,
+          acceptance: ["the first criterion is satisfied", "the second criterion is satisfied"],
+        },
+      ],
+    };
+    let calls = 0;
+    let requestEvidence: readonly CampaignAssessmentFact[] = [];
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      calls += 1;
+      requestEvidence = request.evidence;
+      const delivery = request.evidence.find((item) => item.fact === "delivery");
+      if (!delivery) throw new Error("fixture requires accepted delivery evidence");
+      const second = forged
+        ? { ...delivery, criterionIndex: 1, sha: "0".repeat(40) }
+        : { ...delivery, criterionIndex: 1 };
+      return {
+        verdict: "satisfied",
+        summary: "both criteria reference the supplied delivery",
+        gaps: [],
+        evidence: [{ ...delivery, criterionIndex: 0 }, second],
+        usage: null,
+      };
+    };
+    const { contractPath, server } = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("multi-criterion", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current?.status === "accepted" || current?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const campaign = await getCampaign(server.url, published.campaignId);
+      expect(requestEvidence.every((item) => !Object.hasOwn(item, "criterionIndex"))).toBe(true);
+      expect(calls).toBe(1);
+      if (forged) {
+        expect(campaign).toMatchObject({
+          status: "blocked",
+          outcomes: [{ assessment: { verdict: "gaps", evidence: [{ criterionIndex: 0 }] } }],
+        });
+        expect(campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(1);
+      } else {
+        expect(campaign).toMatchObject({
+          status: "accepted",
+          outcomes: [
+            {
+              status: "accepted",
+              assessment: {
+                verdict: "satisfied",
+                evidence: [{ criterionIndex: 0 }, { criterionIndex: 1 }],
+              },
+            },
+          ],
+        });
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("persists and deduplicates an explicit checkpoint across restart", async () => {
+    let calls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => {
+      calls += 1;
+      return {
+        verdict: "inconclusive",
+        summary: "the checkpoint has no accepted delivery yet",
+        gaps: [],
+        evidence: [],
+        usage: null,
+      };
+    };
+    const fixtureValue = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => context.result,
+      1,
+      true,
+      assessor,
+    );
+    const { contractPath, server, stateDirectory, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("checkpointed", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      let beforeCheckpoint = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (beforeCheckpoint?.proposals?.[0]?.ready?.taskId) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        beforeCheckpoint = await getCampaign(server.url, published.campaignId);
+      }
+      expect(beforeCheckpoint?.status).toBe("planning");
+      expect(calls).toBe(0);
+
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(checkpointed.outcomes[0]?.assessment).toMatchObject({ verdict: "inconclusive" });
+      expect(calls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database.prepare("SELECT COUNT(*) AS count FROM campaign_assessments").get(),
+        ).toEqual({
+          count: 1,
+        });
+      } finally {
+        database.close();
+      }
+      await server.close();
+
+      const restarted = await startUsineServer({
+        environment,
+        execute: async (context) => context.result,
+        assessOutcome: assessor,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+          outcomes: [{ assessment: { verdict: "inconclusive" } }],
+        });
+        expect(calls).toBe(1);
+        const repeated = await checkpointCampaign(restarted.url, published.campaignId);
+        expect(repeated.outcomes[0]?.assessment).toMatchObject({ verdict: "inconclusive" });
+        expect(calls).toBe(1);
+        const restartedDatabase = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            restartedDatabase.prepare("SELECT COUNT(*) AS count FROM campaign_assessments").get(),
+          ).toEqual({ count: 1 });
+        } finally {
+          restartedDatabase.close();
+        }
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
+    }
+  });
 
   test("exhausted fixed plans persist one stable decision request without closing", async () => {
     const fixtureValue = await frontierFixture(

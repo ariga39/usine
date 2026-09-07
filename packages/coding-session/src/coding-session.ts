@@ -9,7 +9,7 @@ import {
   type GoalContract,
   type TaskContract,
 } from "@usine/task-authority";
-import type { CampaignAssessmentEvidence } from "@usine/task-authority";
+import type { CampaignAssessmentFact } from "@usine/task-authority";
 import { z } from "zod";
 import {
   codingSessionAdapterForProfile,
@@ -147,7 +147,7 @@ export interface CampaignAssessmentSessionContext {
     readonly title: string;
     readonly acceptance: readonly string[];
   };
-  readonly evidence: readonly CampaignAssessmentEvidence[];
+  readonly evidence: readonly CampaignAssessmentFact[];
 }
 
 export interface CampaignAssessorSessionRequest<

@@ -32,7 +32,7 @@ import {
   type CampaignDecisionRequest,
   type CampaignOutcomeEvidence,
   type CampaignAssessment,
-  type CampaignAssessmentEvidence,
+  type CampaignAssessmentFact,
   type CampaignResource,
   type GoalContract,
   type TaskExecutionInput,
@@ -711,6 +711,7 @@ async function reconcile(
           outcomeEvidence.has(outcome.id) &&
           assessmentReferencesResolve(outcome, evidence, assessment),
       );
+    const allAssessmentsCurrent = currentAssessments.every(({ current }) => current);
     const assessmentFailure = currentAssessments.find(
       ({ assessment, current, evidence, outcome }) =>
         current &&
@@ -728,7 +729,12 @@ async function reconcile(
     } else if (allSatisfied) {
       campaignStatus = "accepted";
       decisionRequest = null;
-    } else if (campaign.publicationAuthorized && assessmentFailure && !usefulWork) {
+    } else if (
+      campaign.publicationAuthorized &&
+      allAssessmentsCurrent &&
+      assessmentFailure &&
+      !usefulWork
+    ) {
       campaignStatus = "blocked";
       const nextDecisionRequest: CampaignDecisionRequest = {
         requestId: `decision:${campaign.campaignId}`,
@@ -850,15 +856,14 @@ function campaignAssessmentEvidence(
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   results: ReadonlyMap<string, TaskResult>,
   outcomeId: string,
-): CampaignAssessmentEvidence[] {
-  const evidence: CampaignAssessmentEvidence[] = [];
+): CampaignAssessmentFact[] {
+  const evidence: CampaignAssessmentFact[] = [];
   for (const row of rows) {
     const proposal = taskProposalSchema.parse(row.proposal);
     if (proposal.outcomeId !== outcomeId) continue;
     const result = results.get(row.proposalId);
     if (!result?.candidateSha || !EXACT_SHA.test(result.candidateSha)) continue;
     evidence.push({
-      criterionIndex: 0,
       repositoryId: proposal.repositoryId,
       proposalId: row.proposalId,
       taskId: result.taskId,
@@ -868,7 +873,6 @@ function campaignAssessmentEvidence(
     });
     if (result.check?.sha === result.candidateSha && EXACT_SHA.test(result.check.sha))
       evidence.push({
-        criterionIndex: 0,
         repositoryId: proposal.repositoryId,
         proposalId: row.proposalId,
         taskId: result.taskId,
@@ -878,7 +882,6 @@ function campaignAssessmentEvidence(
       });
     if (result.review?.sha === result.candidateSha && EXACT_SHA.test(result.review.sha))
       evidence.push({
-        criterionIndex: 0,
         repositoryId: proposal.repositoryId,
         proposalId: row.proposalId,
         taskId: result.taskId,
@@ -889,7 +892,6 @@ function campaignAssessmentEvidence(
     const accepted = acceptedTaskDelivery(result);
     if (accepted)
       evidence.push({
-        criterionIndex: 0,
         repositoryId: proposal.repositoryId,
         proposalId: row.proposalId,
         taskId: result.taskId,
@@ -903,25 +905,25 @@ function campaignAssessmentEvidence(
 
 function assessmentEvidenceHash(
   outcome: GoalContract["outcomes"][number],
-  evidence: readonly CampaignAssessmentEvidence[],
+  evidence: readonly CampaignAssessmentFact[],
 ): string {
   return createHash("sha256").update(JSON.stringify({ outcome, evidence }), "utf8").digest("hex");
 }
 
-function assessmentEvidenceKey(item: CampaignAssessmentEvidence): string {
+function assessmentFactKey(item: CampaignAssessmentFact): string {
   return `${item.repositoryId}\u0000${item.proposalId}\u0000${item.taskId}\u0000${item.fact}\u0000${item.status}\u0000${item.sha}`;
 }
 
 function assessmentReferencesResolve(
   outcome: GoalContract["outcomes"][number],
-  evidence: readonly CampaignAssessmentEvidence[],
+  evidence: readonly CampaignAssessmentFact[],
   assessment: CampaignAssessment | undefined,
 ): boolean {
   if (!assessment || assessment.verdict !== "satisfied") return false;
-  const source = new Set(evidence.map(assessmentEvidenceKey));
+  const source = new Set(evidence.map(assessmentFactKey));
   const references = assessment.evidence.filter(
     (item) =>
-      item.criterionIndex < outcome.acceptance.length && source.has(assessmentEvidenceKey(item)),
+      item.criterionIndex < outcome.acceptance.length && source.has(assessmentFactKey(item)),
   );
   return outcome.acceptance.every((_, criterionIndex) =>
     references.some((item) => item.criterionIndex === criterionIndex && item.fact === "delivery"),
@@ -1017,7 +1019,7 @@ interface AssessmentTarget {
   readonly campaign: typeof campaigns.$inferSelect;
   readonly contract: GoalContract;
   readonly outcome: GoalContract["outcomes"][number];
-  readonly evidence: readonly CampaignAssessmentEvidence[];
+  readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: CampaignAssessmentRequest["repositories"];
   readonly evidenceHash: string;
   readonly invocationId: string;
@@ -1113,11 +1115,10 @@ function validateAssessment(
   startedAtEpochMs: number,
   completedAtEpochMs: number,
 ): CampaignAssessment {
-  const source = new Set(target.evidence.map(assessmentEvidenceKey));
+  const source = new Set(target.evidence.map(assessmentFactKey));
   const references = draft.evidence.filter(
     (item) =>
-      item.criterionIndex < target.outcome.acceptance.length &&
-      source.has(assessmentEvidenceKey(item)),
+      item.criterionIndex < target.outcome.acceptance.length && source.has(assessmentFactKey(item)),
   );
   const criteriaSatisfied = target.outcome.acceptance.every((_, index) =>
     references.some((item) => item.criterionIndex === index && item.fact === "delivery"),
@@ -1547,14 +1548,32 @@ export async function checkpointCampaign(
     const campaignState = decodeCampaignState(campaign);
     if (!campaign.planHandedOff || isTerminalCampaignStatus(campaignState.status))
       throw new CampaignCheckpointError(campaignId);
-    await database
-      .update(campaigns)
-      .set({
-        assessmentRequested: true,
-        revision: sql`${campaigns.revision} + 1`,
-        updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
-      })
-      .where(eq(campaigns.campaignId, campaignId));
+    const contract = decodePersistedGoalContract(campaign.contract);
+    const rows = await database
+      .select()
+      .from(campaignProposals)
+      .where(eq(campaignProposals.campaignId, campaignId))
+      .orderBy(asc(campaignProposals.sequence));
+    const results = await campaignTaskResults(database, rows);
+    const assessments = await campaignAssessmentRows(database, campaignId);
+    const assessmentNeeded = contract.outcomes
+      .filter((outcome) => outcome.status === "live")
+      .some((outcome) => {
+        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        return (
+          assessments.get(outcome.id)?.evidenceHash !== assessmentEvidenceHash(outcome, evidence)
+        );
+      });
+    if (!campaign.assessmentRequested && assessmentNeeded) {
+      await database
+        .update(campaigns)
+        .set({
+          assessmentRequested: true,
+          revision: sql`${campaigns.revision} + 1`,
+          updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
+        })
+        .where(eq(campaigns.campaignId, campaignId));
+    }
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);
   });

@@ -7,6 +7,7 @@ import {
 } from "@usine/coding-session";
 import type {
   CampaignAssessmentEvidence,
+  CampaignAssessmentFact,
   CampaignAssessmentUsage,
   GoalContract,
 } from "@usine/task-authority";
@@ -26,7 +27,7 @@ export interface CampaignAssessmentRequest {
   readonly goalVersion: number;
   readonly goal: GoalContract;
   readonly outcome: GoalContract["outcomes"][number];
-  readonly evidence: readonly CampaignAssessmentEvidence[];
+  readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
   readonly deadlineEpochMs: number;
   readonly environment: NodeJS.ProcessEnv;
