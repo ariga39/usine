@@ -501,7 +501,7 @@ export async function lookupRestartableTasks(stateDirectory: string): Promise<{
 export async function lookupTaskExecution(
   stateDirectory: string,
   taskId: string,
-): Promise<{ result: TaskResult; input: TaskExecutionInput } | null> {
+): Promise<TaskExecutionInput | null> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   try {
     await access(databasePath);

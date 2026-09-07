@@ -535,9 +535,7 @@ export class TaskAuthority {
     return { restartable, activeTaskCount };
   }
 
-  async lookupExecution(
-    taskId: string,
-  ): Promise<{ result: TaskResult; input: TaskExecutionInput } | null> {
+  async lookupExecution(taskId: string): Promise<TaskExecutionInput | null> {
     const rows = await this.database
       .select({
         rawResult: sql<string>`${taskRuns.result}`,
@@ -550,12 +548,11 @@ export class TaskAuthority {
     const row = rows[0];
     if (!row) return null;
     if (!row.rawContract) return null;
+    // Validate durable Task state before returning committed execution input.
+    decodeRawPersistedTaskResult(row.rawResult);
     return {
-      result: decodeRawPersistedTaskResult(row.rawResult),
-      input: {
-        contractPath: row.contractPath,
-        rawContract: row.rawContract,
-      },
+      contractPath: row.contractPath,
+      rawContract: row.rawContract,
     };
   }
 
