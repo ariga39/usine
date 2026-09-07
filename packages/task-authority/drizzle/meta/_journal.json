@@ -148,6 +148,13 @@
       "when": 1788739200000,
       "tag": "0020_posthog_capture_acknowledgements",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1788739200001,
+      "tag": "0021_campaign_assessments",
+      "breakpoints": true
     }
   ]
 }

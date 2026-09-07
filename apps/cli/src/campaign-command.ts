@@ -3,6 +3,7 @@ import { Argument, Command } from "effect/unstable/cli";
 import { readFile } from "node:fs/promises";
 import {
   campaignEvidence,
+  checkpointCampaign,
   abandonCampaign,
   getCampaign,
   handoffCampaign,
@@ -98,6 +99,19 @@ export function campaignCommand(serverUrl: string) {
         }),
       ),
   );
+  const checkpoint = Command.make(
+    "checkpoint",
+    { campaignId: Argument.string("campaign-id"), json: jsonFlag() },
+    ({ campaignId, json }) =>
+      Effect.promise(() =>
+        runCommand("campaign_checkpoint_failed", async () => {
+          const campaign = await checkpointCampaign(serverUrl, campaignId);
+          process.stdout.write(
+            json ? renderJson(campaign) : `Campaign ${campaign.campaignId}: ${campaign.status}\n`,
+          );
+        }),
+      ),
+  );
   const touch = Command.make(
     "touch",
     {
@@ -116,6 +130,6 @@ export function campaignCommand(serverUrl: string) {
       ),
   );
   return Command.make("campaign").pipe(
-    Command.withSubcommands([publish, get, propose, handoff, abandon, evidence, touch]),
+    Command.withSubcommands([publish, get, propose, handoff, checkpoint, abandon, evidence, touch]),
   );
 }

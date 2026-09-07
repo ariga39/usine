@@ -6,8 +6,10 @@ import { Effect } from "effect";
 import {
   mergeProviderNeutralUsage,
   remainingUntil,
+  type GoalContract,
   type TaskContract,
 } from "@usine/task-authority";
+import type { CampaignAssessmentEvidence } from "@usine/task-authority";
 import { z } from "zod";
 import {
   codingSessionAdapterForProfile,
@@ -78,7 +80,8 @@ export function explicitWorkerEnvironment(environment: NodeJS.ProcessEnv): Recor
   return result;
 }
 
-export type SessionRole = "implementer" | "reviewer";
+export type SessionRole = "implementer" | "reviewer" | "assessor";
+export type TaskSessionRole = "implementer" | "reviewer";
 export type SandboxMode = "workspace-write" | "read-only";
 
 export interface EffectiveSessionProfile {
@@ -108,11 +111,9 @@ export interface CodingSessionMcpServer {
   required: boolean;
 }
 
-export interface SessionRequest<Output = unknown> {
-  role: SessionRole;
+interface SessionRequestBase<Output = unknown> {
   attempt: string;
   workspace: string;
-  contract: TaskContract;
   prompt: string;
   profile: string;
   sandbox: SandboxMode;
@@ -124,6 +125,46 @@ export interface SessionRequest<Output = unknown> {
   onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
 }
 
+export interface TaskSessionRequest<Output = unknown> extends SessionRequestBase<Output> {
+  role: TaskSessionRole;
+  contract: TaskContract;
+}
+
+export interface CampaignAssessmentSessionContext {
+  readonly invocationId: string;
+  readonly campaignId: string;
+  readonly goalId: string;
+  readonly goalVersion: number;
+  readonly goal: {
+    readonly id: GoalContract["id"];
+    readonly version: GoalContract["version"];
+    readonly objective: GoalContract["objective"];
+    readonly authority: GoalContract["authority"];
+    readonly budget: GoalContract["budget"];
+  };
+  readonly outcome: {
+    readonly id: string;
+    readonly title: string;
+    readonly acceptance: readonly string[];
+  };
+  readonly evidence: readonly CampaignAssessmentEvidence[];
+}
+
+export interface CampaignAssessorSessionRequest<
+  Output = unknown,
+> extends SessionRequestBase<Output> {
+  role: "assessor";
+  assessment: CampaignAssessmentSessionContext;
+}
+
+/** The existing Task-shaped port used by implementer and reviewer callers. */
+export type SessionRequest<Output = unknown> = TaskSessionRequest<Output>;
+
+/** The provider-neutral port accepted by the concrete Coding Session facade. */
+export type CodingSessionRequest<Output = unknown> =
+  | TaskSessionRequest<Output>
+  | CampaignAssessorSessionRequest<Output>;
+
 export interface CodingSessionMcpServerResolution {
   serverName: string;
   status: "available" | "unavailable";
@@ -132,7 +173,7 @@ export interface CodingSessionMcpServerResolution {
 }
 
 export type CodingSessionMcpServerFactory = (
-  request: SessionRequest,
+  request: CodingSessionRequest,
 ) => Promise<CodingSessionMcpServerResolution>;
 
 export type CodingSessionObservation =
@@ -297,7 +338,7 @@ interface CapturedSessionObservation<T = unknown> extends SessionObservation<T> 
   sessionId: string | null;
 }
 
-export type CodingSessionClientFactory = (request: SessionRequest) => Promise<Codex>;
+export type CodingSessionClientFactory = (request: CodingSessionRequest) => Promise<Codex>;
 
 type AdapterOverrides = Partial<Record<"sdk" | "app-server" | "opencode2", CodingSessionAdapter>>;
 const internalAdapterOverrides = new WeakMap<CodexCodingSession, AdapterOverrides>();
@@ -347,14 +388,14 @@ export class CodexCodingSession {
     this.openCode2Adapter = new OpenCode2Adapter(options.openCode2StateDirectory);
   }
 
-  async run<T = unknown>(request: SessionRequest<T>): Promise<SessionObservation<T>> {
+  async run<T = unknown>(request: CodingSessionRequest<T>): Promise<SessionObservation<T>> {
     return Effect.runPromise(
       Effect.tryPromise({ try: () => this.runProvider(request), catch: identityError }),
     );
   }
 
   private async runProvider<T = unknown>(
-    request: SessionRequest<T>,
+    request: CodingSessionRequest<T>,
   ): Promise<SessionObservation<T>> {
     const roleRequest = {
       ...request,
@@ -364,13 +405,21 @@ export class CodexCodingSession {
     const archive = archiveDirectory
       ? new SessionArchiveWriter(
           this.options.sessionArchive ?? { stateDirectory: archiveDirectory },
-          {
-            taskId: roleRequest.contract.id,
-            role: roleRequest.role,
-            attempt: roleRequest.attempt,
-            contract: roleRequest.contract,
-            prompt: roleRequest.prompt,
-          },
+          request.role === "assessor"
+            ? {
+                taskId: request.assessment.invocationId,
+                role: request.role,
+                attempt: request.attempt,
+                contract: request.assessment,
+                prompt: roleRequest.prompt,
+              }
+            : {
+                taskId: request.contract.id,
+                role: request.role,
+                attempt: request.attempt,
+                contract: request.contract,
+                prompt: roleRequest.prompt,
+              },
         )
       : undefined;
     await archive?.begin();
@@ -402,7 +451,7 @@ export class CodexCodingSession {
   }
 
   private async runProviderCaptured<T = unknown>(
-    request: SessionRequest<T>,
+    request: CodingSessionRequest<T>,
     archive?: SessionArchiveWriter,
   ): Promise<CapturedSessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
@@ -745,7 +794,7 @@ export class CodexCodingSession {
 
 async function emitCompletedEvidenceObservation(
   evidence: ProviderNeutralCompletedEvidence,
-  onObservation: SessionRequest["onObservation"],
+  onObservation: CodingSessionRequest["onObservation"],
 ): Promise<void> {
   const outcome = evidence.status === "completed" ? "succeeded" : "failed";
   switch (evidence.type) {

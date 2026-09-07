@@ -154,6 +154,14 @@ export async function handoffCampaign(
   return runRequest(client.campaigns.handoff({ params: { campaignId }, payload: {} }));
 }
 
+export async function checkpointCampaign(
+  serverUrl: string,
+  campaignId: string,
+): Promise<CampaignResource> {
+  const client = await clientFor(serverUrl);
+  return runRequest(client.campaigns.checkpoint({ params: { campaignId }, payload: {} }));
+}
+
 export async function abandonCampaign(
   serverUrl: string,
   campaignId: string,

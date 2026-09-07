@@ -33,10 +33,12 @@ import {
   CampaignNotFoundError,
   CampaignAbandonmentError,
   CampaignHandoffError,
+  CampaignCheckpointError,
   isCampaignStateQuarantinedError,
   GoalContractInputError,
   abandonCampaign,
   handoffCampaign,
+  checkpointCampaign,
   lookupCampaign,
   recordCampaignDecisionTouch,
   CampaignTouchInputError,
@@ -45,6 +47,10 @@ import {
   reconcileCampaigns,
   readGoalContract,
 } from "./campaign.js";
+import {
+  createCampaignOutcomeAssessor,
+  type CampaignOutcomeAssessor,
+} from "./campaign-assessor.js";
 import {
   CampaignEvidenceCursorError,
   lookupCampaignEvidence,
@@ -113,6 +119,7 @@ export type ServerExecution = (context: ServerExecutionContext) => Promise<TaskR
 export interface UsineServerOptions {
   environment: NodeJS.ProcessEnv;
   execute?: ServerExecution;
+  assessOutcome?: CampaignOutcomeAssessor;
   host?: string;
   port?: number;
 }
@@ -237,6 +244,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const urlHost = host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host;
   const stateDirectory = stateDirectoryFromEnvironment(options.environment);
   const activeTaskCapacity = activeTaskCapacityFromEnvironment(options.environment);
+  const assessOutcome = options.assessOutcome ?? createCampaignOutcomeAssessor();
   const eventHub = new TransientEventHub();
   const executionOwnerId = randomUUID();
   let eventDispatch = Promise.resolve();
@@ -311,6 +319,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           stateDirectory,
           options.environment,
           activeTaskCapacity,
+          assessOutcome,
         );
         for (const admission of admissions) {
           if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")
@@ -672,6 +681,16 @@ function createApiLayer(options: {
           await options.coordinateCampaigns();
           return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
         }),
+      checkpoint: ({ params }) =>
+        apiEffect(async () => {
+          const campaign = await checkpointCampaign(
+            stateDirectory,
+            params.campaignId,
+            options.environment,
+          );
+          await options.coordinateCampaigns();
+          return (await lookupCampaign(stateDirectory, campaign.campaignId)) ?? campaign;
+        }),
       abandon: ({ params }) =>
         apiEffect(async () => {
           const campaign = await abandonCampaign(
@@ -753,6 +772,8 @@ function apiError(error: unknown): ApiError {
   if (error instanceof CampaignProposalConflictError)
     return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CampaignHandoffError)
+    return { code: error.code, message: error.message, retryable: false };
+  if (error instanceof CampaignCheckpointError)
     return { code: error.code, message: error.message, retryable: false };
   if (error instanceof CampaignAbandonmentError)
     return { code: error.code, message: error.message, retryable: false };

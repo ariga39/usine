@@ -763,7 +763,7 @@ function toReviewerArchiveManifest(
   return {
     archiveId: manifest.archiveId,
     taskId: manifest.taskId,
-    role: manifest.role,
+    role: manifest.role === "reviewer" ? "reviewer" : "implementer",
     captureStatus: manifest.captureStatus,
     completeness: manifest.completeness,
   };

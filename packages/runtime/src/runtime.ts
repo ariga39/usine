@@ -173,6 +173,8 @@ export {
   GoalContractInputError,
   lookupCampaign,
   handoffCampaign,
+  checkpointCampaign,
+  CampaignCheckpointError,
   abandonCampaign,
   CampaignAbandonmentError,
   CampaignStateQuarantinedError,
@@ -181,6 +183,12 @@ export {
   proposeCampaign,
 } from "./campaign.js";
 export type { CampaignResource, GoalContract } from "@usine/task-authority";
+export {
+  createCampaignOutcomeAssessor,
+  type CampaignAssessmentRequest,
+  type CampaignAssessmentDraft,
+  type CampaignOutcomeAssessor,
+} from "./campaign-assessor.js";
 export * from "./http-api.js";
 export {
   cleanupSessionArchives,
@@ -746,6 +754,8 @@ async function executeWithServices(options: {
     sessionArchive: policy.sessionArchive,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {
       const readPolicy = policy.githubRead;
+      if (request.role === "assessor")
+        return { serverName: "github_read_assessor", status: "unavailable" };
       const role: GithubReadRole = request.role;
       const serverName = `github_read_${role}`;
       if (!readPolicy || contract.delivery.issue === undefined)

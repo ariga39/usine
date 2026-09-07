@@ -11,6 +11,7 @@ import {
 } from "./coding-session-adapter.js";
 
 type CodexConfig = NonNullable<CodexOptions["config"]>;
+type CodexConfigValue = CodexConfig[string];
 
 const modelReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
 const profileConfigFieldsSchema = z
@@ -78,6 +79,51 @@ function hasDisallowedFeatures(value: unknown): boolean {
   return typeof value === "object" && value !== null && Object.hasOwn(value, "features");
 }
 
+function toCodexConfigValue(value: unknown): CodexConfigValue | undefined {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const converted: CodexConfigValue[] = [];
+    for (const child of value) {
+      const convertedChild = toCodexConfigValue(child);
+      if (convertedChild === undefined) return undefined;
+      converted.push(convertedChild);
+    }
+    return converted;
+  }
+  if (value !== null && typeof value === "object") {
+    const converted: CodexConfig = {};
+    for (const [key, child] of Object.entries(value)) {
+      const convertedChild = toCodexConfigValue(child);
+      if (convertedChild === undefined) return undefined;
+      converted[key] = convertedChild;
+    }
+    return converted;
+  }
+  return undefined;
+}
+
+function codexConfigFromProfileFields(
+  profile: string,
+  fields: Record<string, unknown>,
+  includeDeveloperInstructions: boolean,
+): CodexConfig {
+  const config: CodexConfig = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!PROFILE_CONFIG_KEYS.has(key)) continue;
+    if (!includeDeveloperInstructions && key === "developer_instructions") continue;
+    const converted = toCodexConfigValue(value);
+    if (converted === undefined)
+      throw new CodexProfileSelectionError(
+        profile,
+        `named profile "${profile}" has malformed or unsupported model configuration`,
+      );
+    config[key] = converted;
+  }
+  return config;
+}
+
 export interface CodexProfileSelection {
   model: string;
   modelReasoningEffort?: ModelReasoningEffort;
@@ -130,9 +176,7 @@ export const resolveCodexProfile: CodexProfileResolver = async (
       `named profile "${normalized}" has malformed or unsupported model configuration`,
     );
 
-  const config = Object.fromEntries(
-    Object.entries(supportedConfig.data).filter(([key]) => PROFILE_CONFIG_KEYS.has(key)),
-  ) as CodexConfig;
+  const config = codexConfigFromProfileFields(normalized, supportedConfig.data, true);
   const selection = {
     model: profileConfig.data.model,
     modelReasoningEffort: profileConfig.data.model_reasoning_effort,
@@ -164,11 +208,7 @@ export function normalizeCodexProfileSelection(
       profile,
       `named profile "${profile}" has malformed or unsupported model configuration`,
     );
-  const config = Object.fromEntries(
-    Object.entries(profileConfig.data).filter(
-      ([key]) => PROFILE_CONFIG_KEYS.has(key) && key !== "developer_instructions",
-    ),
-  ) as CodexConfig;
+  const config = codexConfigFromProfileFields(profile, profileConfig.data, false);
   const selection = {
     model: parsed.data.model,
     modelReasoningEffort: parsed.data.modelReasoningEffort,
