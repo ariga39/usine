@@ -28,6 +28,12 @@ import {
   taskEvents,
   taskStatus,
 } from "../apps/cli/src/server-client.js";
+import {
+  lookupCampaign,
+  publishCampaign as publishCampaignToState,
+} from "../packages/runtime/src/campaign.js";
+import { lookupCampaignEvidence } from "../packages/runtime/src/campaign-evidence.js";
+import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
 
 function goalContract(objective = "Deliver the authorized campaign") {
   return {
@@ -3135,5 +3141,64 @@ describe("durable Ready frontier", () => {
     } finally {
       await server.close();
     }
+  });
+
+  test("records newer Goal supersession as monotonic Campaign progress", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-campaign-supersession-"));
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory);
+    const environment = { USINE_GOAL_PUBLICATION_SOURCE: "user:campaign-366" };
+    const first = await publishCampaignToState(
+      stateDirectory,
+      JSON.stringify(frontierGoal("campaign-repository")),
+      environment,
+    );
+    const before = await lookupCampaignEvidence(stateDirectory, first.campaignId);
+    if (!before) throw new Error("initial Campaign evidence is missing");
+    const durableTime = before.progress.occurredAtEpochMs + 60_000;
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    try {
+      database
+        .prepare("UPDATE campaigns SET updated_at = ? WHERE campaign_id = ?")
+        .run(durableTime, first.campaignId);
+    } finally {
+      database.close();
+    }
+
+    await publishCampaignToState(
+      stateDirectory,
+      JSON.stringify({ ...frontierGoal("campaign-repository"), version: 2 }),
+      environment,
+    );
+
+    const after = await lookupCampaignEvidence(stateDirectory, first.campaignId);
+    expect(after?.progress).toEqual({
+      revision: before.progress.revision + 1,
+      occurredAtEpochMs: durableTime + 1,
+    });
+    expect(after?.progress.revision).toBeGreaterThan(before.progress.revision);
+    expect(after?.progress.occurredAtEpochMs).toBeGreaterThan(before.progress.occurredAtEpochMs);
+
+    const campaign = await lookupCampaign(stateDirectory, first.campaignId);
+    const beforeEvent = campaignEvidenceToPostHogEvents(campaign!, before, "deployment-test").find(
+      (event) => event.event === "usine_campaign_progress",
+    );
+    const afterEvent = campaignEvidenceToPostHogEvents(campaign!, after!, "deployment-test").find(
+      (event) => event.event === "usine_campaign_progress",
+    );
+    expect(afterEvent?.uuid).not.toBe(beforeEvent?.uuid);
+    expect(afterEvent?.timestamp).toBe(new Date(durableTime + 1).toISOString());
+    expect(Date.parse(afterEvent?.timestamp ?? "")).toBeGreaterThan(
+      Date.parse(beforeEvent?.timestamp ?? ""),
+    );
+
+    await publishCampaignToState(
+      stateDirectory,
+      JSON.stringify({ ...frontierGoal("campaign-repository"), version: 2 }),
+      environment,
+    );
+    await expect(lookupCampaignEvidence(stateDirectory, first.campaignId)).resolves.toMatchObject({
+      progress: after?.progress,
+    });
   });
 });
