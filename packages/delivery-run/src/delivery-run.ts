@@ -12,6 +12,7 @@ import type {
 import type { ReviewAttemptObservation } from "@usine/quality-gate";
 import {
   DeliveryQuarantineError,
+  ExternalReviewPendingError,
   ForgeAuthenticationError,
   ForgeDeliveryReconciliationError,
 } from "@usine/forge-delivery";
@@ -462,6 +463,16 @@ export async function executeDeliveryRun(
         if (input.signal?.aborted) throw error;
         if (error instanceof DeliveryQuarantineError || error instanceof ForgeAuthenticationError)
           return blockTask(services, result, error.message);
+        if (error instanceof ExternalReviewPendingError && result.candidateFence !== null)
+          return services.authority.recordWaiting(
+            { taskId: result.taskId, revision: result.revision },
+            {
+              reason: "external_review",
+              resumeState: "reviewed",
+              activation: result.candidateFence,
+              diagnostic: error.diagnostic,
+            },
+          );
         if (error instanceof ForgeDeliveryReconciliationError && result.candidateFence !== null)
           return services.authority.recordWaiting(
             { taskId: result.taskId, revision: result.revision },

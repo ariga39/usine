@@ -16,6 +16,7 @@ import {
   type ForgePolicy,
   type GithubApiPolicy,
   type GithubReadToolName,
+  type ExternalReviewPolicy,
 } from "@usine/forge-delivery";
 import { forgeProfileSchema } from "@usine/task-authority";
 
@@ -39,6 +40,7 @@ export interface RuntimePolicy {
     reviewer: RolePolicy;
   };
   forge: ForgePolicy;
+  externalReview?: ExternalReviewPolicy;
   githubRead?: GithubReadPolicy;
   roleOutputTransform?: RoleOutputTransform;
   workerEnvironment: NodeJS.ProcessEnv;
@@ -112,6 +114,7 @@ export function runtimePolicyFromEnvironment(
   };
 
   const forge = forgePolicyFromEnvironment(environment, repository);
+  const externalReview = externalReviewPolicyFromEnvironment(environment, repository);
   const githubRead = githubReadPolicyFromEnvironment(environment, repository);
   const workerEnvironment = explicitWorkerEnvironment(environment);
   const roleOutputTransform = roleOutputTransformFromEnvironment(environment);
@@ -121,12 +124,34 @@ export function runtimePolicyFromEnvironment(
     codexPathOverride: environment.USINE_CODEX_PATH_OVERRIDE,
     roles,
     forge,
+    externalReview,
     githubRead,
     roleOutputTransform,
     workerEnvironment,
     adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(environment),
     credentialFreeGitEnvironment: credentialFreeGitEnvironment(environment),
     sessionArchive,
+  };
+}
+
+export function externalReviewPolicyFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  repository: { owner: string; name: string; forgeProfile: string },
+): ExternalReviewPolicy | undefined {
+  const profile = repository.forgeProfile.trim();
+  if (!forgeProfileSchema.safeParse(profile).success) throw new Error("Forge profile is malformed");
+  const prefix = `USINE_FORGE_PROFILE_${profile.toUpperCase().replaceAll("-", "_")}_`;
+  const gateValue = environment[`${prefix}EXTERNAL_REVIEW_REQUIRE_APPROVAL`]?.trim();
+  const usersValue = environment[`${prefix}EXTERNAL_REVIEW_TRUSTED_USERS`];
+  const appsValue = environment[`${prefix}EXTERNAL_REVIEW_TRUSTED_APPS`];
+  if (gateValue === undefined && usersValue === undefined && appsValue === undefined)
+    return undefined;
+  if (gateValue !== "true" && gateValue !== "false")
+    throw new Error(`${prefix}EXTERNAL_REVIEW_REQUIRE_APPROVAL must be explicitly true or false`);
+  return {
+    requireApproval: gateValue === "true",
+    trustedUsers: githubIdentityIdsFromEnvironment(usersValue, "trusted user IDs"),
+    trustedApps: githubIdentityIdsFromEnvironment(appsValue, "trusted App IDs"),
   };
 }
 
@@ -367,6 +392,17 @@ function githubReadToolsFromEnvironment(value: string | undefined): GithubReadTo
     tools.push(tool);
   }
   return [...new Set(tools)];
+}
+
+function githubIdentityIdsFromEnvironment(value: string | undefined, label: string): number[] {
+  if (value === undefined) return [];
+  const entries = value.split(",").map((entry) => entry.trim());
+  if (entries.some((entry) => !/^\d+$/.test(entry)))
+    throw new Error(`GitHub external review ${label} must be positive integer IDs`);
+  const ids = entries.map(Number);
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length)
+    throw new Error(`GitHub external review ${label} must be unique positive integer IDs`);
+  return ids;
 }
 
 function requiredProfileValue(

@@ -113,10 +113,12 @@ export interface TaskCampaignAssociation {
 export type TaskWaitingReason =
   | "network_interruption"
   | "delivery_reconciliation"
+  | "external_review"
   | "review_interruption";
 export const PUBLIC_TASK_WAITING_REASONS = [
   "network_interruption",
   "delivery_reconciliation",
+  "external_review",
 ] as const;
 export type PublicTaskWaitingReason = (typeof PUBLIC_TASK_WAITING_REASONS)[number];
 export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed" | "reviewing";
@@ -125,6 +127,8 @@ export interface TaskWaiting {
   resumeState: TaskWaitingResumeState;
   activation: number;
   failureClass?: TaskFailureClass;
+  /** Public-safe explanation for a mutable external constraint, when present. */
+  diagnostic?: string;
 }
 
 export interface TaskRepositoryResource {
@@ -208,6 +212,7 @@ export interface PublicBlockerDiagnostic {
 
 export interface PublicTaskWaiting {
   reason: PublicTaskWaitingReason;
+  diagnostic?: string;
 }
 
 export interface TaskResource {
@@ -245,14 +250,18 @@ export function publicTaskWaitingFromResult(
   result: Pick<TaskResult, "waiting">,
 ): PublicTaskWaiting | null {
   return result.waiting && result.waiting.reason !== "review_interruption"
-    ? { reason: result.waiting.reason }
+    ? {
+        reason: result.waiting.reason,
+        ...(result.waiting.diagnostic ? { diagnostic: result.waiting.diagnostic } : {}),
+      }
     : null;
 }
 
 export function publicTaskRetryableFromResult(result: Pick<TaskResult, "waiting">): boolean {
   return (
     result.waiting?.reason === "network_interruption" ||
-    result.waiting?.reason === "delivery_reconciliation"
+    result.waiting?.reason === "delivery_reconciliation" ||
+    result.waiting?.reason === "external_review"
   );
 }
 
@@ -622,7 +631,8 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       const validActivation =
         fact.waiting.reason === "network_interruption"
           ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
-          : fact.waiting.reason === "delivery_reconciliation"
+          : fact.waiting.reason === "delivery_reconciliation" ||
+              fact.waiting.reason === "external_review"
             ? result.state === "reviewed" &&
               result.activeActivation === null &&
               result.candidateFence === fact.waiting.activation &&

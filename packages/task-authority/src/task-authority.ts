@@ -1238,6 +1238,7 @@ function factEvent(
           reason: fact.waiting.reason,
           activation: fact.waiting.activation,
           ...(fact.waiting.failureClass ? { failureClass: fact.waiting.failureClass } : {}),
+          ...(fact.waiting.diagnostic ? { diagnostic: fact.waiting.diagnostic } : {}),
         },
       };
     case "retry":

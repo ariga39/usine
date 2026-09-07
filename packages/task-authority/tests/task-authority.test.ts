@@ -300,6 +300,50 @@ describe("Task Authority module contract", () => {
     ).toThrow("waiting activation is stale");
   });
 
+  test("persists an external-review wait and exposes its retryable diagnostic", () => {
+    const reviewed: TaskResult = {
+      ...checkedTask(),
+      state: "reviewed",
+      mergeAuthorized: true,
+      review: { sha, verdict: "approved", summary: "approved", findings: [] },
+      evidence: { ...checkedTask().evidence, reviewCycles: 1 },
+    };
+    const diagnostic =
+      "trusted external approval was not observed on the current Pull Request head";
+    const waiting = applyTaskFact(reviewed, {
+      type: "waiting",
+      waiting: {
+        reason: "external_review",
+        resumeState: "reviewed",
+        activation: 1,
+        diagnostic,
+      },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "external_review", resumeState: "reviewed", activation: 1, diagnostic },
+      candidateSha: sha,
+      review: { verdict: "approved" },
+    });
+    expect(taskResourceFromResult(waiting)).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "external_review", diagnostic },
+      retryable: true,
+    });
+    expect(
+      Schema.decodeUnknownSync(taskResourceSchema)(taskResourceFromResult(waiting)),
+    ).toMatchObject({
+      waiting: { reason: "external_review", diagnostic },
+      retryable: true,
+    });
+    expect(applyTaskFact(waiting, { type: "retry" })).toMatchObject({
+      state: "reviewed",
+      waiting: null,
+      candidateSha: sha,
+      review: { verdict: "approved" },
+    });
+  });
+
   test("makes a repair batch idempotent for the current changes-requested verdict", () => {
     const reviewed: TaskResult = {
       ...checkedTask(),

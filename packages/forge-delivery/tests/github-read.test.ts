@@ -63,6 +63,16 @@ describe("host-owned GitHub read MCP", () => {
           return Response.json([
             { id: 1, body: "bounded issue comment", user: { login: "author" } },
           ]);
+        if (path === "/repos/example/authorized/issues/7/comments")
+          return Response.json([
+            {
+              id: 5,
+              body: `ordinary PR comment${"x".repeat(9_000)}`,
+              user: { id: 22, login: "commenter" },
+              created_at: "2026-09-08T00:00:00Z",
+              updated_at: "2026-09-08T00:01:00Z",
+            },
+          ]);
         if (path === "/repos/example/authorized/pulls/7")
           return Response.json({
             number: 7,
@@ -74,7 +84,36 @@ describe("host-owned GitHub read MCP", () => {
           });
         if (path === "/repos/example/authorized/pulls/7/reviews")
           return Response.json([
-            { id: 2, state: "APPROVED", body: "approved", user: { login: "reviewer" } },
+            {
+              id: 2,
+              state: "APPROVED",
+              body: "approved",
+              user: { id: 21, login: "reviewer" },
+              commit_id: exactSha,
+              submitted_at: "2026-09-08T00:00:00Z",
+            },
+            ...Array.from({ length: 50 }, (_, index) => ({
+              id: 100 + index,
+              state: "COMMENTED",
+              body: "bounded review",
+              user: { id: 21, login: "reviewer" },
+              commit_id: exactSha,
+              submitted_at: "2026-09-08T00:00:00Z",
+            })),
+          ]);
+        if (path === "/repos/example/authorized/pulls/7/comments")
+          return Response.json([
+            {
+              id: 4,
+              body: "App inline feedback",
+              user: { id: 42, login: "review-app[bot]" },
+              performed_via_github_app: { id: 42, slug: "review-app" },
+              pull_request_review_id: 2,
+              path: "src/index.ts",
+              line: 7,
+              created_at: "2026-09-08T00:02:00Z",
+              updated_at: "2026-09-08T00:03:00Z",
+            },
           ]);
         if (path === "/graphql")
           return Response.json({
@@ -91,7 +130,7 @@ describe("host-owned GitHub read MCP", () => {
                             {
                               databaseId: 4,
                               body: "review thread",
-                              author: { login: "reviewer" },
+                              author: { databaseId: 21, login: "reviewer" },
                               path: "src/index.ts",
                               line: 1,
                             },
@@ -200,9 +239,19 @@ describe("host-owned GitHub read MCP", () => {
         expect(JSON.stringify(result)).not.toContain("host-read-credential");
       }
       expect(JSON.stringify(reviews)).toContain("review thread");
+      expect(JSON.stringify(reviews)).toContain("ordinary PR comment");
+      expect(JSON.stringify(reviews)).toContain('\\"kind\\":\\"app\\"');
+      expect(JSON.stringify(reviews)).toContain('\\"id\\":42');
+      expect(JSON.stringify(reviews)).toContain('\\"pullRequestReviewId\\":2');
+      expect(JSON.stringify(reviews)).toContain('\\"path\\":\\"src/index.ts\\"');
+      expect(JSON.stringify(reviews)).toContain('\\"line\\":7');
+      expect(JSON.stringify(reviews)).not.toContain("x".repeat(9_000));
+      expect(JSON.stringify(reviews)).toContain('\\"id\\":21');
+      expect(JSON.stringify(reviews)).toContain('\\"exactHead\\":true');
+      expect(JSON.stringify(reviews)).toContain('\\"reviewsTruncated\\":true');
       expect(JSON.stringify(reviews)).toContain("reviewThreads");
       expect(JSON.stringify(reviews)).toContain('\\"isResolved\\":true');
-      expect(requests.filter(({ path }) => path.endsWith("/comments"))).toHaveLength(1);
+      expect(requests.filter(({ path }) => path.endsWith("/comments"))).toHaveLength(3);
       expect(requests.filter(({ path }) => path.endsWith("/reviews"))).toHaveLength(1);
       const graphQlRequests = requests.filter(({ path }) => path === "/graphql");
       expect(graphQlRequests).toHaveLength(1);
@@ -217,7 +266,7 @@ describe("host-owned GitHub read MCP", () => {
       expect(graphQlBody.query).toContain("reviewThreads");
       expect(graphQlBody.query).not.toContain("after");
       expect(requests.find(({ path }) => path.endsWith("/reviews"))?.query).toContain(
-        "per_page=50",
+        "per_page=51",
       );
       expect(requests.some(({ query }) => query.includes("page=2"))).toBe(false);
 

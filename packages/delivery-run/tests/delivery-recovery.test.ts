@@ -11,7 +11,11 @@ import {
   type ResolvedTaskContract,
 } from "@usine/task-authority";
 import { executeDeliveryRun, type DeliveryRunServices } from "../src/delivery-run.js";
-import { DeliveryQuarantineError, ForgeDeliveryReconciliationError } from "@usine/forge-delivery";
+import {
+  DeliveryQuarantineError,
+  ExternalReviewPendingError,
+  ForgeDeliveryReconciliationError,
+} from "@usine/forge-delivery";
 import {
   applyTaskFact,
   type CandidateFact,
@@ -674,6 +678,100 @@ describe("Delivery Run durable phase recovery", () => {
       delivery: { sha, prNumber: 80, attestationId: "reconciled" },
     });
     expect(deliveries).toBe(2);
+  });
+
+  test("waits for external review after PR delivery and retries the reviewed bundle", async () => {
+    const id = `external-review-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("reviewed", id, true));
+    let deliveries = 0;
+    let pullRequestObserved = false;
+    let externalReviewReady = false;
+    let implementerActivations = 0;
+    let reviews = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          throw new Error("check must not run while waiting for external review");
+        },
+        reviewWithObservation: async () => {
+          reviews += 1;
+          throw new Error("review must not run while waiting for external review");
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha, check, review) => {
+          deliveries += 1;
+          expect(check.sha).toBe(candidateSha);
+          expect(review).toMatchObject({ sha: candidateSha, verdict: "approved" });
+          if (!externalReviewReady) {
+            pullRequestObserved = true;
+            throw new ExternalReviewPendingError(
+              "trusted external approval was not observed on the current Pull Request head",
+            );
+          }
+          return {
+            sha: candidateSha,
+            effect: "github" as const,
+            prNumber: 80,
+            url: "https://example.invalid/pr/80",
+            attestationId: "external-review-attested",
+            merge: {
+              prNumber: 80,
+              approvedHeadSha: candidateSha,
+              mergeCommitSha: "c".repeat(40),
+              observedState: "merged" as const,
+            },
+          };
+        },
+      },
+    );
+    const input = {
+      contract: contract(id, true),
+      contractHash: "external-review-hash",
+      repositoryIdentity: `recovery/${id}`,
+      deadlineEpochMs: Date.now() + 60_000,
+      implementer: {
+        ...implementer,
+        role: "implementer" as const,
+      },
+      reviewer: { ...implementer, role: "reviewer" as const, sandbox: "read-only" as const },
+    };
+
+    const waiting = await executeDeliveryRun(input, services);
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "external_review",
+        resumeState: "reviewed",
+        activation: 1,
+        diagnostic: "trusted external approval was not observed on the current Pull Request head",
+      },
+      candidateSha: sha,
+      review: { sha, verdict: "approved" },
+    });
+    expect(pullRequestObserved).toBe(true);
+    expect(taskResourceFromResult(waiting)).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "external_review",
+        diagnostic: "trusted external approval was not observed on the current Pull Request head",
+      },
+      retryable: true,
+    });
+
+    externalReviewReady = true;
+    await fake.retry();
+    const merged = await executeDeliveryRun(input, services);
+    expect(merged).toMatchObject({
+      state: "merged",
+      candidateSha: sha,
+      review: { sha, verdict: "approved" },
+      delivery: { sha, prNumber: 80, merge: { approvedHeadSha: sha } },
+    });
+    expect(deliveries).toBe(2);
+    expect(implementerActivations).toBe(0);
+    expect(reviews).toBe(0);
   });
 
   test("blocks an untyped definite delivery refusal instead of making it retryable", async () => {

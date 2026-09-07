@@ -8,6 +8,7 @@ import {
   ForgeDelivery,
   ForgeDeliveryReconciliationError,
   forgeGitEnvironment,
+  type ExternalReviewPolicy,
 } from "../src/index.js";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { taskContractSchema, type ResolvedTaskContract } from "@usine/task-authority";
@@ -226,6 +227,9 @@ type ForgeServerState = {
   headSha: string | null;
   pullRequests: PullRequest[];
   comments: Comment[];
+  reviews?: Array<Record<string, unknown>>;
+  failExternalReviewCommentRead?: boolean;
+  commentReads?: number;
   failAfterPullRequestCreate: boolean;
   failAfterCommentCreate: boolean;
   pullRequestCreates: number;
@@ -311,6 +315,8 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
         head: { sha: state.authoritativeHeadSha ?? pullRequest.head.sha },
       });
     }
+    if (method === "GET" && pathname === "/repos/owner/repo/pulls/1/reviews")
+      return Response.json(state.reviews ?? []);
     if (method === "POST" && pathname === "/repos/owner/repo/pulls") {
       const inputBody = JSON.parse(typeof init?.body === "string" ? init.body : "") as {
         head: string;
@@ -362,7 +368,12 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
       });
     }
     if (pathname === "/repos/owner/repo/issues/1/comments") {
-      if (method === "GET") return Response.json(state.comments);
+      if (method === "GET") {
+        state.commentReads = (state.commentReads ?? 0) + 1;
+        if (state.failExternalReviewCommentRead && state.commentReads > 4)
+          return Response.json({ message: "ordinary comments unavailable" }, { status: 500 });
+        return Response.json(state.comments);
+      }
       if (method === "POST") {
         const inputBody = JSON.parse(typeof init?.body === "string" ? init.body : "") as {
           body: string;
@@ -449,7 +460,12 @@ async function remoteMergeCommit(fixture: Awaited<ReturnType<typeof repositoryFi
   return mergeCommitSha;
 }
 
-function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDelivery {
+function forge(
+  repository: string,
+  apiUrl: string,
+  gitUrl: string,
+  externalReview?: ExternalReviewPolicy,
+): ForgeDelivery {
   return new ForgeDelivery({
     repository,
     deadlineEpochMs: Date.now() + 60_000,
@@ -460,6 +476,7 @@ function forge(repository: string, apiUrl: string, gitUrl: string): ForgeDeliver
       apiUrl,
       gitUrl,
     },
+    ...(externalReview ? { externalReview } : {}),
     environment: process.env,
   });
 }
@@ -858,6 +875,88 @@ describe.sequential("Forge Delivery reconciliation", () => {
     expect(await git(writer.path, "rev-parse", "HEAD")).toBe(state.mergeCommitSha);
     await workspace.quarantine(writer);
     expect(state.mergeCalls).toBe(1);
+  }, 30_000);
+
+  test("gates authorized merge on trusted current-head native review identity", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+      ],
+      comments: [],
+      failExternalReviewCommentRead: true,
+      reviews: [
+        {
+          id: 11,
+          state: "APPROVED",
+          commit_id: fixture.candidateSha,
+          body: "<!-- trusted reviewer --> copied wording",
+          user: { id: 99, login: "trusted-reviewer" },
+        },
+      ],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const policy: ExternalReviewPolicy = {
+      requireApproval: true,
+      trustedUsers: [7],
+      trustedApps: [42],
+    };
+    const task = contract("forge-external-review", true);
+    const check = { ...passingCheck, sha: fixture.candidateSha };
+    const review = { ...approvedReview, sha: fixture.candidateSha };
+    state.comments = [
+      {
+        id: 7,
+        body: approvalAttestationBody(task, fixture.candidateSha, check, review),
+        performed_via_github_app: { slug: "usine-app" },
+        user: { type: "Bot" },
+      },
+    ];
+
+    await expect(
+      withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote, policy).deliver(
+          task,
+          fixture.candidateSha,
+          check,
+          review,
+        ),
+      ),
+    ).rejects.toThrow("trusted external approval");
+    expect(state.mergeCalls ?? 0).toBe(0);
+
+    state.reviews = [
+      {
+        id: 12,
+        state: "APPROVED",
+        commit_id: fixture.candidateSha,
+        body: "approved",
+        performed_via_github_app: { id: 42, slug: "external-review-app" },
+      },
+    ];
+    state.mergeCommitSha = await remoteMergeCommit(fixture);
+    const result = await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote, policy).deliver(
+        task,
+        fixture.candidateSha,
+        check,
+        review,
+      ),
+    );
+    expect(result.merge?.approvedHeadSha).toBe(fixture.candidateSha);
+    expect(state.mergeCalls).toBe(1);
+    expect(state.commentReads).toBe(4);
   }, 30_000);
 
   test("stops at the reviewed PR without merge authority", async () => {

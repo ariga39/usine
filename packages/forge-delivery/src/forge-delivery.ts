@@ -15,6 +15,7 @@ import {
   ForgeAuthenticationError,
   type ForgeDeliveryOptions,
 } from "./forge-policy.js";
+import { externalReviewBlocksMerge, readGithubNativeReviews } from "./external-review.js";
 
 function statusOf(error: unknown): number | undefined {
   return typeof error === "object" && error !== null && "status" in error
@@ -23,6 +24,15 @@ function statusOf(error: unknown): number | undefined {
 }
 
 export class DeliveryQuarantineError extends Error {}
+
+export class ExternalReviewPendingError extends Error {
+  readonly code = "external_review_pending" as const;
+
+  constructor(readonly diagnostic: string) {
+    super(diagnostic);
+    this.name = "ExternalReviewPendingError";
+  }
+}
 
 export class ForgeDeliveryReconciliationError extends Error {
   readonly code = "forge_delivery_reconciliation_required" as const;
@@ -52,6 +62,7 @@ export class ForgeDelivery {
       } catch (error) {
         if (error instanceof DeliveryQuarantineError) throw error;
         if (error instanceof ForgeAuthenticationError) throw error;
+        if (error instanceof ExternalReviewPendingError) throw error;
         const status = statusOf(error);
         if (
           status !== undefined &&
@@ -234,6 +245,7 @@ export class ForgeDelivery {
         `live delivery PR #${pullRequest.number} does not target the approved open head; merge blocked`,
       );
     await this.ensureAttestation(client, owner, repo, livePullRequest.number, marker, body);
+    await this.enforceExternalReviewGate(client, owner, repo, livePullRequest.number, sha);
     let mergeResponse: Awaited<ReturnType<typeof client.octokit.rest.pulls.merge>>;
     try {
       mergeResponse = await client.octokit.rest.pulls.merge({
@@ -298,6 +310,24 @@ export class ForgeDelivery {
       },
       requireAttestationId(attestation),
     );
+  }
+
+  private async enforceExternalReviewGate(
+    client: Awaited<ReturnType<typeof createGithubApiClient>>,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    headSha: string,
+  ): Promise<void> {
+    const policy = this.options.externalReview;
+    if (!policy?.requireApproval) return;
+    const evidence = await readGithubNativeReviews(client, owner, repo, pullNumber, {
+      timeout: remainingUntil(this.options.deadlineEpochMs),
+      retries: 0,
+      ...(this.options.signal ? { signal: this.options.signal } : {}),
+    });
+    const blocker = externalReviewBlocksMerge(policy, evidence, headSha);
+    if (blocker) throw new ExternalReviewPendingError(blocker);
   }
 
   private async probeMerged(

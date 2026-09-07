@@ -7,6 +7,7 @@ import { remainingUntil } from "@usine/task-authority";
 import { Duration, Effect } from "effect";
 import type { GithubApiPolicy, ForgeClient } from "./forge-policy.js";
 import { createGithubApiClient } from "./forge-policy.js";
+import { readGithubReviewEvidence, reviewIdentity } from "./external-review.js";
 import { z } from "zod";
 
 const exactSha = /^[0-9a-f]{40}$/;
@@ -242,17 +243,17 @@ async function readPullRequestReviews(
 ) {
   assertPullRequest(options, input);
   const client = await clientPromise;
-  const reviews = (
-    await withRequestOptions(options, (request) =>
-      client.octokit.rest.pulls.listReviews({
-        owner: input.owner,
-        repo: input.repository,
-        pull_number: input.pullRequest,
-        per_page: MAX_ITEMS,
-        request,
-      }),
-    )
-  ).data;
+  const pullRequest = await withRequestOptions(options, (request) =>
+    client.octokit.rest.pulls.get({
+      owner: input.owner,
+      repo: input.repository,
+      pull_number: input.pullRequest,
+      request,
+    }),
+  );
+  const evidence = await withRequestOptions(options, (request) =>
+    readGithubReviewEvidence(client, input.owner, input.repository, input.pullRequest, request),
+  );
   const threads = await withRequestOptions(options, (request) =>
     client.octokit.graphql<ReviewThreadsResponse>(
       `
@@ -267,9 +268,11 @@ async function readPullRequestReviews(
                   nodes {
                     databaseId
                     body
-                    author { login }
+                    author { databaseId login }
                     path
                     line
+                    createdAt
+                    updatedAt
                   }
                 }
               }
@@ -288,18 +291,36 @@ async function readPullRequestReviews(
       },
     ),
   );
-  const pullRequest = threads.repository?.pullRequest;
-  if (!pullRequest) throw new Error("authorized Pull Request was not returned by GraphQL");
-  const reviewThreads = pullRequest.reviewThreads.nodes.filter(
+  const threadPullRequest = threads.repository?.pullRequest;
+  if (!threadPullRequest) throw new Error("authorized Pull Request was not returned by GraphQL");
+  const reviewThreads = threadPullRequest.reviewThreads.nodes.filter(
     (thread): thread is NonNullable<typeof thread> => thread !== null,
   );
+  const reviewComments = new Map(evidence.reviewComments.map((comment) => [comment.id, comment]));
   return project("pull_request_reviews", options, {
     pullRequest: input.pullRequest,
-    reviews: reviews.slice(0, MAX_ITEMS).map((review) => ({
+    pullRequestHeadSha: pullRequest.data.head.sha,
+    reviewsTruncated: evidence.reviewsTruncated,
+    reviews: evidence.reviews.map((review) => ({
       id: review.id,
       state: review.state,
-      body: bounded(review.body),
-      author: bounded(review.user?.login),
+      body: review.body,
+      author: review.identity?.kind === "user" ? review.identity.login : "",
+      identity: review.identity,
+      commitSha: review.commitSha,
+      createdAt: review.createdAt,
+      submittedAt: review.submittedAt,
+      updatedAt: review.updatedAt,
+      exactHead: review.commitSha === pullRequest.data.head.sha,
+    })),
+    comments: evidence.comments.map((comment) => ({
+      id: comment.id,
+      body: comment.body,
+      author: comment.identity?.kind === "user" ? comment.identity.login : "",
+      identity: comment.identity,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      pullRequestReviewId: comment.pullRequestReviewId,
     })),
     reviewThreads: reviewThreads.slice(0, MAX_ITEMS).map((thread) => ({
       id: thread.id,
@@ -307,13 +328,27 @@ async function readPullRequestReviews(
       comments: thread.comments.nodes
         .filter((comment): comment is NonNullable<typeof comment> => comment !== null)
         .slice(0, MAX_ITEMS)
-        .map((comment) => ({
-          id: comment.databaseId,
-          body: bounded(comment.body),
-          author: bounded(comment.author?.login),
-          path: bounded(comment.path),
-          line: comment.line ?? null,
-        })),
+        .map((comment) => {
+          const restComment = reviewComments.get(comment.databaseId);
+          const identity =
+            restComment?.identity ??
+            reviewIdentity({
+              user: comment.author
+                ? { id: comment.author.databaseId, login: comment.author.login }
+                : null,
+            });
+          return {
+            id: comment.databaseId,
+            body: bounded(comment.body),
+            author: identity?.kind === "user" ? identity.login : "",
+            identity,
+            path: bounded(restComment?.path ?? comment.path),
+            line: restComment?.line ?? comment.line ?? null,
+            createdAt: restComment?.createdAt ?? comment.createdAt,
+            updatedAt: restComment?.updatedAt ?? comment.updatedAt,
+            pullRequestReviewId: restComment?.pullRequestReviewId ?? null,
+          };
+        }),
     })),
   });
 }
@@ -329,9 +364,11 @@ interface ReviewThreadsResponse {
             nodes: Array<{
               databaseId: number;
               body: string;
-              author: { login: string } | null;
+              author: { databaseId: number; login: string } | null;
               path: string | null;
               line: number | null;
+              createdAt: string;
+              updatedAt: string;
             } | null>;
           };
         } | null>;

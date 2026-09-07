@@ -89,15 +89,18 @@ const repositorySnapshot = Schema.Struct({
   projectCheck: Schema.Struct({ command: Schema.String, timeoutMs: Schema.Int }),
   gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
 });
+const waitingDiagnostic = Schema.String.check(Schema.isMaxLength(512));
 const taskWaiting = Schema.Struct({
   reason: Schema.Literals([
     "network_interruption",
     "delivery_reconciliation",
+    "external_review",
     "review_interruption",
   ]),
   resumeState: Schema.Literals(["admitted", "checked", "reviewed", "reviewing"]),
   activation: Schema.Natural,
   failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
+  diagnostic: Schema.optional(waitingDiagnostic),
 });
 const publicTaskWaitingReason = Schema.Literals(PUBLIC_TASK_WAITING_REASONS);
 const taskBlockerClassification = Schema.Literals(TASK_BLOCKER_CLASSIFICATIONS);
@@ -222,6 +225,7 @@ const publicBlockerDiagnostic = Schema.Struct({
 });
 const publicTaskWaiting = Schema.Struct({
   reason: publicTaskWaitingReason,
+  diagnostic: Schema.optional(waitingDiagnostic),
 });
 const publicTaskRepository = Schema.Struct({
   id: Schema.String,

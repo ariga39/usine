@@ -120,6 +120,16 @@ export USINE_FORGE_PROFILE_RELEASE_GIT_URL="<GIT_REMOTE_URL>"
 
 The configured repository must match the registration's `owner` and `name`, case-insensitively. The App ID must be nonblank, and the installation ID must be a positive integer. Forge credentials are resolved only at the host execution boundary.
 
+An external GitHub review gate is optional and host-configured alongside the Forge profile. Omit the following variables to preserve the current merge behavior. To enable the gate, set the decision explicitly and allowlist stable GitHub user or App IDs; login names and App slugs are not authorization values:
+
+```sh
+export USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_REQUIRE_APPROVAL="true"
+export USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_TRUSTED_USERS="<GITHUB_USER_ID>,<GITHUB_USER_ID>"
+export USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_TRUSTED_APPS="<GITHUB_APP_ID>"
+```
+
+Set `USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_REQUIRE_APPROVAL="false"` to configure an explicit disabled policy. A required gate with no matching trusted current-head approval, trusted current-head changes requested, or incomplete bounded native-review evidence records a retryable `external_review` wait after the PR is observed. After the independent reviewer changes GitHub-native facts, explicitly retry the Task; Usine does not poll, launch, host, credential, or supervise the external reviewer.
+
 Install the Forge App on the registered repository with these repository permissions:
 
 | Permission | Access | Used for |

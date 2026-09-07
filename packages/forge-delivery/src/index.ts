@@ -1,5 +1,6 @@
 export {
   DeliveryQuarantineError,
+  ExternalReviewPendingError,
   ForgeDelivery,
   ForgeDeliveryReconciliationError,
 } from "./forge-delivery.js";
@@ -14,6 +15,7 @@ export {
   type ForgeReadinessResult,
   type ForgeDeliveryOptions,
   type ForgePolicy,
+  type ExternalReviewPolicy,
 } from "./forge-policy.js";
 export {
   createGithubReadMcpServer,
