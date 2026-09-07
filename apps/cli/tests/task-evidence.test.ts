@@ -376,6 +376,8 @@ describe("task evidence", () => {
       profileName: "implementer-profile",
       configSha256: "a".repeat(64),
       adapter: "sdk",
+      configuredModel: "configured-model",
+      configuredProvider: "configured-provider",
       model: "configured-model",
       modelProvider: "configured-provider",
       reasoningEffort: "high",
@@ -392,6 +394,7 @@ describe("task evidence", () => {
         effectiveProfile: {
           ...configured,
           actualModel: "provider-model",
+          actualProvider: "provider-name",
           actualModelProvider: "provider-name",
         },
       }),
@@ -408,16 +411,36 @@ describe("task evidence", () => {
     ]);
 
     expect(observed.roleRuns.implementer[0]?.effectiveProfile).toMatchObject({
+      configuredModel: "configured-model",
+      configuredProvider: "configured-provider",
       model: "configured-model",
       modelProvider: "configured-provider",
       actualModel: "provider-model",
+      actualProvider: "provider-name",
       actualModelProvider: "provider-name",
     });
     expect(omitted.roleRuns.implementer[0]?.effectiveProfile).toMatchObject({
+      configuredModel: "configured-model",
+      configuredProvider: "configured-provider",
       model: "configured-model",
       modelProvider: "configured-provider",
       actualModel: null,
+      actualProvider: null,
       actualModelProvider: null,
+    });
+    expect(JSON.parse(renderTaskEvidence(observed, true))).toMatchObject({
+      roleRuns: {
+        implementer: [
+          {
+            effectiveProfile: {
+              configuredModel: "configured-model",
+              configuredProvider: "configured-provider",
+              actualModel: "provider-model",
+              actualProvider: "provider-name",
+            },
+          },
+        ],
+      },
     });
     expect(renderTaskEvidence(omitted, false)).toContain(
       "configured-model=configured-model configured-provider=configured-provider actual-model=unavailable actual-provider=unavailable",

@@ -127,6 +127,8 @@ function evidence(): CampaignEvidencePage {
         reviewCycle: null,
         configuredProvider: "configured-provider",
         configuredModel: "configured-model",
+        actualProvider: "observed-provider",
+        actualModel: "observed-model",
         provider: "observed-provider",
         adapter: "sdk",
         model: "observed-model",

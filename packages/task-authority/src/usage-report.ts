@@ -56,6 +56,8 @@ export interface UsageInvocation {
   readonly profile: UsageDimension;
   readonly configuredModel: UsageDimension;
   readonly configuredProvider: UsageDimension;
+  readonly actualModel: UsageDimension;
+  readonly actualProvider: UsageDimension;
   readonly provider: UsageDimension;
   readonly adapter: UsageDimension;
   readonly model: UsageDimension;
@@ -77,6 +79,8 @@ export interface UsageAggregate {
   readonly profile: UsageDimension;
   readonly configuredModel: UsageDimension;
   readonly configuredProvider: UsageDimension;
+  readonly actualModel: UsageDimension;
+  readonly actualProvider: UsageDimension;
   readonly provider: UsageDimension;
   readonly adapter: UsageDimension;
   readonly model: UsageDimension;
@@ -138,6 +142,8 @@ const usageInvocationSchema = Schema.Struct({
   profile: Schema.String,
   configuredModel: Schema.String,
   configuredProvider: Schema.String,
+  actualModel: Schema.String,
+  actualProvider: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
   model: Schema.String,
@@ -158,6 +164,8 @@ const usageAggregateSchema = Schema.Struct({
   profile: Schema.String,
   configuredModel: Schema.String,
   configuredProvider: Schema.String,
+  actualModel: Schema.String,
+  actualProvider: Schema.String,
   provider: Schema.String,
   adapter: Schema.String,
   model: Schema.String,
@@ -522,11 +530,22 @@ function invocationFromRun(
       ? USAGE_DIMENSION_UNAVAILABLE
       : (effective?.profileName ?? run.requestedProfile ?? USAGE_DIMENSION_UNAVAILABLE),
     configuredModel: normalizer
-      ? (run.normalizer?.model ?? USAGE_DIMENSION_UNAVAILABLE)
-      : (effective?.model ?? USAGE_DIMENSION_UNAVAILABLE),
+      ? (run.normalizer?.configuredModel ?? run.normalizer?.model ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.configuredModel ?? effective?.model ?? USAGE_DIMENSION_UNAVAILABLE),
     configuredProvider: normalizer
-      ? (run.normalizer?.modelProvider ?? USAGE_DIMENSION_UNAVAILABLE)
-      : (effective?.modelProvider ?? USAGE_DIMENSION_UNAVAILABLE),
+      ? (run.normalizer?.configuredProvider ??
+        run.normalizer?.modelProvider ??
+        USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.configuredProvider ?? effective?.modelProvider ?? USAGE_DIMENSION_UNAVAILABLE),
+    actualModel: normalizer
+      ? (run.normalizerActualModel ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.actualModel ?? run.actualModel ?? USAGE_DIMENSION_UNAVAILABLE),
+    actualProvider: normalizer
+      ? (run.normalizerActualModelProvider ?? USAGE_DIMENSION_UNAVAILABLE)
+      : (effective?.actualProvider ??
+        effective?.actualModelProvider ??
+        run.actualModelProvider ??
+        USAGE_DIMENSION_UNAVAILABLE),
     provider: normalizer
       ? (run.normalizerActualModelProvider ?? USAGE_DIMENSION_UNAVAILABLE)
       : (run.actualModelProvider ?? USAGE_DIMENSION_UNAVAILABLE),
@@ -612,6 +631,8 @@ function aggregateInvocations(rows: readonly UsageInvocation[]): UsageAggregate[
         profile: first.profile,
         configuredModel: first.configuredModel,
         configuredProvider: first.configuredProvider,
+        actualModel: first.actualModel,
+        actualProvider: first.actualProvider,
         provider: first.provider,
         adapter: first.adapter,
         model: first.model,

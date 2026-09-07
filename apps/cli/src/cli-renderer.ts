@@ -15,6 +15,10 @@ export function renderJson(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
+function renderToken(value: number | null): string {
+  return value === null ? "unknown" : String(value);
+}
+
 export function renderTaskList(page: TaskListPage, json: boolean): string {
   if (json) return renderJson(page);
   return [
@@ -88,23 +92,27 @@ export function renderUsageReport(report: UsageReport, json: boolean): string {
   return [
     `Usage: ${report.coverage} (${report.invocations.length} invocations)`,
     `Aggregates: ${report.aggregates.length}`,
+    "TASK ID\tROLE\tCONFIGURED_MODEL\tCONFIGURED_PROVIDER\tACTUAL_MODEL\tACTUAL_PROVIDER\tINPUT\tOUTPUT",
+    ...report.invocations.map(
+      (run) =>
+        `${run.taskId}\t${run.role}\t${run.configuredModel}\t${run.configuredProvider}\t${run.actualModel}\t${run.actualProvider}\t${renderToken(run.usage.inputTokens)}\t${renderToken(run.usage.outputTokens)}`,
+    ),
     "",
   ].join("\n");
 }
 
 export function renderCampaignEvidence(report: CampaignEvidencePage, json: boolean): string {
   if (json) return renderJson(report);
-  const token = (value: number | null): string => (value === null ? "unknown" : String(value));
   return [
     `Campaign ${report.campaignId} evidence: ${report.coverage}`,
     `Totals: ${report.totals.invocations} runs, ${report.totals.reviewCycles} review cycles, ${report.totals.repairBatches} repair batches`,
     `Proposals: ${report.totals.blockedProposals} blocked`,
     `Guardian touches: ${report.totals.guardianTouches}; accepted deliveries: ${report.totals.acceptedDeliveries}`,
-    `Tokens: input=${token(report.totals.usage.inputTokens)} cached=${token(report.totals.usage.cachedInputTokens)} uncached=${token(report.totals.usage.uncachedInputTokens)} output=${token(report.totals.usage.outputTokens)}`,
-    "TASK ID\tOUTCOME\tROLE\tMODEL\tPROVIDER\tADAPTER\tINPUT\tCACHED\tUNCACHED\tOUTPUT",
+    `Tokens: input=${renderToken(report.totals.usage.inputTokens)} cached=${renderToken(report.totals.usage.cachedInputTokens)} uncached=${renderToken(report.totals.usage.uncachedInputTokens)} output=${renderToken(report.totals.usage.outputTokens)}`,
+    "TASK ID\tOUTCOME\tROLE\tCONFIGURED_MODEL\tCONFIGURED_PROVIDER\tACTUAL_MODEL\tACTUAL_PROVIDER\tADAPTER\tINPUT\tCACHED\tUNCACHED\tOUTPUT",
     ...report.runs.map(
       (run) =>
-        `${run.taskId}\t${run.outcome}\t${run.role}\t${run.model}\t${run.provider}\t${run.adapter}\t${token(run.usage.inputTokens)}\t${token(run.usage.cachedInputTokens)}\t${token(run.usage.uncachedInputTokens)}\t${token(run.usage.outputTokens)}`,
+        `${run.taskId}\t${run.outcome}\t${run.role}\t${run.configuredModel}\t${run.configuredProvider}\t${run.actualModel}\t${run.actualProvider}\t${run.adapter}\t${renderToken(run.usage.inputTokens)}\t${renderToken(run.usage.cachedInputTokens)}\t${renderToken(run.usage.uncachedInputTokens)}\t${renderToken(run.usage.outputTokens)}`,
     ),
     "",
   ].join("\n");
