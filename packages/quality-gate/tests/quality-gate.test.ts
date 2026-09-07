@@ -116,8 +116,15 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   expect(boundedCheck.stderr).toContain("[stderr truncated to 16384 characters]");
   expect(boundedCheck.stderr).toContain("stderr-head");
   expect(boundedCheck.stderr).toContain("stderr-tail");
-  const review = await gate.review(task, base, check, 1);
-  expect(review.verdict).toBe("approved");
+  await expect(
+    gate.reviewWithObservation(task, base, { ...check, status: "failed", exitCode: 1 }, 1),
+  ).rejects.toThrow("review requires a passing exact-SHA check");
+  const reviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
+  expect(reviewAttempt).toMatchObject({
+    review: { sha: base, verdict: "approved", findings: [] },
+    usage: null,
+    requestedProfile: "reviewer-profile",
+  });
   expect(reviewerSchema).toBe(reviewerOutputSchema);
   expect(reviewerEnvironment).toEqual(testEnvironment);
   expect(reviewerContract).toMatchObject({
@@ -129,19 +136,27 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   expect(reviewerContract).not.toHaveProperty("delivery.baseBranch");
   expect(reviewerPrompt).toContain(`Task Contract: ${JSON.stringify(reviewerContract)}`);
   reviewerSha = "b".repeat(40);
-  const staleReview = await gate.review(task, base, check, 1);
-  expect(staleReview).toMatchObject({
-    sha: base,
-    verdict: "inconclusive",
-    summary: "review output was stale",
-    findings: [],
+  const staleReviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
+  expect(staleReviewAttempt).toMatchObject({
+    review: {
+      sha: base,
+      verdict: "inconclusive",
+      summary: "review output was stale",
+      findings: [],
+    },
+    usage: null,
+    requestedProfile: "reviewer-profile",
   });
   sessionStatus = "failed";
   const failedReviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
-  expect(failedReviewAttempt.review).toBeNull();
-  expect(failedReviewAttempt.interruption).toEqual({
-    phase: "turn",
-    failureClass: "transient_capacity",
+  expect(failedReviewAttempt).toMatchObject({
+    review: null,
+    usage: null,
+    requestedProfile: "reviewer-profile",
+    interruption: {
+      phase: "turn",
+      failureClass: "transient_capacity",
+    },
   });
 });
 

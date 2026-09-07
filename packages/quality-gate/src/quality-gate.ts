@@ -134,17 +134,6 @@ export class QualityGate {
     );
   }
 
-  async review(
-    contract: ResolvedTaskContract,
-    sha: string,
-    check: CheckResult,
-    cycle: number,
-  ): Promise<ReviewVerdict> {
-    const review = (await this.reviewWithObservation(contract, sha, check, cycle)).review;
-    if (!review) throw new Error("review did not produce a verdict");
-    return review;
-  }
-
   async reviewWithObservation(
     contract: ResolvedTaskContract,
     sha: string,
