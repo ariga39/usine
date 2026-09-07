@@ -2430,6 +2430,7 @@ describe("durable Ready frontier", () => {
 
       const restarted = await startUsineServer({
         environment,
+        assessOutcome: satisfiesDeliveredOutcome,
         execute: async (context) => {
           const repository = context.result.repository;
           if (!repository) throw new Error("review recovery restart has no repository snapshot");
@@ -2919,10 +2920,13 @@ describe("durable Ready frontier", () => {
       await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
         status: "blocked",
         outcomes: [
-          { id: "outcome-one", status: "accepted", evidence: { outcomeId: "outcome-one" } },
+          { id: "outcome-one", status: "planned", evidence: null },
           { id: "outcome-two", status: "planned", evidence: null },
         ],
-        decisionRequest: { reason: "assessment_inconclusive", outcomeIds: ["outcome-two"] },
+        decisionRequest: {
+          reason: "assessment_inconclusive",
+          outcomeIds: ["outcome-one", "outcome-two"],
+        },
       });
     } finally {
       await server.close();

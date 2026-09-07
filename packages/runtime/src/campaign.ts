@@ -99,7 +99,9 @@ export function isCampaignStateQuarantinedError(
   error: unknown,
 ): error is CampaignStateQuarantinedError {
   return (
-    error instanceof Error &&
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
     error.name === "CampaignStateQuarantinedError" &&
     "code" in error &&
     error.code === "campaign_state_quarantined"
@@ -678,8 +680,10 @@ async function reconcile(
   if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
     const results = await campaignTaskResults(database, rows);
     const assessments = await campaignAssessmentRows(database, campaignId);
+    const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
     const usefulWork = hasUsefulCampaignWork(rows, results);
+    const authorityBlocked = rows.some((row) => row.status === "blocked" && row.blocker !== null);
     if (!campaign.publicationAuthorized) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -703,12 +707,15 @@ async function reconcile(
       liveOutcomes.length > 0 &&
       currentAssessments.every(
         ({ assessment, current, evidence, outcome }) =>
-          current && assessmentReferencesResolve(outcome, evidence, assessment),
+          current &&
+          outcomeEvidence.has(outcome.id) &&
+          assessmentReferencesResolve(outcome, evidence, assessment),
       );
     const assessmentFailure = currentAssessments.find(
       ({ assessment, current, evidence, outcome }) =>
         current &&
         (assessment?.verdict !== "satisfied" ||
+          !outcomeEvidence.has(outcome.id) ||
           !assessmentReferencesResolve(outcome, evidence, assessment)),
     );
     if (campaign.publicationAuthorized && liveOutcomes.length === 0 && !usefulWork) {
@@ -723,10 +730,11 @@ async function reconcile(
       decisionRequest = null;
     } else if (campaign.publicationAuthorized && assessmentFailure && !usefulWork) {
       campaignStatus = "blocked";
-      decisionRequest ??= {
+      const nextDecisionRequest: CampaignDecisionRequest = {
         requestId: `decision:${campaign.campaignId}`,
-        reason:
-          assessmentFailure.assessment?.verdict === "gaps"
+        reason: authorityBlocked
+          ? "branches_blocked"
+          : assessmentFailure.assessment?.verdict === "gaps"
             ? "assessment_gaps"
             : "assessment_inconclusive",
         outcomeIds: liveOutcomes
@@ -736,11 +744,14 @@ async function reconcile(
             );
             return (
               !item?.current ||
+              !outcomeEvidence.has(outcome.id) ||
               !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
             );
           })
           .map((outcome) => outcome.id),
       };
+      if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
+        decisionRequest = nextDecisionRequest;
     } else if (campaign.publicationAuthorized && !usefulWork && liveOutcomes.length > 0) {
       // The assessor must run before the exhausted frontier becomes terminal.
       campaignStatus = "planning";
@@ -783,7 +794,14 @@ async function reconcileAll(
   observedRepositoryIds: ReadonlySet<string>,
 ): Promise<void> {
   const rows = await database.select({ campaignId: campaigns.campaignId }).from(campaigns);
-  for (const row of rows) await reconcile(database, row.campaignId, observedRepositoryIds);
+  for (const row of rows) {
+    try {
+      await reconcile(database, row.campaignId, observedRepositoryIds);
+    } catch (error) {
+      if (isCampaignStateQuarantinedError(error)) continue;
+      throw error;
+    }
+  }
 }
 
 async function reconcileWithRepositoryHeads(
@@ -1014,7 +1032,13 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
     const repositoryById = new Map(repositoryRows.map((row) => [row.id, row]));
     const targets: AssessmentTarget[] = [];
     for (const campaign of campaignRows) {
-      const decoded = decodeCampaignState(campaign);
+      let decoded: DecodedCampaignState;
+      try {
+        decoded = decodeCampaignState(campaign);
+      } catch (error) {
+        if (isCampaignStateQuarantinedError(error)) continue;
+        throw error;
+      }
       if (
         !campaign.planHandedOff ||
         isTerminalCampaignStatus(decoded.status) ||
@@ -1154,12 +1178,6 @@ async function persistCampaignAssessment(
           updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
         })
         .where(eq(campaigns.campaignId, target.campaign.campaignId));
-      const observed = new Set(
-        (await handle.database.select({ id: repositories.id }).from(repositories)).map(
-          (row) => row.id,
-        ),
-      );
-      await reconcile(handle.database, target.campaign.campaignId, observed);
     });
   } finally {
     handle.close();
@@ -1218,6 +1236,9 @@ async function assessCampaignTargets(
     }
     await persistCampaignAssessment(stateDirectory, target, assessment);
   }
+  await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
+    await reconcileAll(database, observed);
+  });
 }
 
 export async function reconcileCampaigns(
@@ -1359,6 +1380,7 @@ async function resourceFromDatabase(
         const assessment = assessments.get(outcome.id);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         return (
+          outcomeEvidence.has(outcome.id) &&
           assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
           assessmentReferencesResolve(outcome, evidence, assessment)
         );
