@@ -9,6 +9,7 @@ export * from "./usage-report.js";
 export * from "./campaign-evidence.js";
 export * from "./campaign-evidence-sources.js";
 export * from "./accepted-delivery.js";
+export * from "./evidence-identity.js";
 export {
   taskListItemFromResult,
   TaskStateQuarantinedError,

@@ -4,6 +4,7 @@ import {
   TASK_FAILURE_CLASSES,
   taskFailureClassFromProvider,
 } from "./task-state.js";
+import { safeEvidenceIdentity } from "./evidence-identity.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
 const safeObservationId = Schema.String.check(
@@ -12,7 +13,7 @@ const safeObservationId = Schema.String.check(
 const safeProfileName = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/));
 const safeEvidenceValue = Schema.String.check(
   Schema.makeFilter((value) =>
-    isSafeEvidenceIdentity(value) ? undefined : "must be a bounded non-hostname identity",
+    safeEvidenceIdentity(value) !== null ? undefined : "must be a bounded non-hostname identity",
   ),
 );
 const exactHash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
@@ -62,27 +63,6 @@ const normalizer = Schema.Struct({
   actualModelProvider: Schema.optional(Schema.NullOr(safeEvidenceValue)),
   usage: Schema.NullOr(usage),
 });
-
-function isSafeEvidenceIdentity(value: string): boolean {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}$/.test(value)) return false;
-  if (
-    value.includes("://") ||
-    value.includes("\\") ||
-    value.includes("?") ||
-    value.includes("#") ||
-    value.split("/").some((segment) => segment === "." || segment === "..") ||
-    /(?:api[_-]?key|secret|token|password|credential|bearer)/i.test(value)
-  )
-    return false;
-  const firstSegment = value.split("/")[0]!;
-  if (
-    firstSegment.includes(".") &&
-    /^[A-Za-z0-9.-]+$/.test(firstSegment) &&
-    /^[A-Za-z]/.test(firstSegment.split(".").at(-1)!)
-  )
-    return false;
-  return !/:[0-9]+(?:\/|$)/.test(value);
-}
 
 const tool = Schema.Literals(["shell", "apply_patch", "read", "search", "unknown"]);
 const codingSessionPhase = Schema.Literals(["startup", "thread", "turn", "output"]);
