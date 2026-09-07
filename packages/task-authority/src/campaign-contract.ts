@@ -395,8 +395,7 @@ export function campaignResourceFromContract(
     status:
       outcome.status === "superseded"
         ? ("superseded" as const)
-        : (projection?.satisfiedOutcomes?.has(outcome.id) ??
-            projection?.assessments?.get(outcome.id)?.verdict === "satisfied")
+        : projection?.satisfiedOutcomes?.has(outcome.id)
           ? ("accepted" as const)
           : ("planned" as const),
     evidence: projection?.outcomeEvidence?.get(outcome.id) ?? null,

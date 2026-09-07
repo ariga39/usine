@@ -211,7 +211,7 @@ export interface ReviewerEvaluationReviewInput {
 export interface ReviewerEvaluationArchiveManifest {
   readonly archiveId: string;
   readonly taskId: string;
-  readonly role: "implementer" | "reviewer";
+  readonly role: "reviewer";
   readonly captureStatus: "stored" | "truncated" | "failed" | "pruned";
   readonly completeness: "complete" | "partial";
 }
@@ -759,11 +759,12 @@ function withArchiveEvidence(
 
 function toReviewerArchiveManifest(
   manifest: SessionArchiveManifest,
-): ReviewerEvaluationArchiveManifest {
+): ReviewerEvaluationArchiveManifest | null {
+  if (manifest.role !== "reviewer") return null;
   return {
     archiveId: manifest.archiveId,
     taskId: manifest.taskId,
-    role: manifest.role === "reviewer" ? "reviewer" : "implementer",
+    role: "reviewer",
     captureStatus: manifest.captureStatus,
     completeness: manifest.completeness,
   };

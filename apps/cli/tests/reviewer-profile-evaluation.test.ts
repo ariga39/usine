@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -186,6 +187,74 @@ function currentArchiveManifest(
     completeness: "complete",
     ...patch,
   };
+}
+
+async function writeAssessorArchive(stateDirectory: string, taskId: string): Promise<string> {
+  const archiveId = "archive_00000000-0000-0000-0000-000000000002";
+  const directory = join(stateDirectory, "session-archives");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const profileFields = { name: "assessor-profile" };
+  const profile = {
+    ...profileFields,
+    sha256: createHash("sha256").update(JSON.stringify(profileFields), "utf8").digest("hex"),
+  };
+  const archive = {
+    schemaVersion: 1 as const,
+    archiveId,
+    taskId,
+    role: "assessor" as const,
+    attempt: "1",
+    createdAtEpochMs: 1,
+    updatedAtEpochMs: 2,
+    status: "completed" as const,
+    captureStatus: "stored" as const,
+    completeness: "complete" as const,
+    sessionId: "assessor-session",
+    adapter: "sdk" as const,
+    phase: "output" as const,
+    failureClass: null,
+    failure: null,
+    prompt: "assessor archive must not become reviewer evidence",
+    contract: { id: taskId },
+    profile,
+    items: [],
+    rawFinalResponse: "assessor response",
+    normalizedOutput: { verdict: "approved" },
+    usage: { inputTokens: 1, outputTokens: 1 },
+    byteLength: 0,
+    truncated: false,
+    warnings: [],
+  };
+  for (;;) {
+    const bytes = JSON.stringify(archive);
+    const byteLength = Buffer.byteLength(bytes);
+    if (archive.byteLength === byteLength) {
+      await writeFile(join(directory, `${archiveId}.json`), bytes, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      return archiveId;
+    }
+    archive.byteLength = byteLength;
+  }
+}
+
+type ReviewerArchiveProjectionReport = {
+  inconclusiveReasons: string[];
+  baseline: { runs: Array<{ archive: unknown }> };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isReviewerArchiveProjectionReport(
+  value: unknown,
+): value is ReviewerArchiveProjectionReport {
+  if (!isRecord(value) || !Array.isArray(value.inconclusiveReasons)) return false;
+  if (!value.inconclusiveReasons.every((reason) => typeof reason === "string")) return false;
+  if (!isRecord(value.baseline) || !Array.isArray(value.baseline.runs)) return false;
+  return value.baseline.runs.every((run) => isRecord(run) && "archive" in run);
 }
 
 function withCurrentArchive(
@@ -1051,6 +1120,43 @@ describe("reviewer profile evaluation public path", () => {
     ) as { recommendation: string; inconclusiveReasons: string[] };
     expect(report.recommendation).toBe("inconclusive");
     expect(report.inconclusiveReasons).toContain("approved:reviewer_archive_missing");
+    process.exitCode = 0;
+  });
+
+  test("does not treat an assessor archive as reviewer evidence", async () => {
+    const value = await fixture();
+    const loaded = await readReviewerEvaluationPlan(value.planPath, value.environment);
+    const stateDirectory = join(value.root, "assessor-state");
+    const archiveId = await writeAssessorArchive(stateDirectory, "approved");
+    const services: ReviewerEvaluationServices = {
+      review: async (input) => {
+        const selection =
+          input.profile === "baseline-reviewer"
+            ? loaded.profileSelections.baseline
+            : loaded.profileSelections.candidate;
+        return {
+          ...observation(input, "approved", selection.configSha256!),
+          archive: {
+            archiveId,
+            status: "stored",
+            completeness: "complete",
+          },
+        };
+      },
+    };
+    await runProfileEvaluateCommand(
+      { planPath: value.planPath, subjectRole: "reviewer", json: true },
+      "http://server.test",
+      { ...value.environment, USINE_STATE_DIR: stateDirectory },
+      undefined,
+      services,
+    );
+    const report: unknown = JSON.parse(
+      await readFile(join(value.root, "reports/reviewer-report.json"), "utf8"),
+    );
+    if (!isReviewerArchiveProjectionReport(report)) throw new Error("invalid reviewer report");
+    expect(report.inconclusiveReasons).toContain("approved:reviewer_archive_missing");
+    expect(report.baseline.runs[0]?.archive).toBeNull();
     process.exitCode = 0;
   });
 });

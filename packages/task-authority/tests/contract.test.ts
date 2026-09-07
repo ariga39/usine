@@ -1,4 +1,11 @@
-import { resolveTaskContract, taskContractSchema, taskProposalSchema } from "@usine/task-authority";
+import {
+  campaignResourceFromContract,
+  resolveTaskContract,
+  taskContractSchema,
+  taskProposalSchema,
+  type CampaignAssessment,
+  type GoalContract,
+} from "@usine/task-authority";
 import { describe, expect, test } from "vite-plus/test";
 
 const committedContract = {
@@ -143,4 +150,55 @@ test("rejects an issue-less standalone Task contract", () => {
     expect(result.error.issues.some((issue) => issue.path.join(".") === "delivery.issue")).toBe(
       true,
     );
+});
+
+test("does not display an assessed Outcome as accepted without verified evidence", () => {
+  const contract = {
+    schemaVersion: 1,
+    id: "assessment-projection-test",
+    version: 1,
+    objective: "Keep assessment display subordinate to verified evidence.",
+    outcomes: [
+      {
+        id: "outcome-one",
+        title: "Verify the first Outcome",
+        acceptance: ["The first Outcome has verified evidence."],
+        dependsOn: [],
+        parentId: null,
+        status: "live",
+      },
+    ],
+    authority: {
+      source: "https://github.com/example/usine/issues/403",
+      publish: true,
+      delivery: true,
+      merge: false,
+      repositories: [],
+      effects: [],
+    },
+    budget: { maxElapsedMs: 60_000, maxTasks: 1, maxImplementerActivations: 1, maxReviewCycles: 1 },
+  } satisfies GoalContract;
+  const assessment = {
+    role: "assessor",
+    assessmentId: "assessment-one",
+    outcomeId: "outcome-one",
+    evidenceHash: "evidence-hash",
+    verdict: "satisfied",
+    summary: "the assessor claims satisfaction",
+    gaps: [],
+    evidence: [],
+    usage: null,
+    startedAtEpochMs: 1,
+    completedAtEpochMs: 2,
+  } satisfies CampaignAssessment;
+
+  const resource = campaignResourceFromContract(contract, "contract-hash", "planning", 1, {
+    proposals: [],
+    planHandedOff: false,
+    decisionRequest: null,
+    assessments: new Map([["outcome-one", assessment]]),
+  });
+
+  expect(resource.outcomes[0]?.assessment?.verdict).toBe("satisfied");
+  expect(resource.outcomes[0]?.status).toBe("planned");
 });
