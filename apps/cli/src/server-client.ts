@@ -218,8 +218,8 @@ export async function campaignEvidence(
     ),
     aggregates: [...aggregates].toSorted((left, right) =>
       compareStrings(
-        `${left.goalVersion}:${left.outcomeId}:${left.taskId}:${left.role}:${left.model}:${left.provider}:${left.adapter}`,
-        `${right.goalVersion}:${right.outcomeId}:${right.taskId}:${right.role}:${right.model}:${right.provider}:${right.adapter}`,
+        `${left.goalVersion}:${left.outcomeId}:${left.taskId}:${left.role}:${left.actualModel}:${left.actualProvider}:${left.adapter}`,
+        `${right.goalVersion}:${right.outcomeId}:${right.taskId}:${right.role}:${right.actualModel}:${right.actualProvider}:${right.adapter}`,
       ),
     ),
     touches: [...touches.values()].toSorted((left, right) =>

@@ -84,9 +84,14 @@ export interface EffectiveSessionProfile {
   profileName: string | null;
   configSha256: string | null;
   adapter: "sdk" | "app-server" | "opencode2" | null;
+  /** Canonical configured identity; the legacy aliases remain for compatibility. */
+  configuredModel?: string | null;
+  configuredProvider?: string | null;
   model: string | null;
   modelProvider: string | null;
   actualModel?: string | null;
+  /** Provider-attested identity; it is never inferred from configured identity. */
+  actualProvider?: string | null;
   actualModelProvider?: string | null;
   reasoningEffort: ModelReasoningEffort | null;
   developerInstructionsSha256: string | null;
@@ -280,7 +285,10 @@ export interface RoleOutputNormalizerObservation {
   readonly adapter: "role-output-normalizer";
   readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly configuredModel?: string | null;
+  readonly configuredProvider?: string | null;
   readonly actualModel: string | null;
+  readonly actualProvider?: string | null;
   readonly actualModelProvider: string | null;
 }
 
@@ -447,8 +455,13 @@ export class CodexCodingSession {
           profileName,
           configSha256: profileSelection.configSha256,
           adapter: null,
+          configuredModel: safeEvidenceIdentity(snapshot.model),
+          configuredProvider: safeEvidenceIdentity(snapshot.modelProvider),
           model: safeEvidenceIdentity(snapshot.model),
           modelProvider: safeEvidenceIdentity(snapshot.modelProvider),
+          actualModel: null,
+          actualProvider: null,
+          actualModelProvider: null,
           reasoningEffort: snapshot.modelReasoningEffort ?? null,
           developerInstructionsSha256: snapshot.developerInstructions
             ? hashText(snapshot.developerInstructions)
@@ -555,6 +568,7 @@ export class CodexCodingSession {
         effectiveProfile = {
           ...effectiveProfile,
           actualModel: safeModelIdentity(result.actualModel.model),
+          actualProvider: safeModelIdentity(result.actualModel.provider),
           actualModelProvider: safeModelIdentity(result.actualModel.provider),
         };
       phase = "output";
@@ -810,7 +824,10 @@ function normalizerObservation(
     adapter: "role-output-normalizer",
     model: safeEvidenceIdentity(transform?.profile?.model) ?? null,
     modelProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
+    configuredModel: safeEvidenceIdentity(transform?.profile?.model) ?? null,
+    configuredProvider: safeEvidenceIdentity(transform?.profile?.modelProvider) ?? null,
     actualModel: safeModelIdentity(actualModel),
+    actualProvider: safeModelIdentity(actualModelProvider),
     actualModelProvider: safeModelIdentity(actualModelProvider),
   };
 }
@@ -851,12 +868,15 @@ function unavailableEffectiveProfile(): EffectiveSessionProfile {
     profileName: null,
     configSha256: null,
     adapter: null,
+    configuredModel: null,
+    configuredProvider: null,
     model: null,
     modelProvider: null,
     reasoningEffort: null,
     developerInstructionsSha256: null,
     serviceTier: null,
     actualModel: null,
+    actualProvider: null,
     actualModelProvider: null,
   };
 }

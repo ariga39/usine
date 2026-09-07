@@ -16,9 +16,12 @@ export interface EffectiveRoleProfile {
   readonly profileName: string | null;
   readonly configSha256: string | null;
   readonly adapter: EvidenceAdapter;
+  readonly configuredModel?: string | null;
+  readonly configuredProvider?: string | null;
   readonly model: string | null;
   readonly modelProvider: string | null;
   readonly actualModel?: string | null;
+  readonly actualProvider?: string | null;
   readonly actualModelProvider?: string | null;
   readonly reasoningEffort: EvidenceReasoningEffort;
   readonly developerInstructionsSha256: string | null;
@@ -137,13 +140,23 @@ export function deriveTaskEvidence(task: TaskResource, events: readonly TaskEven
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
     } else if (data.type === "coding_session_completed") {
       run.requestedProfile = data.requestedProfile ?? run.requestedProfile;
-      run.effectiveProfile = data.effectiveProfile
-        ? {
-            ...data.effectiveProfile,
-            actualModel: data.effectiveProfile.actualModel ?? null,
-            actualModelProvider: data.effectiveProfile.actualModelProvider ?? null,
-          }
-        : run.effectiveProfile;
+      if (data.effectiveProfile) {
+        const profile = data.effectiveProfile;
+        const configuredModel = profile.configuredModel ?? profile.model;
+        const configuredProvider = profile.configuredProvider ?? profile.modelProvider;
+        const actualModel = profile.actualModel ?? null;
+        const actualProvider = profile.actualProvider ?? profile.actualModelProvider ?? null;
+        run.effectiveProfile = {
+          ...profile,
+          configuredModel,
+          configuredProvider,
+          model: profile.model ?? configuredModel,
+          modelProvider: profile.modelProvider ?? configuredProvider,
+          actualModel,
+          actualProvider,
+          actualModelProvider: actualProvider,
+        };
+      }
       run.usage = data.usage ?? run.usage;
       run.archive = data.archive ? archiveEvidence(data.archive) : run.archive;
       run.outcome.status = data.outcome;
@@ -356,9 +369,12 @@ function unavailableEffectiveProfile(): EffectiveRoleProfile {
     profileName: null,
     configSha256: null,
     adapter: null,
+    configuredModel: null,
+    configuredProvider: null,
     model: null,
     modelProvider: null,
     actualModel: null,
+    actualProvider: null,
     actualModelProvider: null,
     reasoningEffort: null,
     developerInstructionsSha256: null,
@@ -392,7 +408,7 @@ export function renderTaskEvidence(evidence: TaskEvidence, json: boolean): strin
 function renderRoleRun(run: RoleRunEvidence): string {
   return [
     `  ${run.role === "reviewer" ? `review-cycle=${run.reviewCycle ?? "unknown"}` : `activation=${run.activation ?? "unknown"}`} requested-profile=${run.requestedProfile ?? "unknown"}`,
-    `    effective=${run.effectiveProfile.profileName ?? "unavailable"} configured-model=${run.effectiveProfile.model ?? "unavailable"} configured-provider=${run.effectiveProfile.modelProvider ?? "unavailable"} actual-model=${run.effectiveProfile.actualModel ?? "unavailable"} actual-provider=${run.effectiveProfile.actualModelProvider ?? "unavailable"} adapter=${run.effectiveProfile.adapter ?? "unavailable"} reasoning=${run.effectiveProfile.reasoningEffort ?? "unavailable"}`,
+    `    effective=${run.effectiveProfile.profileName ?? "unavailable"} configured-model=${run.effectiveProfile.configuredModel ?? run.effectiveProfile.model ?? "unavailable"} configured-provider=${run.effectiveProfile.configuredProvider ?? run.effectiveProfile.modelProvider ?? "unavailable"} actual-model=${run.effectiveProfile.actualModel ?? "unavailable"} actual-provider=${run.effectiveProfile.actualProvider ?? run.effectiveProfile.actualModelProvider ?? "unavailable"} adapter=${run.effectiveProfile.adapter ?? "unavailable"} reasoning=${run.effectiveProfile.reasoningEffort ?? "unavailable"}`,
     `    status=${run.outcome.status} usage=${run.usage ? JSON.stringify(run.usage) : "unavailable"} archive=${run.archive.archiveId ?? "unavailable"} (${run.archive.status})`,
     `    effort=${run.effort.observations.map((observation) => observation.type).join(",") || "unavailable"} elapsed-ms=${run.effort.elapsedMs ?? "unknown"} turns=${run.effort.counts.turns} tools=${run.effort.counts.tools} mcp-tools=${run.effort.counts.mcpTools} phase=${run.effort.phase ?? "unknown"} failure-class=${run.effort.failureClass ?? "none"}`,
     `    relation=${run.outcome.taskRelation}`,

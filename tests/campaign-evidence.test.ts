@@ -447,6 +447,8 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
       run.role,
       run.configuredModel,
       run.configuredProvider,
+      run.actualModel,
+      run.actualProvider,
       run.model,
       run.provider,
       run.adapter,
@@ -458,12 +460,16 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
       "configured-provider",
       "observed-one",
       "provider-one",
+      "observed-one",
+      "provider-one",
       "sdk",
     ],
     [
       "reviewer",
       "review-model",
       "review-provider",
+      "review-observed",
+      "review-observed-provider",
       "review-observed",
       "review-observed-provider",
       "app-server",
@@ -507,9 +513,17 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
 
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
   expect(publicReport?.runs).toHaveLength(4);
+  expect(publicReport?.runs.find((run) => run.adapter === "sdk")).toMatchObject({
+    configuredModel: "configured-model",
+    configuredProvider: "configured-provider",
+    actualModel: "observed-one",
+    actualProvider: "provider-one",
+  });
   expect(publicReport?.runs.find((run) => run.adapter === "opencode2")).toMatchObject({
     configuredModel: "review-model",
     configuredProvider: "review-provider",
+    actualModel: "unavailable",
+    actualProvider: "unavailable",
     model: "unavailable",
     provider: "unavailable",
   });

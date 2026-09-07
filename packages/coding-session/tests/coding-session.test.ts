@@ -412,7 +412,13 @@ describe("Coding Session", () => {
       ).resolves.toMatchObject({
         status: "completed",
         output: { status: "proposed", summary: "sdk" },
-        effectiveProfile: { adapter: "sdk" },
+        effectiveProfile: {
+          adapter: "sdk",
+          configuredModel: "implementer-model",
+          configuredProvider: null,
+          actualModel: null,
+          actualProvider: null,
+        },
       });
     } finally {
       startThread.mockRestore();
