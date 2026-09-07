@@ -10,7 +10,7 @@ import type {
 import { remainingUntil } from "@usine/task-authority";
 import {
   approvalAttestationBody,
-  createForgeClient,
+  createGithubApiClient,
   forgeGitEnvironment,
   ForgeAuthenticationError,
   type ForgeDeliveryOptions,
@@ -77,7 +77,7 @@ export class ForgeDelivery {
     check: CheckResult,
     review: ReviewVerdict,
   ): Promise<DeliveryEffect> {
-    const client = await createForgeClient(this.options);
+    const client = await createGithubApiClient(this.options.forge);
     const { owner, name: repo } = contract.repository;
     const { branch, baseBranch } = contract.delivery;
     const body = approvalAttestationBody(contract, sha, check, review);
@@ -301,7 +301,7 @@ export class ForgeDelivery {
   }
 
   private async probeMerged(
-    client: Awaited<ReturnType<typeof createForgeClient>>,
+    client: Awaited<ReturnType<typeof createGithubApiClient>>,
     owner: string,
     repo: string,
     pullNumber: number,
@@ -401,7 +401,7 @@ export class ForgeDelivery {
   }
 
   private async ensureAttestation(
-    client: Awaited<ReturnType<typeof createForgeClient>>,
+    client: Awaited<ReturnType<typeof createGithubApiClient>>,
     owner: string,
     repo: string,
     pullNumber: number,

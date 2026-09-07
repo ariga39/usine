@@ -205,10 +205,6 @@ export async function createGithubApiClient(
   }
 }
 
-export async function createForgeClient(options: ForgeDeliveryOptions): Promise<ForgeClient> {
-  return createGithubApiClient(options.forge);
-}
-
 /**
  * Proves the host Forge App capability with authenticated reads only.
  * GitHub's installation-token exchange is authentication, not a repository mutation.
