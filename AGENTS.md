@@ -20,6 +20,8 @@ Publish the first checkable state as a small commit and draft PR; continue visib
 
 The primary orchestrator owns direction, task selection, repository-agent policy, integration, review, delivery, and continuation. It launches every delegated repository implementer and reviewer through Herdr: verify `HERDR_ENV=1`, then use Herdr to start, prompt, inspect, and wait for the agent. Do not substitute native/internal subagent APIs; if Herdr is unavailable, report the development-environment blocker.
 
+Every delegated implementation worker is a leaf writer. It begins the authorized repository work directly and does not launch another implementer or reviewer unless the primary explicitly delegates orchestration authority.
+
 Repository product-code implementation uses a fresh worker in an isolated writable workspace. Exact-SHA review uses a fresh context with a read-only candidate and no implementer chat. These are repository-development isolation rules, not Usine product runtime rules: product Coding Session remains defined by the canonical design. Herdr lifecycle state and agent prose are evidence, never completion authority.
 
 Continue through the authorized stopping condition; a plan, local commit, green subset, status report, or tool-success message is not completion. Decide reversible implementation details without asking. Stop only for missing product intent or authority, unavailable required input, an irreversible external choice, or verified acceptance.
