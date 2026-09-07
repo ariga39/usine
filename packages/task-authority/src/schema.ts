@@ -52,6 +52,9 @@ export const campaignProposals = sqliteTable(
     readyBaseSha: text("ready_base_sha"),
     readyRepositoryRevision: integer("ready_repository_revision"),
     taskId: text("task_id"),
+    replacementAssessmentId: text("replacement_assessment_id"),
+    replacementEvidenceHash: text("replacement_evidence_hash"),
+    replacementUsage: text("replacement_usage", { mode: "json" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(unixepoch() * 1000)`)
       .notNull(),
@@ -173,6 +176,32 @@ export const campaignAssessments = sqliteTable(
     campaignAssessmentIdentity: primaryKey({
       columns: [table.campaignId, table.outcomeId, table.assessmentId],
     }),
+  }),
+);
+
+/** Append-only replacement-planner attempt and result for one Campaign/Outcome opportunity. */
+export const campaignReplacementRuns = sqliteTable(
+  "campaign_replacement_runs",
+  {
+    campaignId: text("campaign_id").notNull(),
+    outcomeId: text("outcome_id").notNull(),
+    assessmentId: text("assessment_id").notNull(),
+    evidenceHash: text("evidence_hash").notNull(),
+    invocationId: text("invocation_id").notNull(),
+    role: text("role").notNull().default("replacement-planner"),
+    status: text("status").notNull(),
+    proposal: text("proposal", { mode: "json" }),
+    usage: text("usage", { mode: "json" }),
+    startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
+    completedAtEpochMs: integer("completed_at_epoch_ms"),
+  },
+  (table) => ({
+    campaignReplacementRunIdentity: primaryKey({
+      columns: [table.campaignId, table.outcomeId],
+    }),
+    campaignReplacementRunInvocation: uniqueIndex("campaign_replacement_runs_invocation_index").on(
+      table.invocationId,
+    ),
   }),
 );
 

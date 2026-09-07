@@ -175,6 +175,10 @@ export interface CampaignEvidenceProposal {
   readonly blocker: string | null;
   readonly taskId: string | null;
   readonly admittedAtEpochMs: number;
+  readonly replacement?: {
+    readonly assessmentId: string;
+    readonly evidenceHash: string;
+  };
 }
 
 export interface CampaignEvidenceDecisionTouch {

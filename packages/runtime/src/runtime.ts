@@ -189,6 +189,12 @@ export {
   type CampaignAssessmentDraft,
   type CampaignOutcomeAssessor,
 } from "./campaign-assessor.js";
+export type {
+  CampaignReplacementDraft,
+  CampaignReplacementGenerator,
+  CampaignReplacementRequest,
+  CampaignReplacementRepository,
+} from "./campaign-replacement.js";
 export * from "./http-api.js";
 export {
   cleanupSessionArchives,
@@ -754,8 +760,8 @@ async function executeWithServices(options: {
     sessionArchive: policy.sessionArchive,
     mcpServerFactory: async (request): Promise<CodingSessionMcpServerResolution> => {
       const readPolicy = policy.githubRead;
-      if (request.role === "assessor")
-        return { serverName: "github_read_assessor", status: "unavailable" };
+      if (request.role === "assessor" || request.role === "replacement-planner")
+        return { serverName: `github_read_${request.role}`, status: "unavailable" };
       const role: GithubReadRole = request.role;
       const serverName = `github_read_${role}`;
       if (!readPolicy || contract.delivery.issue === undefined)

@@ -114,6 +114,14 @@ export async function listCampaignEvidenceSources(
     blocker: row.blocker,
     taskId: row.taskId,
     admittedAtEpochMs: row.createdAt.getTime(),
+    ...(row.replacementAssessmentId && row.replacementEvidenceHash
+      ? {
+          replacement: {
+            assessmentId: row.replacementAssessmentId,
+            evidenceHash: row.replacementEvidenceHash,
+          },
+        }
+      : {}),
   }));
   const decisionTouches: CampaignEvidenceDecisionTouch[] = decisionRows.flatMap((row) =>
     row.type === "decision"

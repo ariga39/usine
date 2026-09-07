@@ -20,6 +20,8 @@ export {
   type TaskSessionRequest,
   type CampaignAssessorSessionRequest,
   type CampaignAssessmentSessionContext,
+  type CampaignReplacementPlannerSessionRequest,
+  type CampaignReplacementPlannerSessionContext,
   type SessionRole,
   type TaskSessionRole,
   type RoleOutputNormalizerObservation,

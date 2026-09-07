@@ -5,6 +5,8 @@ import {
   campaigns,
   campaignProposals,
   campaignTouches,
+  campaignAssessments,
+  campaignReplacementRuns,
   posthogCaptureAcknowledgements,
   repositories,
   taskEvents,
@@ -38,6 +40,8 @@ export type RuntimeDatabase = SqliteRemoteDatabase<{
   campaigns: typeof campaigns;
   campaignProposals: typeof campaignProposals;
   campaignTouches: typeof campaignTouches;
+  campaignAssessments: typeof campaignAssessments;
+  campaignReplacementRuns: typeof campaignReplacementRuns;
   posthogCaptureAcknowledgements: typeof posthogCaptureAcknowledgements;
 }>;
 
@@ -72,6 +76,8 @@ export function openSqliteDatabase(
       campaigns,
       campaignProposals,
       campaignTouches,
+      campaignAssessments,
+      campaignReplacementRuns,
       posthogCaptureAcknowledgements,
     },
   });
