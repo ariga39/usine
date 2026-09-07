@@ -14,6 +14,10 @@ import {
 } from "@usine/coding-session";
 import { z } from "zod";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
+import {
+  campaignModelRunFromObservation,
+  type CampaignModelRunDraft,
+} from "./campaign-model-run.js";
 
 export interface CampaignReplacementRepository {
   readonly id: string;
@@ -51,6 +55,7 @@ export interface CampaignReplacementDraft {
   /** Untrusted output; the Campaign coordinator must parse and authorize it. */
   readonly proposal: unknown;
   readonly usage: CampaignAssessmentUsage | null;
+  readonly modelRuns?: readonly CampaignModelRunDraft[];
 }
 
 export type CampaignReplacementGenerator = (
@@ -82,6 +87,7 @@ function usageFrom(
 /** Compose the one concrete replacement-planner role used by the runtime. */
 export function createCampaignReplacementGenerator(): CampaignReplacementGenerator {
   return async (request) => {
+    const startedAtEpochMs = Date.now();
     const repository = request.repositories[0];
     if (!repository) return { proposal: null, usage: null };
     const session = new CodexCodingSession(undefined, {
@@ -163,9 +169,17 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
     };
     try {
       const result = await session.run(plannerRequest);
+      const modelRun = campaignModelRunFromObservation(
+        "replacement-planner",
+        repository,
+        request.invocationId,
+        startedAtEpochMs,
+        result,
+      );
       return {
         proposal: result.status === "completed" ? (result.output ?? null) : null,
         usage: usageFrom(result.usage),
+        modelRuns: modelRun,
       };
     } catch {
       return { proposal: null, usage: null };

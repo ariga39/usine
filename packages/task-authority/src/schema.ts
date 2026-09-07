@@ -205,6 +205,32 @@ export const campaignReplacementRuns = sqliteTable(
   }),
 );
 
+/** Durable provider observation for one Campaign-only assessor or planner run. */
+export const campaignModelRuns = sqliteTable("campaign_model_runs", {
+  invocationId: text("invocation_id").primaryKey(),
+  campaignId: text("campaign_id").notNull(),
+  outcomeId: text("outcome_id").notNull(),
+  role: text("role").notNull(),
+  assessmentId: text("assessment_id"),
+  evidenceHash: text("evidence_hash"),
+  status: text("status").notNull(),
+  failureClass: text("failure_class"),
+  startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
+  completedAtEpochMs: integer("completed_at_epoch_ms"),
+  elapsedMs: integer("elapsed_ms"),
+  repositoryId: text("repository_id"),
+  repository: text("repository"),
+  profile: text("profile"),
+  configuredProvider: text("configured_provider"),
+  configuredModel: text("configured_model"),
+  actualProvider: text("actual_provider"),
+  actualModel: text("actual_model"),
+  adapter: text("adapter"),
+  serviceTier: text("service_tier"),
+  reasoningEffort: text("reasoning_effort"),
+  usage: text("usage", { mode: "json" }),
+});
+
 /** Minimum durable acknowledgement owned by the optional PostHog observer. */
 export const posthogCaptureAcknowledgements = sqliteTable(
   "posthog_capture_acknowledgements",

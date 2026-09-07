@@ -12,10 +12,16 @@ import type {
   GoalContract,
 } from "@usine/task-authority";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
+import {
+  campaignModelRunFromObservation,
+  type CampaignModelRunDraft,
+} from "./campaign-model-run.js";
 
 export interface CampaignAssessorRepository {
   readonly id: string;
   readonly path: string;
+  readonly owner: string;
+  readonly name: string;
   readonly reviewerProfile: string;
   readonly baseSha: string;
 }
@@ -39,6 +45,7 @@ export interface CampaignAssessmentDraft {
   readonly gaps: readonly string[];
   readonly evidence: readonly CampaignAssessmentEvidence[];
   readonly usage: CampaignAssessmentUsage | null;
+  readonly modelRuns?: readonly CampaignModelRunDraft[];
 }
 
 export type CampaignOutcomeAssessor = (
@@ -108,6 +115,7 @@ function inconclusive(summary: string, usage: CampaignAssessmentUsage | null = e
  */
 export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
   return async (request) => {
+    const startedAtEpochMs = Date.now();
     const repository = request.repositories[0];
     if (!repository) return inconclusive("no readable Repository evidence is available");
 
@@ -161,9 +169,16 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
         environment: request.environment,
       };
       const result = await session.run(assessorRequest);
+      const modelRuns = campaignModelRunFromObservation(
+        "assessor",
+        repository,
+        request.invocationId,
+        startedAtEpochMs,
+        result,
+      );
       if (result.status !== "completed" || !result.output)
-        return inconclusive(result.summary, usageFrom(result.usage));
-      return { ...result.output, usage: usageFrom(result.usage) };
+        return { ...inconclusive(result.summary, usageFrom(result.usage)), modelRuns };
+      return { ...result.output, usage: usageFrom(result.usage), modelRuns };
     } catch {
       return inconclusive("Campaign assessor was unavailable");
     }

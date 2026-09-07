@@ -221,7 +221,7 @@ export async function campaignEvidence(
             : "partial",
     runs: [...runs].toSorted(
       (left, right) =>
-        compareStrings(left.taskId, right.taskId) ||
+        compareStrings(left.taskId ?? "", right.taskId ?? "") ||
         compareStrings(left.invocationId, right.invocationId),
     ),
     aggregates: [...aggregates].toSorted((left, right) =>

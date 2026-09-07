@@ -8,6 +8,7 @@ import {
   acceptedTaskDelivery,
   campaignAssessmentSchema,
   campaignAssessments,
+  campaignModelRuns,
   campaignReplacementRuns,
   campaignAssessmentUsageSchema,
   campaignIdFor,
@@ -53,6 +54,7 @@ import type {
   CampaignReplacementGenerator,
   CampaignReplacementRequest,
 } from "./campaign-replacement.js";
+import type { CampaignModelRunDraft } from "./campaign-model-run.js";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { ensurePrivateStateDatabase } from "./private-state.js";
 import { readCommittedContract } from "./verify-committed-contract.js";
@@ -1386,11 +1388,119 @@ async function reserveReplacementRun(
   }
 }
 
+async function reserveCampaignModelRun(
+  stateDirectory: string,
+  target: {
+    readonly campaign: typeof campaigns.$inferSelect;
+    readonly outcome: GoalContract["outcomes"][number];
+    readonly invocationId: string;
+    readonly role: "assessor" | "replacement-planner";
+    readonly assessmentId?: string;
+    readonly evidenceHash?: string;
+  },
+): Promise<boolean> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    let reserved = false;
+    await handle.exclusiveTransaction(async () => {
+      await handle.database
+        .insert(campaignModelRuns)
+        .values({
+          invocationId: target.invocationId,
+          campaignId: target.campaign.campaignId,
+          outcomeId: target.outcome.id,
+          role: target.role,
+          assessmentId: target.assessmentId ?? null,
+          evidenceHash: target.evidenceHash ?? null,
+          status: "pending",
+          failureClass: null,
+          startedAtEpochMs: Date.now(),
+          completedAtEpochMs: null,
+          elapsedMs: null,
+          repositoryId: null,
+          repository: null,
+          profile: null,
+          configuredProvider: null,
+          configuredModel: null,
+          actualProvider: null,
+          actualModel: null,
+          adapter: null,
+          serviceTier: null,
+          reasoningEffort: null,
+          usage: null,
+        })
+        .onConflictDoNothing();
+      const row = await handle.database
+        .select({ invocationId: campaignModelRuns.invocationId })
+        .from(campaignModelRuns)
+        .where(eq(campaignModelRuns.invocationId, target.invocationId));
+      reserved = row[0]?.invocationId === target.invocationId;
+    });
+    return reserved;
+  } finally {
+    handle.close();
+  }
+}
+
+async function persistCampaignModelRun(
+  database: CampaignDatabase,
+  target: {
+    readonly campaignId: string;
+    readonly outcomeId: string;
+    readonly assessmentId?: string;
+    readonly evidenceHash?: string;
+    readonly invocationId: string;
+  },
+  modelRuns: readonly CampaignModelRunDraft[] | undefined,
+): Promise<void> {
+  if (!modelRuns || modelRuns.length === 0) {
+    await database
+      .delete(campaignModelRuns)
+      .where(eq(campaignModelRuns.invocationId, target.invocationId));
+    return;
+  }
+  for (const modelRun of modelRuns) {
+    const values = {
+      invocationId: modelRun.invocationId,
+      campaignId: target.campaignId,
+      outcomeId: target.outcomeId,
+      role: modelRun.role,
+      assessmentId: target.assessmentId ?? null,
+      evidenceHash: target.evidenceHash ?? null,
+      status: modelRun.status,
+      failureClass: modelRun.failureClass,
+      startedAtEpochMs: modelRun.startedAtEpochMs,
+      completedAtEpochMs: modelRun.completedAtEpochMs,
+      elapsedMs: modelRun.elapsedMs,
+      repositoryId: modelRun.repositoryId,
+      repository: modelRun.repository,
+      profile: modelRun.profile,
+      configuredProvider: modelRun.configuredProvider,
+      configuredModel: modelRun.configuredModel,
+      actualProvider: modelRun.actualProvider,
+      actualModel: modelRun.actualModel,
+      adapter: modelRun.adapter,
+      serviceTier: modelRun.serviceTier,
+      reasoningEffort: modelRun.reasoningEffort,
+      usage: modelRun.usage,
+    };
+    if (modelRun.invocationId === target.invocationId) {
+      await database
+        .update(campaignModelRuns)
+        .set(values)
+        .where(eq(campaignModelRuns.invocationId, target.invocationId));
+    } else {
+      await database.insert(campaignModelRuns).values(values).onConflictDoNothing();
+    }
+  }
+}
+
 async function persistReplacementResult(
   stateDirectory: string,
   target: ReplacementTarget,
   candidate: unknown,
   usage: CampaignReplacementDraft["usage"],
+  modelRuns: readonly CampaignModelRunDraft[] | undefined,
   mechanicalStatus?: "budget_exhausted",
 ): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
@@ -1440,6 +1550,17 @@ async function persistReplacementResult(
           replacementUsage: usage,
         });
       }
+      await persistCampaignModelRun(
+        handle.database,
+        {
+          campaignId: target.campaign.campaignId,
+          outcomeId: target.outcome.id,
+          assessmentId: target.assessment.assessmentId,
+          evidenceHash: target.evidenceHash,
+          invocationId: target.invocationId,
+        },
+        modelRuns,
+      );
       await handle.database
         .update(campaignReplacementRuns)
         .set({
@@ -1532,6 +1653,18 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
   }
 }
 
+/** A model reservation without a returned observation is not an AI run. */
+async function recoverPendingCampaignModelRuns(stateDirectory: string): Promise<void> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    await handle.exclusiveTransaction(() =>
+      handle.database.delete(campaignModelRuns).where(eq(campaignModelRuns.status, "pending")),
+    );
+  } finally {
+    handle.close();
+  }
+}
+
 async function generateCampaignReplacements(
   stateDirectory: string,
   generator: CampaignReplacementGenerator,
@@ -1542,7 +1675,14 @@ async function generateCampaignReplacements(
     if (!target) return;
     if (!(await reserveReplacementRun(stateDirectory, target))) continue;
     if (!replacementBudgetAvailable(target.remainingBudget)) {
-      await persistReplacementResult(stateDirectory, target, null, null, "budget_exhausted");
+      await persistReplacementResult(
+        stateDirectory,
+        target,
+        null,
+        null,
+        undefined,
+        "budget_exhausted",
+      );
       await reconcileWithRepositoryHeads(
         stateDirectory,
         environment,
@@ -1550,6 +1690,19 @@ async function generateCampaignReplacements(
           await reconcileAll(database, observed);
         },
       );
+      continue;
+    }
+    if (
+      !(await reserveCampaignModelRun(stateDirectory, {
+        campaign: target.campaign,
+        outcome: target.outcome,
+        invocationId: target.invocationId,
+        role: "replacement-planner",
+        assessmentId: target.assessment.assessmentId,
+        evidenceHash: target.evidenceHash,
+      }))
+    ) {
+      await persistReplacementResult(stateDirectory, target, null, null, undefined);
       continue;
     }
     let draft: CampaignReplacementDraft;
@@ -1579,7 +1732,7 @@ async function generateCampaignReplacements(
     } catch {
       usage = null;
     }
-    await persistReplacementResult(stateDirectory, target, draft.proposal, usage);
+    await persistReplacementResult(stateDirectory, target, draft.proposal, usage, draft.modelRuns);
     await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
       await reconcileAll(database, observed);
     });
@@ -1646,6 +1799,8 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
           repositoriesForOutcome.set(proposal.repositoryId, {
             id: proposal.repositoryId,
             path: result?.repository?.path ?? repository.path,
+            owner: repository.owner,
+            name: repository.name,
             reviewerProfile: repository.reviewerProfile,
             baseSha:
               result?.candidateSha ??
@@ -1725,6 +1880,7 @@ async function persistCampaignAssessment(
   stateDirectory: string,
   target: AssessmentTarget,
   assessment: CampaignAssessment,
+  modelRuns: readonly CampaignModelRunDraft[] | undefined,
 ): Promise<void> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath);
@@ -1743,6 +1899,15 @@ async function persistCampaignAssessment(
           completedAtEpochMs: assessment.completedAtEpochMs,
         })
         .onConflictDoNothing();
+      await persistCampaignModelRun(
+        handle.database,
+        {
+          campaignId: target.campaign.campaignId,
+          outcomeId: target.outcome.id,
+          invocationId: target.invocationId,
+        },
+        modelRuns,
+      );
       await handle.database
         .update(campaigns)
         .set({
@@ -1764,6 +1929,15 @@ async function assessCampaignTargets(
 ): Promise<void> {
   for (const target of await assessmentTargets(stateDirectory)) {
     const startedAtEpochMs = Date.now();
+    if (
+      !(await reserveCampaignModelRun(stateDirectory, {
+        campaign: target.campaign,
+        outcome: target.outcome,
+        invocationId: target.invocationId,
+        role: "assessor",
+      }))
+    )
+      continue;
     let draft: CampaignAssessmentDraft;
     try {
       draft = await assessor({
@@ -1788,6 +1962,7 @@ async function assessCampaignTargets(
         gaps: [],
         evidence: [],
         usage: null,
+        modelRuns: [],
       };
     }
     let assessment: CampaignAssessment;
@@ -1807,7 +1982,7 @@ async function assessCampaignTargets(
         Date.now(),
       );
     }
-    await persistCampaignAssessment(stateDirectory, target, assessment);
+    await persistCampaignAssessment(stateDirectory, target, assessment, draft.modelRuns);
   }
   await generateCampaignReplacements(stateDirectory, replacementGenerator, environment);
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
@@ -1834,6 +2009,7 @@ export async function reconcileCampaigns(
   } finally {
     readHandle.close();
   }
+  await recoverPendingCampaignModelRuns(stateDirectory);
   await recoverPendingReplacementRuns(stateDirectory);
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);

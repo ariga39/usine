@@ -35,6 +35,7 @@ export interface CampaignEvidenceRequest extends CampaignEvidencePageRequest {}
 interface CampaignEvidenceSourceSet {
   readonly firstPage: CampaignEvidenceSourcesPage;
   readonly sources: readonly CampaignEvidenceSource[];
+  readonly campaignRuns: readonly CampaignEvidenceRun[];
 }
 
 export async function lookupCampaignEvidence(
@@ -56,8 +57,14 @@ export async function lookupCampaignEvidence(
     const requested = await authority.listCampaignEvidenceSources(campaignId, request);
     if (!requested) return null;
     const sourceSet = await loadAllSources(authority, campaignId, requested, request);
-    const pageRuns = requested.sources.flatMap((source) => usageRuns(source));
-    const allRuns = sourceSet.sources.flatMap((source) => usageRuns(source));
+    const pageRuns = [
+      ...requested.campaignRuns,
+      ...requested.sources.flatMap((source) => usageRuns(source)),
+    ];
+    const allRuns = [
+      ...sourceSet.campaignRuns,
+      ...sourceSet.sources.flatMap((source) => usageRuns(source)),
+    ];
     const allTouches = touches(sourceSet.firstPage);
     const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source));
     const report: CampaignEvidencePage = {
@@ -108,7 +115,7 @@ async function loadAllSources(
     sources.push(...page.sources);
     cursor = page.nextCursor;
   }
-  return { firstPage, sources };
+  return { firstPage, sources, campaignRuns: firstPage.campaignRuns };
 }
 
 function usageRuns(source: CampaignEvidenceSource): CampaignEvidenceRun[] {
@@ -135,6 +142,9 @@ function projectRun(run: UsageInvocation, source: CampaignEvidenceSource): Campa
     actualProvider: run.actualProvider,
     provider: run.provider,
     adapter: run.adapter,
+    profile: run.profile,
+    serviceTier: run.serviceTier,
+    reasoningEffort: run.reasoningEffort,
     model: run.model,
     outcome: run.outcome,
     failureClass: run.failureClass ?? null,
@@ -208,6 +218,9 @@ function aggregateRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidenceAg
       run.model,
       run.provider,
       run.adapter,
+      run.profile,
+      run.serviceTier,
+      run.reasoningEffort,
       run.failureClass ?? "none",
     ].join("\u0000");
     groups.set(key, [...(groups.get(key) ?? []), run]);
@@ -227,6 +240,9 @@ function aggregateRuns(runs: readonly CampaignEvidenceRun[]): CampaignEvidenceAg
         model: first.model,
         provider: first.provider,
         adapter: first.adapter,
+        profile: first.profile,
+        serviceTier: first.serviceTier,
+        reasoningEffort: first.reasoningEffort,
         failureClass: first.failureClass ?? null,
         invocations: group.length,
         elapsedMs: sumNullable(group.map((run) => run.elapsedMs)),
@@ -249,6 +265,9 @@ function aggregateSortKey(aggregate: CampaignEvidenceAggregate): string {
     aggregate.model,
     aggregate.provider,
     aggregate.adapter,
+    aggregate.profile,
+    aggregate.serviceTier,
+    aggregate.reasoningEffort,
     aggregate.failureClass ?? "none",
   ].join("\u0000");
 }

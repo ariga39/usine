@@ -162,6 +162,13 @@
       "when": 1788739200002,
       "tag": "0022_bounded_replacements",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1788739200003,
+      "tag": "0023_campaign_model_runs",
+      "breakpoints": true
     }
   ]
 }

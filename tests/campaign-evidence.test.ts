@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
@@ -8,7 +9,9 @@ import {
   lookupCampaignEvidence,
   startUsineServer,
 } from "@usine/runtime";
+import type { SessionObservation } from "@usine/coding-session";
 import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
+import { campaignModelRunFromObservation } from "../packages/runtime/src/campaign-model-run.js";
 import {
   campaignEvidence,
   getCampaign,
@@ -483,7 +486,7 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
     acceptedDeliveries: 2,
     usage: { inputTokens: null, outputTokens: null, coverage: "partial" },
   });
-  expect(first?.runs[0]).not.toHaveProperty("profile");
+  expect(first?.runs[0]).toHaveProperty("profile", "implementer");
   expect(first?.runs[0]).toHaveProperty("configuredProvider", "configured-provider");
   expect(first?.deliveries).toHaveLength(1);
   expect(first?.touches.map((touch) => touch.type)).toEqual([
@@ -583,6 +586,258 @@ test("retains failed interrupted usage in public Campaign runs and totals", asyn
   expect(publicEvidence?.coverage).toBe("complete");
   expect(publicEvidence?.runs).toEqual(persisted?.runs);
   expect(publicEvidence?.totals).toEqual(persisted?.totals);
+});
+
+test("projects Campaign model invocations, including a normalizer, exactly once", async () => {
+  const { stateDirectory, contractPath, server, finished } = await fixture();
+  const published = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, published.campaignId, proposal("one", "outcome-one"));
+  await proposeCampaign(server.url, published.campaignId, proposal("two", "outcome-two"));
+  await handoffCampaign(server.url, published.campaignId);
+  await finished;
+
+  const successfulObservation = {
+    status: "completed",
+    output: null,
+    usage: {
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      uncachedInputTokens: 80,
+      cacheWriteInputTokens: 4,
+      outputTokens: 12,
+      reasoningOutputTokens: 5,
+    },
+    summary: "completed",
+    failure: null,
+    phase: null,
+    failureClass: null,
+    requestedProfile: "assessor-profile",
+    effectiveProfile: {
+      profileName: "assessor-profile",
+      configSha256: null,
+      adapter: "sdk",
+      configuredModel: "configured-assessor",
+      configuredProvider: "configured-provider",
+      model: "configured-assessor",
+      modelProvider: "configured-provider",
+      actualModel: "actual-assessor",
+      actualProvider: "attested-provider",
+      actualModelProvider: "attested-provider",
+      reasoningEffort: "high",
+      developerInstructionsSha256: null,
+      serviceTier: "priority",
+    },
+    normalizer: {
+      status: "succeeded",
+      usage: {
+        inputTokens: 30,
+        cachedInputTokens: 10,
+        uncachedInputTokens: 20,
+        cacheWriteInputTokens: 1,
+        outputTokens: 6,
+        reasoningOutputTokens: 2,
+      },
+      adapter: "role-output-normalizer",
+      model: "configured-normalizer",
+      modelProvider: "normalizer-provider",
+      configuredModel: "configured-normalizer",
+      configuredProvider: "normalizer-provider",
+      actualModel: "actual-normalizer",
+      actualProvider: "attested-normalizer-provider",
+      actualModelProvider: "attested-normalizer-provider",
+    },
+  } satisfies SessionObservation;
+  const failedObservation = {
+    status: "failed",
+    output: null,
+    usage: {
+      inputTokens: 40,
+      cachedInputTokens: 5,
+      uncachedInputTokens: 35,
+      outputTokens: 0,
+    },
+    summary: "failed",
+    failure: "private provider diagnostic",
+    phase: "output",
+    failureClass: "transport",
+  } satisfies SessionObservation;
+  const repository = { id: "repo-one", owner: "example", name: "repo-one" };
+  const modelRuns = [
+    ...campaignModelRunFromObservation(
+      "assessor",
+      repository,
+      "assessor-invocation",
+      Date.now() - 10,
+      successfulObservation,
+    ),
+    ...campaignModelRunFromObservation(
+      "replacement-planner",
+      repository,
+      "planner-invocation",
+      Date.now() - 20,
+      failedObservation,
+    ),
+  ];
+  const noProviderRun = campaignModelRunFromObservation(
+    "assessor",
+    repository,
+    "startup-failure",
+    Date.now() - 30,
+    {
+      ...failedObservation,
+      usage: null,
+      phase: "startup",
+      failureClass: "configuration",
+    },
+  );
+  expect(noProviderRun).toEqual([]);
+  const failedNormalizer = campaignModelRunFromObservation(
+    "assessor",
+    repository,
+    "failed-normalizer",
+    Date.now() - 40,
+    {
+      ...successfulObservation,
+      status: "failed",
+      failureClass: "network",
+      normalizer: { ...successfulObservation.normalizer, status: "failed" },
+    },
+  );
+  expect(failedNormalizer[1]).toMatchObject({
+    invocationId: "failed-normalizer:role-output-normalizer",
+    status: "failed",
+    failureClass: "network",
+  });
+  expect(modelRuns).toHaveLength(3);
+
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    const insert = database.prepare(
+      `INSERT INTO campaign_model_runs (
+        invocation_id, campaign_id, outcome_id, role, assessment_id, evidence_hash,
+        status, failure_class, started_at_epoch_ms, completed_at_epoch_ms, elapsed_ms,
+        repository_id, repository, profile, configured_provider, configured_model,
+        actual_provider, actual_model, adapter, service_tier, reasoning_effort, usage
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const run of modelRuns)
+      insert.run(
+        run.invocationId,
+        published.campaignId,
+        "outcome-one",
+        run.role,
+        run.role === "replacement-planner" ? "assessment-one" : null,
+        run.role === "replacement-planner" ? "evidence-one" : null,
+        run.status,
+        run.failureClass,
+        run.startedAtEpochMs,
+        run.completedAtEpochMs,
+        run.elapsedMs,
+        run.repositoryId,
+        run.repository,
+        run.profile,
+        run.configuredProvider,
+        run.configuredModel,
+        run.actualProvider,
+        run.actualModel,
+        run.adapter,
+        run.serviceTier,
+        run.reasoningEffort,
+        run.usage === null ? null : JSON.stringify(run.usage),
+      );
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM campaign_model_runs WHERE campaign_id = ?")
+        .get(published.campaignId),
+    ).toEqual({ count: 3 });
+  } finally {
+    database.close();
+  }
+
+  const first = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+    cursor: null,
+    limit: 1,
+  });
+  const second = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+    cursor: first!.nextCursor,
+    limit: 1,
+  });
+  const campaignRuns = first!.runs.filter((run) => run.taskId === null);
+  expect(campaignRuns).toHaveLength(3);
+  expect(campaignRuns.map((run) => run.invocationId)).toEqual([
+    "assessor-invocation",
+    "assessor-invocation:role-output-normalizer",
+    "planner-invocation",
+  ]);
+  expect(campaignRuns[0]).toMatchObject({
+    role: "assessor",
+    configuredModel: "configured-assessor",
+    configuredProvider: "configured-provider",
+    actualModel: "actual-assessor",
+    actualProvider: "attested-provider",
+    profile: "assessor-profile",
+    serviceTier: "priority",
+    reasoningEffort: "high",
+    usage: {
+      inputTokens: 100,
+      cachedInputTokens: 20,
+      uncachedInputTokens: 80,
+      outputTokens: 12,
+    },
+  });
+  expect(campaignRuns[1]).toMatchObject({
+    invocationId: "assessor-invocation:role-output-normalizer",
+    configuredModel: "configured-normalizer",
+    configuredProvider: "normalizer-provider",
+    actualModel: "actual-normalizer",
+    actualProvider: "attested-normalizer-provider",
+    adapter: "role-output-normalizer",
+    usage: { inputTokens: 30, cachedInputTokens: 10, outputTokens: 6 },
+  });
+  expect(campaignRuns[2]).toMatchObject({
+    role: "replacement-planner",
+    outcome: "failed",
+    failureClass: "protocol",
+    usage: { inputTokens: 40, cachedInputTokens: 5, outputTokens: 0 },
+  });
+  expect(second!.runs.every((run) => run.taskId !== null)).toBe(true);
+  const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
+  expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(3);
+  expect(publicReport!.totals.invocations).toBe(first!.totals.invocations);
+  expect(new Set(publicReport!.runs.map((run) => run.invocationId)).size).toBe(
+    publicReport!.runs.length,
+  );
+  expect(publicReport!.totals.usage.coverage).toBe("partial");
+  expect(
+    publicReport!.runs
+      .filter((run) => run.taskId === null)
+      .reduce((total, run) => total + (run.usage.inputTokens ?? 0), 0),
+  ).toBe(170);
+
+  const campaign = await getCampaign(server.url, published.campaignId);
+  const postHog = [
+    ...campaignEvidenceToPostHogEvents(campaign!, first!, "deployment-test"),
+    ...campaignEvidenceToPostHogEvents(campaign!, second!, "deployment-test"),
+  ];
+  const modelEvents = postHog.filter((event) => event.event === "$ai_generation");
+  expect(modelEvents.filter((event) => event.properties.task_id === null)).toHaveLength(3);
+  expect(modelEvents.map((event) => event.properties.invocation_id)).toContain(
+    "assessor-invocation:role-output-normalizer",
+  );
+  expect(
+    modelEvents.find(
+      (event) => event.properties.invocation_id === "assessor-invocation:role-output-normalizer",
+    ),
+  ).toMatchObject({
+    properties: {
+      configured_model: "configured-normalizer",
+      configured_provider: "normalizer-provider",
+      $ai_model: "actual-normalizer",
+      $ai_provider: "attested-normalizer-provider",
+      adapter: "role-output-normalizer",
+    },
+  });
+  expect(JSON.stringify(postHog)).not.toContain("private provider diagnostic");
 });
 
 test.each([
