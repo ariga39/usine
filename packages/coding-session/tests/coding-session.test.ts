@@ -37,6 +37,7 @@ import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
 import { createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { codexAdapterConfig } from "../src/codex-adapter-config.js";
 import { normalizeCodingSessionMcpServer } from "../src/coding-session-policy.js";
+import { composeRoleQualityPrompt } from "../src/role-quality-contract.js";
 import type {
   CodingSessionAdapter,
   CodingSessionAdapterRequest,
@@ -711,7 +712,7 @@ describe("Coding Session", () => {
       prompts.push(prompt);
       if (options) turnOptions.push(options);
       return sdkTurn(
-        prompt === "review"
+        prompt.includes("Caller-owned Task context:\nreview")
           ? JSON.stringify({ sha, verdict: "approved", summary: "sdk-review", findings: [] })
           : JSON.stringify({ status: "proposed", summary: "sdk-implementer" }),
       );
@@ -785,7 +786,14 @@ describe("Coding Session", () => {
         approvalPolicy: "never",
       }),
     ]);
-    expect(prompts).toEqual(["work", "review"]);
+    expect(prompts).toEqual([
+      composeRoleQualityPrompt("implementer", "work"),
+      composeRoleQualityPrompt("reviewer", "review"),
+    ]);
+    expect(prompts[0]).toContain("Active falsifier:");
+    expect(prompts[1]).toContain("An incomplete acceptance checklist is not permission");
+    expect(prompts[0]).not.toContain("Usine role: fresh independent reviewer.");
+    expect(prompts[1]).not.toContain("Usine role: implementer.");
     expect(turnOptions.every((options) => options.outputSchema !== undefined)).toBe(true);
   });
 
@@ -2616,7 +2624,7 @@ describe("Coding Session", () => {
       taskId: "session-test",
       role: "implementer",
       attempt: "1",
-      prompt: "sensitive prompt",
+      prompt: composeRoleQualityPrompt("implementer", "sensitive prompt"),
       rawFinalResponse: JSON.stringify({ status: "proposed", summary: "done" }),
       normalizedOutput: { status: "proposed", summary: "done" },
       usage: { inputTokens: 12, outputTokens: 7 },
@@ -3087,7 +3095,7 @@ describe("Coding Session", () => {
         await readSessionArchive(stateDirectory, observation.archiveId!),
       );
       expect(archive.status).toBe(mode === "cancellation" ? "cancelled" : "failed");
-      expect(archive.prompt).toBe("outcome prompt");
+      expect(archive.prompt).toBe(composeRoleQualityPrompt("reviewer", "outcome prompt"));
       expect(archive.completeness).toBe(mode === "schema-invalid" ? "complete" : "partial");
       if (mode === "schema-invalid") expect(archive.rawFinalResponse).toBe("not an output");
     },

@@ -20,7 +20,7 @@ if (!workspace) throw new Error("Codex workspace is required");
 const activation = Number(basename(workspace).split("-")[0]);
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
-const reviewer = prompt.includes("Role: fresh independent reviewer.");
+const reviewer = prompt.includes("Usine role: fresh independent reviewer.");
 const stateDirectory = reviewer
   ? dirname(dirname(workspace))
   : dirname(dirname(dirname(workspace)));

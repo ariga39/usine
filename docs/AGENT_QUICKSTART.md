@@ -506,7 +506,7 @@ Each case names committed unchanged Task Contract, exact-SHA check evidence for 
 
 ### Session Archive operations
 
-Session Archive content is sensitive: it can contain the strict authorized Task Contract and prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.
+Session Archive content is sensitive: it can contain the strict authorized Task Contract and effective provider-visible prompt, whitelist-only profile evidence, provider tool arguments/output, raw response, and normalized output. Resolved Repository facts and project-check policy are not copied into the role Contract or archive. Normal Task resources, snapshots, logs, history, and `task evidence` expose only bounded archive metadata/reference: an opaque archive ID, capture status, and completeness. Archive content is never returned by the loopback HTTP API; a pruned archive has no retrievable content and is unavailable to `task evidence`.
 
 Use the host-local CLI against the configured state root. Listing and manifest inspection are metadata-only:
 

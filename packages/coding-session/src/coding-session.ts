@@ -46,6 +46,7 @@ import {
   type SessionArchiveOptions,
 } from "./session-archive.js";
 import { recoverReviewerOutput } from "./role-output.js";
+import { composeRoleQualityPrompt } from "./role-quality-contract.js";
 
 type ResolvedCodexProfile = ReturnType<typeof normalizeCodexProfileSelection>;
 
@@ -355,21 +356,25 @@ export class CodexCodingSession {
   private async runProvider<T = unknown>(
     request: SessionRequest<T>,
   ): Promise<SessionObservation<T>> {
+    const roleRequest = {
+      ...request,
+      prompt: composeRoleQualityPrompt(request.role, request.prompt),
+    };
     const archiveDirectory = this.options.sessionArchive?.stateDirectory;
     const archive = archiveDirectory
       ? new SessionArchiveWriter(
           this.options.sessionArchive ?? { stateDirectory: archiveDirectory },
           {
-            taskId: request.contract.id,
-            role: request.role,
-            attempt: request.attempt,
-            contract: request.contract,
-            prompt: request.prompt,
+            taskId: roleRequest.contract.id,
+            role: roleRequest.role,
+            attempt: roleRequest.attempt,
+            contract: roleRequest.contract,
+            prompt: roleRequest.prompt,
           },
         )
       : undefined;
     await archive?.begin();
-    const observation = await this.runProviderCaptured(request, archive);
+    const observation = await this.runProviderCaptured(roleRequest, archive);
     const { sessionId: _sessionId, ...publicObservation } = observation;
     if (!archive)
       return {

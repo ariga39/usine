@@ -160,7 +160,6 @@ export class QualityGate {
       async (path) => {
         const taskContract = originalTaskContract(contract);
         const prompt = [
-          "Role: fresh independent reviewer.",
           "Review only the frozen Task Contract, exact candidate checkout, and project check evidence.",
           "Return an explicit JSON object matching the supplied schema. Approval requires the exact candidate SHA.",
           `Candidate SHA: ${sha}`,
