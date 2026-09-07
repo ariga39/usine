@@ -11,6 +11,7 @@ import {
   campaigns,
   campaignResourceFromContract,
   decodeCampaignDecisionRequest,
+  decodePersistedGoalContract,
   decodeCampaignProposalStatus,
   decodeCampaignStatus,
   goalContractSchema,
@@ -579,7 +580,7 @@ async function reconcile(
   }
   let campaignStatus = campaignState.status;
   let decisionRequest = campaignState.decisionRequest;
-  const contract = goalContractSchema.parse(campaign.contract);
+  const contract = decodePersistedGoalContract(campaign.contract);
   const newerCampaign = await database
     .select({ goalVersion: max(campaigns.goalVersion) })
     .from(campaigns)
@@ -869,7 +870,7 @@ async function admitReadyCampaignTasks(
         continue;
       }
       if (isTerminalCampaignStatus(campaignStatus)) continue;
-      const contract = goalContractSchema.parse(campaignRow.contract);
+      const contract = decodePersistedGoalContract(campaignRow.contract);
       const proposalRows = await handle.database
         .select()
         .from(campaignProposals)
@@ -950,7 +951,7 @@ async function resourceFromDatabase(
     .from(campaignProposals)
     .where(eq(campaignProposals.campaignId, campaignId))
     .orderBy(asc(campaignProposals.sequence));
-  const contract = goalContractSchema.parse(campaign.contract);
+  const contract = decodePersistedGoalContract(campaign.contract);
   const results = await campaignTaskResults(database, rows);
   const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
   return campaignResourceFromContract(
@@ -1108,7 +1109,7 @@ export async function abandonCampaign(
     });
     if (!campaign) throw new CampaignNotFoundError();
     const campaignState = decodeCampaignState(campaign);
-    const contract = goalContractSchema.parse(campaign.contract);
+    const contract = decodePersistedGoalContract(campaign.contract);
     const configured = environment[CAMPAIGN_ABANDONMENT_SOURCE_ENV]?.trim();
     if (!configured || configured !== contract.authority.source)
       throw new CampaignAbandonmentError();

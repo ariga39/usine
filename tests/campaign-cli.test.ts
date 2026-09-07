@@ -30,7 +30,7 @@ const campaign = {
     delivery: true,
     merge: false,
   },
-  budget: { maxElapsedMs: 60_000, maxTasks: 4, maxPlannerActivations: 1 },
+  budget: { maxElapsedMs: 60_000, maxTasks: 4 },
   status: "planning",
   planHandedOff: false,
   decisionRequest: null,

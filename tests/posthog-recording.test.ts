@@ -73,7 +73,6 @@ function campaign(): CampaignResource {
     budget: {
       maxElapsedMs: 10_000,
       maxTasks: 1,
-      maxPlannerActivations: 1,
       maxImplementerActivations: 1,
       maxReviewCycles: 1,
     },
@@ -672,7 +671,6 @@ async function campaignFixture(postHogStatus: number, deliver = false) {
     budget: {
       maxElapsedMs: 60_000,
       maxTasks: 1,
-      maxPlannerActivations: 1,
       maxImplementerActivations: 1,
       maxReviewCycles: 1,
     },

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -30,6 +31,7 @@ import {
 } from "../apps/cli/src/server-client.js";
 import {
   lookupCampaign,
+  parseGoalContract,
   publishCampaign as publishCampaignToState,
 } from "../packages/runtime/src/campaign.js";
 import { lookupCampaignEvidence } from "../packages/runtime/src/campaign-evidence.js";
@@ -66,7 +68,6 @@ function goalContract(objective = "Deliver the authorized campaign") {
     budget: {
       maxElapsedMs: 60_000,
       maxTasks: 4,
-      maxPlannerActivations: 1,
     },
   } as const;
 }
@@ -126,7 +127,6 @@ function frontierGoal(repositoryId: string) {
     budget: {
       maxElapsedMs: 60_000,
       maxTasks: 10,
-      maxPlannerActivations: 1,
       maxImplementerActivations: 1,
       maxReviewCycles: 1,
     },
@@ -334,6 +334,77 @@ async function checkCampaignTask(
 type CampaignExecutionContext = Parameters<
   NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>
 >[0];
+
+test("keeps the current Goal input and Campaign projection free of Planner budget", async () => {
+  const current = goalContract();
+  const legacy = {
+    ...current,
+    budget: { ...current.budget, maxPlannerActivations: 1 },
+  };
+
+  expect(() => parseGoalContract(JSON.stringify(legacy))).toThrow();
+
+  const context = await fixture();
+  const server = await start(context.stateDirectory);
+  try {
+    const campaign = await publishCampaign(server.url, { contractPath: context.contractPath });
+    expect(campaign.budget).toEqual({
+      maxElapsedMs: 60_000,
+      maxTasks: 4,
+      maxImplementerActivations: 0,
+      maxReviewCycles: 0,
+    });
+    expect(Object.hasOwn(campaign.budget, "maxPlannerActivations")).toBe(false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("recovers a persisted legacy Goal publication after server restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "usine-campaign-legacy-goal-"));
+  const stateDirectory = join(root, "state");
+  await mkdir(stateDirectory);
+  const current = goalContract();
+  const initial = await publishCampaignToState(stateDirectory, JSON.stringify(current));
+  const legacy = {
+    ...current,
+    budget: { ...current.budget, maxPlannerActivations: 1 },
+  };
+  const legacyRaw = JSON.stringify(legacy);
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    database
+      .prepare("UPDATE campaigns SET contract = ?, contract_hash = ? WHERE campaign_id = ?")
+      .run(
+        legacyRaw,
+        createHash("sha256").update(legacyRaw, "utf8").digest("hex"),
+        initial.campaignId,
+      );
+  } finally {
+    database.close();
+  }
+
+  await expect(lookupCampaign(stateDirectory, initial.campaignId)).resolves.toMatchObject({
+    campaignId: initial.campaignId,
+    budget: {
+      maxElapsedMs: 60_000,
+      maxTasks: 4,
+      maxImplementerActivations: 0,
+      maxReviewCycles: 0,
+    },
+  });
+
+  const restarted = await start(stateDirectory);
+  await restarted.close();
+  const recovered = await lookupCampaign(stateDirectory, initial.campaignId);
+  expect(recovered?.budget).toEqual({
+    maxElapsedMs: 60_000,
+    maxTasks: 4,
+    maxImplementerActivations: 0,
+    maxReviewCycles: 0,
+  });
+  expect(Object.hasOwn(recovered?.budget ?? {}, "maxPlannerActivations")).toBe(false);
+});
 
 async function rewriteTaskResult(
   stateDirectory: string,
