@@ -1168,7 +1168,13 @@ function supersedableProposalIds(
   return rows
     .filter((row) => {
       if (!canSupersedeProposal(row, results.get(row.proposalId))) return false;
-      return taskProposalSchema.parse(row.proposal).outcomeId === outcomeId;
+      if (taskProposalSchema.parse(row.proposal).outcomeId !== outcomeId) return false;
+      return !rows.some(
+        (successor) =>
+          successor.status !== "superseded" &&
+          successor.proposalId !== row.proposalId &&
+          taskProposalSchema.parse(successor.proposal).dependsOn.includes(row.proposalId),
+      );
     })
     .map((row) => row.proposalId);
 }
@@ -2054,8 +2060,6 @@ async function persistCampaignAssessment(
         .update(campaigns)
         .set({
           assessmentRequested: false,
-          checkpointRequested:
-            assessment.verdict === "gaps" ? target.campaign.checkpointRequested : false,
           updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
         })
         .where(eq(campaigns.campaignId, target.campaign.campaignId));
