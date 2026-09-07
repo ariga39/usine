@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vite-plus/test";
 import {
   ForgeProfileResolutionError,
+  externalReviewPolicyFromEnvironment,
   forgePolicyFromEnvironment,
   forgeReadinessFromEnvironment,
   githubReadPolicyFromEnvironment,
@@ -367,6 +368,33 @@ describe("runtime composition", () => {
       privateKeyPath: "release.pem",
       gitUrl: "https://github.com/owner/repo.git",
     });
+  });
+
+  test("requires explicit external-review merge policy and parses stable identity allowlists", () => {
+    const reviewRepository = { owner: "owner", name: "repo", forgeProfile: "release" };
+    expect(externalReviewPolicyFromEnvironment({}, reviewRepository)).toBeUndefined();
+    expect(
+      externalReviewPolicyFromEnvironment(
+        {
+          USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_REQUIRE_APPROVAL: "true",
+          USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_TRUSTED_USERS: "123, 456",
+          USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_TRUSTED_APPS: "789",
+        },
+        reviewRepository,
+      ),
+    ).toEqual({ requireApproval: true, trustedUsers: [123, 456], trustedApps: [789] });
+    expect(
+      externalReviewPolicyFromEnvironment(
+        { USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_REQUIRE_APPROVAL: "false" },
+        reviewRepository,
+      ),
+    ).toEqual({ requireApproval: false, trustedUsers: [], trustedApps: [] });
+    expect(() =>
+      externalReviewPolicyFromEnvironment(
+        { USINE_FORGE_PROFILE_RELEASE_EXTERNAL_REVIEW_TRUSTED_USERS: "trusted-name" },
+        reviewRepository,
+      ),
+    ).toThrow("explicitly true or false");
   });
 
   test("returns bounded readiness failures for missing host identity, installation, and binding", async () => {

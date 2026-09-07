@@ -149,6 +149,7 @@ export {
   runtimePolicyFromEnvironment,
   forgePolicyFromEnvironment,
   forgeReadinessFromEnvironment,
+  externalReviewPolicyFromEnvironment,
   githubReadPolicyFromEnvironment,
   ForgeProfileResolutionError,
   type ForgeProfileErrorCode,
@@ -813,6 +814,7 @@ async function executeWithServices(options: {
     repository,
     deadlineEpochMs,
     forge: forgePolicy,
+    externalReview: policy.externalReview,
     environment: policy.credentialFreeGitEnvironment,
     signal: options.signal,
   });

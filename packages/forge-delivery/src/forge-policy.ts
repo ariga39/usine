@@ -48,6 +48,15 @@ export type ForgePolicy =
       gitUrl: string;
     });
 
+export interface ExternalReviewPolicy {
+  /** When true, an authorized merge waits for a trusted current-head approval. */
+  readonly requireApproval: boolean;
+  /** Stable GitHub user IDs. Login names are display-only and never authorize a merge. */
+  readonly trustedUsers: readonly number[];
+  /** Stable GitHub App IDs with verified GitHub App attribution. */
+  readonly trustedApps: readonly number[];
+}
+
 export function forgeGitEnvironment(
   environment: NodeJS.ProcessEnv,
   token: string,
@@ -72,6 +81,8 @@ export interface ForgeDeliveryOptions {
   repository: string;
   deadlineEpochMs: number;
   forge: ForgePolicy;
+  /** Optional host-configured external gate; omission preserves current merge behavior. */
+  externalReview?: ExternalReviewPolicy;
   environment: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
