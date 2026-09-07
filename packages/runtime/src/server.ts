@@ -613,9 +613,9 @@ function createApiLayer(options: {
         }),
       retry: ({ params }) =>
         apiEffect(async () => {
-          const execution = await lookupTaskExecution(stateDirectory, params.taskId);
-          if (!execution) throw new ServerNotFoundError("task not found");
-          const contract = parseTaskContract(execution.input.rawContract);
+          const input = await lookupTaskExecution(stateDirectory, params.taskId);
+          if (!input) throw new ServerNotFoundError("task not found");
+          const contract = parseTaskContract(input.rawContract);
           const result = await retryTask(
             stateDirectory,
             params.taskId,
@@ -623,7 +623,7 @@ function createApiLayer(options: {
             options.onEvent,
           );
           if (!isTerminalState(result.state) && result.state !== "waiting")
-            options.launch({ input: execution.input, contract, result }, "replace");
+            options.launch({ input, contract, result }, "replace");
           return taskResourceForApi(result);
         }),
     }),

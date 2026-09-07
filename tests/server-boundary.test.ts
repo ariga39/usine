@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { chmod, mkdir, mkdtemp, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,8 +201,9 @@ process.exit(result.status ?? 1);
       expect(launched).toEqual([
         { rawContract: committedRawContract, instructions: committedContract.instructions },
       ]);
-      await expect(lookupTaskExecution(stateDirectory, taskId)).resolves.toMatchObject({
-        input: { contractPath, rawContract: committedRawContract },
+      await expect(lookupTaskExecution(stateDirectory, taskId)).resolves.toEqual({
+        contractPath,
+        rawContract: committedRawContract,
       });
       await expect(
         submitTask(server.url, { contractPath, repositoryId: taskId }),
@@ -243,6 +245,72 @@ process.exit(result.status ?? 1);
       await server.close().catch(() => undefined);
     }
   }, 30_000);
+
+  test("keeps retry preflight input-only while retaining durable result validation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-server-retry-preflight-"));
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory);
+    const databasePath = join(stateDirectory, "usine.sqlite");
+    await applyMigrations(databasePath);
+    const handle = openSqliteDatabase(databasePath);
+    const authority = new TaskAuthority(handle.database);
+    const taskId = "retry-preflight-input-only";
+    const contract: TaskContract = {
+      id: taskId,
+      repositoryId: taskId,
+      baseSha: "a".repeat(40),
+      instructions: "Exercise retry preflight.",
+      acceptance: ["Retry receives only committed execution input."],
+      nonGoals: [],
+      budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 30_000 },
+      authorization: {
+        source: "https://github.com/example/retry-preflight/issues/360",
+        delivery: true,
+      },
+      delivery: {
+        branch: "agent/retry-preflight-input-only",
+        issue: 360,
+        title: "Retry preflight input",
+        body: "Retry preflight input",
+      },
+    };
+    const rawContract = JSON.stringify(contract);
+    await authority.admit(
+      {
+        contract,
+        contractHash: hashTaskContract(rawContract),
+        repositoryIdentity: "example/retry-preflight-input-only",
+        deadlineEpochMs: Date.now() + 30_000,
+      },
+      { contractPath: "task.json", rawContract },
+    );
+    handle.close();
+
+    await expect(lookupTaskExecution(stateDirectory, taskId)).resolves.toEqual({
+      contractPath: "task.json",
+      rawContract,
+    });
+
+    const missingInputTaskId = "retry-preflight-missing-input";
+    const missingHandle = openSqliteDatabase(databasePath);
+    await new TaskAuthority(missingHandle.database).admit({
+      contract: { ...contract, id: missingInputTaskId },
+      contractHash: hashTaskContract(rawContract),
+      repositoryIdentity: "example/retry-preflight-missing-input",
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    missingHandle.close();
+    await expect(lookupTaskExecution(stateDirectory, missingInputTaskId)).resolves.toBeNull();
+
+    const inspection = new DatabaseSync(databasePath);
+    inspection
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run("{ invalid", taskId);
+    inspection.close();
+    await expect(lookupTaskExecution(stateDirectory, taskId)).rejects.toMatchObject({
+      code: "task_state_quarantined",
+    });
+  });
 
   test("bounds Task Contract ingestion before admission and accepts the exact bound", async () => {
     const maxContractBytes = MAX_TASK_CONTRACT_BYTES;
