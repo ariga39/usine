@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, test } from "vite-plus/test";
-import { registerRepositoryResource, startUsineServer } from "@usine/runtime";
+import {
+  registerRepositoryResource,
+  startUsineServer,
+  type CampaignOutcomeAssessor,
+} from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { executeDeliveryRun, type DeliveryRunServices } from "@usine/delivery-run";
 import {
@@ -173,12 +177,35 @@ function oneOutcomeFrontierGoal(repositoryId: string) {
   };
 }
 
+const satisfiesDeliveredOutcome: CampaignOutcomeAssessor = async (request) => {
+  const delivery = request.evidence.find((item) => item.fact === "delivery");
+  if (!delivery)
+    return {
+      verdict: "inconclusive",
+      summary: "the bounded evidence has no accepted delivery",
+      gaps: [],
+      evidence: [],
+      usage: null,
+    };
+  return {
+    verdict: "satisfied",
+    summary: "every acceptance condition is covered by the accepted delivery evidence",
+    gaps: [],
+    evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+      ...delivery,
+      criterionIndex,
+    })),
+    usage: null,
+  };
+};
+
 async function frontierFixture(
   contract: unknown = frontierGoal("campaign-repository"),
   publicationSource: string | null = "user:campaign-366",
   execute?: Parameters<typeof startUsineServer>[0]["execute"],
   activeTaskCapacity = 1,
   register = true,
+  assessOutcome?: CampaignOutcomeAssessor,
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-frontier-"));
   const stateDirectory = join(root, "state");
@@ -200,6 +227,7 @@ async function frontierFixture(
   const server = await startUsineServer({
     environment,
     execute,
+    assessOutcome,
     host: "127.0.0.1",
     port: 0,
   });
@@ -2189,6 +2217,9 @@ describe("durable Ready frontier", () => {
         }
         return acceptCampaignTask(context);
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     const { contractPath, server, stateDirectory } = fixtureValue;
     try {
@@ -2361,6 +2392,9 @@ describe("durable Ready frontier", () => {
         );
         return waiting;
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     const { contractPath, environment, server } = fixtureValue;
     try {
@@ -2547,6 +2581,9 @@ describe("durable Ready frontier", () => {
         executions += 1;
         return acceptCampaignTask(context, true);
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     const { contractPath, server, environment } = fixtureValue;
     try {
@@ -2602,9 +2639,108 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test.each(["satisfied", "gaps", "inconclusive"] as const)(
+    "persists the owning Campaign assessor %s verdict and does not use Task completion as acceptance",
+    async (verdict) => {
+      let calls = 0;
+      let assessmentRequest: Parameters<CampaignOutcomeAssessor>[0] | undefined;
+      const assessor: CampaignOutcomeAssessor = async (request) => {
+        calls += 1;
+        assessmentRequest = request;
+        const delivery = request.evidence.find((item) => item.fact === "delivery");
+        return {
+          verdict,
+          summary: `fixture ${verdict}`,
+          gaps: verdict === "gaps" ? ["the direction is incomplete"] : [],
+          evidence: verdict === "satisfied" && delivery ? [{ ...delivery, criterionIndex: 0 }] : [],
+          usage: {
+            inputTokens: 11,
+            cachedInputTokens: 2,
+            uncachedInputTokens: 9,
+            cacheWriteInputTokens: 0,
+            outputTokens: 7,
+            reasoningOutputTokens: 3,
+          },
+        };
+      };
+      const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+        oneOutcomeFrontierGoal("campaign-repository"),
+        "user:campaign-366",
+        async (context) => acceptCampaignTask(context),
+        1,
+        true,
+        assessor,
+      );
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("assessed", "outcome-one"),
+        );
+        await handoffCampaign(server.url, published.campaignId);
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const current = await getCampaign(server.url, published.campaignId);
+          if (current?.status === "accepted" || current?.status === "blocked") break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        const campaign = await getCampaign(server.url, published.campaignId);
+        expect(calls).toBe(1);
+        expect(assessmentRequest).toMatchObject({
+          goal: { id: "campaign-366", version: 1 },
+          outcome: { id: "outcome-one" },
+        });
+        expect(assessmentRequest).not.toHaveProperty("contract");
+        expect(campaign?.outcomes[0]?.assessment).toMatchObject({
+          verdict,
+          usage: { inputTokens: 11, outputTokens: 7 },
+        });
+        expect(campaign?.status).toBe(verdict === "satisfied" ? "accepted" : "blocked");
+        if (verdict !== "satisfied")
+          expect(campaign?.decisionRequest?.reason).toBe(
+            verdict === "gaps" ? "assessment_gaps" : "assessment_inconclusive",
+          );
+
+        const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          const count = database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_assessments")
+            .get() as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          database.close();
+        }
+        if (verdict === "satisfied") {
+          await server.close();
+          const restarted = await startUsineServer({
+            environment,
+            assessOutcome: async () => {
+              calls += 1;
+              throw new Error("an accepted assessment must not repeat");
+            },
+            host: "127.0.0.1",
+            port: 0,
+          });
+          await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+            status: "accepted",
+          });
+          await restarted.close();
+          expect(calls).toBe(1);
+        }
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
   test("exhausted fixed plans persist one stable decision request without closing", async () => {
-    const fixtureValue = await frontierFixture(undefined, "user:campaign-366", async (context) =>
-      acceptCampaignTask(context),
+    const fixtureValue = await frontierFixture(
+      undefined,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     const { contractPath, server, environment } = fixtureValue;
     try {
@@ -2626,7 +2762,7 @@ describe("durable Ready frontier", () => {
       }
       expect(firstRequest).toMatchObject({
         requestId: `decision:${published.campaignId}`,
-        reason: "plan_exhausted",
+        reason: "assessment_inconclusive",
         outcomeIds: ["outcome-two"],
       });
       await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
@@ -2679,7 +2815,7 @@ describe("durable Ready frontier", () => {
         planHandedOff: true,
         decisionRequest: {
           requestId: `decision:${published.campaignId}`,
-          reason: "plan_exhausted",
+          reason: "assessment_inconclusive",
           outcomeIds: ["outcome-one", "outcome-two"],
         },
       });
@@ -2707,6 +2843,9 @@ describe("durable Ready frontier", () => {
           );
         return acceptCampaignTask(context, true);
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     try {
       const published = await publishCampaign(server.url, { contractPath });
@@ -2729,7 +2868,7 @@ describe("durable Ready frontier", () => {
       await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
         status: "blocked",
         decisionRequest: {
-          reason: "branches_blocked",
+          reason: "assessment_inconclusive",
           outcomeIds: ["outcome-one"],
         },
         outcomes: [
@@ -2755,6 +2894,9 @@ describe("durable Ready frontier", () => {
           );
         return acceptCampaignTask(context, true);
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     try {
       const published = await publishCampaign(server.url, { contractPath });
@@ -2777,10 +2919,10 @@ describe("durable Ready frontier", () => {
       await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
         status: "blocked",
         outcomes: [
-          { id: "outcome-one", status: "planned", evidence: null },
+          { id: "outcome-one", status: "accepted", evidence: { outcomeId: "outcome-one" } },
           { id: "outcome-two", status: "planned", evidence: null },
         ],
-        decisionRequest: { reason: "branches_blocked", outcomeIds: ["outcome-one", "outcome-two"] },
+        decisionRequest: { reason: "assessment_inconclusive", outcomeIds: ["outcome-two"] },
       });
     } finally {
       await server.close();
@@ -2846,6 +2988,9 @@ describe("durable Ready frontier", () => {
           },
         );
       },
+      1,
+      true,
+      satisfiesDeliveredOutcome,
     );
     try {
       const published = await publishCampaign(server.url, { contractPath });
@@ -2875,7 +3020,7 @@ describe("durable Ready frontier", () => {
           },
           { id: "outcome-two", status: "planned", evidence: null },
         ],
-        decisionRequest: { reason: "plan_exhausted" },
+        decisionRequest: { reason: "assessment_inconclusive", outcomeIds: ["outcome-two"] },
       });
     } finally {
       await server.close();
