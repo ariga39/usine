@@ -145,13 +145,21 @@ function providerStatusOf(error: unknown): number | undefined {
 export async function createGithubApiClient(
   policy: GithubApiPolicy,
   fetchImplementation?: typeof fetch,
+  requestOptions?: { timeout: number; retries: number; signal?: AbortSignal },
 ): Promise<ForgeClient> {
+  const requestDefaults =
+    requestOptions === undefined && fetchImplementation === undefined
+      ? undefined
+      : {
+          ...requestOptions,
+          ...(fetchImplementation === undefined ? undefined : { fetch: fetchImplementation }),
+        };
   if (policy.mode === "test") {
     return {
       octokit: new Octokit({
         auth: policy.token,
         baseUrl: policy.apiUrl,
-        request: fetchImplementation ? { fetch: fetchImplementation } : undefined,
+        request: requestDefaults,
       }),
       token: policy.token,
       appSlug: policy.appSlug,
@@ -161,7 +169,7 @@ export async function createGithubApiClient(
         const appClient = new Octokit({
           auth: policy.appToken ?? policy.token,
           baseUrl: policy.apiUrl,
-          request: fetchImplementation ? { fetch: fetchImplementation } : undefined,
+          request: requestDefaults,
         });
         const response = await appClient.request("GET /app", {
           request,
@@ -171,9 +179,12 @@ export async function createGithubApiClient(
     };
   }
   try {
+    const AppOctokit =
+      requestOptions === undefined ? Octokit : Octokit.defaults({ request: requestOptions });
     const app = new App({
       appId: policy.appId,
       privateKey: await readFile(policy.privateKeyPath, "utf8"),
+      Octokit: AppOctokit,
     });
     const octokit = await app.getInstallationOctokit(policy.installationId);
     const auth = installationAuthenticationFrom(await octokit.auth({ type: "installation" }));
@@ -209,7 +220,11 @@ export async function checkForgeReadiness(
   const deadlineEpochMs = options.deadlineEpochMs ?? Date.now() + 30_000;
   let client: ForgeClient;
   try {
-    client = await createGithubApiClient(options.forge, options.fetch);
+    client = await createGithubApiClient(
+      options.forge,
+      options.fetch,
+      requestOptions(deadlineEpochMs, options.signal),
+    );
   } catch (error) {
     const status = providerStatusOf(error);
     if (status === 404)

@@ -152,7 +152,6 @@ export {
   githubReadPolicyFromEnvironment,
   ForgeProfileResolutionError,
   type ForgeProfileErrorCode,
-  type ForgeProfileField,
   stateDirectoryFromEnvironment,
   sessionArchiveOptionsFromEnvironment,
   type RuntimePolicy,

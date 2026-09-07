@@ -11,8 +11,6 @@ export {
   createGithubApiClient,
   type GithubApiPolicy,
   type ForgeReadinessOptions,
-  type ForgeAppIdentity,
-  type ForgeReadinessPermission,
   type ForgeReadinessResult,
   type ForgeDeliveryOptions,
   type ForgePolicy,
