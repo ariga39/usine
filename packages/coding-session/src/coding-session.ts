@@ -182,6 +182,7 @@ export interface CampaignReplacementPlannerSessionContext {
     readonly effects: readonly string[];
     readonly merge: boolean;
   }[];
+  readonly supersedableProposalIds: readonly string[];
   readonly repositories: readonly {
     readonly id: string;
     readonly owner: string;

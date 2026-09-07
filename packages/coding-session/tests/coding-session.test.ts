@@ -20,6 +20,7 @@ import {
   codingSessionAdapterProfilesFromEnvironment,
   type CodingSessionMcpServer,
   type CodingSessionObservation,
+  type CampaignReplacementPlannerSessionRequest,
   createOpenAICompatibleRoleOutputTransform,
   explicitWorkerEnvironment,
   implementerOutputSchema,
@@ -3055,6 +3056,93 @@ describe("Coding Session", () => {
       expect(JSON.stringify(archive)).not.toContain("mcpToolCall");
     }
     expect(archiveAdapters).toEqual(new Set(["sdk", "app-server", "opencode2"]));
+  });
+
+  test("archives checkpoint replacement source IDs in the provider-neutral planner context", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-replacement-context-"));
+    const request: CampaignReplacementPlannerSessionRequest<null> = {
+      role: "replacement-planner",
+      attempt: "replacement-attempt",
+      workspace: ".",
+      prompt: "replacement prompt",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: z.null(),
+      replacement: {
+        invocationId: "replacement-invocation",
+        campaignId: "campaign-test",
+        goalId: "goal-test",
+        goalVersion: 1,
+        goal: {
+          id: "goal-test",
+          version: 1,
+          objective: "Preserve the authorized campaign boundary",
+          authority: {
+            source: "user:test",
+            publish: true,
+            delivery: true,
+            merge: false,
+            repositories: ["repository-test"],
+            effects: ["github"],
+          },
+          budget: {
+            maxElapsedMs: 10_000,
+            maxTasks: 2,
+            maxImplementerActivations: 1,
+            maxReviewCycles: 1,
+          },
+        },
+        outcome: {
+          id: "outcome-test",
+          title: "Preserve the campaign outcome",
+          acceptance: ["The replacement remains bounded."],
+        },
+        assessment: {
+          assessmentId: "assessment-test",
+          evidenceHash: "evidence-hash",
+          verdict: "gaps",
+          summary: "the direction needs correction",
+          gaps: ["one bounded gap"],
+          evidence: [],
+        },
+        evidence: [],
+        priorProposals: [],
+        supersedableProposalIds: ["proposal-unowned"],
+        repositories: [],
+        remainingBudget: {
+          tasks: 1,
+          implementerActivations: 1,
+          reviewCycles: 1,
+          elapsedMs: 5_000,
+        },
+      },
+    };
+    const session = createCodexCodingSessionForTesting(
+      undefined,
+      {
+        environment: { CI: "true" },
+        sessionArchive: { stateDirectory },
+        profileResolver: syntheticProfileResolver,
+      },
+      {
+        sdk: {
+          name: "sdk",
+          run: async () => ({ finalResponse: "null", usage: null, sessionId: "session-test" }),
+        },
+      },
+    );
+
+    const observation = await session.run(request);
+    expect(observation).toMatchObject({ status: "completed", output: null });
+    const archive = completeArchive(
+      await readSessionArchive(stateDirectory, observation.archiveId!),
+    );
+    expect(archive.contract).toMatchObject({
+      invocationId: "replacement-invocation",
+      supersedableProposalIds: ["proposal-unowned"],
+    });
+    expect(JSON.stringify(archive.contract)).not.toContain("provider");
   });
 
   test.each(["provider failure", "cancellation", "schema-invalid"] as const)(

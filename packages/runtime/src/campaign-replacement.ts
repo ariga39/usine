@@ -159,6 +159,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           effects: proposal.effects,
           merge: proposal.merge,
         })),
+        supersedableProposalIds: request.supersedableProposalIds,
         repositories: request.repositories.map(
           ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
         ),

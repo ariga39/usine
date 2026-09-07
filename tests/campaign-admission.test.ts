@@ -211,6 +211,28 @@ const checkpointOwnedGapAssessor: CampaignOutcomeAssessor = async () => ({
   usage: null,
 });
 
+const checkpointUnauthorizedSourceAssessor: CampaignOutcomeAssessor = async (request) => {
+  const delivery = request.evidence.find((item) => item.fact === "delivery");
+  return delivery
+    ? {
+        verdict: "satisfied" as const,
+        summary: "the independent delivery satisfies the Outcome",
+        gaps: [],
+        evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+          ...delivery,
+          criterionIndex,
+        })),
+        usage: null,
+      }
+    : {
+        verdict: "gaps" as const,
+        summary: "the checkpoint source points in the wrong direction",
+        gaps: ["the source needs one focused correction"],
+        evidence: [],
+        usage: null,
+      };
+};
+
 async function frontierFixture(
   contract: unknown = frontierGoal("campaign-repository"),
   publicationSource: string | null = "user:campaign-366",
@@ -3016,7 +3038,7 @@ describe("durable Ready frontier", () => {
         usage: null,
       };
     };
-    const { contractPath, server, stateDirectory } = await frontierFixture(
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
       checkpointGoal,
       "user:campaign-366",
       async (context) => {
@@ -3088,6 +3110,169 @@ describe("durable Ready frontier", () => {
         database.close();
       }
       expect(assessmentCalls).toBeGreaterThanOrEqual(1);
+
+      releaseIndependent();
+      let settled = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (settled?.status === "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled = await getCampaign(server.url, published.campaignId);
+      }
+      expect(settled).toMatchObject({ status: "accepted" });
+      const assessmentCallsAfterSettle = assessmentCalls;
+      const replacementCallsAfterSettle = replacementCalls;
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        execute: async (context) => {
+          throw new Error(`unexpected post-restart Campaign execution: ${context.result.taskId}`);
+        },
+        assessOutcome: assessor,
+        generateReplacement: replacementGenerator,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        if (!settled) throw new Error("Campaign disappeared before restart");
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          settled,
+        );
+        const restartedCampaign = await getCampaign(restarted.url, published.campaignId);
+        expect(restartedCampaign?.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+          initial.proposalId,
+          independent.proposalId,
+          replacement.proposalId,
+        ]);
+        expect(assessmentCalls).toBe(assessmentCallsAfterSettle);
+        expect(replacementCalls).toBe(replacementCallsAfterSettle);
+        const restartedDatabase = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            restartedDatabase
+              .prepare(
+                "SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ? AND superseded_by_proposal_id IS NOT NULL",
+              )
+              .get(published.campaignId),
+          ).toEqual({ count: 1 });
+          expect(
+            restartedDatabase
+              .prepare(
+                "SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ? AND supersedes_proposal_id IS NOT NULL",
+              )
+              .get(published.campaignId),
+          ).toEqual({ count: 1 });
+        } finally {
+          restartedDatabase.close();
+        }
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      releaseIndependent();
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("rejects a checkpoint replacement that selects an unauthorized source ID", async () => {
+    const initial = frontierProposal("checkpoint-source", "outcome-one", ["not-admitted"]);
+    const independent = frontierProposal("checkpoint-independent", "outcome-two");
+    let replacementCalls = 0;
+    let releaseIndependent!: () => void;
+    const independentGate = new Promise<void>((resolve) => {
+      releaseIndependent = resolve;
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      return {
+        proposal: {
+          ...frontierProposal("unauthorized-replacement", "outcome-one"),
+          supersedesProposalId: "missing-checkpoint-source",
+        },
+        usage: null,
+      };
+    };
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => {
+        if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
+        return acceptCampaignTask(context);
+      },
+      1,
+      true,
+      checkpointUnauthorizedSourceAssessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initial);
+      await proposeCampaign(server.url, published.campaignId, independent);
+      await handoffCampaign(server.url, published.campaignId);
+      let handedOff = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (handedOff?.planHandedOff && handedOff.status !== "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        handedOff = await getCampaign(server.url, published.campaignId);
+      }
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(checkpointed.planHandedOff).toBe(true);
+      releaseIndependent();
+
+      let rejected = checkpointed;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (rejected.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        rejected = (await getCampaign(server.url, published.campaignId)) ?? rejected;
+      }
+      expect(rejected).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_invalid",
+          outcomeIds: ["outcome-one"],
+        },
+        proposals: [
+          { proposalId: initial.proposalId, status: "planned" },
+          { proposalId: independent.proposalId },
+        ],
+      });
+      expect(replacementCalls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, superseded_by_proposal_id, supersedes_proposal_id, replacement_assessment_id, replacement_evidence_hash FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, initial.proposalId),
+        ).toEqual({
+          status: "planned",
+          superseded_by_proposal_id: null,
+          supersedes_proposal_id: null,
+          replacement_assessment_id: null,
+          replacement_evidence_hash: null,
+        });
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 2 });
+        expect(
+          database
+            .prepare(
+              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one"),
+        ).toMatchObject({ status: "invalid", proposal: null });
+      } finally {
+        database.close();
+      }
     } finally {
       releaseIndependent();
       await server.close();
