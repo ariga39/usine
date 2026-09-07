@@ -177,9 +177,11 @@ export interface CampaignEvidenceProposal {
   readonly proposalId: string;
   readonly sequence: number;
   readonly outcomeId: string;
-  readonly status: "planned" | "ready" | "blocked";
+  readonly status: "planned" | "ready" | "blocked" | "superseded";
   readonly blocker: string | null;
   readonly taskId: string | null;
+  readonly supersededByProposalId?: string;
+  readonly supersedesProposalId?: string;
   readonly admittedAtEpochMs: number;
   readonly replacement?: {
     readonly assessmentId: string;

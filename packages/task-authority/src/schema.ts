@@ -49,6 +49,8 @@ export const campaignProposals = sqliteTable(
     proposal: text("proposal", { mode: "json" }).notNull(),
     status: text("status").notNull(),
     blocker: text("blocker"),
+    supersededByProposalId: text("superseded_by_proposal_id"),
+    supersedesProposalId: text("supersedes_proposal_id"),
     readyBaseSha: text("ready_base_sha"),
     readyRepositoryRevision: integer("ready_repository_revision"),
     taskId: text("task_id"),
@@ -125,6 +127,9 @@ export const campaigns = sqliteTable(
     superseded: integer("superseded", { mode: "boolean" }).notNull().default(false),
     planHandedOff: integer("plan_handed_off", { mode: "boolean" }).notNull().default(false),
     assessmentRequested: integer("assessment_requested", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    checkpointRequested: integer("checkpoint_requested", { mode: "boolean" })
       .notNull()
       .default(false),
     decisionRequest: text("decision_request", { mode: "json" }),

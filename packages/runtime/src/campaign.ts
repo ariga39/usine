@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { execa } from "execa";
-import { Schema } from "effect";
+import { Predicate, Schema } from "effect";
 import { and, asc, eq, gt, max, sql } from "drizzle-orm";
 import {
   applyMigrations,
@@ -279,6 +279,8 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
     sequence: row.sequence,
     status: decodeCampaignProposalStatus(row.status),
     blocker: row.blocker,
+    ...(row.supersededByProposalId ? { supersededByProposalId: row.supersededByProposalId } : {}),
+    ...(row.supersedesProposalId ? { supersedesProposalId: row.supersedesProposalId } : {}),
     ...(replacement ? { replacement } : {}),
     ready:
       row.readyBaseSha === null || row.readyRepositoryRevision === null
@@ -482,7 +484,8 @@ async function dependencyResolution(
   const proposalDependencyIds = new Set<string>();
   for (const dependency of proposal.dependsOn) {
     const row = rows.find((candidate) => candidate.proposalId === dependency);
-    if (!row) return { blocker: "proposal dependency is not admitted", baseSha: null };
+    if (!row || row.status === "superseded")
+      return { blocker: "proposal dependency is not admitted", baseSha: null };
     dependencies.set(row.proposalId, row);
     proposalDependencyIds.add(row.proposalId);
   }
@@ -492,7 +495,10 @@ async function dependencyResolution(
     outcomeDependencyIds.add(dependency);
     let found = false;
     for (const row of rows) {
-      if (taskProposalSchema.parse(row.proposal).outcomeId === dependency) {
+      if (
+        row.status !== "superseded" &&
+        taskProposalSchema.parse(row.proposal).outcomeId === dependency
+      ) {
         dependencies.set(row.proposalId, row);
         found = true;
       }
@@ -644,6 +650,7 @@ async function reconcile(
   const repositoriesById = new Map(repositoryRows.map((repository) => [repository.id, repository]));
   let changed = false;
   for (const row of rows) {
+    if (row.status === "superseded") continue;
     const proposal = taskProposalSchema.parse(row.proposal);
     const blocker = blockerFor(
       row,
@@ -753,6 +760,21 @@ async function reconcile(
         assessment?.verdict === "gaps" &&
         !replacementRuns.some((run) => run.outcomeId === outcome.id),
     );
+    const checkpointGap =
+      currentAssessments.find(
+        ({ assessment, current, outcome }) =>
+          campaign.checkpointRequested &&
+          current &&
+          assessment?.verdict === "gaps" &&
+          supersedableProposalIds(rows, results, outcome.id).length > 0,
+      ) ??
+      currentAssessments.find(
+        ({ assessment, current }) =>
+          campaign.checkpointRequested && current && assessment?.verdict === "gaps",
+      );
+    const checkpointHasSafeSource = checkpointGap
+      ? supersedableProposalIds(rows, results, checkpointGap.outcome.id).length > 0
+      : false;
     const replacementFailure = currentAssessments
       .filter(({ current, assessment }) => current && assessment)
       .map(({ outcome }) => replacementRuns.find((run) => run.outcomeId === outcome.id))
@@ -781,22 +803,24 @@ async function reconcile(
         requestId: `decision:${campaign.campaignId}`,
         reason: authorityBlocked
           ? "branches_blocked"
-          : unattemptedGaps
-            ? "assessment_gaps"
-            : replacementFailure?.status === "invalid"
-              ? "replacement_invalid"
-              : replacementFailure?.status === "duplicate"
-                ? "replacement_duplicate"
-                : replacementFailure?.status === "budget_exhausted"
-                  ? "replacement_budget_exhausted"
-                  : replacementFailure?.status === "unavailable"
-                    ? "replacement_unavailable"
-                    : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
-                        assessmentFailure.assessment?.verdict === "gaps"
-                      ? "replacement_exhausted"
-                      : assessmentFailure.assessment?.verdict === "gaps"
-                        ? "assessment_gaps"
-                        : "assessment_inconclusive",
+          : checkpointGap && !checkpointHasSafeSource
+            ? "replacement_exhausted"
+            : unattemptedGaps
+              ? "assessment_gaps"
+              : replacementFailure?.status === "invalid"
+                ? "replacement_invalid"
+                : replacementFailure?.status === "duplicate"
+                  ? "replacement_duplicate"
+                  : replacementFailure?.status === "budget_exhausted"
+                    ? "replacement_budget_exhausted"
+                    : replacementFailure?.status === "unavailable"
+                      ? "replacement_unavailable"
+                      : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
+                          assessmentFailure.assessment?.verdict === "gaps"
+                        ? "replacement_exhausted"
+                        : assessmentFailure.assessment?.verdict === "gaps"
+                          ? "assessment_gaps"
+                          : "assessment_inconclusive",
         outcomeIds: liveOutcomes
           .filter((outcome) => {
             const item = currentAssessments.find(
@@ -825,6 +849,16 @@ async function reconcile(
     await database
       .update(campaigns)
       .set({ status: campaignStatus, decisionRequest, updatedAt })
+      .where(eq(campaigns.campaignId, campaignId));
+    changed = true;
+  }
+  if (
+    campaign.checkpointRequested &&
+    ((campaignStatus === "blocked" && decisionRequest !== null) || campaignStatus === "accepted")
+  ) {
+    await database
+      .update(campaigns)
+      .set({ checkpointRequested: false, updatedAt: nextCampaignUpdatedAt(campaign.updatedAt) })
       .where(eq(campaigns.campaignId, campaignId));
     changed = true;
   }
@@ -913,6 +947,7 @@ function campaignAssessmentEvidence(
 ): CampaignAssessmentFact[] {
   const evidence: CampaignAssessmentFact[] = [];
   for (const row of rows) {
+    if (row.status === "superseded") continue;
     const proposal = taskProposalSchema.parse(row.proposal);
     if (proposal.outcomeId !== outcomeId) continue;
     const result = results.get(row.proposalId);
@@ -1017,6 +1052,7 @@ function campaignOutcomeEvidence(
   const evidence = new Map<string, CampaignOutcomeEvidence>();
   const proposalsByOutcome = new Map<string, Array<(typeof rows)[number]>>();
   for (const row of rows) {
+    if (row.status === "superseded") continue;
     const proposal = taskProposalSchema.parse(row.proposal);
     const outcomeRows = proposalsByOutcome.get(proposal.outcomeId) ?? [];
     outcomeRows.push(row);
@@ -1059,6 +1095,7 @@ function hasUsefulCampaignWork(
   results: ReadonlyMap<string, TaskResult>,
 ): boolean {
   for (const row of rows) {
+    if (row.status === "superseded") continue;
     const result = results.get(row.proposalId);
     if (result) {
       if (!isTerminalState(result.state)) return true;
@@ -1084,11 +1121,14 @@ interface ReplacementTarget {
   readonly assessment: CampaignAssessment;
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly priorProposals: readonly TaskProposal[];
+  readonly supersededProposalIds: readonly string[];
   readonly repositories: CampaignReplacementRequest["repositories"];
   readonly remainingBudget: CampaignReplacementRequest["remainingBudget"];
   readonly evidenceHash: string;
   readonly invocationId: string;
   readonly deadlineEpochMs: number;
+  /** A checkpoint may revise one proposal from this still-unowned set. */
+  readonly supersedableProposalIds: readonly string[];
 }
 
 function replacementRunKey(campaignId: string, outcomeId: string): string {
@@ -1101,6 +1141,42 @@ function replacementCampaignEligible(campaignState: DecodedCampaignState): boole
     (campaignState.status === "blocked" &&
       campaignState.decisionRequest?.reason === "assessment_gaps")
   );
+}
+
+function canSupersedeProposal(
+  row: typeof campaignProposals.$inferSelect,
+  result: TaskResult | undefined,
+): boolean {
+  return (
+    (row.status === "planned" || row.status === "blocked") &&
+    row.readyBaseSha === null &&
+    row.readyRepositoryRevision === null &&
+    row.taskId === null &&
+    result === undefined &&
+    row.replacementAssessmentId === null &&
+    row.replacementEvidenceHash === null &&
+    row.supersededByProposalId === null &&
+    row.supersedesProposalId === null
+  );
+}
+
+function supersedableProposalIds(
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+  results: ReadonlyMap<string, TaskResult>,
+  outcomeId: string,
+): readonly string[] {
+  return rows
+    .filter((row) => {
+      if (!canSupersedeProposal(row, results.get(row.proposalId))) return false;
+      if (taskProposalSchema.parse(row.proposal).outcomeId !== outcomeId) return false;
+      return !rows.some(
+        (successor) =>
+          successor.status !== "superseded" &&
+          successor.proposalId !== row.proposalId &&
+          taskProposalSchema.parse(successor.proposal).dependsOn.includes(row.proposalId),
+      );
+    })
+    .map((row) => row.proposalId);
 }
 
 function remainingCampaignBudget(
@@ -1166,13 +1242,21 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
         .where(eq(campaignProposals.campaignId, campaign.campaignId))
         .orderBy(asc(campaignProposals.sequence));
       const results = await campaignTaskResults(handle.database, rows);
-      if (hasUsefulCampaignWork(rows, results)) continue;
+      if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) continue;
       const assessments = await campaignAssessmentRows(handle.database, campaign.campaignId);
       const remainingBudget = remainingCampaignBudget(campaign, rows, results);
       for (const outcome of contract.outcomes.filter((candidate) => candidate.status === "live")) {
         const assessment = assessments.get(outcome.id);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+        const checkpointRevision = campaign.checkpointRequested;
+        const revisionSources = checkpointRevision
+          ? supersedableProposalIds(rows, results, outcome.id)
+          : [];
+        // A checkpoint can revise one still-unowned proposal. If no such source
+        // exists, let reconciliation produce the stable decision request without
+        // spending a planner invocation.
+        if (checkpointRevision && revisionSources.length === 0) continue;
         if (
           !assessment ||
           assessment.verdict !== "gaps" ||
@@ -1193,6 +1277,9 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           assessment,
           evidence,
           priorProposals: rows.map((row) => taskProposalSchema.parse(row.proposal)),
+          supersededProposalIds: rows
+            .filter((row) => row.status === "superseded")
+            .map((row) => row.proposalId),
           repositories: repositoryRows
             .filter((repository) => contract.authority.repositories.includes(repository.id))
             .map((repository) => ({
@@ -1211,6 +1298,7 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
             Date.now() + 60_000,
             campaign.createdAt.getTime() + contract.budget.maxElapsedMs,
           ),
+          supersedableProposalIds: revisionSources,
         });
       }
     }
@@ -1236,16 +1324,51 @@ function replacementBudgetAvailable(
   );
 }
 
+interface ReplacementValidation {
+  readonly status: ReplacementRunStatus;
+  readonly proposal: TaskProposal | null;
+  readonly supersedesProposalId: string | null;
+}
+
 function replacementValidation(
   target: ReplacementTarget,
   candidate: unknown,
-): { readonly status: ReplacementRunStatus; readonly proposal: TaskProposal | null } {
+): ReplacementValidation {
   if (candidate === null || candidate === undefined)
-    return { status: "unavailable", proposal: null };
-  const parsed = taskProposalSchema.safeParse(candidate);
-  if (!parsed.success) return { status: "invalid", proposal: null };
+    return { status: "unavailable", proposal: null, supersedesProposalId: null };
+  let supersedesProposalId: string | null = null;
+  let proposalCandidate: unknown = candidate;
+  if (Predicate.isObject(candidate)) {
+    const envelope = candidate;
+    if ("proposal" in envelope) {
+      proposalCandidate = envelope.proposal;
+      supersedesProposalId =
+        typeof envelope.supersedesProposalId === "string" ? envelope.supersedesProposalId : null;
+    } else if ("supersedesProposalId" in envelope) {
+      const { supersedesProposalId: requested, ...proposalWithoutLineage } = envelope;
+      proposalCandidate = proposalWithoutLineage;
+      supersedesProposalId = typeof requested === "string" ? requested : null;
+    }
+  }
+  const parsed = taskProposalSchema.safeParse(proposalCandidate);
+  if (!parsed.success) return { status: "invalid", proposal: null, supersedesProposalId: null };
   const proposal = parsed.data;
-  if (proposal.outcomeId !== target.outcome.id) return { status: "invalid", proposal: null };
+  const checkpointRevision = target.supersedableProposalIds.length > 0;
+  if (checkpointRevision) {
+    if (
+      supersedesProposalId === null ||
+      !target.supersedableProposalIds.includes(supersedesProposalId)
+    )
+      return { status: "invalid", proposal: null, supersedesProposalId: null };
+  } else if (supersedesProposalId !== null) {
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
+  }
+  if (proposal.outcomeId !== target.outcome.id)
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
+  if (supersedesProposalId !== null && proposal.dependsOn.includes(supersedesProposalId))
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
+  if (proposal.dependsOn.some((dependency) => target.supersededProposalIds.includes(dependency)))
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
   if (
     !target.contract.authority.delivery ||
     !target.contract.authority.repositories.includes(proposal.repositoryId) ||
@@ -1257,7 +1380,7 @@ function replacementValidation(
         !target.priorProposals.some((prior) => prior.proposalId === dependency),
     )
   )
-    return { status: "invalid", proposal: null };
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
   if (
     target.priorProposals.some(
       (prior) =>
@@ -1265,17 +1388,17 @@ function replacementValidation(
         proposalFingerprint(prior) === proposalFingerprint(proposal),
     )
   )
-    return { status: "duplicate", proposal: null };
+    return { status: "duplicate", proposal: null, supersedesProposalId: null };
   if (
     !replacementBudgetAvailable(target.remainingBudget) ||
     proposal.budget.maxImplementerActivations > target.remainingBudget.implementerActivations ||
     proposal.budget.maxReviewCycles > target.remainingBudget.reviewCycles ||
     proposal.budget.maxElapsedMs > target.remainingBudget.elapsedMs
   )
-    return { status: "budget_exhausted", proposal: null };
+    return { status: "budget_exhausted", proposal: null, supersedesProposalId: null };
   if (!target.repositories.some((repository) => repository.id === proposal.repositoryId))
-    return { status: "invalid", proposal: null };
-  return { status: "admitted", proposal };
+    return { status: "invalid", proposal: null, supersedesProposalId: null };
+  return { status: "admitted", proposal, supersedesProposalId };
 }
 
 async function currentReplacementTarget(
@@ -1311,7 +1434,7 @@ async function currentReplacementTarget(
     .where(eq(campaignProposals.campaignId, campaign.campaignId))
     .orderBy(asc(campaignProposals.sequence));
   const results = await campaignTaskResults(database, rows);
-  if (hasUsefulCampaignWork(rows, results)) return null;
+  if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) return null;
   const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
   if (assessmentEvidenceHash(outcome, evidence) !== target.evidenceHash) return null;
   const assessment = (await campaignAssessmentRows(database, campaign.campaignId)).get(outcome.id);
@@ -1323,6 +1446,10 @@ async function currentReplacementTarget(
   )
     return null;
   const repositoryRows = await database.select().from(repositories);
+  const allowedSupersedableProposalIds = campaign.checkpointRequested
+    ? supersedableProposalIds(rows, results, outcome.id)
+    : [];
+  if (campaign.checkpointRequested && allowedSupersedableProposalIds.length === 0) return null;
   return {
     ...target,
     campaign,
@@ -1331,6 +1458,9 @@ async function currentReplacementTarget(
     assessment,
     evidence,
     priorProposals: rows.map((row) => taskProposalSchema.parse(row.proposal)),
+    supersededProposalIds: rows
+      .filter((row) => row.status === "superseded")
+      .map((row) => row.proposalId),
     repositories: repositoryRows
       .filter((repository) => contract.authority.repositories.includes(repository.id))
       .map((repository) => ({
@@ -1343,6 +1473,7 @@ async function currentReplacementTarget(
         reviewerProfile: repository.reviewerProfile,
       })),
     remainingBudget: remainingCampaignBudget(campaign, rows, results),
+    supersedableProposalIds: allowedSupersedableProposalIds,
   };
 }
 
@@ -1515,17 +1646,14 @@ async function persistReplacementResult(
       });
       if (!current || current.status !== "pending") return;
       const currentTarget = await currentReplacementTarget(handle.database, target);
-      let result: {
-        readonly status: ReplacementRunStatus;
-        readonly proposal: TaskProposal | null;
-      } =
+      let result: ReplacementValidation =
         mechanicalStatus &&
         currentTarget &&
         !replacementBudgetAvailable(currentTarget.remainingBudget)
-          ? { status: mechanicalStatus, proposal: null }
+          ? { status: mechanicalStatus, proposal: null, supersedesProposalId: null }
           : candidate === null || candidate === undefined
-            ? { status: "unavailable", proposal: null }
-            : { status: "invalid", proposal: null };
+            ? { status: "unavailable", proposal: null, supersedesProposalId: null }
+            : { status: "invalid", proposal: null, supersedesProposalId: null };
       if (!mechanicalStatus && candidate !== null && candidate !== undefined && currentTarget)
         result = replacementValidation(currentTarget, candidate);
       if (result.status === "admitted" && result.proposal) {
@@ -1542,6 +1670,8 @@ async function persistReplacementResult(
           proposal: result.proposal,
           status: "planned",
           blocker: null,
+          supersededByProposalId: null,
+          supersedesProposalId: result.supersedesProposalId,
           readyBaseSha: null,
           readyRepositoryRevision: null,
           taskId: null,
@@ -1549,6 +1679,22 @@ async function persistReplacementResult(
           replacementEvidenceHash: target.evidenceHash,
           replacementUsage: usage,
         });
+        if (result.supersedesProposalId !== null) {
+          await handle.database
+            .update(campaignProposals)
+            .set({
+              status: "superseded",
+              blocker: null,
+              supersededByProposalId: result.proposal.proposalId,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(campaignProposals.campaignId, target.campaign.campaignId),
+                eq(campaignProposals.proposalId, result.supersedesProposalId),
+              ),
+            );
+        }
       }
       await persistCampaignModelRun(
         handle.database,
@@ -1587,6 +1733,7 @@ async function persistReplacementResult(
           .set({
             status: "planning" as const,
             decisionRequest: null,
+            checkpointRequested: false,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
           })
@@ -1718,6 +1865,7 @@ async function generateCampaignReplacements(
         evidenceHash: target.evidenceHash,
         evidence: target.evidence,
         priorProposals: target.priorProposals,
+        supersedableProposalIds: target.supersedableProposalIds,
         repositories: target.repositories,
         remainingBudget: target.remainingBudget,
         deadlineEpochMs: target.deadlineEpochMs,
@@ -1780,7 +1928,7 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
       const results = await campaignTaskResults(handle.database, rows);
       const assessments = await campaignAssessmentRows(handle.database, campaign.campaignId);
       const exhausted = !hasUsefulCampaignWork(rows, results);
-      if (!exhausted && !campaign.assessmentRequested) continue;
+      if (!exhausted && !campaign.assessmentRequested && !campaign.checkpointRequested) continue;
       for (const outcome of contract.outcomes.filter((candidate) => candidate.status === "live")) {
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         const evidenceHash = assessmentEvidenceHash(outcome, evidence);
@@ -2323,11 +2471,22 @@ export async function checkpointCampaign(
           assessments.get(outcome.id)?.evidenceHash !== assessmentEvidenceHash(outcome, evidence)
         );
       });
-    if (!campaign.assessmentRequested && assessmentNeeded) {
+    const currentGaps = contract.outcomes
+      .filter((outcome) => outcome.status === "live")
+      .some((outcome) => {
+        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        const assessment = assessments.get(outcome.id);
+        return (
+          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
+          assessment.verdict === "gaps"
+        );
+      });
+    if (!campaign.assessmentRequested && (assessmentNeeded || currentGaps)) {
       await database
         .update(campaigns)
         .set({
-          assessmentRequested: true,
+          assessmentRequested: assessmentNeeded,
+          checkpointRequested: true,
           revision: sql`${campaigns.revision} + 1`,
           updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
         })

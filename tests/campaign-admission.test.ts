@@ -203,6 +203,36 @@ const satisfiesDeliveredOutcome: CampaignOutcomeAssessor = async (request) => {
   };
 };
 
+const checkpointOwnedGapAssessor: CampaignOutcomeAssessor = async () => ({
+  verdict: "gaps",
+  summary: "the historically Ready proposal leaves a direction gap",
+  gaps: ["the owned proposal cannot be revised"],
+  evidence: [],
+  usage: null,
+});
+
+const checkpointDirectionGapAssessor: CampaignOutcomeAssessor = async (request) => {
+  const delivery = request.evidence.find((item) => item.fact === "delivery");
+  return request.outcome.id !== "outcome-one" && delivery
+    ? {
+        verdict: "satisfied" as const,
+        summary: "the independent delivery satisfies the Outcome",
+        gaps: [],
+        evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+          ...delivery,
+          criterionIndex,
+        })),
+        usage: null,
+      }
+    : {
+        verdict: "gaps" as const,
+        summary: "the checkpoint source points in the wrong direction",
+        gaps: ["the source needs one focused correction"],
+        evidence: [],
+        usage: null,
+      };
+};
+
 async function frontierFixture(
   contract: unknown = frontierGoal("campaign-repository"),
   publicationSource: string | null = "user:campaign-366",
@@ -2959,6 +2989,672 @@ describe("durable Ready frontier", () => {
       }
     } finally {
       await server.close().catch(() => undefined);
+    }
+  });
+
+  test("revises exactly one unowned Planned proposal from an explicit checkpoint", async () => {
+    const initial = frontierProposal("wrong-direction", "outcome-one", ["not-admitted"]);
+    const independent = frontierProposal("independent", "outcome-two");
+    const replacement = frontierProposal("corrected-direction", "outcome-one");
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+    };
+    let assessmentCalls = 0;
+    let replacementCalls = 0;
+    let releaseIndependent!: () => void;
+    const independentRelease = new Promise<void>((resolve) => {
+      releaseIndependent = resolve;
+    });
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentCalls += 1;
+      const delivery = request.evidence.find((item) => item.fact === "delivery");
+      return delivery
+        ? {
+            verdict: "satisfied" as const,
+            summary: "the delivered proposal satisfies the Outcome",
+            gaps: [],
+            evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+              ...delivery,
+              criterionIndex,
+            })),
+            usage: null,
+          }
+        : {
+            verdict: "gaps" as const,
+            summary: "the Planned proposal points in the wrong direction",
+            gaps: ["the direction needs one focused correction"],
+            evidence: [],
+            usage: null,
+          };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      expect(request.supersedableProposalIds).toEqual([initial.proposalId]);
+      return {
+        proposal: { ...replacement, supersedesProposalId: initial.proposalId },
+        usage: null,
+      };
+    };
+    const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => {
+        if (context.contract.campaign?.outcomeId === "outcome-two") await independentRelease;
+        return acceptCampaignTask(context);
+      },
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initial);
+      await proposeCampaign(server.url, published.campaignId, independent);
+      await handoffCampaign(server.url, published.campaignId);
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+
+      expect(replacementCalls).toBe(1);
+      expect(checkpointed.proposals).toMatchObject([
+        {
+          proposalId: initial.proposalId,
+          status: "superseded",
+          supersededByProposalId: replacement.proposalId,
+        },
+        { proposalId: independent.proposalId },
+        {
+          proposalId: replacement.proposalId,
+          supersedesProposalId: initial.proposalId,
+          replacement: {
+            assessmentId: expect.stringMatching(/^assessment-/),
+            evidenceHash: expect.any(String),
+          },
+        },
+      ]);
+      expect(checkpointed.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+        initial.proposalId,
+        independent.proposalId,
+        replacement.proposalId,
+      ]);
+      await expect(checkpointCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+        proposals: checkpointed.proposals,
+      });
+      expect(replacementCalls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, superseded_by_proposal_id FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, initial.proposalId),
+        ).toEqual({
+          status: "superseded",
+          superseded_by_proposal_id: replacement.proposalId,
+        });
+        expect(
+          database
+            .prepare(
+              "SELECT supersedes_proposal_id, replacement_assessment_id, replacement_evidence_hash FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, replacement.proposalId),
+        ).toMatchObject({
+          supersedes_proposal_id: initial.proposalId,
+          replacement_assessment_id: expect.any(String),
+          replacement_evidence_hash: expect.any(String),
+        });
+      } finally {
+        database.close();
+      }
+      expect(assessmentCalls).toBeGreaterThanOrEqual(1);
+
+      releaseIndependent();
+      let settled = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (settled?.status === "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled = await getCampaign(server.url, published.campaignId);
+      }
+      expect(settled).toMatchObject({ status: "accepted" });
+      const assessmentCallsAfterSettle = assessmentCalls;
+      const replacementCallsAfterSettle = replacementCalls;
+      await server.close();
+      const restarted = await startUsineServer({
+        environment,
+        execute: async (context) => {
+          throw new Error(`unexpected post-restart Campaign execution: ${context.result.taskId}`);
+        },
+        assessOutcome: assessor,
+        generateReplacement: replacementGenerator,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        if (!settled) throw new Error("Campaign disappeared before restart");
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          settled,
+        );
+        const restartedCampaign = await getCampaign(restarted.url, published.campaignId);
+        expect(restartedCampaign?.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+          initial.proposalId,
+          independent.proposalId,
+          replacement.proposalId,
+        ]);
+        expect(assessmentCalls).toBe(assessmentCallsAfterSettle);
+        expect(replacementCalls).toBe(replacementCallsAfterSettle);
+        const restartedDatabase = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            restartedDatabase
+              .prepare(
+                "SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ? AND superseded_by_proposal_id IS NOT NULL",
+              )
+              .get(published.campaignId),
+          ).toEqual({ count: 1 });
+          expect(
+            restartedDatabase
+              .prepare(
+                "SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ? AND supersedes_proposal_id IS NOT NULL",
+              )
+              .get(published.campaignId),
+          ).toEqual({ count: 1 });
+        } finally {
+          restartedDatabase.close();
+        }
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      releaseIndependent();
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  test("rejects a checkpoint replacement that selects an unauthorized source ID", async () => {
+    const initial = frontierProposal("checkpoint-source", "outcome-one", ["not-admitted"]);
+    const independent = frontierProposal("checkpoint-independent", "outcome-two");
+    let replacementCalls = 0;
+    let releaseIndependent!: () => void;
+    const independentGate = new Promise<void>((resolve) => {
+      releaseIndependent = resolve;
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      return {
+        proposal: {
+          ...frontierProposal("unauthorized-replacement", "outcome-one"),
+          supersedesProposalId: "missing-checkpoint-source",
+        },
+        usage: null,
+      };
+    };
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => {
+        if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
+        return acceptCampaignTask(context);
+      },
+      1,
+      true,
+      checkpointDirectionGapAssessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initial);
+      await proposeCampaign(server.url, published.campaignId, independent);
+      await handoffCampaign(server.url, published.campaignId);
+      let handedOff = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (handedOff?.planHandedOff && handedOff.status !== "accepted") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        handedOff = await getCampaign(server.url, published.campaignId);
+      }
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(checkpointed.planHandedOff).toBe(true);
+      releaseIndependent();
+
+      let rejected = checkpointed;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (rejected.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        rejected = (await getCampaign(server.url, published.campaignId)) ?? rejected;
+      }
+      expect(rejected).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_invalid",
+          outcomeIds: ["outcome-one"],
+        },
+        proposals: [
+          { proposalId: initial.proposalId, status: "planned" },
+          { proposalId: independent.proposalId },
+        ],
+      });
+      expect(replacementCalls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, superseded_by_proposal_id, supersedes_proposal_id, replacement_assessment_id, replacement_evidence_hash FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, initial.proposalId),
+        ).toEqual({
+          status: "planned",
+          superseded_by_proposal_id: null,
+          supersedes_proposal_id: null,
+          replacement_assessment_id: null,
+          replacement_evidence_hash: null,
+        });
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 2 });
+        expect(
+          database
+            .prepare(
+              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one"),
+        ).toMatchObject({ status: "invalid", proposal: null });
+      } finally {
+        database.close();
+      }
+    } finally {
+      releaseIndependent();
+      await server.close();
+    }
+  });
+
+  test("does not expose a Planned source with a live dependent at a checkpoint", async () => {
+    const first = frontierProposal("chain-first", "outcome-one");
+    const independent = frontierProposal("chain-independent", "outcome-two");
+    const second = frontierProposal("chain-second", "outcome-one", [first.proposalId]);
+    const third = frontierProposal("chain-third", "outcome-one", [second.proposalId]);
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+      budget: {
+        ...frontierGoal("campaign-repository").budget,
+        maxTasks: 10,
+        maxImplementerActivations: 2,
+        maxReviewCycles: 2,
+      },
+    };
+    let replacementCalls = 0;
+    let exposedSupersedableProposalIds: readonly string[] | undefined;
+    let releaseIndependent!: () => void;
+    const independentGate = new Promise<void>((resolve) => {
+      releaseIndependent = resolve;
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      exposedSupersedableProposalIds = request.supersedableProposalIds;
+      return {
+        proposal: {
+          ...frontierProposal("chain-invalid-replacement", "outcome-one"),
+          supersedesProposalId: second.proposalId,
+        },
+        usage: null,
+      };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => {
+        if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
+        return acceptCampaignTask(context);
+      },
+      1,
+      true,
+      checkpointDirectionGapAssessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, first);
+      await proposeCampaign(server.url, published.campaignId, independent);
+      await proposeCampaign(server.url, published.campaignId, second);
+      await proposeCampaign(server.url, published.campaignId, third);
+      await handoffCampaign(server.url, published.campaignId);
+
+      let frontier = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const proposals = frontier?.proposals ?? [];
+        const firstResource = proposals.find(
+          (proposal) => proposal.proposalId === first.proposalId,
+        );
+        const independentResource = proposals.find(
+          (proposal) => proposal.proposalId === independent.proposalId,
+        );
+        const secondResource = proposals.find(
+          (proposal) => proposal.proposalId === second.proposalId,
+        );
+        const thirdResource = proposals.find(
+          (proposal) => proposal.proposalId === third.proposalId,
+        );
+        if (
+          firstResource?.ready?.taskId &&
+          independentResource?.ready?.taskId &&
+          secondResource?.status === "planned" &&
+          thirdResource?.status === "planned"
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        frontier = await getCampaign(server.url, published.campaignId);
+      }
+      expect(frontier?.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ proposalId: first.proposalId, ready: expect.any(Object) }),
+          expect.objectContaining({
+            proposalId: independent.proposalId,
+            ready: expect.any(Object),
+          }),
+          expect.objectContaining({ proposalId: second.proposalId, status: "planned" }),
+          expect.objectContaining({ proposalId: third.proposalId, status: "planned" }),
+        ]),
+      );
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(checkpointed.planHandedOff).toBe(true);
+      releaseIndependent();
+
+      let rejected = checkpointed;
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        if (rejected.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        rejected = (await getCampaign(server.url, published.campaignId)) ?? rejected;
+      }
+      expect(rejected).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_invalid",
+        },
+      });
+      expect(replacementCalls).toBe(1);
+      expect(exposedSupersedableProposalIds).toEqual([third.proposalId]);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, superseded_by_proposal_id, supersedes_proposal_id FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, second.proposalId),
+        ).toEqual({
+          status: "planned",
+          superseded_by_proposal_id: null,
+          supersedes_proposal_id: null,
+        });
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 4 });
+        expect(
+          database
+            .prepare(
+              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+            )
+            .get(published.campaignId, "outcome-one"),
+        ).toMatchObject({ status: "invalid", proposal: null });
+      } finally {
+        database.close();
+      }
+    } finally {
+      releaseIndependent();
+      await server.close();
+    }
+  });
+
+  test("preserves a checkpoint through a multi-Outcome assessment pass", async () => {
+    const delivered = frontierProposal("checkpoint-delivered", "outcome-two");
+    const source = frontierProposal("checkpoint-gap", "outcome-one", ["not-admitted"]);
+    const active = frontierProposal("checkpoint-active", "outcome-two");
+    const replacement = frontierProposal("checkpoint-correction", "outcome-one");
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+      budget: {
+        ...frontierGoal("campaign-repository").budget,
+        maxTasks: 10,
+        maxImplementerActivations: 2,
+        maxReviewCycles: 2,
+      },
+    };
+    let replacementCalls = 0;
+    const assessmentOrder: string[] = [];
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      expect(request.supersedableProposalIds).toEqual([source.proposalId]);
+      return {
+        proposal: { ...replacement, supersedesProposalId: source.proposalId },
+        usage: null,
+      };
+    };
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentOrder.push(request.outcome.id);
+      return checkpointDirectionGapAssessor(request);
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith(`-${active.proposalId}`)) await activeGate;
+        return acceptCampaignTask(context);
+      },
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, delivered);
+      await proposeCampaign(server.url, published.campaignId, source);
+      await proposeCampaign(server.url, published.campaignId, active);
+      await handoffCampaign(server.url, published.campaignId);
+
+      let frontier = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const proposals = frontier?.proposals ?? [];
+        const deliveredResource = proposals.find(
+          (proposal) => proposal.proposalId === delivered.proposalId,
+        );
+        const sourceResource = proposals.find(
+          (proposal) => proposal.proposalId === source.proposalId,
+        );
+        const activeResource = proposals.find(
+          (proposal) => proposal.proposalId === active.proposalId,
+        );
+        if (
+          deliveredResource?.ready?.taskId &&
+          sourceResource?.status === "planned" &&
+          activeResource?.ready?.taskId
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        frontier = await getCampaign(server.url, published.campaignId);
+      }
+      expect(frontier?.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ proposalId: delivered.proposalId, ready: expect.any(Object) }),
+          expect.objectContaining({ proposalId: source.proposalId, status: "planned" }),
+          expect.objectContaining({ proposalId: active.proposalId, ready: expect.any(Object) }),
+        ]),
+      );
+
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      releaseActive();
+      let revised = checkpointed;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (
+          revised.proposals?.some(
+            (proposal) =>
+              proposal.proposalId === source.proposalId &&
+              proposal.status === "superseded" &&
+              proposal.supersededByProposalId === replacement.proposalId,
+          )
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        revised = (await getCampaign(server.url, published.campaignId)) ?? revised;
+      }
+      expect(replacementCalls).toBe(1);
+      expect(assessmentOrder.slice(0, 2)).toEqual(["outcome-one", "outcome-two"]);
+      expect(revised.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            proposalId: source.proposalId,
+            status: "superseded",
+            supersededByProposalId: replacement.proposalId,
+          }),
+          expect.objectContaining({
+            proposalId: replacement.proposalId,
+            supersedesProposalId: source.proposalId,
+            replacement: expect.objectContaining({
+              assessmentId: expect.stringMatching(/^assessment-/),
+              evidenceHash: expect.any(String),
+            }),
+          }),
+        ]),
+      );
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, superseded_by_proposal_id FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, source.proposalId),
+        ).toEqual({
+          status: "superseded",
+          superseded_by_proposal_id: replacement.proposalId,
+        });
+      } finally {
+        database.close();
+      }
+    } finally {
+      releaseActive();
+      await server.close();
+    }
+  });
+
+  test("does not revise a proposal with historical Ready evidence at a checkpoint", async () => {
+    let replacementCalls = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const replacementGenerator: CampaignReplacementGenerator = async () => {
+      replacementCalls += 1;
+      return { proposal: frontierProposal("must-not-run", "outcome-one"), usage: null };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-historical-active")) {
+          await activeGate;
+          return context.authority.block(
+            { taskId: context.result.taskId, revision: context.result.revision },
+            "historical Ready fixture complete",
+          );
+        }
+        return context.result;
+      },
+      1,
+      true,
+      checkpointOwnedGapAssessor,
+      replacementGenerator,
+    );
+    const initial = frontierProposal("historically-ready", "outcome-one", ["never-admitted"]);
+    const active = frontierProposal("historical-active", "outcome-one");
+    const readyBaseSha = "a".repeat(40);
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, initial);
+      await proposeCampaign(server.url, published.campaignId, active);
+      const beforeHandoff = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        beforeHandoff
+          .prepare(
+            "UPDATE campaign_proposals SET ready_base_sha = ?, ready_repository_revision = ? WHERE campaign_id = ? AND proposal_id = ?",
+          )
+          .run(readyBaseSha, 7, published.campaignId, initial.proposalId);
+      } finally {
+        beforeHandoff.close();
+      }
+      await handoffCampaign(server.url, published.campaignId);
+
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(replacementCalls).toBe(0);
+      releaseActive();
+      let exhausted = checkpointed;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (exhausted.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const current = await getCampaign(server.url, published.campaignId);
+        if (current) exhausted = current;
+      }
+      expect(exhausted).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          requestId: `decision:${published.campaignId}`,
+          reason: "replacement_exhausted",
+          outcomeIds: ["outcome-one"],
+        },
+      });
+      expect(exhausted.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            proposalId: initial.proposalId,
+            ready: expect.objectContaining({ baseSha: readyBaseSha, repositoryRevision: 7 }),
+          }),
+          expect.objectContaining({ proposalId: active.proposalId }),
+        ]),
+      );
+      const unchanged = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          unchanged
+            .prepare(
+              "SELECT status, ready_base_sha, ready_repository_revision, superseded_by_proposal_id FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
+            )
+            .get(published.campaignId, initial.proposalId),
+        ).toEqual({
+          status: "planned",
+          ready_base_sha: readyBaseSha,
+          ready_repository_revision: 7,
+          superseded_by_proposal_id: null,
+        });
+      } finally {
+        unchanged.close();
+      }
+    } finally {
+      releaseActive();
+      await server.close();
     }
   });
 
