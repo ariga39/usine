@@ -40,6 +40,8 @@ export interface CampaignReplacementRequest {
   readonly evidenceHash: string;
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly priorProposals: readonly TaskProposal[];
+  /** IDs of proposals that remain wholly unowned and may be revised at a checkpoint. */
+  readonly supersedableProposalIds: readonly string[];
   readonly repositories: readonly CampaignReplacementRepository[];
   readonly remainingBudget: {
     readonly tasks: number;
@@ -104,12 +106,14 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
       "Return null when no bounded proposal can address the gaps within the supplied remaining budget.",
       "Use only the immutable Goal, Outcome, assessment, evidence, prior proposal ownership, Repository facts, and remaining budgets.",
       "Do not propose a new Outcome, authority, effect, Repository, or budget.",
+      "When revising a checkpoint proposal, include its exact supersedesProposalId in the returned proposal object.",
       JSON.stringify({
         goal: request.goal,
         outcome: request.outcome,
         assessment: request.assessment,
         evidence: request.evidence,
         priorProposals: request.priorProposals,
+        supersedableProposalIds: request.supersedableProposalIds,
         repositories: request.repositories.map(
           ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
         ),
@@ -164,7 +168,12 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
       profile: repository.reviewerProfile,
       sandbox: "read-only",
       deadlineEpochMs: request.deadlineEpochMs,
-      outputSchema: z.union([taskProposalSchema, z.null()]),
+      outputSchema: z.union([
+        taskProposalSchema.extend({
+          supersedesProposalId: z.string().min(1).max(128).optional(),
+        }),
+        z.null(),
+      ]),
       environment: request.environment,
     };
     try {

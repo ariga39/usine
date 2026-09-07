@@ -135,6 +135,8 @@ export async function listCampaignEvidenceSources(
     blocker: row.blocker,
     taskId: row.taskId,
     admittedAtEpochMs: row.createdAt.getTime(),
+    ...(row.supersededByProposalId ? { supersededByProposalId: row.supersededByProposalId } : {}),
+    ...(row.supersedesProposalId ? { supersedesProposalId: row.supersedesProposalId } : {}),
     ...(row.replacementAssessmentId && row.replacementEvidenceHash
       ? {
           replacement: {

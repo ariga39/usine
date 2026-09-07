@@ -289,7 +289,7 @@ const campaignOutcomeSchema = Schema.Struct({
   assessment: Schema.optional(Schema.NullOr(campaignAssessmentSchema)),
 });
 
-const campaignProposalStatusSchema = Schema.Literals(["planned", "ready", "blocked"]);
+const campaignProposalStatusSchema = Schema.Literals(["planned", "ready", "blocked", "superseded"]);
 
 const campaignProposalSchema = Schema.Struct({
   proposalId: Schema.String,
@@ -297,6 +297,8 @@ const campaignProposalSchema = Schema.Struct({
   sequence: Schema.Natural,
   status: campaignProposalStatusSchema,
   blocker: Schema.NullOr(Schema.String),
+  supersededByProposalId: Schema.optional(Schema.String),
+  supersedesProposalId: Schema.optional(Schema.String),
   replacement: Schema.optional(
     Schema.Struct({
       assessmentId: Schema.String,
