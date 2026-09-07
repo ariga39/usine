@@ -21,7 +21,6 @@ function implementerPrompt(
 ): string {
   const taskContract = originalTaskContract(input.contract);
   return [
-    "Role: implementer. Work only on the frozen authorized Task Contract.",
     `Task Contract: ${JSON.stringify(taskContract)}`,
     `Current candidate parent SHA: ${previousSha}`,
     check
@@ -29,8 +28,7 @@ function implementerPrompt(
       : findings.length > 0
         ? `Aggregated findings to repair: ${findings.join("; ")}`
         : "No prior findings.",
-    "Implement the requested production behavior and its real tests. Leave the workspace with the complete change; the host will finalize the commit.",
-    "Return a schema-valid proposed or blocked result. Do not claim task completion; the coordinator owns authority.",
+    "Return a schema-valid proposed or blocked result; the host will finalize the Candidate and the coordinator owns authority.",
   ].join("\n");
 }
 
