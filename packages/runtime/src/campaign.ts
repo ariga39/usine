@@ -989,12 +989,6 @@ export async function publishCampaign(
       return;
     }
     const campaignId = campaignIdFor(contract.id, contract.version);
-    await database
-      .update(campaigns)
-      .set({ superseded: true, updatedAt: new Date() })
-      .where(
-        and(eq(campaigns.goalId, contract.id), sql`${campaigns.goalVersion} < ${contract.version}`),
-      );
     await database.insert(campaigns).values({
       campaignId,
       goalId: contract.id,
