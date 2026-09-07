@@ -61,14 +61,14 @@ describe("host-owned GitHub read MCP", () => {
           });
         if (path === "/repos/example/authorized/issues/189/comments")
           return Response.json([
-            { id: 1, body: "bounded issue comment", user: { login: "author" } },
+            { id: 1, body: "bounded issue comment", user: { login: "author", type: "User" } },
           ]);
         if (path === "/repos/example/authorized/issues/7/comments")
           return Response.json([
             {
               id: 5,
               body: `ordinary PR comment${"x".repeat(9_000)}`,
-              user: { id: 22, login: "commenter" },
+              user: { id: 22, login: "commenter", type: "User" },
               created_at: "2026-09-08T00:00:00Z",
               updated_at: "2026-09-08T00:01:00Z",
             },
@@ -88,7 +88,8 @@ describe("host-owned GitHub read MCP", () => {
               id: 2,
               state: "APPROVED",
               body: "approved",
-              user: { id: 21, login: "reviewer" },
+              user: { id: 314708956, login: "review-app[bot]", type: "Bot" },
+              performed_via_github_app: null,
               commit_id: exactSha,
               submitted_at: "2026-09-08T00:00:00Z",
             },
@@ -96,7 +97,7 @@ describe("host-owned GitHub read MCP", () => {
               id: 100 + index,
               state: "COMMENTED",
               body: "bounded review",
-              user: { id: 21, login: "reviewer" },
+              user: { id: 21, login: "reviewer", type: "User" },
               commit_id: exactSha,
               submitted_at: "2026-09-08T00:00:00Z",
             })),
@@ -106,8 +107,8 @@ describe("host-owned GitHub read MCP", () => {
             {
               id: 4,
               body: "App inline feedback",
-              user: { id: 42, login: "review-app[bot]" },
-              performed_via_github_app: { id: 42, slug: "review-app" },
+              user: { id: 314708956, login: "review-app[bot]", type: "Bot" },
+              performed_via_github_app: null,
               pull_request_review_id: 2,
               path: "src/index.ts",
               line: 7,
@@ -115,6 +116,7 @@ describe("host-owned GitHub read MCP", () => {
               updated_at: "2026-09-08T00:03:00Z",
             },
           ]);
+        if (path === "/apps/review-app") return Response.json({ id: 42, slug: "review-app" });
         if (path === "/graphql")
           return Response.json({
             data: {
@@ -253,6 +255,8 @@ describe("host-owned GitHub read MCP", () => {
       expect(JSON.stringify(reviews)).toContain('\\"isResolved\\":true');
       expect(requests.filter(({ path }) => path.endsWith("/comments"))).toHaveLength(3);
       expect(requests.filter(({ path }) => path.endsWith("/reviews"))).toHaveLength(1);
+      expect(requests.filter(({ path }) => path === "/apps/review-app")).toHaveLength(1);
+      expect(JSON.stringify(reviews)).toContain('\\"state\\":\\"APPROVED\\"');
       const graphQlRequests = requests.filter(({ path }) => path === "/graphql");
       expect(graphQlRequests).toHaveLength(1);
       const graphQlBody = JSON.parse(graphQlRequests[0]?.body ?? "{}");

@@ -43,6 +43,7 @@ const MAX_ITEMS = 50;
 
 export function reviewIdentity(input: {
   readonly user?: unknown;
+  readonly userType?: unknown;
   readonly performedViaGithubApp?: unknown;
 }): GithubReviewIdentity | null {
   const app = input.performedViaGithubApp;
@@ -56,6 +57,8 @@ export function reviewIdentity(input: {
     };
 
   const user = input.user;
+  const userType = input.userType ?? field(user, "type");
+  if (userType !== "User") return null;
   const userId = positiveInteger(field(user, "id"));
   if (userId !== null)
     return {
@@ -73,10 +76,18 @@ export async function readGithubReviewEvidence(
   pullNumber: number,
   request: { timeout: number; retries: 0; signal?: AbortSignal },
 ): Promise<GithubReviewEvidence> {
-  const nativeReviews = await readGithubNativeReviews(client, owner, repo, pullNumber, request);
+  const resolveIdentity = createReviewIdentityResolver(client, request);
+  const nativeReviews = await readGithubNativeReviews(
+    client,
+    owner,
+    repo,
+    pullNumber,
+    request,
+    resolveIdentity,
+  );
   const [comments, reviewComments] = await Promise.all([
-    readGithubReviewComments(client, owner, repo, pullNumber, request),
-    readGithubPullRequestReviewComments(client, owner, repo, pullNumber, request),
+    readGithubReviewComments(client, owner, repo, pullNumber, request, resolveIdentity),
+    readGithubPullRequestReviewComments(client, owner, repo, pullNumber, request, resolveIdentity),
   ]);
   return { ...nativeReviews, comments, reviewComments };
 }
@@ -87,6 +98,7 @@ export async function readGithubNativeReviews(
   repo: string,
   pullNumber: number,
   request: { timeout: number; retries: 0; signal?: AbortSignal },
+  resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<GithubNativeReviewEvidence> {
   const reviewsResponse = await client.octokit.rest.pulls.listReviews({
     owner,
@@ -96,21 +108,24 @@ export async function readGithubNativeReviews(
     request,
   });
   const reviewsTruncated = reviewsResponse.data.length > MAX_ITEMS;
-  const reviews = reviewsResponse.data.slice(0, MAX_ITEMS).map((review) => {
-    return {
-      id: numberOrZero(field(review, "id")),
-      state: boundedString(field(review, "state")),
-      commitSha: boundedString(field(review, "commit_id")),
-      body: boundedString(field(review, "body")),
-      identity: reviewIdentity({
-        user: field(review, "user"),
-        performedViaGithubApp: field(review, "performed_via_github_app"),
-      }),
-      createdAt: nullableBoundedString(field(review, "created_at")),
-      submittedAt: nullableBoundedString(field(review, "submitted_at")),
-      updatedAt: nullableBoundedString(field(review, "updated_at")),
-    } satisfies GithubReviewProjection;
-  });
+  const reviews = await Promise.all(
+    reviewsResponse.data.slice(0, MAX_ITEMS).map(async (review) => {
+      return {
+        id: numberOrZero(field(review, "id")),
+        state: boundedString(field(review, "state")),
+        commitSha: boundedString(field(review, "commit_id")),
+        body: boundedString(field(review, "body")),
+        identity: await resolveIdentity({
+          user: field(review, "user"),
+          userType: field(field(review, "user"), "type"),
+          performedViaGithubApp: field(review, "performed_via_github_app"),
+        }),
+        createdAt: nullableBoundedString(field(review, "created_at")),
+        submittedAt: nullableBoundedString(field(review, "submitted_at")),
+        updatedAt: nullableBoundedString(field(review, "updated_at")),
+      } satisfies GithubReviewProjection;
+    }),
+  );
   return { reviews, reviewsTruncated };
 }
 
@@ -120,6 +135,7 @@ export async function readGithubReviewComments(
   repo: string,
   pullNumber: number,
   request: { timeout: number; retries: 0; signal?: AbortSignal },
+  resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<readonly GithubCommentProjection[]> {
   const commentsResponse = await client.octokit.rest.issues.listComments({
     owner,
@@ -128,19 +144,22 @@ export async function readGithubReviewComments(
     per_page: MAX_ITEMS,
     request,
   });
-  return commentsResponse.data.slice(0, MAX_ITEMS).map((comment) => {
-    return {
-      id: numberOrZero(field(comment, "id")),
-      body: boundedString(field(comment, "body")),
-      identity: reviewIdentity({
-        user: field(comment, "user"),
-        performedViaGithubApp: field(comment, "performed_via_github_app"),
-      }),
-      createdAt: nullableBoundedString(field(comment, "created_at")),
-      updatedAt: nullableBoundedString(field(comment, "updated_at")),
-      pullRequestReviewId: nullableNumber(field(comment, "pull_request_review_id")),
-    } satisfies GithubCommentProjection;
-  });
+  return Promise.all(
+    commentsResponse.data.slice(0, MAX_ITEMS).map(async (comment) => {
+      return {
+        id: numberOrZero(field(comment, "id")),
+        body: boundedString(field(comment, "body")),
+        identity: await resolveIdentity({
+          user: field(comment, "user"),
+          userType: field(field(comment, "user"), "type"),
+          performedViaGithubApp: field(comment, "performed_via_github_app"),
+        }),
+        createdAt: nullableBoundedString(field(comment, "created_at")),
+        updatedAt: nullableBoundedString(field(comment, "updated_at")),
+        pullRequestReviewId: nullableNumber(field(comment, "pull_request_review_id")),
+      } satisfies GithubCommentProjection;
+    }),
+  );
 }
 
 export async function readGithubPullRequestReviewComments(
@@ -149,6 +168,7 @@ export async function readGithubPullRequestReviewComments(
   repo: string,
   pullNumber: number,
   request: { timeout: number; retries: 0; signal?: AbortSignal },
+  resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<readonly GithubCommentProjection[]> {
   const commentsResponse = await client.octokit.rest.pulls.listReviewComments({
     owner,
@@ -157,21 +177,71 @@ export async function readGithubPullRequestReviewComments(
     per_page: MAX_ITEMS,
     request,
   });
-  return commentsResponse.data.slice(0, MAX_ITEMS).map((comment) => {
-    return {
-      id: numberOrZero(field(comment, "id")),
-      body: boundedString(field(comment, "body")),
-      identity: reviewIdentity({
-        user: field(comment, "user"),
-        performedViaGithubApp: field(comment, "performed_via_github_app"),
-      }),
-      createdAt: nullableBoundedString(field(comment, "created_at")),
-      updatedAt: nullableBoundedString(field(comment, "updated_at")),
-      path: nullableBoundedString(field(comment, "path")),
-      line: nullableLine(field(comment, "line")),
-      pullRequestReviewId: nullableNumber(field(comment, "pull_request_review_id")),
-    } satisfies GithubCommentProjection;
-  });
+  return Promise.all(
+    commentsResponse.data.slice(0, MAX_ITEMS).map(async (comment) => {
+      return {
+        id: numberOrZero(field(comment, "id")),
+        body: boundedString(field(comment, "body")),
+        identity: await resolveIdentity({
+          user: field(comment, "user"),
+          userType: field(field(comment, "user"), "type"),
+          performedViaGithubApp: field(comment, "performed_via_github_app"),
+        }),
+        createdAt: nullableBoundedString(field(comment, "created_at")),
+        updatedAt: nullableBoundedString(field(comment, "updated_at")),
+        path: nullableBoundedString(field(comment, "path")),
+        line: nullableLine(field(comment, "line")),
+        pullRequestReviewId: nullableNumber(field(comment, "pull_request_review_id")),
+      } satisfies GithubCommentProjection;
+    }),
+  );
+}
+
+type ReviewIdentityInput = Parameters<typeof reviewIdentity>[0];
+type ReviewIdentityResolver = (input: ReviewIdentityInput) => Promise<GithubReviewIdentity | null>;
+
+function createReviewIdentityResolver(
+  client: ForgeClient,
+  request: { timeout: number; retries: 0; signal?: AbortSignal },
+): ReviewIdentityResolver {
+  const appBySlug = new Map<string, Promise<GithubReviewIdentity | null>>();
+  return async (input) => {
+    const directIdentity = reviewIdentity(input);
+    const performedViaGithubApp = input.performedViaGithubApp;
+    if (performedViaGithubApp !== undefined && performedViaGithubApp !== null)
+      return directIdentity;
+
+    if (input.userType !== "Bot") return directIdentity;
+    const login = boundedString(field(input.user, "login"));
+    const slug = botAppSlug(login);
+    if (slug === null) return null;
+    const existing = appBySlug.get(slug);
+    if (existing !== undefined) return existing;
+    const verification = verifyBotApp(client, slug, request);
+    appBySlug.set(slug, verification);
+    return verification;
+  };
+}
+
+async function verifyBotApp(
+  client: ForgeClient,
+  slug: string,
+  request: { timeout: number; retries: 0; signal?: AbortSignal },
+): Promise<GithubReviewIdentity | null> {
+  try {
+    const response = await client.octokit.rest.apps.getBySlug({ app_slug: slug, request });
+    const id = positiveInteger(field(response.data, "id"));
+    const returnedSlug = boundedString(field(response.data, "slug"));
+    if (id === null || returnedSlug !== slug) return null;
+    return { kind: "app", id, slug: returnedSlug };
+  } catch {
+    return null;
+  }
+}
+
+function botAppSlug(login: string): string | null {
+  const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)\[bot\]$/.exec(login);
+  return match?.[1] ?? null;
 }
 
 export function externalReviewBlocksMerge(

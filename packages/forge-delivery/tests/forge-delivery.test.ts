@@ -205,8 +205,8 @@ describe("Forge Delivery module", () => {
 type Comment = {
   id: number;
   body: string;
-  performed_via_github_app?: { slug?: string };
-  user?: { type?: string };
+  performed_via_github_app?: { id?: number; slug?: string } | null;
+  user?: { id?: number; login?: string; type?: string };
 };
 
 type PullRequest = {
@@ -317,6 +317,10 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
     }
     if (method === "GET" && pathname === "/repos/owner/repo/pulls/1/reviews")
       return Response.json(state.reviews ?? []);
+    if (method === "GET" && pathname === "/apps/external-review-app")
+      return Response.json({ id: 42, slug: "external-review-app" });
+    if (method === "GET" && pathname === "/apps/trusted-reviewer")
+      return Response.json({ id: 42, slug: "different-app" });
     if (method === "POST" && pathname === "/repos/owner/repo/pulls") {
       const inputBody = JSON.parse(typeof init?.body === "string" ? init.body : "") as {
         head: string;
@@ -898,7 +902,8 @@ describe.sequential("Forge Delivery reconciliation", () => {
           state: "APPROVED",
           commit_id: fixture.candidateSha,
           body: "<!-- trusted reviewer --> copied wording",
-          user: { id: 99, login: "trusted-reviewer" },
+          user: { id: 99, login: "trusted-reviewer[bot]", type: "Bot" },
+          performed_via_github_app: null,
         },
       ],
       failAfterPullRequestCreate: false,
@@ -942,7 +947,8 @@ describe.sequential("Forge Delivery reconciliation", () => {
         state: "APPROVED",
         commit_id: fixture.candidateSha,
         body: "approved",
-        performed_via_github_app: { id: 42, slug: "external-review-app" },
+        user: { id: 314708956, login: "external-review-app[bot]", type: "Bot" },
+        performed_via_github_app: null,
       },
     ];
     state.mergeCommitSha = await remoteMergeCommit(fixture);

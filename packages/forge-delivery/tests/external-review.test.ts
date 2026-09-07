@@ -15,13 +15,22 @@ describe("external GitHub review policy", () => {
   test("uses stable user and verified App identities, never display text", () => {
     expect(
       reviewIdentity({
-        user: { id: 7, login: "trusted-name" },
+        user: { id: 7, login: "trusted-name", type: "Bot" },
         performedViaGithubApp: { id: 42, slug: "trusted-app" },
       }),
     ).toEqual({ kind: "app", id: 42, slug: "trusted-app" });
     expect(
-      reviewIdentity({ user: { id: 7, login: "renamed-user" }, performedViaGithubApp: null }),
+      reviewIdentity({
+        user: { id: 7, login: "renamed-user", type: "User" },
+        performedViaGithubApp: null,
+      }),
     ).toEqual({ kind: "user", id: 7, login: "renamed-user" });
+    expect(
+      reviewIdentity({
+        user: { id: 7, login: "trusted-reviewer[bot]", type: "Bot" },
+        performedViaGithubApp: null,
+      }),
+    ).toBeNull();
     expect(
       externalReviewBlocksMerge(
         { requireApproval: true, trustedUsers: [7], trustedApps: [] },

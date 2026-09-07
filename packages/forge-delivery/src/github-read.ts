@@ -7,7 +7,7 @@ import { remainingUntil } from "@usine/task-authority";
 import { Duration, Effect } from "effect";
 import type { GithubApiPolicy, ForgeClient } from "./forge-policy.js";
 import { createGithubApiClient } from "./forge-policy.js";
-import { readGithubReviewEvidence, reviewIdentity } from "./external-review.js";
+import { readGithubReviewEvidence } from "./external-review.js";
 import { z } from "zod";
 
 const exactSha = /^[0-9a-f]{40}$/;
@@ -268,7 +268,6 @@ async function readPullRequestReviews(
                   nodes {
                     databaseId
                     body
-                    author { databaseId login }
                     path
                     line
                     createdAt
@@ -330,13 +329,7 @@ async function readPullRequestReviews(
         .slice(0, MAX_ITEMS)
         .map((comment) => {
           const restComment = reviewComments.get(comment.databaseId);
-          const identity =
-            restComment?.identity ??
-            reviewIdentity({
-              user: comment.author
-                ? { id: comment.author.databaseId, login: comment.author.login }
-                : null,
-            });
+          const identity = restComment?.identity ?? null;
           return {
             id: comment.databaseId,
             body: bounded(comment.body),
@@ -364,7 +357,6 @@ interface ReviewThreadsResponse {
             nodes: Array<{
               databaseId: number;
               body: string;
-              author: { databaseId: number; login: string } | null;
               path: string | null;
               line: number | null;
               createdAt: string;
