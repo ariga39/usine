@@ -17,6 +17,16 @@ SELECT
 FROM `campaign_assessments` a
 WHERE json_valid(a.`assessment`) = 1
 	AND json_extract(a.`assessment`, '$.usage') IS NOT NULL
+	AND EXISTS (
+		SELECT 1
+		FROM json_each(a.`assessment`, '$.usage') AS usage
+		WHERE usage.`key` IN (
+			'inputTokens', 'cachedInputTokens', 'uncachedInputTokens',
+			'cacheWriteInputTokens', 'outputTokens', 'reasoningOutputTokens'
+		)
+			AND usage.`type` = 'integer'
+			AND json_type(usage.`value`) = 'integer'
+	)
 	AND NOT EXISTS (
 		SELECT 1 FROM `campaign_model_runs` m WHERE m.`invocation_id` = a.`assessment_id`
 	);
@@ -37,6 +47,16 @@ SELECT
 FROM `campaign_replacement_runs` r
 WHERE json_valid(r.`usage`) = 1
 	AND r.`usage` IS NOT NULL
+	AND EXISTS (
+		SELECT 1
+		FROM json_each(r.`usage`) AS usage
+		WHERE usage.`key` IN (
+			'inputTokens', 'cachedInputTokens', 'uncachedInputTokens',
+			'cacheWriteInputTokens', 'outputTokens', 'reasoningOutputTokens'
+		)
+			AND usage.`type` = 'integer'
+			AND json_type(usage.`value`) = 'integer'
+	)
 	AND NOT EXISTS (
 		SELECT 1 FROM `campaign_model_runs` m WHERE m.`invocation_id` = r.`invocation_id`
 	);

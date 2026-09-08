@@ -2112,6 +2112,22 @@ test("moves legacy Campaign role usage into the model-run owner", async () => {
     outputTokens: 7,
     reasoningOutputTokens: 1,
   });
+  const allNullUsage = JSON.stringify({
+    inputTokens: null,
+    cachedInputTokens: null,
+    uncachedInputTokens: null,
+    cacheWriteInputTokens: null,
+    outputTokens: null,
+    reasoningOutputTokens: null,
+  });
+  const zeroUsage = JSON.stringify({
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    uncachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+  });
   legacy
     .prepare(
       `INSERT INTO campaign_assessments (
@@ -2161,6 +2177,84 @@ test("moves legacy Campaign role usage into the model-run owner", async () => {
       500,
       600,
     );
+  legacy
+    .prepare(
+      `INSERT INTO campaign_assessments (
+        campaign_id, outcome_id, role, evidence_hash, assessment_id, assessment,
+        started_at_epoch_ms, completed_at_epoch_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "outcome-two",
+      "assessor",
+      "legacy-all-null-evidence",
+      "legacy-all-null-assessment",
+      JSON.stringify({
+        role: "assessor",
+        assessmentId: "legacy-all-null-assessment",
+        outcomeId: "outcome-two",
+        evidenceHash: "legacy-all-null-evidence",
+        verdict: "inconclusive",
+        summary: "legacy startup failure",
+        gaps: [],
+        evidence: [],
+        usage: JSON.parse(allNullUsage),
+        startedAtEpochMs: 700,
+        completedAtEpochMs: 800,
+      }),
+      700,
+      800,
+    );
+  legacy
+    .prepare(
+      `INSERT INTO campaign_replacement_runs (
+        campaign_id, outcome_id, assessment_id, evidence_hash, invocation_id, role,
+        status, proposal, usage, started_at_epoch_ms, completed_at_epoch_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "outcome-two",
+      "legacy-all-null-assessment",
+      "legacy-all-null-evidence",
+      "legacy-all-null-replacement",
+      "replacement-planner",
+      "unavailable",
+      null,
+      allNullUsage,
+      900,
+      1000,
+    );
+  legacy
+    .prepare(
+      `INSERT INTO campaign_assessments (
+        campaign_id, outcome_id, role, evidence_hash, assessment_id, assessment,
+        started_at_epoch_ms, completed_at_epoch_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "outcome-three",
+      "assessor",
+      "legacy-zero-evidence",
+      "legacy-zero-assessment",
+      JSON.stringify({
+        role: "assessor",
+        assessmentId: "legacy-zero-assessment",
+        outcomeId: "outcome-three",
+        evidenceHash: "legacy-zero-evidence",
+        verdict: "inconclusive",
+        summary: "legacy zero usage",
+        gaps: [],
+        evidence: [],
+        usage: JSON.parse(zeroUsage),
+        startedAtEpochMs: 1100,
+        completedAtEpochMs: 1200,
+      }),
+      1100,
+      1200,
+    );
   legacy.close();
 
   await applyMigrations(path);
@@ -2176,17 +2270,32 @@ test("moves legacy Campaign role usage into the model-run owner", async () => {
     ).toEqual([
       { role: "assessor", adapter: "legacy-compatibility", usage },
       { role: "replacement-planner", adapter: "legacy-compatibility", usage },
+      { role: "assessor", adapter: "legacy-compatibility", usage: zeroUsage },
     ]);
     expect(
       migrated
-        .prepare("SELECT json_extract(assessment, '$.usage') AS usage FROM campaign_assessments")
-        .get(),
+        .prepare(
+          "SELECT json_extract(assessment, '$.usage') AS usage FROM campaign_assessments WHERE assessment_id = ?",
+        )
+        .get("legacy-assessment"),
     ).toEqual({ usage: null });
     expect(
       migrated
         .prepare("SELECT usage FROM campaign_replacement_runs WHERE invocation_id = ?")
         .get("legacy-replacement"),
     ).toEqual({ usage: null });
+    expect(
+      migrated
+        .prepare(
+          "SELECT json_extract(assessment, '$.usage') AS usage FROM campaign_assessments WHERE assessment_id = ?",
+        )
+        .get("legacy-all-null-assessment"),
+    ).toEqual({ usage: allNullUsage });
+    expect(
+      migrated
+        .prepare("SELECT usage FROM campaign_replacement_runs WHERE invocation_id = ?")
+        .get("legacy-all-null-replacement"),
+    ).toEqual({ usage: allNullUsage });
   } finally {
     migrated.close();
   }
