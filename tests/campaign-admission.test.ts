@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   registerRepositoryResource,
   startUsineServer,
@@ -1630,6 +1630,92 @@ describe("durable Ready frontier", () => {
     } finally {
       releaseFirst();
       await server.close();
+    }
+  });
+
+  test("reuses unchanged Task facts for shared Campaign dependencies", async () => {
+    const fixtureValue = await frontierFixture(
+      mergeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => {
+        if (context.result.taskId.endsWith("-shared-first"))
+          return acceptCampaignTask(context, true);
+        return checkCampaignTask(context);
+      },
+    );
+    const { contractPath, stateDirectory, server, environment } = fixtureValue;
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("shared-first", "outcome-one", [], true),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("shared-second-a", "outcome-two", ["shared-first"]),
+      );
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("shared-second-b", "outcome-two", ["shared-first"]),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      await waitFor(
+        async () => ({
+          campaign: await getCampaign(server.url, published.campaignId),
+          predecessor: await taskStatus(server.url, "campaign-campaign-366-v1-shared-first").catch(
+            () => null,
+          ),
+          dependent: await taskStatus(server.url, "campaign-campaign-366-v1-shared-second-a").catch(
+            () => null,
+          ),
+        }),
+        ({ campaign, predecessor, dependent }) =>
+          predecessor?.state === "merged" &&
+          predecessor.delivery?.merge?.observedState === "merged" &&
+          typeof predecessor.delivery.merge.mergeCommitSha === "string" &&
+          dependent?.state === "checked" &&
+          campaign?.proposals?.filter((proposal) =>
+            ["shared-second-a", "shared-second-b"].includes(proposal.proposalId),
+          ).length === 2 &&
+          campaign.proposals
+            .filter((proposal) =>
+              ["shared-second-a", "shared-second-b"].includes(proposal.proposalId),
+            )
+            .every(
+              (proposal) =>
+                proposal.status === "ready" &&
+                proposal.ready?.baseSha === predecessor.delivery?.merge?.mergeCommitSha,
+            ),
+      );
+      await server.close();
+
+      const lookupSpy = vi.spyOn(TaskAuthority.prototype, "lookup");
+      const lookupCounts = new Map<string, number>();
+      try {
+        await reconcileCampaigns(stateDirectory, environment);
+        for (const [taskId] of lookupSpy.mock.calls)
+          lookupCounts.set(taskId, (lookupCounts.get(taskId) ?? 0) + 1);
+        expect(Object.fromEntries(lookupCounts)).toEqual({
+          "campaign-campaign-366-v1-shared-first": 1,
+          "campaign-campaign-366-v1-shared-second-a": 1,
+        });
+        lookupSpy.mockClear();
+        lookupCounts.clear();
+        await reconcileCampaigns(stateDirectory, environment);
+        for (const [taskId] of lookupSpy.mock.calls)
+          lookupCounts.set(taskId, (lookupCounts.get(taskId) ?? 0) + 1);
+        expect(Object.fromEntries(lookupCounts)).toEqual({
+          "campaign-campaign-366-v1-shared-first": 1,
+          "campaign-campaign-366-v1-shared-second-a": 1,
+        });
+      } finally {
+        lookupSpy.mockRestore();
+      }
+    } finally {
+      await server.close().catch(() => undefined);
     }
   });
 

@@ -500,6 +500,8 @@ interface DependencyResolution {
   readonly baseSha: string | null;
 }
 
+type CampaignTaskFacts = Map<string, TaskResult | null>;
+
 function acceptedCampaignDelivery(
   result: TaskResult | null,
   campaign: typeof campaigns.$inferSelect,
@@ -530,6 +532,7 @@ async function dependencyResolution(
   contract: GoalContract,
   campaign: typeof campaigns.$inferSelect,
   database: CampaignDatabase,
+  taskFacts: CampaignTaskFacts,
 ): Promise<DependencyResolution> {
   const dependencies = new Map<string, typeof campaignProposals.$inferSelect>();
   const proposalDependencyIds = new Set<string>();
@@ -561,14 +564,7 @@ async function dependencyResolution(
   let latestMergedSequence = -1;
   for (const row of dependencies.values()) {
     const predecessor = taskProposalSchema.parse(row.proposal);
-    let task: TaskResult | null = null;
-    if (row.taskId) {
-      try {
-        task = await new TaskAuthority(database).lookup(row.taskId);
-      } catch (error) {
-        if (!isTaskStateQuarantinedError(error)) throw error;
-      }
-    }
+    const task = row.taskId ? await campaignTaskLookup(database, row.taskId, taskFacts) : null;
     const accepted = acceptedCampaignDelivery(task, campaign, contract, predecessor);
     if (!accepted)
       return {
@@ -712,6 +708,7 @@ async function reconcile(
     .orderBy(asc(campaignProposals.sequence));
   const repositoryRows = await database.select().from(repositories);
   const repositoriesById = new Map(repositoryRows.map((repository) => [repository.id, repository]));
+  const taskFacts: CampaignTaskFacts = new Map();
   let changed = false;
   for (const row of rows) {
     if (row.status === "superseded") continue;
@@ -727,7 +724,7 @@ async function reconcile(
     );
     const dependency =
       blocker === null
-        ? await dependencyResolution(proposal, rows, contract, campaign, database)
+        ? await dependencyResolution(proposal, rows, contract, campaign, database, taskFacts)
         : { blocker: null, baseSha: null };
     const nextStatus = blocker ? "blocked" : dependency.blocker ? "planned" : "ready";
     const nextBlocker = blocker ?? dependency.blocker;
@@ -773,7 +770,7 @@ async function reconcile(
     }
   }
   if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
-    const results = await campaignTaskResults(database, rows);
+    const results = await campaignTaskResults(database, rows, taskFacts);
     const assessments = await campaignAssessmentRows(database, campaignId);
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
@@ -989,19 +986,32 @@ async function reconcileWithRepositoryHeads(
 async function campaignTaskResults(
   database: CampaignDatabase,
   rows: readonly (typeof campaignProposals.$inferSelect)[],
+  taskFacts: CampaignTaskFacts = new Map(),
 ): Promise<Map<string, TaskResult>> {
-  const authority = new TaskAuthority(database);
   const results = new Map<string, TaskResult>();
   for (const row of rows) {
     if (!row.taskId) continue;
-    try {
-      const result = await authority.lookup(row.taskId);
-      if (result) results.set(row.proposalId, result);
-    } catch (error) {
-      if (!isTaskStateQuarantinedError(error)) throw error;
-    }
+    const result = await campaignTaskLookup(database, row.taskId, taskFacts);
+    if (result) results.set(row.proposalId, result);
   }
   return results;
+}
+
+async function campaignTaskLookup(
+  database: CampaignDatabase,
+  taskId: string,
+  taskFacts: CampaignTaskFacts,
+): Promise<TaskResult | null> {
+  if (taskFacts.has(taskId)) return taskFacts.get(taskId) ?? null;
+  try {
+    const result = await new TaskAuthority(database).lookup(taskId);
+    taskFacts.set(taskId, result);
+    return result;
+  } catch (error) {
+    if (!isTaskStateQuarantinedError(error)) throw error;
+    taskFacts.set(taskId, null);
+    return null;
+  }
 }
 
 function campaignAssessmentEvidence(
