@@ -1640,6 +1640,14 @@ describe("Coding Session", () => {
   test.each([
     ["missing model", 'model_reasoning_effort = "low"\n'],
     ["unsupported reasoning effort", 'model = "fixture-model"\nmodel_reasoning_effort = "ultra"\n'],
+    [
+      "unsupported reasoning effort max",
+      'model = "fixture-model"\nmodel_reasoning_effort = "max"\n',
+    ],
+    [
+      "unsupported reasoning effort persistent",
+      'model = "fixture-model"\nmodel_reasoning_effort = "persistent"\n',
+    ],
     ["disallowed features", 'model = "fixture-model"\nfeatures = { shell = true }\n'],
     ["blank developer instructions", 'model = "fixture-model"\ndeveloper_instructions = "   "\n'],
     ["non-string developer instructions", 'model = "fixture-model"\ndeveloper_instructions = 42\n'],

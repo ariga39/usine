@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Codex, type ModelReasoningEffort } from "@openai/codex-sdk";
+import { Codex } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
 import { Effect } from "effect";
@@ -21,6 +21,7 @@ import { CodexAppServerAdapter } from "./codex-app-server.js";
 import { OpenCode2Adapter } from "./opencode2-adapter.js";
 import {
   type CodingSessionAdapter,
+  type CodingSessionAdapterProfile,
   type CodingSessionAdapterRequest,
   type ProviderNeutralCompletedEvidence,
   type ProviderNeutralUsage,
@@ -98,7 +99,7 @@ export interface EffectiveSessionProfile {
   /** Provider-attested identity; it is never inferred from configured identity. */
   actualProvider?: string | null;
   actualModelProvider?: string | null;
-  reasoningEffort: ModelReasoningEffort | null;
+  reasoningEffort: NonNullable<CodingSessionAdapterProfile["reasoningEffort"]> | null;
   developerInstructionsSha256: string | null;
   serviceTier?: string | null;
 }
