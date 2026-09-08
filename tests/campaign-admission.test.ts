@@ -686,6 +686,88 @@ test("holds the next Ready proposal at active capacity and admits it after relea
   }
 });
 
+test("admits unrelated Ready work while an assessor remains pending", async () => {
+  const firstContract = oneOutcomeFrontierGoal("campaign-repository");
+  const secondContract = {
+    ...firstContract,
+    id: "campaign-367",
+  };
+  let assessorEntered!: () => void;
+  const assessorStarted = new Promise<void>((resolve) => {
+    assessorEntered = resolve;
+  });
+  let releaseAssessor!: () => void;
+  const assessorRelease = new Promise<void>((resolve) => {
+    releaseAssessor = resolve;
+  });
+  const ordering: string[] = [];
+  let executions = 0;
+  const assessor: CampaignOutcomeAssessor = async () => {
+    ordering.push("assessor-start");
+    assessorEntered();
+    await assessorRelease;
+    return {
+      verdict: "inconclusive",
+      summary: "the fixture assessor is still pending",
+      gaps: [],
+      evidence: [],
+      usage: null,
+    };
+  };
+  const { root, contractPath, server } = await frontierFixture(
+    firstContract,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      executions += 1;
+      ordering.push(`execute:${result.taskId}`);
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "controlled reproduction complete",
+      );
+    },
+    2,
+    true,
+    assessor,
+  );
+  const secondContractPath = join(root, "second-goal.json");
+  await writeFile(secondContractPath, JSON.stringify(secondContract));
+  await execa("git", ["add", "second-goal.json"], { cwd: root });
+  await execa("git", ["commit", "-m", "authorize second campaign"], { cwd: root });
+  try {
+    const first = await publishCampaign(server.url, { contractPath });
+    const second = await publishCampaign(server.url, { contractPath: secondContractPath });
+    await proposeCampaign(
+      server.url,
+      second.campaignId,
+      frontierProposal("independent-ready", "outcome-one"),
+    );
+
+    const firstHandoff = handoffCampaign(server.url, first.campaignId);
+    await assessorStarted;
+    const secondHandoff = handoffCampaign(server.url, second.campaignId);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(executions).toBe(1);
+    expect(ordering).toEqual([
+      "assessor-start",
+      "execute:campaign-campaign-367-v1-independent-ready",
+    ]);
+
+    releaseAssessor();
+    await Promise.all([firstHandoff, secondHandoff]);
+    for (let attempt = 0; attempt < 100 && executions === 0; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(executions).toBe(1);
+    expect(ordering.slice(0, 2)).toEqual([
+      "assessor-start",
+      "execute:campaign-campaign-367-v1-independent-ready",
+    ]);
+  } finally {
+    releaseAssessor();
+    await server.close();
+  }
+});
+
 test("keeps same-Repository Ready proposals serial with spare active capacity", async () => {
   let executions = 0;
   let releaseFirst!: () => void;

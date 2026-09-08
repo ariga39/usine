@@ -351,6 +351,13 @@ export interface CampaignTaskAdmission {
   readonly contract: TaskContract;
 }
 
+export type CampaignModelWork = (signal: AbortSignal) => Promise<boolean>;
+
+export interface CampaignReconciliationOptions {
+  /** Run Campaign-only model work in the server-owned lifecycle. */
+  readonly launchModelWork?: (work: CampaignModelWork) => void;
+}
+
 function campaignTaskId(contract: GoalContract, proposal: TaskProposal): string {
   const readable = `campaign-${contract.id}-v${contract.version}-${proposal.proposalId}`;
   return readable.length <= 128
@@ -1559,6 +1566,16 @@ async function reserveReplacementRun(
   try {
     let reserved = false;
     await handle.exclusiveTransaction(async () => {
+      const existing = await handle.database
+        .select({ invocationId: campaignReplacementRuns.invocationId })
+        .from(campaignReplacementRuns)
+        .where(
+          and(
+            eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
+            eq(campaignReplacementRuns.outcomeId, target.outcome.id),
+          ),
+        );
+      if (existing.length > 0) return;
       await handle.database
         .insert(campaignReplacementRuns)
         .values({
@@ -1575,17 +1592,7 @@ async function reserveReplacementRun(
           completedAtEpochMs: null,
         })
         .onConflictDoNothing();
-      const row = await handle.database
-        .select({ invocationId: campaignReplacementRuns.invocationId })
-        .from(campaignReplacementRuns)
-        .where(
-          and(
-            eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
-            eq(campaignReplacementRuns.outcomeId, target.outcome.id),
-            eq(campaignReplacementRuns.assessmentId, target.assessment.assessmentId),
-          ),
-        );
-      reserved = row[0]?.invocationId === target.invocationId;
+      reserved = true;
     });
     return reserved;
   } finally {
@@ -1608,6 +1615,11 @@ async function reserveCampaignModelRun(
   try {
     let reserved = false;
     await handle.exclusiveTransaction(async () => {
+      const existing = await handle.database
+        .select({ invocationId: campaignModelRuns.invocationId })
+        .from(campaignModelRuns)
+        .where(eq(campaignModelRuns.invocationId, target.invocationId));
+      if (existing.length > 0) return;
       await handle.database
         .insert(campaignModelRuns)
         .values({
@@ -1635,11 +1647,7 @@ async function reserveCampaignModelRun(
           usage: null,
         })
         .onConflictDoNothing();
-      const row = await handle.database
-        .select({ invocationId: campaignModelRuns.invocationId })
-        .from(campaignModelRuns)
-        .where(eq(campaignModelRuns.invocationId, target.invocationId));
-      reserved = row[0]?.invocationId === target.invocationId;
+      reserved = true;
     });
     return reserved;
   } finally {
@@ -1930,15 +1938,27 @@ async function recoverPendingCampaignModelRuns(stateDirectory: string): Promise<
   }
 }
 
+/** Recover model reservations once before the server starts active coordination. */
+export async function recoverPendingCampaignRuns(stateDirectory: string): Promise<void> {
+  await recoverPendingCampaignModelRuns(stateDirectory);
+  await recoverPendingReplacementRuns(stateDirectory);
+}
+
 async function generateCampaignReplacements(
   stateDirectory: string,
   generator: CampaignReplacementGenerator,
   environment: NodeJS.ProcessEnv,
-): Promise<void> {
+  signal?: AbortSignal,
+): Promise<boolean> {
+  let ran = false;
   while (true) {
+    if (signal?.aborted) return ran;
     const target = (await replacementTargets(stateDirectory))[0];
-    if (!target) return;
+    if (!target) return ran;
+    if (signal?.aborted) return ran;
     if (!(await reserveReplacementRun(stateDirectory, target))) continue;
+    ran = true;
+    if (signal?.aborted) return ran;
     if (!replacementBudgetAvailable(target.remainingBudget)) {
       await persistReplacementResult(
         stateDirectory,
@@ -1967,8 +1987,7 @@ async function generateCampaignReplacements(
         evidenceHash: target.evidenceHash,
       }))
     ) {
-      await persistReplacementResult(stateDirectory, target, null, null, undefined);
-      continue;
+      return ran;
     }
     let draft: CampaignReplacementDraft;
     try {
@@ -1988,10 +2007,12 @@ async function generateCampaignReplacements(
         remainingBudget: target.remainingBudget,
         deadlineEpochMs: target.deadlineEpochMs,
         environment,
+        signal,
       });
     } catch {
       draft = { proposal: null, usage: null };
     }
+    if (signal?.aborted) return ran;
     let usage: CampaignReplacementDraft["usage"] = null;
     try {
       usage = Schema.decodeUnknownSync(Schema.NullOr(campaignAssessmentUsageSchema))(draft.usage);
@@ -2200,8 +2221,11 @@ async function assessCampaignTargets(
   environment: NodeJS.ProcessEnv,
   assessor: CampaignOutcomeAssessor,
   replacementGenerator: CampaignReplacementGenerator,
-): Promise<void> {
+  signal?: AbortSignal,
+): Promise<boolean> {
+  let ran = false;
   for (const target of await assessmentTargets(stateDirectory)) {
+    if (signal?.aborted) return ran;
     const startedAtEpochMs = Date.now();
     if (
       !(await reserveCampaignModelRun(stateDirectory, {
@@ -2212,6 +2236,7 @@ async function assessCampaignTargets(
       }))
     )
       continue;
+    ran = true;
     let draft: CampaignAssessmentDraft;
     try {
       draft = await assessor({
@@ -2228,6 +2253,7 @@ async function assessCampaignTargets(
           target.campaign.createdAt.getTime() + (target.contract.budget.maxElapsedMs || 60_000),
         ),
         environment,
+        signal,
       });
     } catch {
       draft = {
@@ -2239,6 +2265,7 @@ async function assessCampaignTargets(
         modelRuns: [],
       };
     }
+    if (signal?.aborted) return ran;
     let assessment: CampaignAssessment;
     try {
       assessment = validateAssessment(target, draft, startedAtEpochMs, Date.now());
@@ -2264,10 +2291,18 @@ async function assessCampaignTargets(
     }
     await persistCampaignAssessment(stateDirectory, target, assessment, usage, draft.modelRuns);
   }
-  await generateCampaignReplacements(stateDirectory, replacementGenerator, environment);
+  ran =
+    (await generateCampaignReplacements(
+      stateDirectory,
+      replacementGenerator,
+      environment,
+      signal,
+    )) || ran;
+  if (signal?.aborted) return ran;
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);
   });
+  return ran;
 }
 
 export async function reconcileCampaigns(
@@ -2276,6 +2311,7 @@ export async function reconcileCampaigns(
   activeTaskCapacity = 1,
   assessor?: CampaignOutcomeAssessor,
   replacementGenerator?: CampaignReplacementGenerator,
+  options: CampaignReconciliationOptions = {},
 ): Promise<readonly CampaignTaskAdmission[]> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
@@ -2289,21 +2325,34 @@ export async function reconcileCampaigns(
   } finally {
     readHandle.close();
   }
-  await recoverPendingCampaignModelRuns(stateDirectory);
-  await recoverPendingReplacementRuns(stateDirectory);
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
     await reconcileAll(database, observed);
   });
-  if (assessor)
-    await assessCampaignTargets(
-      stateDirectory,
-      environment,
-      assessor,
-      replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
-    );
-  else if (replacementGenerator)
-    await generateCampaignReplacements(stateDirectory, replacementGenerator, environment);
-  return admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
+  const admissions = await admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
+  const modelWork = assessor
+    ? (signal: AbortSignal) =>
+        assessCampaignTargets(
+          stateDirectory,
+          environment,
+          assessor,
+          replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
+          signal,
+        )
+    : replacementGenerator
+      ? (signal: AbortSignal) =>
+          generateCampaignReplacements(stateDirectory, replacementGenerator, environment, signal)
+      : undefined;
+  const modelWorkAvailable = assessor
+    ? (await assessmentTargets(stateDirectory)).length > 0 ||
+      (await replacementTargets(stateDirectory)).length > 0
+    : replacementGenerator
+      ? (await replacementTargets(stateDirectory)).length > 0
+      : false;
+  if (modelWork && modelWorkAvailable) {
+    if (options.launchModelWork) options.launchModelWork(modelWork);
+    else await modelWork(new AbortController().signal);
+  }
+  return admissions;
 }
 
 async function admitReadyCampaignTasks(

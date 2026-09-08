@@ -44,8 +44,10 @@ import {
   CampaignTouchInputError,
   proposeCampaign,
   publishCampaign,
+  recoverPendingCampaignRuns,
   reconcileCampaigns,
   readGoalContract,
+  type CampaignModelWork,
 } from "./campaign.js";
 import {
   createCampaignOutcomeAssessor,
@@ -256,6 +258,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   let eventDispatch = Promise.resolve();
   let coordinateCampaigns: () => Promise<void> = async () => undefined;
   let campaignCoordination = Promise.resolve();
+  let launchCampaignModelWork: (work: CampaignModelWork) => void = () => undefined;
+  let serverClosed = false;
+  const activeCampaignModelPromises = new Set<Promise<boolean>>();
+  const queuedCampaignModelLaunches = new Set<ReturnType<typeof setImmediate>>();
   const onEvent = (event: TaskEvent): void => {
     eventDispatch = eventDispatch
       .then(async () => {
@@ -282,6 +288,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const program = Effect.gen(function* () {
     const runTask = yield* FiberMap.makeRuntime<never, string>();
+    const runCampaignModel = yield* FiberMap.makeRuntimePromise<never, string>();
     let launchTask: (task: AdmittedTask, mode?: LaunchMode) => void = () => undefined;
     const api = yield* HttpRouter.toHttpEffect(
       createApiLayer({
@@ -319,6 +326,38 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       );
     };
 
+    launchCampaignModelWork = (work) => {
+      if (serverClosed) return;
+      const launch = setImmediate(() => {
+        queuedCampaignModelLaunches.delete(launch);
+        if (serverClosed) return;
+        const promise = runCampaignModel(
+          "campaign-model-work",
+          Effect.tryPromise({
+            try: async (signal) => {
+              if (serverClosed) return Promise.resolve(false);
+              const operation = work(signal);
+              activeCampaignModelPromises.add(operation);
+              try {
+                return await operation;
+              } finally {
+                activeCampaignModelPromises.delete(operation);
+              }
+            },
+            catch: () => false,
+          }).pipe(Effect.catch(() => Effect.succeed(false))),
+          { onlyIfMissing: true },
+        );
+        void promise.then(
+          (ran) => {
+            if (ran && !serverClosed) void coordinateCampaigns().catch(() => undefined);
+          },
+          () => undefined,
+        );
+      });
+      queuedCampaignModelLaunches.add(launch);
+    };
+
     coordinateCampaigns = () => {
       const run = campaignCoordination.then(async () => {
         const admissions = await reconcileCampaigns(
@@ -327,6 +366,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           activeTaskCapacity,
           assessOutcome,
           generateReplacement,
+          { launchModelWork: launchCampaignModelWork },
         );
         for (const admission of admissions) {
           if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")
@@ -336,6 +376,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       campaignCoordination = run.catch(() => undefined);
       return run;
     };
+
+    yield* Effect.tryPromise({
+      try: () => recoverPendingCampaignRuns(stateDirectory),
+      catch: (cause) => cause,
+    });
 
     const restartState = yield* Effect.tryPromise({
       try: () => lookupRestartableTasks(stateDirectory),
@@ -403,9 +448,18 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     return {
       ...running,
       close: () =>
-        (closePromise ??= Effect.runPromise(Scope.close(scope, Exit.void)).then(() => undefined)),
+        (closePromise ??= (async () => {
+          serverClosed = true;
+          for (const launch of queuedCampaignModelLaunches) clearImmediate(launch);
+          queuedCampaignModelLaunches.clear();
+          await Effect.runPromise(Scope.close(scope, Exit.void));
+          await Promise.allSettled(activeCampaignModelPromises);
+        })()),
     };
   } catch (error) {
+    serverClosed = true;
+    for (const launch of queuedCampaignModelLaunches) clearImmediate(launch);
+    queuedCampaignModelLaunches.clear();
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
     throw error;
   }
