@@ -14,12 +14,9 @@ import {
   type TaskContract,
 } from "@usine/task-authority";
 import {
-  codingSessionAdapterForProfile,
   CodingSessionAdapterConfigurationError,
   reviewCandidateWithProfile,
-  codingSessionAdapterProfilesFromEnvironment,
   readSessionArchiveManifest,
-  resolveCodexProfile,
   stateDirectoryFromEnvironment,
   type ReviewerQualityGateInput,
   type ReviewAttemptObservation,
@@ -31,6 +28,12 @@ import {
   profilePairFieldSnapshot,
   type ProfilePairChangedFactor,
 } from "./profile-pair-admission.js";
+import {
+  expectedProfileIdentity,
+  matchesProfileIdentity,
+  resolveEvaluationProfile,
+  type ProfileIdentity,
+} from "./profile-identity.js";
 
 type EffectiveSessionProfile = NonNullable<ReviewAttemptObservation["effectiveProfile"]>;
 type CheckResult = ReviewerQualityGateInput["check"];
@@ -428,8 +431,8 @@ export async function executeReviewerProfileEvaluation(
   }
   await revalidateArchiveEvidence(loaded, environment, reports, services);
   return compareReviewerProfileEvaluation(loaded.plan, reports, {
-    baseline: expectedProfile(loaded.profileSelections.baseline),
-    candidate: expectedProfile(loaded.profileSelections.candidate),
+    baseline: expectedProfileIdentity(loaded.profileSelections.baseline),
+    candidate: expectedProfileIdentity(loaded.profileSelections.candidate),
   });
 }
 
@@ -472,8 +475,8 @@ export function compareReviewerProfileEvaluation(
   plan: ReviewerEvaluationPlan,
   reports: Record<"baseline" | "candidate", ReviewerEvaluationRunReport[]>,
   expectedProfiles?: {
-    readonly baseline: ExpectedReviewerProfile;
-    readonly candidate: ExpectedReviewerProfile;
+    readonly baseline: ProfileIdentity;
+    readonly candidate: ProfileIdentity;
   },
 ): ReviewerEvaluationReport {
   const baseline = profileReport(
@@ -549,35 +552,10 @@ export function compareReviewerProfileEvaluation(
   };
 }
 
-interface ExpectedReviewerProfile {
-  readonly configSha256: string;
-  readonly model: string;
-  readonly modelProvider: string | null;
-  readonly reasoningEffort: EffectiveSessionProfile["reasoningEffort"];
-  readonly developerInstructionsSha256: string | null;
-  readonly adapter: EffectiveSessionProfile["adapter"];
-}
-
-function expectedProfile(
-  selection: Awaited<ReturnType<typeof resolveReviewerProfile>>,
-): ExpectedReviewerProfile {
-  return {
-    configSha256: selection.configSha256 ?? "",
-    model: selection.model,
-    modelProvider:
-      typeof selection.config?.model_provider === "string" ? selection.config.model_provider : null,
-    reasoningEffort: selection.modelReasoningEffort ?? null,
-    developerInstructionsSha256: selection.developerInstructions
-      ? createHash("sha256").update(selection.developerInstructions, "utf8").digest("hex")
-      : null,
-    adapter: selection.adapter,
-  };
-}
-
 function profileReport(
   profile: string,
   runs: readonly ReviewerEvaluationRunReport[],
-  expected?: ExpectedReviewerProfile,
+  expected?: ProfileIdentity,
 ): {
   profile: string;
   correctness: ReviewerEvaluationProfileReport["correctness"];
@@ -620,19 +598,14 @@ function profileEvidenceReason(
 function matchesExpectedProfile(
   run: ReviewerEvaluationRunReport,
   profile: string,
-  expected: ExpectedReviewerProfile,
+  expected: ProfileIdentity,
 ): boolean {
   const effective = run.effectiveProfile;
   return (
     run.requestedProfile === profile &&
     effective !== null &&
     effective.profileName === profile &&
-    effective.configSha256 === expected.configSha256 &&
-    effective.model === expected.model &&
-    effective.modelProvider === expected.modelProvider &&
-    effective.reasoningEffort === expected.reasoningEffort &&
-    effective.developerInstructionsSha256 === expected.developerInstructionsSha256 &&
-    effective.adapter === expected.adapter
+    matchesProfileIdentity(effective, expected)
   );
 }
 
@@ -1042,15 +1015,7 @@ function parseLabel(raw: string): ReviewerEvaluationLabel {
 
 async function resolveReviewerProfile(profile: string, environment: NodeJS.ProcessEnv) {
   try {
-    const selection = await resolveCodexProfile(profile, environment);
-    if (!selection.config) throw new Error("configuration unavailable");
-    return {
-      ...selection,
-      adapter: codingSessionAdapterForProfile(
-        profile,
-        codingSessionAdapterProfilesFromEnvironment(environment),
-      ),
-    };
+    return await resolveEvaluationProfile(profile, environment);
   } catch (error) {
     if (error instanceof CodingSessionAdapterConfigurationError) throw error;
     throw new ReviewerEvaluationValidationError(

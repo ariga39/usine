@@ -555,6 +555,75 @@ describe("profile evaluate plan boundary", () => {
     expect(inconclusive.recommendation).toBe("inconclusive");
     expect(inconclusive.candidate.metrics.elapsedMs).toBe(null);
 
+    const missingIdentityBase = accepted("candidate-profile", 2);
+    const missingIdentity: TaskEvidence = {
+      ...missingIdentityBase,
+      roleRuns: {
+        ...missingIdentityBase.roleRuns,
+        implementer: [
+          {
+            ...missingIdentityBase.roleRuns.implementer[0]!,
+            effectiveProfile: {
+              ...missingIdentityBase.roleRuns.implementer[0]!.effectiveProfile,
+              configSha256: null,
+            },
+          },
+        ],
+      },
+    };
+    const missingIdentityReport = compareProfileEvaluation(
+      plan,
+      {
+        baseline: [
+          {
+            id: "baseline",
+            pairId: "case",
+            repetition: 1,
+            taskId: "baseline-task",
+            evidence: accepted("baseline-profile", 1),
+          },
+        ],
+        candidate: [
+          {
+            id: "candidate",
+            pairId: "case",
+            repetition: 1,
+            taskId: "candidate-task",
+            evidence: missingIdentity,
+          },
+        ],
+      },
+      {
+        baseline: {
+          configSha256: "1".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+        candidate: {
+          configSha256: "1".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+        reviewer: {
+          configSha256: "1".repeat(64),
+          model: "test-model",
+          modelProvider: null,
+          reasoningEffort: null,
+          developerInstructionsSha256: null,
+          adapter: "sdk",
+        },
+      },
+    );
+    expect(missingIdentityReport.inconclusiveReasons).toContain(
+      "candidate-task:implementer_profile_unknown",
+    );
+
     const missingComparisonEvidence = accepted("baseline-profile", 10);
     const missingComparisonReport = compareProfileEvaluation(plan, {
       baseline: [
