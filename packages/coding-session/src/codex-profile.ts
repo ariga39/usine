@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CodexOptions, ModelReasoningEffort } from "@openai/codex-sdk";
+import type { CodexOptions } from "@openai/codex-sdk";
 import { Toml } from "effect/unstable/encoding";
 import { z } from "zod";
 import {
@@ -126,7 +126,7 @@ function codexConfigFromProfileFields(
 
 export interface CodexProfileSelection {
   model: string;
-  modelReasoningEffort?: ModelReasoningEffort;
+  modelReasoningEffort?: NonNullable<CodingSessionAdapterProfile["reasoningEffort"]>;
   developerInstructions?: string;
   config?: Readonly<Record<string, unknown>>;
   configSha256?: string;

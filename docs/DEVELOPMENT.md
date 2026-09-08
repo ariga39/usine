@@ -99,6 +99,8 @@ If custom infrastructure remains necessary, record the evaluated primitive, its 
 
 A new direct dependency is a repository decision: name its current caller and why an existing platform or selected dependency cannot own the behavior. Ordinary dependency resolution and updates observe the seven-day pnpm cooldown.
 
+Keep the Coding Session SDK on the current stable release when maintaining this dependency. Verify its matching bundled CLI against supported host configuration without a model request, and commit exact dependency and lockfile updates together. A user-authorized cooldown exception must name only the selected SDK, CLI, and matching platform releases; unrelated dependencies retain the cooldown. Runtime startup does not resolve or install updates.
+
 The current product package map and dependency direction are defined in [DESIGN](DESIGN.md#5-behavioral-packages-and-composition). Use [codebase-design](../.agents/skills/codebase-design/SKILL.md) before changing those boundaries and [find-simplifications](../.agents/skills/find-simplifications/SKILL.md) when a touched seam exposes removable machinery.
 
 The root Vite+ workspace is the toolchain authority:
