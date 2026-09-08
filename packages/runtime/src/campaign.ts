@@ -35,6 +35,7 @@ import {
   type CampaignDecisionRequest,
   type CampaignOutcomeEvidence,
   type CampaignAssessment,
+  type CampaignAssessmentEvidence,
   type CampaignAssessmentUsage,
   type CampaignAssessmentFact,
   type CampaignUsageSource,
@@ -1046,20 +1047,34 @@ function assessmentFactKey(item: CampaignAssessmentFact): string {
   return `${item.repositoryId}\u0000${item.proposalId}\u0000${item.taskId}\u0000${item.fact}\u0000${item.status}\u0000${item.sha}`;
 }
 
+function resolveAssessmentReferences(
+  outcome: GoalContract["outcomes"][number],
+  evidence: readonly CampaignAssessmentFact[],
+  references: readonly CampaignAssessmentEvidence[],
+): {
+  readonly references: readonly CampaignAssessmentEvidence[];
+  readonly criteriaSatisfied: boolean;
+} {
+  const source = new Set(evidence.map(assessmentFactKey));
+  const resolved = references.filter(
+    (item) =>
+      item.criterionIndex < outcome.acceptance.length && source.has(assessmentFactKey(item)),
+  );
+  return {
+    references: resolved,
+    criteriaSatisfied: outcome.acceptance.every((_, criterionIndex) =>
+      resolved.some((item) => item.criterionIndex === criterionIndex && item.fact === "delivery"),
+    ),
+  };
+}
+
 function assessmentReferencesResolve(
   outcome: GoalContract["outcomes"][number],
   evidence: readonly CampaignAssessmentFact[],
   assessment: CampaignAssessment | undefined,
 ): boolean {
   if (!assessment || assessment.verdict !== "satisfied") return false;
-  const source = new Set(evidence.map(assessmentFactKey));
-  const references = assessment.evidence.filter(
-    (item) =>
-      item.criterionIndex < outcome.acceptance.length && source.has(assessmentFactKey(item)),
-  );
-  return outcome.acceptance.every((_, criterionIndex) =>
-    references.some((item) => item.criterionIndex === criterionIndex && item.fact === "delivery"),
-  );
+  return resolveAssessmentReferences(outcome, evidence, assessment.evidence).criteriaSatisfied;
 }
 
 async function campaignAssessmentRows(
@@ -2092,13 +2107,10 @@ function validateAssessment(
   startedAtEpochMs: number,
   completedAtEpochMs: number,
 ): CampaignAssessment {
-  const source = new Set(target.evidence.map(assessmentFactKey));
-  const references = draft.evidence.filter(
-    (item) =>
-      item.criterionIndex < target.outcome.acceptance.length && source.has(assessmentFactKey(item)),
-  );
-  const criteriaSatisfied = target.outcome.acceptance.every((_, index) =>
-    references.some((item) => item.criterionIndex === index && item.fact === "delivery"),
+  const { references, criteriaSatisfied } = resolveAssessmentReferences(
+    target.outcome,
+    target.evidence,
+    draft.evidence,
   );
   let verdict = draft.verdict;
   let summary = draft.summary.slice(0, 2000);
