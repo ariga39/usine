@@ -980,7 +980,7 @@ describe("reviewer profile evaluation public path", () => {
           return { ...result, effectiveProfile: undefined, archive: undefined };
         return {
           ...result,
-          effectiveProfile: { ...result.effectiveProfile!, model: "drifted-model" },
+          effectiveProfile: { ...result.effectiveProfile!, configSha256: "9".repeat(64) },
           archive: {
             archiveId: "archive_00000000-0000-0000-0000-000000000002",
             status: "truncated",

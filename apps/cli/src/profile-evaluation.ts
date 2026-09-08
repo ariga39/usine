@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -16,13 +15,7 @@ import {
   type RepositorySnapshot,
   type TaskContract,
 } from "@usine/task-authority";
-import {
-  codingSessionAdapterForProfile,
-  codingSessionAdapterProfilesFromEnvironment,
-  CodingSessionAdapterConfigurationError,
-  resolveCodexProfile,
-  validateCodexProfile,
-} from "@usine/runtime";
+import { CodingSessionAdapterConfigurationError, validateCodexProfile } from "@usine/runtime";
 import { CliFailure, runCommand } from "./cli-failure.js";
 import {
   followTask,
@@ -44,6 +37,12 @@ import {
   profilePairFieldSnapshot,
   type ProfilePairChangedFactor,
 } from "./profile-pair-admission.js";
+import {
+  expectedProfileIdentity,
+  matchesProfileIdentity,
+  resolveEvaluationProfile,
+  type ProfileIdentity,
+} from "./profile-identity.js";
 
 const execFile = promisify(execFileCallback);
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -565,9 +564,9 @@ export async function executeProfileEvaluation(
     throw new ProfileEvaluationRestorationError(cause.message, { cause });
   }
   return compareProfileEvaluation(plan, reports, {
-    baseline: expectedEvidenceProfile(loaded.profileSelections.baseline),
-    candidate: expectedEvidenceProfile(loaded.profileSelections.candidate),
-    reviewer: expectedEvidenceProfile(loaded.profileSelections.reviewer),
+    baseline: expectedProfileIdentity(loaded.profileSelections.baseline),
+    candidate: expectedProfileIdentity(loaded.profileSelections.candidate),
+    reviewer: expectedProfileIdentity(loaded.profileSelections.reviewer),
   });
 }
 
@@ -782,9 +781,9 @@ export function compareProfileEvaluation(
   plan: ProfileEvaluationPlan,
   reports: Record<"baseline" | "candidate", EvaluationTaskReport[]>,
   expectedProfiles?: {
-    readonly baseline: ExpectedEvidenceProfile;
-    readonly candidate: ExpectedEvidenceProfile;
-    readonly reviewer: ExpectedEvidenceProfile;
+    readonly baseline: ProfileIdentity;
+    readonly candidate: ProfileIdentity;
+    readonly reviewer: ProfileIdentity;
   },
 ): ProfileEvaluationReport {
   const baseline = profileReport(
@@ -871,8 +870,8 @@ function profileReport(
   profile: string,
   reviewerProfile: string,
   tasks: readonly EvaluationTaskReport[],
-  expectedProfile?: ExpectedEvidenceProfile,
-  expectedReviewer?: ExpectedEvidenceProfile,
+  expectedProfile?: ProfileIdentity,
+  expectedReviewer?: ProfileIdentity,
 ) {
   const reasons: string[] = [];
   let correctness: EvaluationProfileReport["correctness"] = "passed";
@@ -931,60 +930,26 @@ function reviewerEvidenceRequired(evidence: EvaluationTaskReport["evidence"]): b
   );
 }
 
-interface ExpectedEvidenceProfile {
-  readonly configSha256: string;
-  readonly model: string;
-  readonly modelProvider: string | null;
-  readonly reasoningEffort: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"]["reasoningEffort"];
-  readonly developerInstructionsSha256: string | null;
-  readonly adapter: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"]["adapter"];
-}
-
-function expectedEvidenceProfile(
-  selection: Awaited<ReturnType<typeof resolveProfile>>,
-): ExpectedEvidenceProfile {
-  const provider = selection.config?.model_provider;
-  return {
-    configSha256: selection.configSha256 ?? "",
-    model: selection.model,
-    modelProvider: typeof provider === "string" ? provider : null,
-    reasoningEffort: selection.modelReasoningEffort ?? null,
-    developerInstructionsSha256: selection.developerInstructions
-      ? createHash("sha256").update(selection.developerInstructions, "utf8").digest("hex")
-      : null,
-    adapter: selection.adapter,
-  };
-}
-
 function matchesExpectedProfile(
   run: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number],
   expectedName: string,
-  expected?: ExpectedEvidenceProfile,
+  expected?: ProfileIdentity,
 ): boolean {
   if (run.requestedProfile !== expectedName || run.effectiveProfile.profileName !== expectedName)
     return false;
   if (!expected) return true;
-  const effective = run.effectiveProfile;
-  return (
-    effective.configSha256 === expected.configSha256 &&
-    effective.model === expected.model &&
-    effective.modelProvider === expected.modelProvider &&
-    effective.reasoningEffort === expected.reasoningEffort &&
-    effective.developerInstructionsSha256 === expected.developerInstructionsSha256 &&
-    effective.adapter === expected.adapter
-  );
+  return matchesProfileIdentity(run.effectiveProfile, expected);
 }
 
 function hasRequiredEffectiveIdentity(
   run: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number],
 ): boolean {
-  const profile = run.effectiveProfile;
   return (
     run.requestedProfile !== null &&
-    profile.profileName !== null &&
-    profile.configSha256 !== null &&
-    profile.adapter !== null &&
-    profile.model !== null
+    run.effectiveProfile.profileName !== null &&
+    run.effectiveProfile.configSha256 !== null &&
+    run.effectiveProfile.adapter !== null &&
+    run.effectiveProfile.model !== null
   );
 }
 
@@ -1072,21 +1037,11 @@ function stableImplementerIdentity(
   return unknown || drifted ? null : first.effectiveProfile;
 }
 
-const effectiveIdentityFields = [
-  "profileName",
-  "configSha256",
-  "adapter",
-  "model",
-  "modelProvider",
-  "reasoningEffort",
-  "developerInstructionsSha256",
-] as const;
-
 function sameEffectiveIdentity(
   left: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
   right: EvaluationTaskReport["evidence"]["roleRuns"]["implementer"][number]["effectiveProfile"],
 ): boolean {
-  return effectiveIdentityFields.every((field) => left[field] === right[field]);
+  return left.profileName === right.profileName && matchesProfileIdentity(left, right);
 }
 
 function sameAllowedImplementerIdentity(
@@ -1288,18 +1243,7 @@ async function readUsineSourceCommit(): Promise<string> {
 
 async function resolveProfile(profile: string, environment: NodeJS.ProcessEnv) {
   try {
-    const selection = await resolveCodexProfile(profile, environment);
-    if (!selection.config)
-      throw new ProfileEvaluationValidationError(
-        `${profile}: resolved profile configuration is unavailable`,
-      );
-    return {
-      ...selection,
-      adapter: codingSessionAdapterForProfile(
-        profile,
-        codingSessionAdapterProfilesFromEnvironment(environment),
-      ),
-    };
+    return await resolveEvaluationProfile(profile, environment);
   } catch (error) {
     if (error instanceof CodingSessionAdapterConfigurationError) throw error;
     if (error instanceof ProfileEvaluationValidationError) throw error;
