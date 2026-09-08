@@ -2828,9 +2828,11 @@ describe("durable Ready frontier", () => {
   });
 
   test.each([
-    { name: "accepts the same exact delivery fact for criterion 1", forged: false },
-    { name: "rejects a forged unavailable fact for criterion 1", forged: true },
-  ])("$name in multi-criterion assessment evidence", async ({ forged }) => {
+    { name: "accepts the same exact delivery fact for criterion 1", kind: "accepted" },
+    { name: "rejects a forged unavailable fact for criterion 1", kind: "forged" },
+    { name: "downgrades evidence missing a criterion", kind: "missing" },
+    { name: "downgrades evidence that cites a non-delivery fact", kind: "non-delivery" },
+  ] as const)("$name in multi-criterion assessment evidence", async ({ kind }) => {
     const base = oneOutcomeFrontierGoal("campaign-repository");
     const contract = {
       ...base,
@@ -2848,14 +2850,21 @@ describe("durable Ready frontier", () => {
       requestEvidence = request.evidence;
       const delivery = request.evidence.find((item) => item.fact === "delivery");
       if (!delivery) throw new Error("fixture requires accepted delivery evidence");
-      const second = forged
-        ? { ...delivery, criterionIndex: 1, sha: "0".repeat(40) }
-        : { ...delivery, criterionIndex: 1 };
+      const source =
+        kind === "non-delivery"
+          ? request.evidence.find((item) => item.fact === "candidate")!
+          : delivery;
+      const second =
+        kind === "forged"
+          ? { ...delivery, criterionIndex: 1, sha: "0".repeat(40) }
+          : kind === "missing"
+            ? null
+            : { ...source, criterionIndex: 1 };
       return {
         verdict: "satisfied",
         summary: "both criteria reference the supplied delivery",
         gaps: [],
-        evidence: [{ ...delivery, criterionIndex: 0 }, second],
+        evidence: [{ ...source, criterionIndex: 0 }, ...(second ? [second] : [])],
         usage: null,
       };
     };
@@ -2883,12 +2892,16 @@ describe("durable Ready frontier", () => {
       const campaign = await getCampaign(server.url, published.campaignId);
       expect(requestEvidence.every((item) => !Object.hasOwn(item, "criterionIndex"))).toBe(true);
       expect(calls).toBe(1);
-      if (forged) {
+      if (kind !== "accepted") {
+        const expectedEvidence =
+          kind === "non-delivery"
+            ? [{ criterionIndex: 0 }, { criterionIndex: 1 }]
+            : [{ criterionIndex: 0 }];
         expect(campaign).toMatchObject({
           status: "blocked",
-          outcomes: [{ assessment: { verdict: "gaps", evidence: [{ criterionIndex: 0 }] } }],
+          outcomes: [{ assessment: { verdict: "gaps", evidence: expectedEvidence } }],
         });
-        expect(campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(1);
+        expect(campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(expectedEvidence.length);
       } else {
         expect(campaign).toMatchObject({
           status: "accepted",
