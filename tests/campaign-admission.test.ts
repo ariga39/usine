@@ -102,6 +102,16 @@ async function start(stateDirectory: string) {
   });
 }
 
+async function waitFor<T>(read: () => Promise<T>, predicate: (value: T) => boolean): Promise<T> {
+  let value = await read();
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    value = await read();
+  }
+  throw new Error("timed out waiting for durable Campaign state");
+}
+
 function frontierGoal(repositoryId: string) {
   return {
     schemaVersion: 1,
@@ -201,6 +211,15 @@ const satisfiesDeliveredOutcome: CampaignOutcomeAssessor = async (request) => {
     })),
     usage: null,
   };
+};
+
+const lateAssessorUsage = {
+  inputTokens: 17,
+  cachedInputTokens: 4,
+  uncachedInputTokens: 13,
+  cacheWriteInputTokens: 0,
+  outputTokens: 6,
+  reasoningOutputTokens: 2,
 };
 
 const checkpointOwnedGapAssessor: CampaignOutcomeAssessor = async () => ({
@@ -702,6 +721,10 @@ test("admits unrelated Ready work while an assessor remains pending", async () =
   });
   const ordering: string[] = [];
   let executions = 0;
+  let executionEntered!: () => void;
+  const executionStarted = new Promise<void>((resolve) => {
+    executionEntered = resolve;
+  });
   const assessor: CampaignOutcomeAssessor = async () => {
     ordering.push("assessor-start");
     assessorEntered();
@@ -720,6 +743,7 @@ test("admits unrelated Ready work while an assessor remains pending", async () =
     async ({ authority, result }) => {
       executions += 1;
       ordering.push(`execute:${result.taskId}`);
+      executionEntered();
       return authority.block(
         { taskId: result.taskId, revision: result.revision },
         "controlled reproduction complete",
@@ -745,7 +769,7 @@ test("admits unrelated Ready work while an assessor remains pending", async () =
     const firstHandoff = handoffCampaign(server.url, first.campaignId);
     await assessorStarted;
     const secondHandoff = handoffCampaign(server.url, second.campaignId);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await executionStarted;
 
     expect(executions).toBe(1);
     expect(ordering).toEqual([
@@ -764,6 +788,104 @@ test("admits unrelated Ready work while an assessor remains pending", async () =
     ]);
   } finally {
     releaseAssessor();
+    await server.close();
+  }
+});
+
+test("admits unrelated Ready work while a replacement planner remains pending", async () => {
+  const firstContract = oneOutcomeFrontierGoal("campaign-repository");
+  const secondContract = { ...firstContract, id: "campaign-367" };
+  let replacementEntered!: () => void;
+  const replacementStarted = new Promise<void>((resolve) => {
+    replacementEntered = resolve;
+  });
+  let releaseReplacement!: () => void;
+  const replacementRelease = new Promise<void>((resolve) => {
+    releaseReplacement = resolve;
+  });
+  let executionEntered!: () => void;
+  const executionStarted = new Promise<void>((resolve) => {
+    executionEntered = resolve;
+  });
+  const ordering: string[] = [];
+  let replacementCalls = 0;
+  let executions = 0;
+  const assessor: CampaignOutcomeAssessor = async () => ({
+    verdict: "gaps",
+    summary: "the empty frontier remains incomplete",
+    gaps: ["the fixture requires a replacement"],
+    evidence: [],
+    usage: null,
+  });
+  const replacementGenerator: CampaignReplacementGenerator = async () => {
+    replacementCalls += 1;
+    ordering.push("replacement-start");
+    replacementEntered();
+    await replacementRelease;
+    return { proposal: null, usage: null };
+  };
+  const { root, contractPath, server, stateDirectory } = await frontierFixture(
+    firstContract,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      executions += 1;
+      ordering.push(`execute:${result.taskId}`);
+      executionEntered();
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "controlled replacement reproduction complete",
+      );
+    },
+    2,
+    true,
+    assessor,
+    replacementGenerator,
+  );
+  const secondContractPath = join(root, "second-goal.json");
+  await writeFile(secondContractPath, JSON.stringify(secondContract));
+  await execa("git", ["add", "second-goal.json"], { cwd: root });
+  await execa("git", ["commit", "-m", "authorize second campaign"], { cwd: root });
+  try {
+    const first = await publishCampaign(server.url, { contractPath });
+    const second = await publishCampaign(server.url, { contractPath: secondContractPath });
+    await proposeCampaign(
+      server.url,
+      second.campaignId,
+      frontierProposal("independent-ready", "outcome-one"),
+    );
+
+    await handoffCampaign(server.url, first.campaignId);
+    await replacementStarted;
+    await handoffCampaign(server.url, second.campaignId);
+    await executionStarted;
+
+    expect(replacementCalls).toBe(1);
+    expect(executions).toBe(1);
+    expect(ordering.slice(0, 2)).toEqual([
+      "replacement-start",
+      "execute:campaign-campaign-367-v1-independent-ready",
+    ]);
+    const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+    try {
+      expect(
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+          )
+          .get(first.campaignId, "outcome-one"),
+      ).toEqual({ count: 1 });
+      expect(
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ? AND task_id IS NOT NULL",
+          )
+          .get(second.campaignId),
+      ).toEqual({ count: 1 });
+    } finally {
+      database.close();
+    }
+  } finally {
+    releaseReplacement();
     await server.close();
   }
 });
@@ -2871,6 +2993,13 @@ describe("durable Ready frontier", () => {
     try {
       const published = await publishCampaign(server.url, { contractPath });
       await handoffCampaign(server.url, published.campaignId);
+      await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) =>
+          (campaign?.outcomes.every((outcome) => outcome.assessment?.verdict === "gaps") ??
+            false) &&
+          campaign?.decisionRequest?.reason === "replacement_unavailable",
+      );
       await server.close();
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
@@ -3041,7 +3170,12 @@ describe("durable Ready frontier", () => {
       expect(beforeCheckpoint?.status).toBe("planning");
       expect(calls).toBe(0);
 
-      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      await checkpointCampaign(server.url, published.campaignId);
+      const checkpointed = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "inconclusive",
+      );
+      if (!checkpointed) throw new Error("Campaign disappeared before assessment persisted");
       expect(checkpointed.outcomes[0]?.assessment).toMatchObject({ verdict: "inconclusive" });
       expect(calls).toBe(1);
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
@@ -3150,7 +3284,14 @@ describe("durable Ready frontier", () => {
       await proposeCampaign(server.url, published.campaignId, initial);
       await proposeCampaign(server.url, published.campaignId, independent);
       await handoffCampaign(server.url, published.campaignId);
-      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      await checkpointCampaign(server.url, published.campaignId);
+      const checkpointed = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) =>
+          campaign?.proposals?.some(({ proposalId }) => proposalId === replacement.proposalId) ??
+          false,
+      );
+      if (!checkpointed) throw new Error("Campaign disappeared before replacement persisted");
 
       expect(replacementCalls).toBe(1);
       expect(checkpointed.proposals).toMatchObject([
@@ -3174,9 +3315,28 @@ describe("durable Ready frontier", () => {
         independent.proposalId,
         replacement.proposalId,
       ]);
-      await expect(checkpointCampaign(server.url, published.campaignId)).resolves.toMatchObject({
-        proposals: checkpointed.proposals,
-      });
+      const repeated = await checkpointCampaign(server.url, published.campaignId);
+      expect(repeated.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+        initial.proposalId,
+        independent.proposalId,
+        replacement.proposalId,
+      ]);
+      expect(repeated.proposals).toMatchObject([
+        {
+          proposalId: initial.proposalId,
+          status: "superseded",
+          supersededByProposalId: replacement.proposalId,
+        },
+        { proposalId: independent.proposalId },
+        {
+          proposalId: replacement.proposalId,
+          supersedesProposalId: initial.proposalId,
+          replacement: {
+            assessmentId: expect.stringMatching(/^assessment-/),
+            evidenceHash: expect.any(String),
+          },
+        },
+      ]);
       expect(replacementCalls).toBe(1);
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
@@ -3272,12 +3432,17 @@ describe("durable Ready frontier", () => {
     const initial = frontierProposal("checkpoint-source", "outcome-one", ["not-admitted"]);
     const independent = frontierProposal("checkpoint-independent", "outcome-two");
     let replacementCalls = 0;
+    let replacementEntered!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
     let releaseIndependent!: () => void;
     const independentGate = new Promise<void>((resolve) => {
       releaseIndependent = resolve;
     });
     const replacementGenerator: CampaignReplacementGenerator = async () => {
       replacementCalls += 1;
+      replacementEntered();
       return {
         proposal: {
           ...frontierProposal("unauthorized-replacement", "outcome-one"),
@@ -3317,6 +3482,7 @@ describe("durable Ready frontier", () => {
       }
       const checkpointed = await checkpointCampaign(server.url, published.campaignId);
       expect(checkpointed.planHandedOff).toBe(true);
+      await replacementStarted;
       releaseIndependent();
 
       let rejected = checkpointed;
@@ -3393,6 +3559,10 @@ describe("durable Ready frontier", () => {
     };
     let replacementCalls = 0;
     let exposedSupersedableProposalIds: readonly string[] | undefined;
+    let replacementEntered!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
     let releaseIndependent!: () => void;
     const independentGate = new Promise<void>((resolve) => {
       releaseIndependent = resolve;
@@ -3400,6 +3570,7 @@ describe("durable Ready frontier", () => {
     const replacementGenerator: CampaignReplacementGenerator = async (request) => {
       replacementCalls += 1;
       exposedSupersedableProposalIds = request.supersedableProposalIds;
+      replacementEntered();
       return {
         proposal: {
           ...frontierProposal("chain-invalid-replacement", "outcome-one"),
@@ -3466,6 +3637,7 @@ describe("durable Ready frontier", () => {
       );
       const checkpointed = await checkpointCampaign(server.url, published.campaignId);
       expect(checkpointed.planHandedOff).toBe(true);
+      await replacementStarted;
       releaseIndependent();
 
       let rejected = checkpointed;
@@ -3540,8 +3712,13 @@ describe("durable Ready frontier", () => {
     const activeGate = new Promise<void>((resolve) => {
       releaseActive = resolve;
     });
+    let replacementEntered!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
     const replacementGenerator: CampaignReplacementGenerator = async (request) => {
       replacementCalls += 1;
+      replacementEntered();
       expect(request.supersedableProposalIds).toEqual([source.proposalId]);
       return {
         proposal: { ...replacement, supersedesProposalId: source.proposalId },
@@ -3601,8 +3778,8 @@ describe("durable Ready frontier", () => {
       );
 
       const checkpointed = await checkpointCampaign(server.url, published.campaignId);
-      releaseActive();
       let revised = checkpointed;
+      await replacementStarted;
       for (let attempt = 0; attempt < 300; attempt += 1) {
         if (
           revised.proposals?.some(
@@ -3616,6 +3793,7 @@ describe("durable Ready frontier", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         revised = (await getCampaign(server.url, published.campaignId)) ?? revised;
       }
+      releaseActive();
       expect(replacementCalls).toBe(1);
       expect(assessmentOrder.slice(0, 2)).toEqual(["outcome-one", "outcome-two"]);
       expect(revised.proposals).toEqual(
@@ -3830,7 +4008,12 @@ describe("durable Ready frontier", () => {
     try {
       const published = await publishCampaign(server.url, { contractPath });
       await handoffCampaign(server.url, published.campaignId);
-      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+      await expect(
+        waitFor(
+          () => getCampaign(server.url, published.campaignId),
+          (campaign) => campaign?.status === "blocked",
+        ),
+      ).resolves.toMatchObject({
         status: "blocked",
         planHandedOff: true,
         decisionRequest: {
@@ -4181,6 +4364,291 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test.each([
+    { name: "with canonical usage", usage: lateAssessorUsage, returnsModelRun: true },
+    { name: "with unavailable usage", usage: null, returnsModelRun: true },
+    { name: "without a canonical model run", usage: null, returnsModelRun: false },
+  ])(
+    "terminalizes a late assessor result across restart ($name)",
+    async ({ usage, returnsModelRun }) => {
+      let initialAssessorFinished!: () => void;
+      const initialAssessorFinishedPromise = new Promise<void>((resolve) => {
+        initialAssessorFinished = resolve;
+      });
+      let taskStarted!: () => void;
+      const taskStartedPromise = new Promise<void>((resolve) => {
+        taskStarted = resolve;
+      });
+      let releaseTask!: () => void;
+      const taskRelease = new Promise<void>((resolve) => {
+        releaseTask = resolve;
+      });
+      let assessorStarted!: () => void;
+      const assessorStartedPromise = new Promise<void>((resolve) => {
+        assessorStarted = resolve;
+      });
+      let assessorCalls = 0;
+      const assessor: CampaignOutcomeAssessor = async (request) => {
+        const { invocationId, signal } = request;
+        if (!signal) throw new Error("assessor cancellation fixture requires a signal");
+        assessorCalls += 1;
+        if (assessorCalls === 1) {
+          initialAssessorFinished();
+          return {
+            verdict: "inconclusive" as const,
+            summary: "the initial assessment predates the accepted delivery",
+            gaps: [],
+            evidence: [],
+            usage: null,
+          };
+        }
+        assessorStarted();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        const delivery = request.evidence.find((item) => item.fact === "delivery");
+        if (!delivery) throw new Error("late assessor fixture requires accepted delivery evidence");
+        const draft = {
+          verdict: "satisfied" as const,
+          summary: "the late assessor result would have accepted the delivered Outcome",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+            ...delivery,
+            criterionIndex,
+          })),
+          usage,
+        };
+        if (!returnsModelRun) return draft;
+        return {
+          ...draft,
+          modelRuns: [
+            {
+              invocationId,
+              role: "assessor" as const,
+              status: "completed" as const,
+              failureClass: null,
+              startedAtEpochMs: Date.now() - 10,
+              completedAtEpochMs: Date.now(),
+              elapsedMs: 10,
+              repositoryId: null,
+              repository: null,
+              profile: "campaign-test-profile",
+              configuredProvider: "configured-provider",
+              configuredModel: "configured-model",
+              actualProvider: "attested-provider",
+              actualModel: "attested-model",
+              adapter: "sdk",
+              serviceTier: "standard",
+              reasoningEffort: "medium",
+              usage,
+            },
+          ],
+        };
+      };
+      const { contractPath, server, stateDirectory, environment } = await frontierFixture(
+        oneOutcomeFrontierGoal("campaign-repository"),
+        "user:campaign-366",
+        async (context) => {
+          taskStarted();
+          await taskRelease;
+          const result = await acceptCampaignTask(context);
+          return result;
+        },
+        1,
+        true,
+        assessor,
+      );
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("late-assessor-delivery", "outcome-one"),
+        );
+        await handoffCampaign(server.url, published.campaignId);
+        await taskStartedPromise;
+        await checkpointCampaign(server.url, published.campaignId);
+        await initialAssessorFinishedPromise;
+        await waitFor(
+          () => getCampaign(server.url, published.campaignId),
+          (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "inconclusive",
+        );
+        releaseTask();
+        await waitFor(
+          () => taskStatus(server.url, "campaign-campaign-366-v1-late-assessor-delivery"),
+          (task) => task?.delivery?.effect === "github",
+        );
+        await assessorStartedPromise;
+        await server.close();
+
+        const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            database
+              .prepare("SELECT COUNT(*) AS count FROM campaign_assessments WHERE campaign_id = ?")
+              .get(published.campaignId),
+          ).toEqual({ count: 1 });
+          const modelRun = database
+            .prepare(
+              "SELECT invocation_id, status, failure_class, usage FROM campaign_model_runs WHERE campaign_id = ?",
+            )
+            .get(published.campaignId) as {
+            invocation_id: string;
+            status: string;
+            failure_class: string | null;
+            usage: string | null;
+          };
+          expect(modelRun).toMatchObject({
+            status: returnsModelRun ? "completed" : "cancelled",
+            failure_class: returnsModelRun ? null : "cancellation",
+            usage: usage === null ? null : JSON.stringify(usage),
+          });
+          expect(modelRun.invocation_id).not.toContain(":cancelled");
+        } finally {
+          database.close();
+        }
+
+        let restartedAssessorCalls = 0;
+        const restarted = await startUsineServer({
+          environment,
+          assessOutcome: async () => {
+            restartedAssessorCalls += 1;
+            return {
+              verdict: "inconclusive",
+              summary: "unexpected restart assessor call",
+              gaps: [],
+              evidence: [],
+              usage: null,
+            };
+          },
+          host: "127.0.0.1",
+          port: 0,
+        });
+        try {
+          await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+            status: "blocked",
+            decisionRequest: {
+              requestId: `decision:${published.campaignId}`,
+              reason: "assessment_inconclusive",
+              outcomeIds: ["outcome-one"],
+            },
+          });
+          expect(assessorCalls).toBe(2);
+          expect(restartedAssessorCalls).toBe(0);
+        } finally {
+          await restarted.close();
+        }
+      } finally {
+        releaseTask();
+        await server.close().catch(() => undefined);
+      }
+    },
+  );
+
+  test("preserves a same-evidence checkpoint declared during an assessor", async () => {
+    let assessorStarted!: () => void;
+    const assessorStartedPromise = new Promise<void>((resolve) => {
+      assessorStarted = resolve;
+    });
+    let releaseAssessor!: () => void;
+    const assessorRelease = new Promise<void>((resolve) => {
+      releaseAssessor = resolve;
+    });
+    let assessorCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => {
+      assessorCalls += 1;
+      assessorStarted();
+      await assessorRelease;
+      return {
+        verdict: "inconclusive",
+        summary: "the checkpoint assessor found no accepted delivery",
+        gaps: [],
+        evidence: [],
+        usage: lateAssessorUsage,
+      };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      undefined,
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await handoffCampaign(server.url, published.campaignId);
+      await assessorStartedPromise;
+
+      await checkpointCampaign(server.url, published.campaignId);
+      releaseAssessor();
+      const completed = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) =>
+          campaign?.status === "blocked" &&
+          campaign.outcomes[0]?.assessment?.verdict === "inconclusive",
+      );
+      if (!completed) throw new Error("Campaign disappeared during checkpoint recovery");
+      expect(completed).toMatchObject({
+        status: "blocked",
+        decisionRequest: {
+          reason: "assessment_inconclusive",
+          outcomeIds: ["outcome-one"],
+        },
+        outcomes: [{ assessment: { verdict: "inconclusive" } }],
+      });
+      expect(assessorCalls).toBe(1);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT status, evidence_hash, usage FROM campaign_model_runs WHERE campaign_id = ?",
+            )
+            .get(published.campaignId),
+        ).toMatchObject({
+          status: "completed",
+          evidence_hash: expect.any(String),
+          usage: JSON.stringify(lateAssessorUsage),
+        });
+      } finally {
+        database.close();
+      }
+      await server.close();
+      let restartedAssessorCalls = 0;
+      const restarted = await startUsineServer({
+        environment: { USINE_STATE_DIR: stateDirectory },
+        assessOutcome: async () => {
+          restartedAssessorCalls += 1;
+          return {
+            verdict: "inconclusive",
+            summary: "unexpected checkpoint reassessment",
+            gaps: [],
+            evidence: [],
+            usage: null,
+          };
+        },
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
+          completed,
+        );
+        expect(restartedAssessorCalls).toBe(0);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      releaseAssessor();
+      await server.close();
+    }
+  });
+
   test("consumes the Campaign Outcome replacement opportunity across a fresh gaps assessment", async () => {
     const base = oneOutcomeFrontierGoal("campaign-repository");
     const contract = {
@@ -4276,16 +4744,28 @@ describe("durable Ready frontier", () => {
     }
   });
 
-  test("recovers a pending replacement reservation once on restart", async () => {
+  test("recovers a pending replacement after late completion during shutdown", async () => {
     let replacementCalls = 0;
     let replacementEntered!: () => void;
     const replacementStarted = new Promise<void>((resolve) => {
       replacementEntered = resolve;
     });
-    let releaseReplacement!: () => void;
-    const release = new Promise<void>((resolve) => {
-      releaseReplacement = resolve;
+    let cancellationObserved!: () => void;
+    const replacementCancelled = new Promise<void>((resolve) => {
+      cancellationObserved = resolve;
     });
+    let releaseCleanup!: () => void;
+    const delayedCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const cancellationUsage = {
+      inputTokens: 13,
+      cachedInputTokens: 3,
+      uncachedInputTokens: 10,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      reasoningOutputTokens: 2,
+    };
     const assessor: CampaignOutcomeAssessor = async () => ({
       verdict: "gaps",
       summary: "the frontier remains incomplete",
@@ -4293,11 +4773,53 @@ describe("durable Ready frontier", () => {
       evidence: [],
       usage: null,
     });
-    const replacementGenerator: CampaignReplacementGenerator = async () => {
+    let restartedReplacementCalls = 0;
+    const replacementGenerator: CampaignReplacementGenerator = async ({ invocationId, signal }) => {
+      if (!signal) throw new Error("replacement cancellation fixture requires a signal");
       replacementCalls += 1;
       replacementEntered();
-      await release;
-      return { proposal: null, usage: null };
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          cancellationObserved();
+          resolve();
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            cancellationObserved();
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      await delayedCleanup;
+      return {
+        proposal: frontierProposal("late-replacement", "outcome-one"),
+        usage: cancellationUsage,
+        modelRuns: [
+          {
+            invocationId,
+            role: "replacement-planner",
+            status: "completed" as const,
+            failureClass: null,
+            startedAtEpochMs: Date.now() - 10,
+            completedAtEpochMs: Date.now(),
+            elapsedMs: 10,
+            repositoryId: "campaign-repository",
+            repository: "example/campaign-repository",
+            profile: "campaign-test-profile",
+            configuredProvider: "configured-provider",
+            configuredModel: "configured-model",
+            actualProvider: "attested-provider",
+            actualModel: "attested-model",
+            adapter: "sdk",
+            serviceTier: "standard",
+            reasoningEffort: "medium",
+            usage: cancellationUsage,
+          },
+        ],
+      };
     };
     const { contractPath, server, stateDirectory, environment } = await frontierFixture(
       oneOutcomeFrontierGoal("campaign-repository"),
@@ -4318,7 +4840,15 @@ describe("durable Ready frontier", () => {
       await handoffCampaign(server.url, published.campaignId);
       await replacementStarted;
       expect(replacementCalls).toBe(1);
-      await server.close();
+      let closed = false;
+      const close = server.close().then(() => {
+        closed = true;
+      });
+      await replacementCancelled;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(closed).toBe(false);
+      releaseCleanup();
+      await close;
 
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
@@ -4332,12 +4862,35 @@ describe("durable Ready frontier", () => {
       } finally {
         database.close();
       }
+      const modelRuns = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        const rows = modelRuns
+          .prepare(
+            "SELECT invocation_id, status, failure_class, usage FROM campaign_model_runs WHERE campaign_id = ?",
+          )
+          .all(published.campaignId) as {
+          invocation_id: string;
+          status: string;
+          failure_class: string | null;
+          usage: string | null;
+        }[];
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          status: "completed",
+          failure_class: null,
+          usage: JSON.stringify(cancellationUsage),
+        });
+        expect(rows[0]?.invocation_id).not.toContain(":cancelled");
+      } finally {
+        modelRuns.close();
+      }
 
       const restarted = await startUsineServer({
         environment,
         assessOutcome: assessor,
         generateReplacement: async () => {
-          throw new Error("a pending reservation must be recovered without reinvocation");
+          restartedReplacementCalls += 1;
+          return { proposal: frontierProposal("unexpected", "outcome-one"), usage: null };
         },
         host: "127.0.0.1",
         port: 0,
@@ -4352,6 +4905,7 @@ describe("durable Ready frontier", () => {
           },
         });
         expect(replacementCalls).toBe(1);
+        expect(restartedReplacementCalls).toBe(0);
         const recovered = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
         try {
           const row = recovered
@@ -4368,12 +4922,32 @@ describe("durable Ready frontier", () => {
         } finally {
           recovered.close();
         }
+        const modelRuns = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          const row = modelRuns
+            .prepare(
+              "SELECT invocation_id, status, failure_class, usage FROM campaign_model_runs WHERE campaign_id = ?",
+            )
+            .get(published.campaignId) as {
+            invocation_id: string;
+            status: string;
+            failure_class: string | null;
+            usage: string | null;
+          };
+          expect(row).toMatchObject({
+            status: "completed",
+            failure_class: null,
+            usage: JSON.stringify(cancellationUsage),
+          });
+          expect(row.invocation_id).not.toContain(":cancelled");
+        } finally {
+          modelRuns.close();
+        }
       } finally {
         await restarted.close();
       }
-      releaseReplacement();
     } finally {
-      releaseReplacement?.();
+      releaseCleanup?.();
       await server.close().catch(() => undefined);
     }
   });
@@ -4683,8 +5257,14 @@ describe("durable Ready frontier", () => {
       port: 0,
     });
     try {
+      const upgraded = await waitFor(
+        () => getCampaign(restarted.url, published.campaignId),
+        (campaign) =>
+          campaign?.proposals?.some(({ proposalId }) => proposalId === replacement.proposalId) ??
+          false,
+      );
       expect(replacementCalls).toBe(1);
-      await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+      expect(upgraded).toMatchObject({
         proposals: [{ proposalId: replacement.proposalId }],
         outcomes: [
           {
@@ -5226,7 +5806,12 @@ describe("durable Ready frontier", () => {
       expect(blocked.proposals?.[0]?.ready?.taskId ?? null).toBeNull();
       await expect(serverSnapshot(server.url)).resolves.toMatchObject({ tasks: [] });
       await handoffCampaign(server.url, published.campaignId);
-      await expect(getCampaign(server.url, published.campaignId)).resolves.toMatchObject({
+      await expect(
+        waitFor(
+          () => getCampaign(server.url, published.campaignId),
+          (campaign) => campaign?.status === "blocked",
+        ),
+      ).resolves.toMatchObject({
         status: "blocked",
         decisionRequest: { reason: "branches_blocked" },
         proposals: [

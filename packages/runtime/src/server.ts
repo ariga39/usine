@@ -260,8 +260,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   let campaignCoordination = Promise.resolve();
   let launchCampaignModelWork: (work: CampaignModelWork) => void = () => undefined;
   let serverClosed = false;
-  const activeCampaignModelPromises = new Set<Promise<boolean>>();
-  const queuedCampaignModelLaunches = new Set<ReturnType<typeof setImmediate>>();
+  const activeCampaignModelOperations = new Set<Promise<boolean>>();
+  let queuedCampaignModelLaunch: ReturnType<typeof setImmediate> | undefined;
+  let campaignModelWorkGeneration = 0;
   const onEvent = (event: TaskEvent): void => {
     eventDispatch = eventDispatch
       .then(async () => {
@@ -303,6 +304,12 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     const server = yield* NodeHttpServer.make(createServer, { host, port }).pipe(
       Effect.mapError((cause) => new Error(`server failed to listen: ${String(cause.cause)}`)),
     );
+
+    yield* Effect.tryPromise({
+      try: () => recoverPendingCampaignRuns(stateDirectory),
+      catch: (cause) => cause,
+    });
+
     yield* server.serve(api);
     yield* Effect.acquireRelease(Effect.void, () => Effect.sync(() => eventHub.shutdown()));
 
@@ -328,20 +335,22 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
 
     launchCampaignModelWork = (work) => {
       if (serverClosed) return;
+      const generation = ++campaignModelWorkGeneration;
+      if (queuedCampaignModelLaunch !== undefined) return;
       const launch = setImmediate(() => {
-        queuedCampaignModelLaunches.delete(launch);
+        queuedCampaignModelLaunch = undefined;
         if (serverClosed) return;
         const promise = runCampaignModel(
           "campaign-model-work",
           Effect.tryPromise({
             try: async (signal) => {
-              if (serverClosed) return Promise.resolve(false);
+              if (serverClosed) return false;
               const operation = work(signal);
-              activeCampaignModelPromises.add(operation);
+              activeCampaignModelOperations.add(operation);
               try {
                 return await operation;
               } finally {
-                activeCampaignModelPromises.delete(operation);
+                activeCampaignModelOperations.delete(operation);
               }
             },
             catch: () => false,
@@ -350,16 +359,30 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         );
         void promise.then(
           (ran) => {
-            if (ran && !serverClosed) void coordinateCampaigns().catch(() => undefined);
+            const missed = campaignModelWorkGeneration !== generation;
+            if ((ran || missed) && !serverClosed)
+              void coordinateCampaigns()
+                .catch(() => undefined)
+                .then(() => recordAllCampaignEvidence(stateDirectory, options.environment))
+                .catch(reportPostHogFailure);
           },
-          () => undefined,
+          () => {
+            const missed = campaignModelWorkGeneration !== generation;
+            if (missed && !serverClosed)
+              void coordinateCampaigns()
+                .catch(() => undefined)
+                .then(() => recordAllCampaignEvidence(stateDirectory, options.environment))
+                .catch(reportPostHogFailure);
+          },
         );
       });
-      queuedCampaignModelLaunches.add(launch);
+      queuedCampaignModelLaunch = launch;
     };
 
     coordinateCampaigns = () => {
+      if (serverClosed) return Promise.resolve();
       const run = campaignCoordination.then(async () => {
+        if (serverClosed) return;
         const admissions = await reconcileCampaigns(
           stateDirectory,
           options.environment,
@@ -376,11 +399,6 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       campaignCoordination = run.catch(() => undefined);
       return run;
     };
-
-    yield* Effect.tryPromise({
-      try: () => recoverPendingCampaignRuns(stateDirectory),
-      catch: (cause) => cause,
-    });
 
     const restartState = yield* Effect.tryPromise({
       try: () => lookupRestartableTasks(stateDirectory),
@@ -450,17 +468,20 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       close: () =>
         (closePromise ??= (async () => {
           serverClosed = true;
-          for (const launch of queuedCampaignModelLaunches) clearImmediate(launch);
-          queuedCampaignModelLaunches.clear();
+          if (queuedCampaignModelLaunch !== undefined) clearImmediate(queuedCampaignModelLaunch);
+          queuedCampaignModelLaunch = undefined;
+          await campaignCoordination;
           await Effect.runPromise(Scope.close(scope, Exit.void));
-          await Promise.allSettled(activeCampaignModelPromises);
+          await Promise.allSettled(activeCampaignModelOperations);
         })()),
     };
   } catch (error) {
     serverClosed = true;
-    for (const launch of queuedCampaignModelLaunches) clearImmediate(launch);
-    queuedCampaignModelLaunches.clear();
+    if (queuedCampaignModelLaunch !== undefined) clearImmediate(queuedCampaignModelLaunch);
+    queuedCampaignModelLaunch = undefined;
+    await campaignCoordination;
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
+    await Promise.allSettled(activeCampaignModelOperations);
     throw error;
   }
 }
