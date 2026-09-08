@@ -783,10 +783,6 @@ async function reconcile(
       .select()
       .from(campaignReplacementRuns)
       .where(eq(campaignReplacementRuns.campaignId, campaignId));
-    const modelRuns = await database
-      .select()
-      .from(campaignModelRuns)
-      .where(eq(campaignModelRuns.campaignId, campaignId));
     if (!campaign.publicationAuthorized) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -804,18 +800,6 @@ async function reconcile(
         assessment,
         current: assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence),
       };
-    });
-    const cancelledAssessment = currentAssessments.find(({ assessment, evidence, outcome }) => {
-      const evidenceHash = assessmentEvidenceHash(outcome, evidence);
-      if (assessment?.evidenceHash === evidenceHash) return false;
-      const invocationId = campaignAssessmentInvocationId(campaign, outcome.id, evidenceHash);
-      return modelRuns.some(
-        (run) =>
-          run.invocationId === invocationId &&
-          run.role === "assessor" &&
-          run.status !== "pending" &&
-          run.evidenceHash === evidenceHash,
-      );
     });
     const allSatisfied =
       campaign.publicationAuthorized &&
@@ -872,13 +856,6 @@ async function reconcile(
     } else if (allSatisfied) {
       campaignStatus = "accepted";
       decisionRequest = null;
-    } else if (campaign.publicationAuthorized && cancelledAssessment && !usefulWork) {
-      campaignStatus = "blocked";
-      decisionRequest = {
-        requestId: `decision:${campaign.campaignId}`,
-        reason: "assessment_inconclusive",
-        outcomeIds: [cancelledAssessment.outcome.id],
-      };
     } else if (
       campaign.publicationAuthorized &&
       allAssessmentsCurrent &&
@@ -1649,22 +1626,43 @@ async function reserveCampaignModelRun(
     readonly invocationId: string;
     readonly role: "assessor" | "replacement-planner";
     readonly assessmentId?: string;
-    readonly evidenceHash?: string;
+    readonly evidenceHash: string;
   },
-): Promise<boolean> {
+): Promise<string | null> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
-    let reserved = false;
+    let reserved: string | null = null;
     await handle.exclusiveTransaction(async () => {
       const existing = await handle.database
-        .select({ invocationId: campaignModelRuns.invocationId })
+        .select({
+          invocationId: campaignModelRuns.invocationId,
+          status: campaignModelRuns.status,
+        })
         .from(campaignModelRuns)
-        .where(eq(campaignModelRuns.invocationId, target.invocationId));
-      if (existing.length > 0) return;
+        .where(
+          and(
+            eq(campaignModelRuns.campaignId, target.campaign.campaignId),
+            eq(campaignModelRuns.outcomeId, target.outcome.id),
+            eq(campaignModelRuns.role, target.role),
+            eq(campaignModelRuns.evidenceHash, target.evidenceHash),
+          ),
+        );
+      if (existing.some((run) => run.status === "pending")) return;
+      if (target.role !== "assessor" && existing.length > 0) return;
+      let invocationId = target.invocationId;
+      if (target.role === "assessor" && existing.length > 0) {
+        const attemptPrefix = `${target.invocationId}:attempt-`;
+        const attemptNumbers = existing.flatMap(({ invocationId: existingId }) => {
+          if (!existingId.startsWith(attemptPrefix)) return [];
+          const suffix = Number(existingId.slice(attemptPrefix.length));
+          return Number.isSafeInteger(suffix) && suffix > 0 ? [suffix] : [];
+        });
+        invocationId = `${attemptPrefix}${Math.max(0, ...attemptNumbers) + 1}`;
+      }
       await handle.database
         .insert(campaignModelRuns)
         .values({
-          invocationId: target.invocationId,
+          invocationId,
           campaignId: target.campaign.campaignId,
           outcomeId: target.outcome.id,
           role: target.role,
@@ -1688,7 +1686,7 @@ async function reserveCampaignModelRun(
           usage: null,
         })
         .onConflictDoNothing();
-      reserved = true;
+      reserved = invocationId;
     });
     return reserved;
   } finally {
@@ -2167,7 +2165,7 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
           const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
           const evidenceHash = assessmentEvidenceHash(outcome, evidence);
           const current = assessments.get(outcome.id);
-          if (!campaign.assessmentRequested && current?.evidenceHash === evidenceHash) continue;
+          if (current?.evidenceHash === evidenceHash) continue;
           const repositoriesForOutcome = new Map<
             string,
             CampaignAssessmentRequest["repositories"][number]
@@ -2367,20 +2365,20 @@ async function assessCampaignTargets(
   for (const target of await assessmentTargets(stateDirectory)) {
     if (signal?.aborted) return ran;
     const startedAtEpochMs = Date.now();
-    if (
-      !(await reserveCampaignModelRun(stateDirectory, {
-        campaign: target.campaign,
-        outcome: target.outcome,
-        invocationId: target.invocationId,
-        role: "assessor",
-      }))
-    )
-      continue;
+    const invocationId = await reserveCampaignModelRun(stateDirectory, {
+      campaign: target.campaign,
+      outcome: target.outcome,
+      invocationId: target.invocationId,
+      role: "assessor",
+      evidenceHash: target.evidenceHash,
+    });
+    if (!invocationId) continue;
+    const invocationTarget = { ...target, invocationId };
     ran = true;
     let draft: CampaignAssessmentDraft;
     try {
       draft = await assessor({
-        invocationId: target.invocationId,
+        invocationId,
         campaignId: target.campaign.campaignId,
         goalId: target.campaign.goalId,
         goalVersion: target.campaign.goalVersion,
@@ -2407,10 +2405,10 @@ async function assessCampaignTargets(
     }
     let assessment: CampaignAssessment;
     try {
-      assessment = validateAssessment(target, draft, startedAtEpochMs, Date.now());
+      assessment = validateAssessment(invocationTarget, draft, startedAtEpochMs, Date.now());
     } catch {
       assessment = validateAssessment(
-        target,
+        invocationTarget,
         {
           verdict: "inconclusive",
           summary: "Campaign assessor returned an invalid schema result",
@@ -2430,7 +2428,7 @@ async function assessCampaignTargets(
     }
     await persistCampaignAssessment(
       stateDirectory,
-      target,
+      invocationTarget,
       assessment,
       usage,
       draft.modelRuns,

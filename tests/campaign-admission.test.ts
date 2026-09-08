@@ -4369,7 +4369,7 @@ describe("durable Ready frontier", () => {
     { name: "with unavailable usage", usage: null, returnsModelRun: true },
     { name: "without a canonical model run", usage: null, returnsModelRun: false },
   ])(
-    "terminalizes a late assessor result across restart ($name)",
+    "recovers an interrupted assessor for the current evidence across restart ($name)",
     async ({ usage, returnsModelRun }) => {
       let initialAssessorFinished!: () => void;
       const initialAssessorFinishedPromise = new Promise<void>((resolve) => {
@@ -4485,6 +4485,7 @@ describe("durable Ready frontier", () => {
         await assessorStartedPromise;
         await server.close();
 
+        let originalInvocationId!: string;
         const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
         try {
           expect(
@@ -4502,6 +4503,7 @@ describe("durable Ready frontier", () => {
             failure_class: string | null;
             usage: string | null;
           };
+          originalInvocationId = modelRun.invocation_id;
           expect(modelRun).toMatchObject({
             status: returnsModelRun ? "completed" : "cancelled",
             failure_class: returnsModelRun ? null : "cancellation",
@@ -4515,32 +4517,109 @@ describe("durable Ready frontier", () => {
         let restartedAssessorCalls = 0;
         const restarted = await startUsineServer({
           environment,
-          assessOutcome: async () => {
+          assessOutcome: async (request) => {
             restartedAssessorCalls += 1;
+            const delivery = request.evidence.find((item) => item.fact === "delivery");
+            if (!delivery) throw new Error("restart assessor fixture requires delivery evidence");
             return {
-              verdict: "inconclusive",
-              summary: "unexpected restart assessor call",
+              verdict: "satisfied",
+              summary: "the restarted assessor accepts the delivered Outcome",
               gaps: [],
-              evidence: [],
-              usage: null,
+              evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+                ...delivery,
+                criterionIndex,
+              })),
+              usage: lateAssessorUsage,
+              modelRuns: [
+                {
+                  invocationId: request.invocationId,
+                  role: "assessor" as const,
+                  status: "completed" as const,
+                  failureClass: null,
+                  startedAtEpochMs: Date.now() - 10,
+                  completedAtEpochMs: Date.now(),
+                  elapsedMs: 10,
+                  repositoryId: null,
+                  repository: null,
+                  profile: "campaign-test-profile",
+                  configuredProvider: "configured-provider",
+                  configuredModel: "configured-model",
+                  actualProvider: "attested-provider",
+                  actualModel: "attested-model",
+                  adapter: "sdk",
+                  serviceTier: "standard",
+                  reasoningEffort: "medium",
+                  usage: lateAssessorUsage,
+                },
+              ],
             };
           },
           host: "127.0.0.1",
           port: 0,
         });
         try {
-          await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
-            status: "blocked",
-            decisionRequest: {
-              requestId: `decision:${published.campaignId}`,
-              reason: "assessment_inconclusive",
-              outcomeIds: ["outcome-one"],
-            },
+          const recovered = await waitFor(
+            () => getCampaign(restarted.url, published.campaignId),
+            (campaign) => campaign?.status === "accepted",
+          );
+          if (!recovered) throw new Error("Campaign disappeared during assessor recovery");
+          expect(recovered).toMatchObject({
+            status: "accepted",
+            outcomes: [{ assessment: { verdict: "satisfied" } }],
           });
           expect(assessorCalls).toBe(2);
-          expect(restartedAssessorCalls).toBe(0);
-        } finally {
+          expect(restartedAssessorCalls).toBe(1);
           await restarted.close();
+
+          const modelRunsAfterRecovery = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+          try {
+            const rows = modelRunsAfterRecovery
+              .prepare(
+                "SELECT invocation_id, status, failure_class, usage FROM campaign_model_runs WHERE campaign_id = ? ORDER BY invocation_id",
+              )
+              .all(published.campaignId) as {
+              invocation_id: string;
+              status: string;
+              failure_class: string | null;
+              usage: string | null;
+            }[];
+            expect(rows).toHaveLength(2);
+            expect(rows.map((row) => row.invocation_id)).toContain(originalInvocationId);
+            expect(rows[0]?.invocation_id).not.toBe(rows[1]?.invocation_id);
+            expect(rows[0]).toMatchObject({
+              status: returnsModelRun ? "completed" : "cancelled",
+              failure_class: returnsModelRun ? null : "cancellation",
+              usage: usage === null ? null : JSON.stringify(usage),
+            });
+            expect(rows[1]).toMatchObject({
+              status: "completed",
+              failure_class: null,
+              usage: JSON.stringify(lateAssessorUsage),
+            });
+          } finally {
+            modelRunsAfterRecovery.close();
+          }
+
+          let secondRestartAssessorCalls = 0;
+          const secondRestart = await startUsineServer({
+            environment,
+            assessOutcome: async () => {
+              secondRestartAssessorCalls += 1;
+              throw new Error("an accepted current assessment must not be reassessed");
+            },
+            host: "127.0.0.1",
+            port: 0,
+          });
+          try {
+            await expect(
+              getCampaign(secondRestart.url, published.campaignId),
+            ).resolves.toMatchObject(recovered);
+            expect(secondRestartAssessorCalls).toBe(0);
+          } finally {
+            await secondRestart.close();
+          }
+        } finally {
+          await restarted.close().catch(() => undefined);
         }
       } finally {
         releaseTask();
