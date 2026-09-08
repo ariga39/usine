@@ -74,6 +74,10 @@ const ANSI_ESCAPE_SEQUENCE = new RegExp(
   "gu",
 );
 const SAFE_CAMPAIGN_TOUCH_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CAMPAIGN_COMPATIBILITY_ADAPTERS = new Set([
+  "campaign-usage-compatibility",
+  "legacy-compatibility",
+]);
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -278,7 +282,13 @@ function campaignUsageProjection(
   modelRun: typeof campaignModelRuns.$inferSelect | undefined,
   legacyUsage: unknown,
 ): CampaignUsageProjection {
-  if (modelRun) return { usage: decodeCampaignUsage(modelRun.usage), source: "model_run" };
+  if (modelRun)
+    return {
+      usage: decodeCampaignUsage(modelRun.usage),
+      source: CAMPAIGN_COMPATIBILITY_ADAPTERS.has(modelRun.adapter ?? "")
+        ? "legacy_compatibility"
+        : "model_run",
+    };
   const compatibilityUsage = decodeCampaignUsage(legacyUsage);
   return compatibilityUsage
     ? { usage: compatibilityUsage, source: "legacy_compatibility" }
@@ -1642,6 +1652,7 @@ async function persistCampaignModelRun(
   const canonicalRuns =
     fallback &&
     fallback.usage !== null &&
+    Object.values(fallback.usage).some((value) => typeof value === "number") &&
     !(modelRuns ?? []).some((run) => run.invocationId === target.invocationId)
       ? [
           ...(modelRuns ?? []),

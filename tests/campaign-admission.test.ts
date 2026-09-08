@@ -4015,6 +4015,77 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("does not report an assessor generation for all-null failure usage", async () => {
+    let assessorCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => {
+      assessorCalls += 1;
+      return {
+        verdict: "inconclusive",
+        summary: "the assessor failed before invoking a model",
+        gaps: [],
+        evidence: [],
+        usage: {
+          inputTokens: null,
+          cachedInputTokens: null,
+          uncachedInputTokens: null,
+          cacheWriteInputTokens: null,
+          outputTokens: null,
+          reasoningOutputTokens: null,
+        },
+      };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async ({ authority, result }) =>
+        authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "the initial Task is blocked",
+        ),
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(assessorCalls).toBe(1);
+      const evidence = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+      expect(
+        evidence?.runs
+          .filter((run) => run.taskId === null)
+          .map(({ role, invocationId, adapter, usage, outcome }) => ({
+            role,
+            invocationId,
+            adapter,
+            usage,
+            outcome,
+          })),
+      ).toEqual([]);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_model_runs WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 0 });
+      } finally {
+        database.close();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   test("consumes the Campaign Outcome replacement opportunity across a fresh gaps assessment", async () => {
     const base = oneOutcomeFrontierGoal("campaign-repository");
     const contract = {
@@ -4456,6 +4527,32 @@ describe("durable Ready frontier", () => {
         );
       database
         .prepare(
+          "INSERT INTO campaign_model_runs (invocation_id, campaign_id, outcome_id, role, assessment_id, evidence_hash, status, failure_class, started_at_epoch_ms, completed_at_epoch_ms, elapsed_ms, adapter, usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          assessment.assessmentId,
+          published.campaignId,
+          outcome.id,
+          "assessor",
+          assessment.assessmentId,
+          evidenceHash,
+          "completed",
+          null,
+          assessment.startedAtEpochMs,
+          assessment.completedAtEpochMs,
+          1,
+          "legacy-compatibility",
+          JSON.stringify({
+            inputTokens: 23,
+            cachedInputTokens: 4,
+            uncachedInputTokens: 19,
+            cacheWriteInputTokens: 0,
+            outputTokens: 12,
+            reasoningOutputTokens: 2,
+          }),
+        );
+      database
+        .prepare(
           "UPDATE campaigns SET plan_handed_off = 1, status = 'blocked', decision_request = ?, assessment_requested = 0 WHERE campaign_id = ?",
         )
         .run(
@@ -4497,7 +4594,7 @@ describe("durable Ready frontier", () => {
         outcomes: [
           {
             assessment: {
-              usage: { inputTokens: 17, outputTokens: 6 },
+              usage: { inputTokens: 23, outputTokens: 12 },
               usageSource: "legacy_compatibility",
             },
           },
