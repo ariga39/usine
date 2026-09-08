@@ -230,6 +230,14 @@ export const campaignAssessmentUsageSchema = Schema.Struct({
   reasoningOutputTokens: Schema.NullOr(Schema.Natural),
 });
 
+/** Where a public Campaign usage projection obtained its token amounts. */
+export const campaignUsageSourceSchema = Schema.Literals([
+  "model_run",
+  "legacy_compatibility",
+  "unavailable",
+]);
+export type CampaignUsageSource = Schema.Schema.Type<typeof campaignUsageSourceSchema>;
+
 const campaignAssessmentFactFields = {
   repositoryId: Schema.String,
   proposalId: Schema.String,
@@ -258,6 +266,7 @@ export const campaignAssessmentSchema = Schema.Struct({
   gaps: Schema.Array(Schema.String),
   evidence: Schema.Array(campaignAssessmentEvidenceSchema),
   usage: Schema.NullOr(campaignAssessmentUsageSchema),
+  usageSource: Schema.optional(campaignUsageSourceSchema),
   startedAtEpochMs: Schema.Int,
   completedAtEpochMs: Schema.Int,
 });
@@ -305,6 +314,7 @@ const campaignProposalSchema = Schema.Struct({
       evidenceHash: Schema.String,
       role: Schema.Literal("replacement-planner"),
       usage: Schema.NullOr(campaignAssessmentUsageSchema),
+      usageSource: Schema.optional(campaignUsageSourceSchema),
     }),
   ),
   ready: Schema.NullOr(

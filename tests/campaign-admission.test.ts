@@ -3898,7 +3898,16 @@ describe("durable Ready frontier", () => {
         summary: "the blocked initial Task leaves one bounded gap",
         gaps: ["the blocked initial Task leaves one bounded gap"],
         evidence: [],
-        usage: null,
+        // Deliberately disagree with the observation below. The model-run
+        // observation is the only durable usage owner.
+        usage: {
+          inputTokens: 901,
+          cachedInputTokens: 90,
+          uncachedInputTokens: 811,
+          cacheWriteInputTokens: 0,
+          outputTokens: 902,
+          reasoningOutputTokens: 9,
+        },
         modelRuns: [modelRun(request, "assessor")],
       };
     };
@@ -3906,7 +3915,14 @@ describe("durable Ready frontier", () => {
       replacementCalls += 1;
       return {
         proposal: { invalid: true },
-        usage: null,
+        usage: {
+          inputTokens: 801,
+          cachedInputTokens: 80,
+          uncachedInputTokens: 721,
+          cacheWriteInputTokens: 0,
+          outputTokens: 802,
+          reasoningOutputTokens: 8,
+        },
         modelRuns: [modelRun(request, "replacement-planner")],
       };
     };
@@ -3947,10 +3963,22 @@ describe("durable Ready frontier", () => {
           expect.objectContaining({ role: "replacement-planner", outcome: "succeeded" }),
         ]),
       );
+      expect(campaignRuns.find((run) => run.role === "assessor")?.usage).toMatchObject({
+        inputTokens: 9,
+        outputTokens: 5,
+      });
+      expect(campaignRuns.find((run) => run.role === "replacement-planner")?.usage).toMatchObject({
+        inputTokens: 9,
+        outputTokens: 5,
+      });
       const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
       expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(2);
       expect(publicReport!.totals.invocations).toBe(evidence!.totals.invocations);
       const campaign = await getCampaign(server.url, published.campaignId);
+      expect(campaign?.outcomes[0]?.assessment).toMatchObject({
+        usage: { inputTokens: 9, outputTokens: 5 },
+        usageSource: "model_run",
+      });
       const postHog = campaignEvidenceToPostHogEvents(campaign!, evidence!, "deployment-test");
       const modelEvents = postHog.filter((event) => event.event === "$ai_generation");
       expect(modelEvents).toHaveLength(2);
@@ -3968,6 +3996,20 @@ describe("durable Ready frontier", () => {
           }),
         ]),
       );
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        const assessmentRow = database
+          .prepare("SELECT assessment FROM campaign_assessments WHERE campaign_id = ?")
+          .get(published.campaignId);
+        expect(assessmentRow?.assessment).not.toContain('"inputTokens":901');
+        expect(
+          database
+            .prepare("SELECT usage FROM campaign_replacement_runs WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ usage: null });
+      } finally {
+        database.close();
+      }
     } finally {
       await server.close();
     }
@@ -4385,7 +4427,14 @@ describe("durable Ready frontier", () => {
       summary: "the persisted assessment identified an incomplete frontier",
       gaps: ["the frontier remains incomplete"],
       evidence: [],
-      usage: null,
+      usage: {
+        inputTokens: 17,
+        cachedInputTokens: 3,
+        uncachedInputTokens: 14,
+        cacheWriteInputTokens: 0,
+        outputTokens: 6,
+        reasoningOutputTokens: 1,
+      },
       startedAtEpochMs: completedAtEpochMs - 1,
       completedAtEpochMs,
     };
@@ -4445,6 +4494,14 @@ describe("durable Ready frontier", () => {
       expect(replacementCalls).toBe(1);
       await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
         proposals: [{ proposalId: replacement.proposalId }],
+        outcomes: [
+          {
+            assessment: {
+              usage: { inputTokens: 17, outputTokens: 6 },
+              usageSource: "legacy_compatibility",
+            },
+          },
+        ],
       });
       await restarted.close();
       const finalRestart = await startUsineServer({

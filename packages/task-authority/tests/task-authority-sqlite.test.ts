@@ -2075,3 +2075,119 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     30_000,
   );
 });
+
+test("moves legacy Campaign role usage into the model-run owner", async () => {
+  const path = await makeDatabaseBeforeMigration(25);
+  const legacy = new DatabaseSync(path);
+  legacy
+    .prepare(
+      `INSERT INTO campaigns (
+        campaign_id, goal_id, goal_version, contract_hash, contract, status,
+        publication_authorized, superseded, plan_handed_off, assessment_requested,
+        checkpoint_requested, decision_request, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "legacy-campaign",
+      1,
+      "legacy-hash",
+      "{}",
+      "blocked",
+      1,
+      0,
+      1,
+      0,
+      0,
+      null,
+      1,
+      100,
+      200,
+    );
+  const usage = JSON.stringify({
+    inputTokens: 11,
+    cachedInputTokens: 2,
+    uncachedInputTokens: 9,
+    cacheWriteInputTokens: 0,
+    outputTokens: 7,
+    reasoningOutputTokens: 1,
+  });
+  legacy
+    .prepare(
+      `INSERT INTO campaign_assessments (
+        campaign_id, outcome_id, role, evidence_hash, assessment_id, assessment,
+        started_at_epoch_ms, completed_at_epoch_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "outcome-one",
+      "assessor",
+      "legacy-evidence",
+      "legacy-assessment",
+      JSON.stringify({
+        role: "assessor",
+        assessmentId: "legacy-assessment",
+        outcomeId: "outcome-one",
+        evidenceHash: "legacy-evidence",
+        verdict: "gaps",
+        summary: "legacy",
+        gaps: ["legacy"],
+        evidence: [],
+        usage: JSON.parse(usage),
+        startedAtEpochMs: 300,
+        completedAtEpochMs: 400,
+      }),
+      300,
+      400,
+    );
+  legacy
+    .prepare(
+      `INSERT INTO campaign_replacement_runs (
+        campaign_id, outcome_id, assessment_id, evidence_hash, invocation_id, role,
+        status, proposal, usage, started_at_epoch_ms, completed_at_epoch_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "legacy-campaign:v1",
+      "outcome-one",
+      "legacy-assessment",
+      "legacy-evidence",
+      "legacy-replacement",
+      "replacement-planner",
+      "invalid",
+      null,
+      usage,
+      500,
+      600,
+    );
+  legacy.close();
+
+  await applyMigrations(path);
+
+  const migrated = new DatabaseSync(path);
+  try {
+    expect(
+      migrated
+        .prepare(
+          "SELECT role, adapter, usage FROM campaign_model_runs WHERE campaign_id = ? ORDER BY invocation_id",
+        )
+        .all("legacy-campaign:v1"),
+    ).toEqual([
+      { role: "assessor", adapter: "legacy-compatibility", usage },
+      { role: "replacement-planner", adapter: "legacy-compatibility", usage },
+    ]);
+    expect(
+      migrated
+        .prepare("SELECT json_extract(assessment, '$.usage') AS usage FROM campaign_assessments")
+        .get(),
+    ).toEqual({ usage: null });
+    expect(
+      migrated
+        .prepare("SELECT usage FROM campaign_replacement_runs WHERE invocation_id = ?")
+        .get("legacy-replacement"),
+    ).toEqual({ usage: null });
+  } finally {
+    migrated.close();
+  }
+});

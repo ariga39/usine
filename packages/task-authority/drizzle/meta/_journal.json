@@ -176,6 +176,13 @@
       "when": 1788739200004,
       "tag": "0024_campaign_checkpoint_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1788739200005,
+      "tag": "0025_campaign_usage_owner",
+      "breakpoints": true
     }
   ]
 }
