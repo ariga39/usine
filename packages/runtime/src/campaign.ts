@@ -35,7 +35,9 @@ import {
   type CampaignDecisionRequest,
   type CampaignOutcomeEvidence,
   type CampaignAssessment,
+  type CampaignAssessmentUsage,
   type CampaignAssessmentFact,
+  type CampaignUsageSource,
   type CampaignResource,
   type GoalContract,
   type TaskExecutionInput,
@@ -72,6 +74,10 @@ const ANSI_ESCAPE_SEQUENCE = new RegExp(
   "gu",
 );
 const SAFE_CAMPAIGN_TOUCH_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CAMPAIGN_COMPATIBILITY_ADAPTERS = new Set([
+  "campaign-usage-compatibility",
+  "legacy-compatibility",
+]);
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -257,7 +263,43 @@ function hostAuthorized(contract: GoalContract, environment: NodeJS.ProcessEnv):
   );
 }
 
-function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignProposalResource {
+type CampaignUsageProjection = {
+  readonly usage: CampaignAssessmentUsage | null;
+  readonly source: CampaignUsageSource;
+};
+
+function decodeCampaignUsage(input: unknown): CampaignAssessmentUsage | null {
+  try {
+    return input === null || input === undefined
+      ? null
+      : Schema.decodeUnknownSync(Schema.NullOr(campaignAssessmentUsageSchema))(input);
+  } catch {
+    return null;
+  }
+}
+
+function campaignUsageProjection(
+  modelRun: typeof campaignModelRuns.$inferSelect | undefined,
+  legacyUsage: unknown,
+): CampaignUsageProjection {
+  if (modelRun)
+    return {
+      usage: decodeCampaignUsage(modelRun.usage),
+      source: CAMPAIGN_COMPATIBILITY_ADAPTERS.has(modelRun.adapter ?? "")
+        ? "legacy_compatibility"
+        : "model_run",
+    };
+  const compatibilityUsage = decodeCampaignUsage(legacyUsage);
+  return compatibilityUsage
+    ? { usage: compatibilityUsage, source: "legacy_compatibility" }
+    : { usage: null, source: "unavailable" };
+}
+
+function proposalResource(
+  row: typeof campaignProposals.$inferSelect,
+  replacementRun: typeof campaignReplacementRuns.$inferSelect | undefined,
+  modelRun: typeof campaignModelRuns.$inferSelect | undefined,
+): CampaignProposalResource {
   const proposal = taskProposalSchema.parse(row.proposal);
   const replacement =
     row.replacementAssessmentId && row.replacementEvidenceHash
@@ -265,12 +307,13 @@ function proposalResource(row: typeof campaignProposals.$inferSelect): CampaignP
           assessmentId: row.replacementAssessmentId,
           evidenceHash: row.replacementEvidenceHash,
           role: "replacement-planner" as const,
-          usage:
-            row.replacementUsage === null
-              ? null
-              : Schema.decodeUnknownSync(Schema.NullOr(campaignAssessmentUsageSchema))(
-                  row.replacementUsage,
-                ),
+          ...(() => {
+            const projection = campaignUsageProjection(
+              modelRun,
+              replacementRun?.usage ?? row.replacementUsage,
+            );
+            return { usage: projection.usage, usageSource: projection.source };
+          })(),
         }
       : undefined;
   return {
@@ -1027,14 +1070,30 @@ async function campaignAssessmentRows(
     .select()
     .from(campaignAssessments)
     .where(eq(campaignAssessments.campaignId, campaignId));
+  const modelRunRows = await database
+    .select()
+    .from(campaignModelRuns)
+    .where(eq(campaignModelRuns.campaignId, campaignId));
+  const modelRunsByInvocation = new Map(
+    modelRunRows.filter((row) => row.status !== "pending").map((row) => [row.invocationId, row]),
+  );
   const assessments = new Map<string, CampaignAssessment>();
   for (const row of rows) {
     try {
       if (row.role !== "assessor") continue;
       const assessment = Schema.decodeUnknownSync(campaignAssessmentSchema)(row.assessment);
+      const usage = campaignUsageProjection(
+        modelRunsByInvocation.get(assessment.assessmentId),
+        assessment.usage,
+      );
+      const projectedAssessment = {
+        ...assessment,
+        usage: usage.usage,
+        usageSource: usage.source,
+      } satisfies CampaignAssessment;
       const current = assessments.get(assessment.outcomeId);
       if (!current || assessment.completedAtEpochMs >= current.completedAtEpochMs)
-        assessments.set(assessment.outcomeId, assessment);
+        assessments.set(assessment.outcomeId, projectedAssessment);
     } catch {
       // A corrupt assessment is not evidence and remains visible only to the
       // owning durable-state diagnostic path.
@@ -1583,14 +1642,49 @@ async function persistCampaignModelRun(
     readonly invocationId: string;
   },
   modelRuns: readonly CampaignModelRunDraft[] | undefined,
+  fallback?: {
+    readonly role: CampaignModelRunDraft["role"];
+    readonly usage: CampaignAssessmentUsage | null;
+    readonly startedAtEpochMs: number;
+    readonly completedAtEpochMs: number;
+  },
 ): Promise<void> {
-  if (!modelRuns || modelRuns.length === 0) {
+  const canonicalRuns =
+    fallback &&
+    fallback.usage !== null &&
+    Object.values(fallback.usage).some((value) => typeof value === "number") &&
+    !(modelRuns ?? []).some((run) => run.invocationId === target.invocationId)
+      ? [
+          ...(modelRuns ?? []),
+          {
+            invocationId: target.invocationId,
+            role: fallback.role,
+            status: "completed" as const,
+            failureClass: null,
+            startedAtEpochMs: fallback.startedAtEpochMs,
+            completedAtEpochMs: fallback.completedAtEpochMs,
+            elapsedMs: Math.max(0, fallback.completedAtEpochMs - fallback.startedAtEpochMs),
+            repositoryId: null,
+            repository: null,
+            profile: null,
+            configuredProvider: null,
+            configuredModel: null,
+            actualProvider: null,
+            actualModel: null,
+            adapter: "campaign-usage-compatibility",
+            serviceTier: null,
+            reasoningEffort: null,
+            usage: fallback.usage,
+          } satisfies CampaignModelRunDraft,
+        ]
+      : modelRuns;
+  if (!canonicalRuns || canonicalRuns.length === 0) {
     await database
       .delete(campaignModelRuns)
       .where(eq(campaignModelRuns.invocationId, target.invocationId));
     return;
   }
-  for (const modelRun of modelRuns) {
+  for (const modelRun of canonicalRuns) {
     const values = {
       invocationId: modelRun.invocationId,
       campaignId: target.campaignId,
@@ -1677,7 +1771,8 @@ async function persistReplacementResult(
           taskId: null,
           replacementAssessmentId: target.assessment.assessmentId,
           replacementEvidenceHash: target.evidenceHash,
-          replacementUsage: usage,
+          // The replacement result is attributable through its model run.
+          replacementUsage: null,
         });
         if (result.supersedesProposalId !== null) {
           await handle.database
@@ -1706,13 +1801,21 @@ async function persistReplacementResult(
           invocationId: target.invocationId,
         },
         modelRuns,
+        {
+          role: "replacement-planner",
+          usage,
+          startedAtEpochMs: current.startedAtEpochMs,
+          completedAtEpochMs: Date.now(),
+        },
       );
       await handle.database
         .update(campaignReplacementRuns)
         .set({
           status: result.status,
           proposal: result.proposal,
-          usage,
+          // Keep this compatibility column null for new attempts. Usage is
+          // owned by campaign_model_runs and projected by invocation ID.
+          usage: null,
           completedAtEpochMs: Date.now(),
         })
         .where(
@@ -2017,7 +2120,11 @@ function validateAssessment(
     summary,
     gaps,
     evidence: references,
-    usage: draft.usage,
+    // Token amounts are projected from campaign_model_runs. The draft usage
+    // is passed to the canonical observation writer, not stored in the
+    // assessment fact.
+    usage: null,
+    usageSource: "unavailable" as const,
     startedAtEpochMs,
     completedAtEpochMs,
   } satisfies CampaignAssessment;
@@ -2028,6 +2135,7 @@ async function persistCampaignAssessment(
   stateDirectory: string,
   target: AssessmentTarget,
   assessment: CampaignAssessment,
+  usage: CampaignAssessmentDraft["usage"],
   modelRuns: readonly CampaignModelRunDraft[] | undefined,
 ): Promise<void> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
@@ -2055,6 +2163,12 @@ async function persistCampaignAssessment(
           invocationId: target.invocationId,
         },
         modelRuns,
+        {
+          role: "assessor",
+          usage,
+          startedAtEpochMs: assessment.startedAtEpochMs,
+          completedAtEpochMs: assessment.completedAtEpochMs,
+        },
       );
       await handle.database
         .update(campaigns)
@@ -2130,7 +2244,13 @@ async function assessCampaignTargets(
         Date.now(),
       );
     }
-    await persistCampaignAssessment(stateDirectory, target, assessment, draft.modelRuns);
+    let usage: CampaignAssessmentDraft["usage"] = null;
+    try {
+      usage = Schema.decodeUnknownSync(Schema.NullOr(campaignAssessmentUsageSchema))(draft.usage);
+    } catch {
+      usage = null;
+    }
+    await persistCampaignAssessment(stateDirectory, target, assessment, usage, draft.modelRuns);
   }
   await generateCampaignReplacements(stateDirectory, replacementGenerator, environment);
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
@@ -2281,6 +2401,18 @@ async function resourceFromDatabase(
   const results = await campaignTaskResults(database, rows);
   const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
   const assessments = await campaignAssessmentRows(database, campaignId);
+  const replacementRuns = await database
+    .select()
+    .from(campaignReplacementRuns)
+    .where(eq(campaignReplacementRuns.campaignId, campaignId));
+  const modelRunRows = await database
+    .select()
+    .from(campaignModelRuns)
+    .where(eq(campaignModelRuns.campaignId, campaignId));
+  const modelRunsByInvocation = new Map(
+    modelRunRows.filter((row) => row.status !== "pending").map((row) => [row.invocationId, row]),
+  );
+  const replacementRunsByOutcome = new Map(replacementRuns.map((run) => [run.outcomeId, run]));
   const satisfiedOutcomes = new Set(
     contract.outcomes
       .filter((outcome) => outcome.status === "live")
@@ -2301,7 +2433,14 @@ async function resourceFromDatabase(
     campaignState.status,
     campaign.revision,
     {
-      proposals: rows.map(proposalResource),
+      proposals: rows.map((row) => {
+        const replacementRun = replacementRunsByOutcome.get(row.outcomeId);
+        return proposalResource(
+          row,
+          replacementRun,
+          replacementRun ? modelRunsByInvocation.get(replacementRun.invocationId) : undefined,
+        );
+      }),
       planHandedOff: campaign.planHandedOff,
       decisionRequest: campaignState.decisionRequest,
       outcomeEvidence,

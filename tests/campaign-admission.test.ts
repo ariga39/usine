@@ -3898,7 +3898,16 @@ describe("durable Ready frontier", () => {
         summary: "the blocked initial Task leaves one bounded gap",
         gaps: ["the blocked initial Task leaves one bounded gap"],
         evidence: [],
-        usage: null,
+        // Deliberately disagree with the observation below. The model-run
+        // observation is the only durable usage owner.
+        usage: {
+          inputTokens: 901,
+          cachedInputTokens: 90,
+          uncachedInputTokens: 811,
+          cacheWriteInputTokens: 0,
+          outputTokens: 902,
+          reasoningOutputTokens: 9,
+        },
         modelRuns: [modelRun(request, "assessor")],
       };
     };
@@ -3906,7 +3915,14 @@ describe("durable Ready frontier", () => {
       replacementCalls += 1;
       return {
         proposal: { invalid: true },
-        usage: null,
+        usage: {
+          inputTokens: 801,
+          cachedInputTokens: 80,
+          uncachedInputTokens: 721,
+          cacheWriteInputTokens: 0,
+          outputTokens: 802,
+          reasoningOutputTokens: 8,
+        },
         modelRuns: [modelRun(request, "replacement-planner")],
       };
     };
@@ -3947,10 +3963,22 @@ describe("durable Ready frontier", () => {
           expect.objectContaining({ role: "replacement-planner", outcome: "succeeded" }),
         ]),
       );
+      expect(campaignRuns.find((run) => run.role === "assessor")?.usage).toMatchObject({
+        inputTokens: 9,
+        outputTokens: 5,
+      });
+      expect(campaignRuns.find((run) => run.role === "replacement-planner")?.usage).toMatchObject({
+        inputTokens: 9,
+        outputTokens: 5,
+      });
       const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
       expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(2);
       expect(publicReport!.totals.invocations).toBe(evidence!.totals.invocations);
       const campaign = await getCampaign(server.url, published.campaignId);
+      expect(campaign?.outcomes[0]?.assessment).toMatchObject({
+        usage: { inputTokens: 9, outputTokens: 5 },
+        usageSource: "model_run",
+      });
       const postHog = campaignEvidenceToPostHogEvents(campaign!, evidence!, "deployment-test");
       const modelEvents = postHog.filter((event) => event.event === "$ai_generation");
       expect(modelEvents).toHaveLength(2);
@@ -3968,6 +3996,91 @@ describe("durable Ready frontier", () => {
           }),
         ]),
       );
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        const assessmentRow = database
+          .prepare("SELECT assessment FROM campaign_assessments WHERE campaign_id = ?")
+          .get(published.campaignId);
+        expect(assessmentRow?.assessment).not.toContain('"inputTokens":901');
+        expect(
+          database
+            .prepare("SELECT usage FROM campaign_replacement_runs WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ usage: null });
+      } finally {
+        database.close();
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("does not report an assessor generation for all-null failure usage", async () => {
+    let assessorCalls = 0;
+    const assessor: CampaignOutcomeAssessor = async () => {
+      assessorCalls += 1;
+      return {
+        verdict: "inconclusive",
+        summary: "the assessor failed before invoking a model",
+        gaps: [],
+        evidence: [],
+        usage: {
+          inputTokens: null,
+          cachedInputTokens: null,
+          uncachedInputTokens: null,
+          cacheWriteInputTokens: null,
+          outputTokens: null,
+          reasoningOutputTokens: null,
+        },
+      };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async ({ authority, result }) =>
+        authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "the initial Task is blocked",
+        ),
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(assessorCalls).toBe(1);
+      const evidence = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+      expect(
+        evidence?.runs
+          .filter((run) => run.taskId === null)
+          .map(({ role, invocationId, adapter, usage, outcome }) => ({
+            role,
+            invocationId,
+            adapter,
+            usage,
+            outcome,
+          })),
+      ).toEqual([]);
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare("SELECT COUNT(*) AS count FROM campaign_model_runs WHERE campaign_id = ?")
+            .get(published.campaignId),
+        ).toEqual({ count: 0 });
+      } finally {
+        database.close();
+      }
     } finally {
       await server.close();
     }
@@ -4385,7 +4498,14 @@ describe("durable Ready frontier", () => {
       summary: "the persisted assessment identified an incomplete frontier",
       gaps: ["the frontier remains incomplete"],
       evidence: [],
-      usage: null,
+      usage: {
+        inputTokens: 17,
+        cachedInputTokens: 3,
+        uncachedInputTokens: 14,
+        cacheWriteInputTokens: 0,
+        outputTokens: 6,
+        reasoningOutputTokens: 1,
+      },
       startedAtEpochMs: completedAtEpochMs - 1,
       completedAtEpochMs,
     };
@@ -4404,6 +4524,32 @@ describe("durable Ready frontier", () => {
           JSON.stringify(assessment),
           assessment.startedAtEpochMs,
           assessment.completedAtEpochMs,
+        );
+      database
+        .prepare(
+          "INSERT INTO campaign_model_runs (invocation_id, campaign_id, outcome_id, role, assessment_id, evidence_hash, status, failure_class, started_at_epoch_ms, completed_at_epoch_ms, elapsed_ms, adapter, usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          assessment.assessmentId,
+          published.campaignId,
+          outcome.id,
+          "assessor",
+          assessment.assessmentId,
+          evidenceHash,
+          "completed",
+          null,
+          assessment.startedAtEpochMs,
+          assessment.completedAtEpochMs,
+          1,
+          "legacy-compatibility",
+          JSON.stringify({
+            inputTokens: 23,
+            cachedInputTokens: 4,
+            uncachedInputTokens: 19,
+            cacheWriteInputTokens: 0,
+            outputTokens: 12,
+            reasoningOutputTokens: 2,
+          }),
         );
       database
         .prepare(
@@ -4445,6 +4591,14 @@ describe("durable Ready frontier", () => {
       expect(replacementCalls).toBe(1);
       await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
         proposals: [{ proposalId: replacement.proposalId }],
+        outcomes: [
+          {
+            assessment: {
+              usage: { inputTokens: 23, outputTokens: 12 },
+              usageSource: "legacy_compatibility",
+            },
+          },
+        ],
       });
       await restarted.close();
       const finalRestart = await startUsineServer({
