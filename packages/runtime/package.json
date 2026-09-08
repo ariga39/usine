@@ -22,7 +22,8 @@
     "@usine/task-authority": "workspace:*",
     "drizzle-orm": "latest",
     "effect": "4.0.0-rc.110",
-    "execa": "latest"
+    "execa": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
