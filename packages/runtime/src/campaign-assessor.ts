@@ -37,6 +37,7 @@ export interface CampaignAssessmentRequest {
   readonly repositories: readonly CampaignAssessorRepository[];
   readonly deadlineEpochMs: number;
   readonly environment: NodeJS.ProcessEnv;
+  readonly signal?: AbortSignal;
 }
 
 export interface CampaignAssessmentDraft {
@@ -167,6 +168,7 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
         deadlineEpochMs: request.deadlineEpochMs,
         outputSchema: assessmentOutputSchema,
         environment: request.environment,
+        signal: request.signal,
       };
       const result = await session.run(assessorRequest);
       const modelRuns = campaignModelRunFromObservation(

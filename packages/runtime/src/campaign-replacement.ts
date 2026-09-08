@@ -51,6 +51,7 @@ export interface CampaignReplacementRequest {
   };
   readonly deadlineEpochMs: number;
   readonly environment: NodeJS.ProcessEnv;
+  readonly signal?: AbortSignal;
 }
 
 export interface CampaignReplacementDraft {
@@ -176,6 +177,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
         z.null(),
       ]),
       environment: request.environment,
+      signal: request.signal,
     };
     try {
       const result = await session.run(plannerRequest);

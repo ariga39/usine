@@ -18,6 +18,7 @@ import {
   publishCampaign,
   registerRepository,
 } from "../apps/cli/src/server-client.js";
+import type { CampaignOutcomeAssessor } from "../packages/runtime/src/campaign-assessor.js";
 
 interface CapturedBatchEvent {
   readonly uuid?: string;
@@ -610,6 +611,69 @@ test("captures persisted evidence from Task events using the Batch protocol", as
   expect(fixture.posthog.requests.length).toBe(replayBaseline);
 });
 
+test("captures terminal Campaign progress when a delayed assessor completes", async () => {
+  let assessorStarted!: () => void;
+  const assessorStartedPromise = new Promise<void>((resolve) => {
+    assessorStarted = resolve;
+  });
+  let releaseAssessor!: () => void;
+  const assessorRelease = new Promise<void>((resolve) => {
+    releaseAssessor = resolve;
+  });
+  const assessor: CampaignOutcomeAssessor = async (request) => {
+    assessorStarted();
+    await assessorRelease;
+    const delivery = request.evidence.find((item) => item.fact === "delivery");
+    if (!delivery) throw new Error("delayed assessor fixture requires delivery evidence");
+    return {
+      verdict: "satisfied",
+      summary: "the delivered Outcome satisfies its criterion",
+      gaps: [],
+      evidence: [{ ...delivery, criterionIndex: 0 }],
+      usage: {
+        inputTokens: 7,
+        cachedInputTokens: 2,
+        uncachedInputTokens: 5,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+      },
+    };
+  };
+  const fixture = await campaignFixture(200, true, assessor);
+  try {
+    await assessorStartedPromise;
+    await waitForRequest(
+      fixture.posthog,
+      (value) =>
+        value.batch?.some(
+          (event) =>
+            event.event === "usine_campaign_progress" &&
+            event.properties?.campaign_status === "planning",
+        ) === true &&
+        value.batch?.some((event) => event.event === "usine_campaign_delivery") === true,
+    );
+    const afterInitialCapture = fixture.posthog.requests.length;
+
+    releaseAssessor();
+    await waitForRequest(
+      fixture.posthog,
+      (value) =>
+        value.batch?.some(
+          (event) =>
+            event.event === "usine_campaign_progress" &&
+            event.properties?.campaign_status === "accepted",
+        ) === true &&
+        value.batch?.some(
+          (event) => event.event === "$ai_generation" && event.properties?.role === "assessor",
+        ) === true,
+      afterInitialCapture,
+    );
+  } finally {
+    releaseAssessor();
+  }
+});
+
 test("a failed PostHog capture does not block the Campaign event entry", async () => {
   const fixture = await campaignFixture(503);
   await waitForRequest(fixture.posthog, (value) => value.batch?.length === 4);
@@ -626,7 +690,24 @@ test("a failed PostHog capture does not block the Campaign event entry", async (
 });
 
 test("suppresses an acknowledged Campaign delivery on repeated capture", async () => {
-  const fixture = await campaignFixture(200, true);
+  const assessor: CampaignOutcomeAssessor = async ({ signal }) => {
+    if (!signal) throw new Error("held assessor fixture requires a signal");
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    return {
+      verdict: "inconclusive" as const,
+      summary: "the held assessor did not produce a new observation",
+      gaps: [],
+      evidence: [],
+      usage: null,
+    };
+  };
+  const fixture = await campaignFixture(200, true, assessor);
   const request = await waitForRequest(
     fixture.posthog,
     (value) => value.batch?.some((event) => event.event === "usine_campaign_delivery") === true,
@@ -646,7 +727,11 @@ test("suppresses an acknowledged Campaign delivery on repeated capture", async (
   expect(sentDeliveries[0]?.uuid).toBe(delivery.uuid);
 });
 
-async function campaignFixture(postHogStatus: number, deliver = false) {
+async function campaignFixture(
+  postHogStatus: number,
+  deliver = false,
+  assessOutcome?: CampaignOutcomeAssessor,
+) {
   const root = await mkdtemp(join(tmpdir(), "usine-posthog-campaign-"));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory);
@@ -763,6 +848,7 @@ async function campaignFixture(postHogStatus: number, deliver = false) {
         },
       );
     },
+    assessOutcome,
   });
   usineServers.push(usine);
   await registerRepository(usine.url, {
