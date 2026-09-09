@@ -186,6 +186,7 @@ const eventData = Schema.Union([
     sessionId: safeObservationId,
     phase: codingSessionPhase,
     failureClass: codingSessionFailureClass,
+    archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({ type: Schema.Literal("candidate_frozen"), sha: exactSha, fence: Schema.Natural }),
   Schema.Struct({
@@ -389,6 +390,7 @@ const observationData = Schema.Union([
     sessionId: safeObservationId,
     phase: codingSessionPhase,
     failureClass: codingSessionFailureClass,
+    archive: Schema.optional(archiveReference),
   }),
   Schema.Struct({
     type: Schema.Literal("recovery_observed"),
@@ -398,6 +400,7 @@ const observationData = Schema.Union([
 
 export type TaskEventData = Schema.Schema.Type<typeof eventData>;
 export type TaskObservationEventData = Schema.Schema.Type<typeof observationData>;
+export type TaskArchiveReference = Schema.Schema.Type<typeof archiveReference>;
 
 const taskObservationEventInput = Schema.Struct({
   eventId: safeEventId,

@@ -108,6 +108,9 @@ import { ensurePrivateStateDatabase } from "./private-state.js";
 type TaskEventEnvelope = ApiEventEnvelope;
 type LaunchMode = "deduplicated" | "replace";
 
+/** Maximum decoded route parameter length permitted by Task IDs and campaignIdFor. */
+const MAX_SUPPORTED_ROUTE_PARAM_LENGTH = 128 + 2 + String(Number.MAX_SAFE_INTEGER).length;
+
 export type TaskSubmission = ApiTaskSubmission;
 
 export interface ServerExecutionContext {
@@ -263,6 +266,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   const activeCampaignModelOperations = new Set<Promise<boolean>>();
   let queuedCampaignModelLaunch: ReturnType<typeof setImmediate> | undefined;
   let campaignModelWorkGeneration = 0;
+  const activeTaskOperations = new Set<Promise<unknown>>();
   const onEvent = (event: TaskEvent): void => {
     eventDispatch = eventDispatch
       .then(async () => {
@@ -300,6 +304,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         eventHub,
         coordinateCampaigns: async () => coordinateCampaigns(),
       }).pipe(Layer.provide(NodeHttpServer.layerHttpServices)),
+    ).pipe(
+      Effect.provideService(HttpRouter.RouterConfig, {
+        maxParamLength: MAX_SUPPORTED_ROUTE_PARAM_LENGTH,
+      }),
     );
     const server = yield* NodeHttpServer.make(createServer, { host, port }).pipe(
       Effect.mapError((cause) => new Error(`server failed to listen: ${String(cause.cause)}`)),
@@ -317,8 +325,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       runTask(
         task.result.taskId,
         Effect.tryPromise({
-          try: (signal) =>
-            executeServerTask(
+          try: (signal) => {
+            const operation = executeServerTask(
               task,
               options.environment,
               stateDirectory,
@@ -326,7 +334,14 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
               signal,
               onEvent,
               executionOwnerId,
-            ),
+            );
+            activeTaskOperations.add(operation);
+            void operation.then(
+              () => activeTaskOperations.delete(operation),
+              () => activeTaskOperations.delete(operation),
+            );
+            return operation;
+          },
           catch: (cause) => cause,
         }).pipe(Effect.asVoid),
         mode === "deduplicated" ? { onlyIfMissing: true } : undefined,
@@ -472,6 +487,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           queuedCampaignModelLaunch = undefined;
           await campaignCoordination;
           await Effect.runPromise(Scope.close(scope, Exit.void));
+          await Promise.allSettled(activeTaskOperations);
           await Promise.allSettled(activeCampaignModelOperations);
         })()),
     };
@@ -481,6 +497,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     queuedCampaignModelLaunch = undefined;
     await campaignCoordination;
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
+    await Promise.allSettled(activeTaskOperations);
     await Promise.allSettled(activeCampaignModelOperations);
     throw error;
   }

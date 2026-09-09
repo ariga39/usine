@@ -1,4 +1,5 @@
 import { and, asc, eq, sql } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
 import { repositories, repositoryLeases, taskEvents, taskQuarantines, taskRuns } from "./schema.js";
 import type { RuntimeDatabase } from "./sqlite-database.js";
 import {
@@ -13,6 +14,7 @@ import {
   decodeTaskObservationEventInput,
   type TaskEvent,
   type TaskEventData,
+  type TaskArchiveReference,
   type TaskObservationEventInput,
 } from "./task-event.js";
 import {
@@ -68,6 +70,13 @@ const MAX_EVENT_LIMIT = 200;
 export const MAX_TASK_LIST_PAGE_SIZE = 200;
 const TASK_LIST_CURSOR_SCOPE = "task-list" as const;
 const MAX_DURABLE_REVISION = Number.MAX_SAFE_INTEGER;
+
+export interface RecoveryArchiveReference {
+  readonly taskId: string;
+  readonly role: "implementer" | "reviewer";
+  readonly attempt: string;
+  readonly archive: TaskArchiveReference;
+}
 
 function repositoryPolicySelectionChanged(
   existing: typeof repositories.$inferSelect,
@@ -319,7 +328,10 @@ export class TaskAuthority {
           activation: event.data.activation,
           revision: event.sequence,
         });
-      } else if (event.data.type === "coding_session_completed") {
+      } else if (
+        event.data.type === "coding_session_completed" ||
+        event.data.type === "coding_session_interrupted"
+      ) {
         active.delete(`${event.taskId}:${event.data.sessionId}`);
       }
     }
@@ -469,6 +481,127 @@ export class TaskAuthority {
     });
     this.emit([event]);
     return event;
+  }
+
+  async recordRecoveryObservation(
+    taskId: string,
+    kind: "server_restart",
+    archiveReferences: readonly RecoveryArchiveReference[] = [],
+  ): Promise<readonly TaskEvent[]> {
+    const events = await this.inTransaction(async (database) => {
+      const current = await TaskAuthority.currentTask(database, taskId);
+      if (!current) throw new Error("task is not admitted");
+      const rows = await database
+        .select()
+        .from(taskEvents)
+        .where(eq(taskEvents.taskId, taskId))
+        .orderBy(asc(taskEvents.sequence));
+      const active = new Map<
+        string,
+        {
+          readonly start: Extract<TaskEventData, { type: "coding_session_started" }>;
+          readonly startEventId: string;
+          readonly sequence: number;
+          phase: "startup" | "thread" | "turn" | "output";
+        }
+      >();
+      const reviewShaByCycle = new Map<number, string>();
+      for (const row of rows) {
+        const event = decodeTaskEvent(row);
+        const data = event.data;
+        if (data.type === "review_started") {
+          reviewShaByCycle.set(data.cycle, data.sha);
+          continue;
+        }
+        if (
+          data.type !== "coding_session_started" &&
+          data.type !== "coding_thread_started" &&
+          data.type !== "coding_turn_started" &&
+          data.type !== "coding_tool_completed" &&
+          data.type !== "coding_mcp_tool_completed" &&
+          data.type !== "coding_turn_completed" &&
+          data.type !== "coding_session_completed" &&
+          data.type !== "coding_session_interrupted"
+        )
+          continue;
+        const key = `${data.role}:${data.activation}:${data.sessionId}`;
+        if (data.type === "coding_session_started") {
+          active.set(key, {
+            start: data,
+            startEventId: event.eventId,
+            sequence: event.sequence,
+            phase: "startup",
+          });
+        } else if (
+          data.type === "coding_session_completed" ||
+          data.type === "coding_session_interrupted"
+        ) {
+          active.delete(key);
+        } else {
+          const run = active.get(key);
+          if (run) {
+            run.phase =
+              data.type === "coding_thread_started"
+                ? "thread"
+                : data.type === "coding_turn_completed"
+                  ? "output"
+                  : "turn";
+          }
+        }
+      }
+      const recovered: TaskEvent[] = [];
+      for (const run of [...active.values()].sort(
+        (left, right) => left.sequence - right.sequence,
+      )) {
+        const attempt =
+          run.start.role === "implementer"
+            ? String(run.start.activation)
+            : run.start.reviewCycle === undefined
+              ? null
+              : (() => {
+                  const sha = reviewShaByCycle.get(run.start.reviewCycle);
+                  return sha === undefined ? null : `${run.start.reviewCycle}-${sha}`;
+                })();
+        const matches =
+          attempt === null
+            ? []
+            : archiveReferences.filter(
+                (reference) =>
+                  reference.taskId === taskId &&
+                  reference.role === run.start.role &&
+                  reference.attempt === attempt,
+              );
+        const archive = matches.length === 1 ? matches[0]!.archive : undefined;
+        recovered.push(
+          await TaskAuthority.appendEvent(database, taskId, {
+            eventId: `recovery:coding_session_interrupted:${createHash("sha256")
+              .update(run.startEventId)
+              .digest("hex")
+              .slice(0, 32)}`,
+            occurredAtEpochMs: Date.now(),
+            data: {
+              type: "coding_session_interrupted",
+              role: run.start.role,
+              activation: run.start.activation,
+              sessionId: run.start.sessionId,
+              phase: run.phase,
+              failureClass: "unknown",
+              ...(archive ? { archive } : {}),
+            },
+          }),
+        );
+      }
+      recovered.push(
+        await TaskAuthority.appendEvent(database, taskId, {
+          eventId: `recovery:${kind}:${randomUUID()}`,
+          occurredAtEpochMs: Date.now(),
+          data: { type: "recovery_observed", kind },
+        }),
+      );
+      return recovered;
+    });
+    this.emit(events);
+    return events;
   }
 
   async listEvents(

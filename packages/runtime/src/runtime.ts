@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
   applyMigrations,
@@ -19,6 +18,7 @@ import {
   type RepositoryResource,
   type ResolvedTaskContract,
   type TaskEvent,
+  type RecoveryArchiveReference,
   type TaskListPage,
   type TaskListPageRequest,
   type TaskResult,
@@ -30,7 +30,6 @@ import {
   taskContractSchema,
   type ServerHealth,
   type ServerSnapshot,
-  type TaskObservationEventInput,
   isTerminalState,
   isWaitingState,
 } from "@usine/task-authority";
@@ -39,6 +38,7 @@ import {
   CodexCodingSession,
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
+  listSessionArchives,
   type CodingSessionMcpServerResolution,
   type CodingSessionObservation,
 } from "@usine/coding-session";
@@ -541,12 +541,33 @@ export async function recordRecoveryObservation(
 ): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
-    const input: TaskObservationEventInput = {
-      eventId: `recovery:${kind}:${randomUUID()}`,
-      occurredAtEpochMs: Date.now(),
-      data: { type: "recovery_observed", kind },
-    };
-    await new TaskAuthority(handle.database, { onEvent }).appendObservation(taskId, input);
+    let archiveReferences: RecoveryArchiveReference[] = [];
+    try {
+      archiveReferences = (await listSessionArchives(stateDirectory, taskId, 1_000)).flatMap(
+        (manifest): RecoveryArchiveReference[] => {
+          if (manifest.role !== "implementer" && manifest.role !== "reviewer") return [];
+          return [
+            {
+              taskId: manifest.taskId,
+              role: manifest.role,
+              attempt: manifest.attempt,
+              archive: {
+                archiveId: manifest.archiveId,
+                status: manifest.captureStatus,
+                completeness: manifest.completeness,
+              },
+            },
+          ];
+        },
+      );
+    } catch {
+      // Archive capture is evidence when readable, but never controls recovery.
+    }
+    await new TaskAuthority(handle.database, { onEvent }).recordRecoveryObservation(
+      taskId,
+      kind,
+      archiveReferences,
+    );
   } finally {
     handle.close();
   }

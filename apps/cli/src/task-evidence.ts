@@ -165,6 +165,7 @@ export function deriveTaskEvidence(task: TaskResource, events: readonly TaskEven
     } else if (data.type === "coding_session_interrupted") {
       run.effort.phase = data.phase;
       run.effort.failureClass = taskFailureClassFromProvider(data.failureClass);
+      run.archive = data.archive ? archiveEvidence(data.archive) : run.archive;
       run.outcome.status = data.failureClass === "cancellation" ? "cancelled" : "failed";
       run.interruptedAtEpochMs = event.occurredAtEpochMs;
       run.terminalAtEpochMs = event.occurredAtEpochMs;

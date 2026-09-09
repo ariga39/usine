@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { execa, type ResultPromise } from "execa";
 import { lookupTaskEvents, lookupTaskStatus } from "@usine/runtime";
 import { describe, expect, test } from "vite-plus/test";
+import { captureCampaignEvidence } from "../packages/runtime/src/posthog.js";
 
 const fakeCodexExecutable = (
   hang: boolean,
   hangReviewer: boolean,
+  usageBeforeHang: boolean,
 ): string => String.raw`#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { access, chmod, readFile, writeFile } from "node:fs/promises";
@@ -18,9 +20,29 @@ const args = process.argv;
 const workspace = args[args.indexOf("--cd") + 1];
 if (!workspace) throw new Error("Codex workspace is required");
 const activation = Number(basename(workspace).split("-")[0]);
+process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "server-milestone-session" }) + "\n");
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Usine role: fresh independent reviewer.");
+const assessor = prompt.includes("Usine role: fresh Campaign assessor.");
+if (assessor) {
+  const output = JSON.stringify({
+    verdict: "inconclusive",
+    summary: "Campaign assessor fixture is inconclusive.",
+    gaps: [],
+    evidence: [],
+  });
+  await new Promise((resolve) =>
+    process.stdout.write(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", id: "message-assessor", text: output },
+      }) + "\n",
+      resolve,
+    ),
+  );
+  process.exit(0);
+}
 const stateDirectory = reviewer
   ? dirname(dirname(workspace))
   : dirname(dirname(dirname(workspace)));
@@ -53,6 +75,10 @@ if (!reviewer) {
       }
     }
     await writeFile(join(stateDirectory, "activation.marker"), "activation-started\n");
+    if (${String(usageBeforeHang)}) {
+      process.stdout.write(JSON.stringify({ type: "turn.started", turn_id: "turn-1" }) + "\n");
+      process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 3 } }) + "\n");
+    }
     process.once("SIGTERM", () => process.exit(0));
     await new Promise(() => {
       setInterval(() => undefined, 1_000);
@@ -65,7 +91,6 @@ const sha = prompt.match(/Candidate SHA: ([0-9a-f]{40})/)?.[1];
 const output = reviewer
   ? JSON.stringify({ sha, verdict: "approved", summary: "approved", findings: [] })
   : JSON.stringify({ status: "proposed", summary: "candidate" });
-process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "server-milestone-session" }) + "\n");
 process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", id: "message-1", text: output } }) + "\n");
 process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } }) + "\n");
 `;
@@ -75,6 +100,8 @@ interface Fixture {
   repository: string;
   remote: string;
   contractPath: string;
+  campaignContractPath: string;
+  campaignProposalPath: string;
   registrationPath: string;
   stateDirectory: string;
   taskId: string;
@@ -88,6 +115,14 @@ interface ForgeServer {
   pullRequests: number;
   attestations: number;
   mergeCalls: number;
+  captureRequests: Array<{
+    batch?: Array<{
+      event?: string;
+      uuid?: string;
+      properties?: Record<string, unknown>;
+    }>;
+  }>;
+  setCaptureStatus(status: number): void;
   close(): Promise<void>;
 }
 
@@ -125,6 +160,8 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   await execa("git", ["commit", "-m", "base"], { cwd: repository });
   const baseSha = await git(repository, "rev-parse", "HEAD");
   const contractPath = join(repository, "task.json");
+  const campaignContractPath = join(repository, "goal.json");
+  const campaignProposalPath = join(root, "campaign-proposal.json");
   await writeFile(
     contractPath,
     JSON.stringify({
@@ -150,6 +187,55 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   );
   await execa("git", ["add", "task.json"], { cwd: repository });
   await execa("git", ["commit", "-m", "authorize task"], { cwd: repository });
+  await writeFile(
+    campaignContractPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      id: `${taskId}-goal`,
+      version: 1,
+      objective: "Deliver the interrupted campaign outcome.",
+      outcomes: [
+        {
+          id: "campaign-outcome",
+          title: "Deliver the campaign outcome",
+          acceptance: ["The campaign outcome is delivered."],
+          dependsOn: [],
+          parentId: null,
+        },
+      ],
+      authority: {
+        source: `https://github.com/example/${taskId}/issues/154`,
+        publish: true,
+        delivery: true,
+        merge: false,
+        repositories: [taskId],
+        effects: ["github"],
+      },
+      budget: {
+        maxElapsedMs: 60_000,
+        maxTasks: 1,
+        maxImplementerActivations: 2,
+        maxReviewCycles: 1,
+      },
+    }),
+  );
+  await execa("git", ["add", "goal.json"], { cwd: repository });
+  await execa("git", ["commit", "-m", "authorize campaign"], { cwd: repository });
+  await writeFile(
+    campaignProposalPath,
+    JSON.stringify({
+      proposalId: "campaign-interruption",
+      outcomeId: "campaign-outcome",
+      dependsOn: [],
+      repositoryId: taskId,
+      instructions: "Implement the campaign outcome.",
+      acceptance: ["The campaign outcome is delivered."],
+      nonGoals: [],
+      effects: ["github"],
+      budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 10_000 },
+      merge: false,
+    }),
+  );
   const registrationPath = join(root, "repository-registration.json");
   await writeFile(
     registrationPath,
@@ -179,7 +265,11 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   );
   await writeFile(
     fakeCodexPath,
-    fakeCodexExecutable(name === "restart" || name === "graceful", name === "reviewer-shutdown"),
+    fakeCodexExecutable(
+      name === "restart" || name === "graceful" || name === "campaign-restart",
+      name === "reviewer-shutdown",
+      name === "campaign-restart",
+    ),
     {
       mode: 0o755,
     },
@@ -190,6 +280,8 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
     repository,
     remote,
     contractPath,
+    campaignContractPath,
+    campaignProposalPath,
     registrationPath,
     stateDirectory,
     taskId,
@@ -206,9 +298,19 @@ async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<F
   let merged = false;
   let mergeCommitSha: string | null = null;
   let attestationBody: string | null = null;
+  let captureStatus = 200;
+  const captureRequests: ForgeServer["captureRequests"] = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const method = request.method ?? "GET";
+    if (method === "POST" && url.pathname === "/batch/") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      captureRequests.push(JSON.parse(body) as (typeof captureRequests)[number]);
+      response.statusCode = captureStatus;
+      response.end("ok");
+      return;
+    }
     if (request.headers.authorization !== "token test-token") {
       await jsonResponse(response, { message: "bad credentials" }, 401);
       return;
@@ -352,6 +454,10 @@ async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<F
     get mergeCalls() {
       return mergeCalls;
     },
+    captureRequests,
+    setCaptureStatus(status: number) {
+      captureStatus = status;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
@@ -371,6 +477,7 @@ function environment(
     USINE_FORGE_PROFILE_DEFAULT_API_URL: forge.url,
     USINE_FORGE_PROFILE_DEFAULT_GIT_URL: fixture.remote,
     USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${fixture.taskId}`,
+    USINE_GOAL_PUBLICATION_SOURCE: `https://github.com/example/${fixture.taskId}/issues/154`,
     CODEX_HOME: join(fixture.root, "codex-home"),
     USINE_CODEX_PATH_OVERRIDE: fixture.fakeCodexPath,
     PATH: process.env.PATH ?? "",
@@ -447,7 +554,18 @@ async function runCli(
   argument: string,
   mode: "complete" | "kill" = "complete",
 ) {
-  return execa("node", ["--no-warnings", cliPath, command, argument], {
+  return runCliArgs(cliPath, fixture, forge, serverUrl, [command, argument], mode);
+}
+
+async function runCliArgs(
+  cliPath: string,
+  fixture: Fixture,
+  forge: ForgeServer,
+  serverUrl: string,
+  args: string[],
+  mode: "complete" | "kill" = "complete",
+) {
+  return execa("node", ["--no-warnings", cliPath, ...args], {
     cwd: fixture.repository,
     env: { ...environment(fixture, forge, mode), USINE_SERVER_URL: serverUrl },
     reject: false,
@@ -460,6 +578,7 @@ async function waitForStatus(
   forge: ForgeServer,
   serverUrl: string,
   predicate: (result: Record<string, unknown>) => boolean,
+  taskId = fixture.taskId,
 ): Promise<Record<string, unknown>> {
   let lastEvidence: {
     status: Record<string, unknown> | null;
@@ -468,7 +587,7 @@ async function waitForStatus(
     stderr: string;
   } = { status: null, exitCode: null, signal: null, stderr: "" };
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const status = await runCli(cliPath, fixture, forge, serverUrl, "status", fixture.taskId);
+    const status = await runCli(cliPath, fixture, forge, serverUrl, "status", taskId);
     lastEvidence = {
       status: null,
       exitCode: status.exitCode ?? null,
@@ -495,6 +614,15 @@ async function waitForMarker(path: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("timed out waiting for the Codex turn marker");
+}
+
+async function waitForCodingThread(stateDirectory: string, taskId: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const events = await lookupTaskEvents(stateDirectory, taskId);
+    if (events?.events.some((event) => event.data.type === "coding_thread_started")) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("timed out waiting for persisted coding thread activity");
 }
 
 function processAlive(pid: number): boolean {
@@ -718,6 +846,7 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      await waitForCodingThread(fixtureValue.stateDirectory, fixtureValue.taskId);
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -739,6 +868,12 @@ describe("server-owned delivery milestone", () => {
       expect(
         interruptedEvents?.events.some((event) => event.data.type === "coding_session_started"),
       ).toBe(true);
+      expect(
+        interruptedEvents?.events.some((event) => event.data.type === "coding_thread_started"),
+      ).toBe(true);
+      expect(
+        interruptedEvents?.events.some((event) => event.data.type === "coding_session_interrupted"),
+      ).toBe(true);
 
       await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -753,7 +888,7 @@ describe("server-owned delivery milestone", () => {
           ),
           "utf8",
         ),
-      ).resolves.toBe("stale\n");
+      ).rejects.toMatchObject({ code: "ENOENT" });
 
       const second = await startServer(cliPath, fixtureValue, forge, "complete");
       try {
@@ -777,6 +912,54 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+        const evidenceResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "task",
+          "evidence",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
+        const evidence = JSON.parse(evidenceResult.stdout) as {
+          roleRuns: {
+            implementer: Array<{
+              activation: number | null;
+              outcome: { status: string };
+              archive: { status: string };
+            }>;
+          };
+        };
+        expect(evidence.roleRuns.implementer).toHaveLength(2);
+        expect(evidence.roleRuns.implementer[0]).toMatchObject({
+          outcome: { status: "cancelled" },
+          archive: { status: "partial" },
+        });
+        expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
+        const usageResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "usage",
+          "--task-id",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(usageResult.exitCode, usageResult.stderr).toBe(0);
+        const usage = JSON.parse(usageResult.stdout) as {
+          invocations: Array<{
+            role: string;
+            activation: number | null;
+            outcome: string;
+            usage: { coverage: string };
+          }>;
+        };
+        expect(usage.invocations).toHaveLength(3);
+        expect(
+          usage.invocations.filter((invocation) => invocation.role === "implementer"),
+        ).toHaveLength(2);
+        expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
+          outcome: "cancelled",
+          usage: { coverage: "unavailable" },
+        });
+        expect(usage.invocations.find((invocation) => invocation.activation === 2)?.outcome).toBe(
+          "succeeded",
+        );
         await expect(
           readFile(
             join(
@@ -841,6 +1024,7 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      await waitForCodingThread(fixtureValue.stateDirectory, fixtureValue.taskId);
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -872,6 +1056,92 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+        const evidenceResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "task",
+          "evidence",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
+        const archiveListResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "archive",
+          "list",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(archiveListResult.exitCode, archiveListResult.stderr).toBe(0);
+        const archiveList = (
+          JSON.parse(archiveListResult.stdout) as {
+            archives: Array<{
+              archiveId: string;
+              taskId: string;
+              role: string;
+              attempt: string;
+              status: string;
+              captureStatus: string;
+              completeness: string;
+            }>;
+          }
+        ).archives;
+        const originalArchive = archiveList.find(
+          (manifest) => manifest.role === "implementer" && manifest.attempt === "1",
+        );
+        if (originalArchive === undefined) throw new Error("original archive manifest is missing");
+        expect(originalArchive).toMatchObject({
+          taskId: fixtureValue.taskId,
+          status: "failed",
+          captureStatus: "stored",
+          completeness: "partial",
+        });
+        const archiveManifestResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "archive",
+          "manifest",
+          originalArchive.archiveId,
+          "--json",
+        ]);
+        expect(archiveManifestResult.exitCode, archiveManifestResult.stderr).toBe(0);
+        expect(JSON.parse(archiveManifestResult.stdout)).toMatchObject(originalArchive);
+        const evidence = JSON.parse(evidenceResult.stdout) as {
+          roleRuns: {
+            implementer: Array<{
+              activation: number | null;
+              outcome: { status: string };
+              archive: { status: string };
+            }>;
+          };
+        };
+        expect(evidence.roleRuns.implementer).toHaveLength(2);
+        expect(evidence.roleRuns.implementer[0]).toMatchObject({
+          outcome: { status: "failed" },
+          archive: { archiveId: originalArchive.archiveId, status: "partial" },
+        });
+        expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
+        const usageResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "usage",
+          "--task-id",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(usageResult.exitCode, usageResult.stderr).toBe(0);
+        const usage = JSON.parse(usageResult.stdout) as {
+          invocations: Array<{
+            role: string;
+            activation: number | null;
+            outcome: string;
+            usage: { coverage: string };
+          }>;
+        };
+        expect(usage.invocations).toHaveLength(3);
+        expect(
+          usage.invocations.filter((invocation) => invocation.role === "implementer"),
+        ).toHaveLength(2);
+        expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
+          outcome: "failed",
+          usage: { coverage: "unavailable" },
+        });
+        expect(usage.invocations.find((invocation) => invocation.activation === 2)?.outcome).toBe(
+          "succeeded",
+        );
         expect(forge.pullRequests).toBe(1);
         expect(forge.attestations).toBe(1);
         expect(
@@ -901,6 +1171,244 @@ describe("server-owned delivery milestone", () => {
       if (!firstStopped) {
         await stopServer(first).catch(() => undefined);
       }
+      if (descendantPid) reapFixtureProcess(descendantPid);
+      if (codexPid) reapFixtureProcess(codexPid);
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("recovers an interrupted Campaign invocation without relaunch after deadline expiry", async () => {
+    const fixtureValue = await fixture("campaign-restart");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const first = await startServer(cliPath, fixtureValue, forge, "kill");
+    let firstStopped = false;
+    let codexPid: number | null = null;
+    let descendantPid: number | null = null;
+    const campaignTaskId = `campaign-${fixtureValue.taskId}-goal-v1-campaign-interruption`;
+    try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
+      const publishedResult = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "publish",
+        fixtureValue.campaignContractPath,
+        "--json",
+      ]);
+      expect(publishedResult.exitCode, publishedResult.stderr).toBe(0);
+      const published = JSON.parse(publishedResult.stdout) as { campaignId: string };
+      const proposedResult = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "propose",
+        published.campaignId,
+        fixtureValue.campaignProposalPath,
+        "--json",
+      ]);
+      expect(proposedResult.exitCode, proposedResult.stderr).toBe(0);
+      const handedOff = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "handoff",
+        published.campaignId,
+        "--json",
+      ]);
+      expect(handedOff.exitCode, handedOff.stderr).toBe(0);
+
+      let publicHistory: { events: Array<{ data: { type: string } }> } | null = null;
+      type PublicHistory = { events: Array<{ data: { type: string } }> };
+      let lastHistoryResult: { exitCode: number | null; signal: string | null; stderr: string } = {
+        exitCode: null,
+        signal: null,
+        stderr: "",
+      };
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const historyResult = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          first.url,
+          ["task", "history", campaignTaskId, "--json"],
+          "kill",
+        );
+        lastHistoryResult = {
+          exitCode: historyResult.exitCode ?? null,
+          signal: historyResult.signal ?? null,
+          stderr: historyResult.stderr.slice(-2_000),
+        };
+        if (historyResult.exitCode === 0) {
+          const history = JSON.parse(historyResult.stdout) as PublicHistory;
+          if (
+            history.events.some((event) => event.data.type === "coding_thread_started") &&
+            history.events.some((event) => event.data.type === "coding_usage_observed")
+          ) {
+            publicHistory = history;
+            break;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(publicHistory, JSON.stringify(lastHistoryResult)).not.toBeNull();
+      const startedResult = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "task",
+        "get",
+        campaignTaskId,
+        "--json",
+      ]);
+      expect(startedResult.exitCode, startedResult.stderr).toBe(0);
+      const started = JSON.parse(startedResult.stdout) as { deadlineEpochMs: number };
+      const originalDeadline = started.deadlineEpochMs;
+      expect(originalDeadline).toBeGreaterThan(Date.now());
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      descendantPid = Number(
+        await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+      );
+      expect(processAlive(descendantPid)).toBe(true);
+
+      await stopServer(first, "SIGKILL");
+      firstStopped = true;
+      while (Date.now() < originalDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const second = await startServer(cliPath, fixtureValue, forge, "complete");
+      try {
+        const expired = await waitForStatus(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          (result) => result.taskId === campaignTaskId && result.state === "blocked",
+          campaignTaskId,
+        );
+        expect(expired).toMatchObject({ state: "blocked", deadlineEpochMs: originalDeadline });
+        const recoveredHistoryResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "task",
+          "history",
+          campaignTaskId,
+          "--json",
+        ]);
+        expect(recoveredHistoryResult.exitCode, recoveredHistoryResult.stderr).toBe(0);
+        const recoveredHistory = JSON.parse(recoveredHistoryResult.stdout) as PublicHistory;
+        expect(
+          recoveredHistory.events.filter((event) => event.data.type === "coding_session_started"),
+        ).toHaveLength(1);
+        expect(
+          recoveredHistory.events.filter(
+            (event) => event.data.type === "coding_session_interrupted",
+          ),
+        ).toHaveLength(1);
+
+        const campaignEvidenceResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "campaign",
+          "evidence",
+          published.campaignId,
+          "--json",
+        ]);
+        expect(campaignEvidenceResult.exitCode, campaignEvidenceResult.stderr).toBe(0);
+        const campaignEvidence = JSON.parse(campaignEvidenceResult.stdout) as {
+          coverage: string;
+          totals: {
+            invocations: number;
+            usage: { inputTokens: number | null; outputTokens: number | null };
+          };
+          runs: Array<{
+            invocationId: string;
+            taskId: string;
+            role: string;
+            activation: number;
+            outcome: string;
+            usage: { inputTokens: number; outputTokens: number; coverage: string };
+          }>;
+        };
+        expect(campaignEvidence.coverage).toBe("partial");
+        expect(campaignEvidence.totals.invocations).toBe(campaignEvidence.runs.length);
+        const recoveredRun = campaignEvidence.runs.find((run) => run.taskId === campaignTaskId);
+        if (!recoveredRun) throw new Error("Campaign evidence has no recovered Task invocation");
+        expect(recoveredRun).toMatchObject({
+          taskId: campaignTaskId,
+          role: "implementer",
+          activation: 1,
+          outcome: "failed",
+          usage: { inputTokens: 12, outputTokens: 3, coverage: "partial" },
+        });
+
+        const taskUsageResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "usage",
+          "--task-id",
+          campaignTaskId,
+          "--json",
+        ]);
+        expect(taskUsageResult.exitCode, taskUsageResult.stderr).toBe(0);
+        const taskUsage = JSON.parse(taskUsageResult.stdout) as {
+          coverage: string;
+          invocations: Array<{
+            invocationId: string;
+            outcome: string;
+            usage: { inputTokens: number; outputTokens: number; coverage: string };
+          }>;
+        };
+        expect(taskUsage).toMatchObject({ coverage: "partial" });
+        expect(taskUsage.invocations).toHaveLength(1);
+        expect(taskUsage.invocations[0]).toMatchObject({
+          invocationId: recoveredRun.invocationId,
+          outcome: recoveredRun.outcome,
+          usage: recoveredRun.usage,
+        });
+
+        const captureEnvironment = {
+          ...environment(fixtureValue, forge, "complete"),
+          USINE_POSTHOG_API_KEY: "test-posthog-key",
+          USINE_POSTHOG_DEPLOYMENT: "milestone-deployment",
+          USINE_POSTHOG_API_URL: `${forge.url}/batch/`,
+        };
+        forge.setCaptureStatus(503);
+        await expect(
+          captureCampaignEvidence(
+            fixtureValue.stateDirectory,
+            published.campaignId,
+            captureEnvironment,
+          ),
+        ).rejects.toThrow();
+        const failedCapture = forge.captureRequests.at(-1);
+        const failedGeneration = failedCapture?.batch?.find(
+          (event) =>
+            event.event === "$ai_generation" && event.properties?.task_id === campaignTaskId,
+        );
+        expect(failedGeneration).toMatchObject({
+          properties: {
+            invocation_id: recoveredRun.invocationId,
+            task_id: campaignTaskId,
+            $ai_input_tokens: 12,
+            $ai_output_tokens: 3,
+            token_coverage: "partial",
+          },
+        });
+        forge.setCaptureStatus(200);
+        await captureCampaignEvidence(
+          fixtureValue.stateDirectory,
+          published.campaignId,
+          captureEnvironment,
+        );
+        const successfulCapture = forge.captureRequests.at(-1);
+        expect(successfulCapture?.batch?.map((event) => event.uuid)).toEqual(
+          failedCapture?.batch?.map((event) => event.uuid),
+        );
+        const requestCount = forge.captureRequests.length;
+        await captureCampaignEvidence(
+          fixtureValue.stateDirectory,
+          published.campaignId,
+          captureEnvironment,
+        );
+        expect(forge.captureRequests).toHaveLength(requestCount);
+      } finally {
+        await stopServer(second);
+      }
+    } finally {
+      if (!firstStopped) await stopServer(first, "SIGKILL").catch(() => undefined);
       if (descendantPid) reapFixtureProcess(descendantPid);
       if (codexPid) reapFixtureProcess(codexPid);
       await forge.close();
