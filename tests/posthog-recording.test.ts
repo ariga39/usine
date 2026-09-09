@@ -194,6 +194,10 @@ test("maps fixed Campaign evidence fields without private payloads", () => {
       $ai_model: "observed-model",
       configured_provider: "configured-provider",
       configured_model: "configured-model",
+      actual_provider: "observed-provider",
+      actual_model: "observed-model",
+      provider_identity_source: "provider",
+      model_identity_source: "provider",
       $ai_trace_id: expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
@@ -347,6 +351,72 @@ test("projects failed interrupted usage with every token dimension and matching 
     output_tokens: 8,
     reasoning_output_tokens: null,
   });
+});
+
+test("projects configured identity per missing dimension and keeps unknown identity unavailable", () => {
+  const base = evidence().runs[0]!;
+  const partial = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      runs: [
+        {
+          ...base,
+          actualProvider: "unavailable",
+          actualModel: "attested-model",
+          provider: "unavailable",
+          model: "attested-model",
+        },
+      ],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "$ai_generation")!;
+  expect(partial.properties).toMatchObject({
+    configured_provider: "configured-provider",
+    configured_model: "configured-model",
+    actual_provider: "unavailable",
+    actual_model: "attested-model",
+    $ai_provider: "configured-provider",
+    $ai_model: "attested-model",
+    provider_identity_source: "configured",
+    model_identity_source: "provider",
+    $ai_input_tokens: 10,
+    $ai_cache_read_input_tokens: 2,
+    uncached_input_tokens: 8,
+    $ai_cache_creation_input_tokens: 1,
+    $ai_output_tokens: 5,
+    reasoning_output_tokens: 3,
+    $ai_cache_reporting_exclusive: false,
+  });
+  const unknown = campaignEvidenceToPostHogEvents(
+    campaign(),
+    {
+      ...evidence(),
+      runs: [
+        {
+          ...base,
+          configuredProvider: "unavailable",
+          configuredModel: "unavailable",
+          actualProvider: "unavailable",
+          actualModel: "unavailable",
+          provider: "unavailable",
+          model: "unavailable",
+        },
+      ],
+    },
+    "deployment-test",
+  ).find((event) => event.event === "$ai_generation")!;
+  expect(unknown.properties).toMatchObject({
+    configured_provider: "unavailable",
+    configured_model: "unavailable",
+    actual_provider: "unavailable",
+    actual_model: "unavailable",
+    $ai_provider: "unavailable",
+    $ai_model: "unavailable",
+    provider_identity_source: "unavailable",
+    model_identity_source: "unavailable",
+  });
+  expect(unknown.uuid).toBe(partial.uuid);
 });
 
 test("namespaces stable event and AI trace identities by deployment", () => {
@@ -517,10 +587,14 @@ test("captures persisted evidence from Task events using the Batch protocol", as
       distinct_id: fixture.published.campaignId,
       deployment: "deployment-test",
       $process_person_profile: false,
-      $ai_provider: "unavailable",
+      $ai_provider: "configured-provider",
       configured_provider: "configured-provider",
       configured_model: "configured-model",
-      $ai_model: "unavailable",
+      actual_provider: "unavailable",
+      actual_model: "unavailable",
+      provider_identity_source: "configured",
+      model_identity_source: "configured",
+      $ai_model: "configured-model",
       $ai_input_tokens: 4,
       uncached_input_tokens: 3,
       $ai_cache_reporting_exclusive: false,

@@ -217,6 +217,8 @@ function roleRunEvent(
   });
   const cacheDimensionsKnown =
     run.usage.cachedInputTokens !== null && run.usage.uncachedInputTokens !== null;
+  const model = projectedIdentity(run.actualModel, run.configuredModel);
+  const provider = projectedIdentity(run.actualProvider, run.configuredProvider);
   const properties = {
     deployment,
     schema_version: 1,
@@ -234,12 +236,16 @@ function roleRunEvent(
     repository: run.repository,
     configured_provider: run.configuredProvider,
     configured_model: run.configuredModel,
-    $ai_provider: run.provider,
+    actual_provider: run.actualProvider,
+    actual_model: run.actualModel,
+    provider_identity_source: provider.source,
+    model_identity_source: model.source,
+    $ai_provider: provider.value,
     adapter: run.adapter,
     profile: run.profile ?? "unavailable",
     service_tier: run.serviceTier ?? "unavailable",
     reasoning_effort: run.reasoningEffort ?? "unavailable",
-    $ai_model: run.model,
+    $ai_model: model.value,
     outcome: run.outcome,
     failure_class: run.failureClass ?? null,
     aggregation_scope: "role_run",
@@ -261,6 +267,15 @@ function roleRunEvent(
     timestamp: timestampForEpochMs(run.occurredAtEpochMs),
     properties,
   };
+}
+
+function projectedIdentity(
+  actual: string,
+  configured: string,
+): { readonly value: string; readonly source: "provider" | "configured" | "unavailable" } {
+  if (actual !== "unavailable") return { value: actual, source: "provider" };
+  if (configured !== "unavailable") return { value: configured, source: "configured" };
+  return { value: "unavailable", source: "unavailable" };
 }
 
 function touchEvent(
