@@ -18,6 +18,8 @@ import {
 } from "@usine/forge-delivery";
 import {
   deadlineExpired,
+  countBudgetExhausted,
+  type CountBudget,
   isTerminalState,
   isWaitingState,
   type AuthorityInput,
@@ -56,7 +58,7 @@ interface DeliveryRunAuthority {
   admit(input: AuthorityInput): Promise<TaskResult>;
   reserveActivation(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
   ): Promise<{ result: TaskResult; activation: number }>;
   recordCandidate(observation: TaskObservation, candidate: CandidateFact): Promise<TaskResult>;
   recordCheck(observation: TaskObservation, check: CheckResult): Promise<TaskResult>;
@@ -74,12 +76,12 @@ interface DeliveryRunAuthority {
   releaseReviewAttempt(observation: TaskObservation, ownerId: string): Promise<TaskResult>;
   reserveReviewAttempt(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
     ownerId: string,
   ): Promise<{ result: TaskResult; claimed: boolean; cycle: number | null }>;
   takeOverReviewAttempt(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
     ownerId: string,
   ): Promise<{
     result: TaskResult;
@@ -189,7 +191,7 @@ export async function executeDeliveryRun(
           "review interruption is not retryable",
           reviewBlockerClassification(failureClass),
         );
-      if (result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles)
+      if (countBudgetExhausted(input.contract.budget.maxReviewCycles, result.evidence.reviewCycles))
         return blockTask(services, result, "review budget exhausted", "elapsed_budget");
       const recovery = await services.authority.reserveReviewAttempt(
         result.taskId,
@@ -211,10 +213,7 @@ export async function executeDeliveryRun(
       if (!result.candidateSha)
         return blockTask(services, result, "candidate phase has no exact SHA");
       await services.workspace.quarantinePriorWriters(input.contract.id, Number.MAX_SAFE_INTEGER);
-      const cycle = Math.min(
-        input.contract.budget.maxReviewCycles,
-        Math.max(1, result.evidence.reviewCycles + 1),
-      );
+      const cycle = result.evidence.reviewCycles + 1;
       let check: CheckResult;
       try {
         check = await services.quality.check(input.contract, result.candidateSha, cycle);
@@ -246,7 +245,7 @@ export async function executeDeliveryRun(
         );
         continue;
       }
-      if (result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles)
+      if (countBudgetExhausted(input.contract.budget.maxReviewCycles, result.evidence.reviewCycles))
         return blockTask(services, result, "review budget exhausted", "elapsed_budget");
       const reservation = await services.authority.reserveReviewAttempt(
         result.taskId,
@@ -416,10 +415,14 @@ export async function executeDeliveryRun(
       if (!result.review || !result.check || !result.candidateSha)
         return blockTask(services, result, "reviewed phase is incomplete");
       if (result.review.verdict === "changes_requested") {
-        const implementationBudgetExhausted =
-          result.evidence.implementerActivations >= input.contract.budget.maxImplementerActivations;
-        const reviewBudgetExhausted =
-          result.evidence.reviewCycles >= input.contract.budget.maxReviewCycles;
+        const implementationBudgetExhausted = countBudgetExhausted(
+          input.contract.budget.maxImplementerActivations,
+          result.evidence.implementerActivations,
+        );
+        const reviewBudgetExhausted = countBudgetExhausted(
+          input.contract.budget.maxReviewCycles,
+          result.evidence.reviewCycles,
+        );
         if (implementationBudgetExhausted || reviewBudgetExhausted)
           return blockTask(
             services,

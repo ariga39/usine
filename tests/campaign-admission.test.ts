@@ -602,6 +602,87 @@ test("admits one Ready proposal through the Task leaf without a Task submission"
   }
 });
 
+test("rejects an unbounded child under a finite Goal and round-trips an unbounded Campaign budget", async () => {
+  const finite = await frontierFixture();
+  try {
+    const published = await publishCampaign(finite.server.url, {
+      contractPath: finite.contractPath,
+    });
+    for (const field of ["maxImplementerActivations", "maxReviewCycles"] as const) {
+      const proposalId = `unbounded-${field}`;
+      const rejected = await proposeCampaign(finite.server.url, published.campaignId, {
+        ...frontierProposal(proposalId, "outcome-one"),
+        budget: {
+          maxImplementerActivations: 1,
+          maxReviewCycles: 1,
+          maxElapsedMs: 10_000,
+          [field]: null,
+        },
+      });
+      expect(
+        rejected.proposals?.find((proposal) => proposal.proposalId === proposalId),
+      ).toMatchObject({
+        status: "blocked",
+        blocker: "proposal budget is outside the Goal budget envelope",
+        ready: null,
+      });
+    }
+  } finally {
+    await finite.server.close();
+  }
+
+  const goal = frontierGoal("campaign-repository");
+  const unbounded = await frontierFixture({
+    ...goal,
+    budget: {
+      ...goal.budget,
+      maxImplementerActivations: null,
+      maxReviewCycles: null,
+    },
+  });
+  try {
+    const published = await publishCampaign(unbounded.server.url, {
+      contractPath: unbounded.contractPath,
+    });
+    expect(published.budget).toMatchObject({
+      maxImplementerActivations: null,
+      maxReviewCycles: null,
+    });
+
+    const proposal = await proposeCampaign(unbounded.server.url, published.campaignId, {
+      ...frontierProposal("unbounded-child", "outcome-one"),
+      budget: {
+        maxImplementerActivations: null,
+        maxReviewCycles: null,
+        maxElapsedMs: 10_000,
+      },
+    });
+    expect(proposal.proposals?.[0]?.ready?.budget).toMatchObject({
+      maxImplementerActivations: null,
+      maxReviewCycles: null,
+    });
+
+    await expect(getCampaign(unbounded.server.url, published.campaignId)).resolves.toMatchObject({
+      budget: {
+        maxImplementerActivations: null,
+        maxReviewCycles: null,
+      },
+      proposals: [
+        {
+          ready: {
+            budget: {
+              maxImplementerActivations: null,
+              maxReviewCycles: null,
+            },
+          },
+        },
+      ],
+    });
+  } finally {
+    await unbounded.server.close();
+  }
+});
+
 test("does not admit a proposal that expands Goal authority or budget", async () => {
   let executions = 0;
   const { contractPath, server } = await frontierFixture(
@@ -4113,101 +4194,114 @@ describe("durable Ready frontier", () => {
     }
   });
 
-  test("admits one bounded replacement after a gaps assessment and reassesses it", async () => {
-    const base = oneOutcomeFrontierGoal("campaign-repository");
-    const contract = {
-      ...base,
-      budget: { ...base.budget, maxReviewCycles: 2 },
-    };
-    const replacement = frontierProposal("replacement", "outcome-one");
-    let calls = 0;
-    let replacementCalls = 0;
-    const assessor: CampaignOutcomeAssessor = async (request) => {
-      calls += 1;
-      if (calls === 1)
-        return {
-          verdict: "gaps",
-          summary: "the first bounded task did not close the Outcome",
-          gaps: ["the missing behavior needs one focused replacement"],
-          evidence: [],
-          usage: null,
-        };
-      const delivery = request.evidence.find((item) => item.fact === "delivery");
-      return {
-        verdict: "satisfied",
-        summary: "the replacement closes the Outcome",
-        gaps: [],
-        evidence: delivery ? [{ ...delivery, criterionIndex: 0 }] : [],
-        usage: null,
+  test.each([2, null])(
+    "admits one replacement under count limit %s and reassesses it",
+    async (limit) => {
+      const base = oneOutcomeFrontierGoal("campaign-repository");
+      const contract = {
+        ...base,
+        budget: { ...base.budget, maxImplementerActivations: limit, maxReviewCycles: limit },
       };
-    };
-    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
-      replacementCalls += 1;
-      expect(request.assessment).toMatchObject({ verdict: "gaps" });
-      expect(request.evidenceHash).toBe(request.assessment.evidenceHash);
-      expect(request.priorProposals.map((proposal) => proposal.proposalId)).toEqual(["initial"]);
-      expect(request.remainingBudget.tasks).toBe(9);
-      return {
-        proposal: replacement,
-        usage: {
-          inputTokens: 13,
-          cachedInputTokens: 3,
-          uncachedInputTokens: 10,
-          cacheWriteInputTokens: 0,
-          outputTokens: 8,
-          reasoningOutputTokens: 2,
+      const replacement = frontierProposal("replacement", "outcome-one");
+      const replacementWithBudget = {
+        ...replacement,
+        budget: {
+          ...replacement.budget,
+          maxImplementerActivations: limit === null ? null : 1,
+          maxReviewCycles: limit === null ? null : 1,
         },
       };
-    };
-    const { contractPath, server } = await frontierFixture(
-      contract,
-      "user:campaign-366",
-      async (context) => acceptCampaignTask(context),
-      1,
-      true,
-      assessor,
-      replacementGenerator,
-    );
-    try {
-      const published = await publishCampaign(server.url, { contractPath });
-      await proposeCampaign(
-        server.url,
-        published.campaignId,
-        frontierProposal("initial", "outcome-one"),
-      );
-      await handoffCampaign(server.url, published.campaignId);
-      for (let attempt = 0; attempt < 200; attempt += 1) {
-        const current = await getCampaign(server.url, published.campaignId);
-        if (current?.status === "accepted") break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      const campaign = await getCampaign(server.url, published.campaignId);
-      expect(calls).toBe(2);
-      expect(replacementCalls).toBe(1);
-      expect(campaign).toMatchObject({
-        status: "accepted",
-        outcomes: [{ id: "outcome-one", status: "accepted" }],
-        proposals: [
-          { proposalId: "initial" },
-          {
-            proposalId: "replacement",
-            replacement: {
-              assessmentId: expect.stringMatching(/^assessment-/),
-              evidenceHash: expect.any(String),
-              role: "replacement-planner",
-              usage: { inputTokens: 13, outputTokens: 8 },
-            },
+      let calls = 0;
+      let replacementCalls = 0;
+      const assessor: CampaignOutcomeAssessor = async (request) => {
+        calls += 1;
+        if (calls === 1)
+          return {
+            verdict: "gaps",
+            summary: "the first bounded task did not close the Outcome",
+            gaps: ["the missing behavior needs one focused replacement"],
+            evidence: [],
+            usage: null,
+          };
+        const delivery = request.evidence.find((item) => item.fact === "delivery");
+        return {
+          verdict: "satisfied",
+          summary: "the replacement closes the Outcome",
+          gaps: [],
+          evidence: delivery ? [{ ...delivery, criterionIndex: 0 }] : [],
+          usage: null,
+        };
+      };
+      const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+        replacementCalls += 1;
+        expect(request.assessment).toMatchObject({ verdict: "gaps" });
+        expect(request.evidenceHash).toBe(request.assessment.evidenceHash);
+        expect(request.priorProposals.map((proposal) => proposal.proposalId)).toEqual(["initial"]);
+        expect(request.remainingBudget.tasks).toBe(9);
+        expect(request.remainingBudget.implementerActivations).toBe(limit === null ? null : 1);
+        expect(request.remainingBudget.reviewCycles).toBe(limit === null ? null : 1);
+        return {
+          proposal: replacementWithBudget,
+          usage: {
+            inputTokens: 13,
+            cachedInputTokens: 3,
+            uncachedInputTokens: 10,
+            cacheWriteInputTokens: 0,
+            outputTokens: 8,
+            reasoningOutputTokens: 2,
           },
-        ],
-      });
-      expect(campaign?.proposals?.map((proposal) => proposal.proposalId)).toEqual([
-        "initial",
-        "replacement",
-      ]);
-    } finally {
-      await server.close();
-    }
-  });
+        };
+      };
+      const { contractPath, server } = await frontierFixture(
+        contract,
+        "user:campaign-366",
+        async (context) => acceptCampaignTask(context),
+        1,
+        true,
+        assessor,
+        replacementGenerator,
+      );
+      try {
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(
+          server.url,
+          published.campaignId,
+          frontierProposal("initial", "outcome-one"),
+        );
+        await handoffCampaign(server.url, published.campaignId);
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const current = await getCampaign(server.url, published.campaignId);
+          if (current?.status === "accepted") break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        const campaign = await getCampaign(server.url, published.campaignId);
+        expect(calls).toBe(2);
+        expect(replacementCalls).toBe(1);
+        expect(campaign).toMatchObject({
+          status: "accepted",
+          outcomes: [{ id: "outcome-one", status: "accepted" }],
+          proposals: [
+            { proposalId: "initial" },
+            {
+              proposalId: "replacement",
+              replacement: {
+                assessmentId: expect.stringMatching(/^assessment-/),
+                evidenceHash: expect.any(String),
+                role: "replacement-planner",
+                usage: { inputTokens: 13, outputTokens: 8 },
+              },
+            },
+          ],
+        });
+        expect(campaign?.proposals?.map((proposal) => proposal.proposalId)).toEqual([
+          "initial",
+          "replacement",
+        ]);
+      } finally {
+        await server.close();
+      }
+    },
+  );
 
   test("persists runtime assessor and invalid planner runs once in Campaign evidence", async () => {
     const contract = oneOutcomeFrontierGoal("campaign-repository");

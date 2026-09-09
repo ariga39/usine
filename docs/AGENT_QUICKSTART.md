@@ -232,8 +232,8 @@ The current contract shape is shown below. Set `delivery` or `merge` to `true` o
   "budget": {
     "maxElapsedMs": 3600000,
     "maxTasks": 10,
-    "maxImplementerActivations": 1,
-    "maxReviewCycles": 1
+    "maxImplementerActivations": null,
+    "maxReviewCycles": null
   }
 }
 ```
@@ -266,8 +266,8 @@ Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current 
   "nonGoals": [],
   "effects": ["<EFFECT_ID>"],
   "budget": {
-    "maxImplementerActivations": 1,
-    "maxReviewCycles": 1,
+    "maxImplementerActivations": null,
+    "maxReviewCycles": null,
     "maxElapsedMs": 3600000
   },
   "delivery": {
@@ -389,8 +389,8 @@ Current contract shape:
     "<EXPLICIT_NON_GOAL>"
   ],
   "budget": {
-    "maxImplementerActivations": 2,
-    "maxReviewCycles": 1,
+    "maxImplementerActivations": null,
+    "maxReviewCycles": null,
     "maxElapsedMs": 3600000
   },
   "authorization": {
@@ -406,7 +406,7 @@ Current contract shape:
 }
 ```
 
-Replace the all-zero example SHA, owner, repository, Task ID, and Issue number. `maxImplementerActivations` and `maxReviewCycles` are each bounded from 1 through 2. Setting `maxImplementerActivations` to `2` permits the one explicit retry described below. Set `authorization.merge` to `true` only when the authorization explicitly grants merge authority:
+Replace the all-zero example SHA, owner, repository, Task ID, and Issue number. `maxImplementerActivations` and `maxReviewCycles` accept positive integers or explicit `null` for no count limit. Use a finite count only when that limit is intended; do not infer it from the task's expected difficulty. Goal count fields also accept zero to authorize no attempts, and omitted Goal count fields retain that meaning. A finite Goal cannot authorize an unbounded proposal. Deadlines and all acceptance and authority gates still apply. Set `authorization.merge` to `true` only when the authorization explicitly grants merge authority:
 
 ```json
 "authorization": {

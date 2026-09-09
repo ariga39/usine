@@ -26,6 +26,22 @@ const committedContract = {
 };
 
 describe("Task Contract repository reference", () => {
+  test.each([null, 4])("accepts a repair/review count policy of %s", (limit) => {
+    const parsed = taskContractSchema.parse({
+      ...committedContract,
+      budget: {
+        maxImplementerActivations: limit,
+        maxReviewCycles: limit,
+        maxElapsedMs: 1_000,
+      },
+    });
+    expect(JSON.parse(JSON.stringify(parsed)).budget).toEqual({
+      maxImplementerActivations: limit,
+      maxReviewCycles: limit,
+      maxElapsedMs: 1_000,
+    });
+  });
+
   test("accepts a stable repository ID without repository facts", () => {
     expect(taskContractSchema.safeParse(committedContract).success).toBe(true);
   });
