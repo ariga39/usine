@@ -1368,7 +1368,7 @@ describe("server-owned delivery milestone", () => {
         forge.setCaptureStatus(503);
         await expect(
           captureCampaignEvidence(
-            captureEnvironment.USINE_STATE_DIR!,
+            fixtureValue.stateDirectory,
             published.campaignId,
             captureEnvironment,
           ),
@@ -1389,7 +1389,7 @@ describe("server-owned delivery milestone", () => {
         });
         forge.setCaptureStatus(200);
         await captureCampaignEvidence(
-          captureEnvironment.USINE_STATE_DIR!,
+          fixtureValue.stateDirectory,
           published.campaignId,
           captureEnvironment,
         );
@@ -1399,7 +1399,7 @@ describe("server-owned delivery milestone", () => {
         );
         const requestCount = forge.captureRequests.length;
         await captureCampaignEvidence(
-          captureEnvironment.USINE_STATE_DIR!,
+          fixtureValue.stateDirectory,
           published.campaignId,
           captureEnvironment,
         );
