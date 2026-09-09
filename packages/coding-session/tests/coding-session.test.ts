@@ -1986,8 +1986,7 @@ describe("Coding Session", () => {
       summary: "The candidate satisfies the task contract.",
       findings: [],
     } as const;
-    const finalResponse =
-      `The format remains {version, fleets}; preview {preview_verdict: "draft"}.\n${JSON.stringify(reviewer)}`;
+    const finalResponse = `The format remains {version, fleets}; preview {preview_verdict: "draft"}.\n${JSON.stringify(reviewer)}`;
     const providerUsage = {
       input_tokens: 12,
       cached_input_tokens: 0,
@@ -2132,7 +2131,10 @@ describe("Coding Session", () => {
       ["missing colon before", `${missingColon}\n${valid}`],
       ["oversized before", `${oversized}\n${valid}`],
       ["oversized after", `${valid}\n${oversized}`],
-      ["multiple valid", `${valid}\n${JSON.stringify({ ...reviewer, verdict: "changes_requested" })}`],
+      [
+        "multiple valid",
+        `${valid}\n${JSON.stringify({ ...reviewer, verdict: "changes_requested" })}`,
+      ],
     ] as const;
 
     for (const [name, finalResponse] of cases) {
