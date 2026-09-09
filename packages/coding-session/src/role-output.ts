@@ -35,9 +35,22 @@ export function recoverReviewerOutput(finalResponse: string): ReviewerOutput | u
   for (let start = 0; start < finalResponse.length; start += 1) {
     if (finalResponse[start] !== "{") continue;
     const end = balancedJsonObjectEnd(finalResponse, start);
-    if (end === undefined) return undefined;
+    if (end === undefined) {
+      const nextObject = finalResponse.indexOf("{", start + 1);
+      const malformedCandidate = finalResponse.slice(
+        start,
+        nextObject === -1 ? finalResponse.length : nextObject,
+      );
+      if (looksLikeReviewerOutput(malformedCandidate)) return undefined;
+      continue;
+    }
+    const candidate = finalResponse.slice(start, end);
+    if (!looksLikeReviewerOutput(candidate)) {
+      start = end - 1;
+      continue;
+    }
     try {
-      const parsed = reviewerOutputSchema.safeParse(JSON.parse(finalResponse.slice(start, end)));
+      const parsed = reviewerOutputSchema.safeParse(JSON.parse(candidate));
       if (!parsed.success) return undefined;
       if (recovered !== undefined) return undefined;
       recovered = parsed.data;
@@ -47,6 +60,14 @@ export function recoverReviewerOutput(finalResponse: string): ReviewerOutput | u
     start = end - 1;
   }
   return recovered;
+}
+
+function looksLikeReviewerOutput(value: string): boolean {
+  const fields = ["sha", "verdict", "summary", "findings"];
+  const present = fields.filter((field) =>
+    new RegExp(`(?:^|[,{]\\s*)["']?${field}["']?(?=\\s|:|,|})`).test(value),
+  );
+  return present.includes("verdict") || present.length >= 2;
 }
 
 function balancedJsonObjectEnd(value: string, start: number): number | undefined {

@@ -1978,6 +1978,190 @@ describe("Coding Session", () => {
     expect(observation).toMatchObject({ status: "completed", output: reviewer, failure: null });
   });
 
+  test("recovers a verdict after harmless brace notation without normalization", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-recovery-"));
+    const reviewer = {
+      sha,
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse =
+      `The format remains {version, fleets}; preview {preview_verdict: "draft"}.\n${JSON.stringify(reviewer)}`;
+    const providerUsage = {
+      input_tokens: 12,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 7,
+      reasoning_output_tokens: 0,
+    } as const;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse, providerUsage), "recovery-thread"),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        sessionArchive: { stateDirectory },
+      },
+    );
+
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: ".",
+      contract,
+      prompt: "review",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: reviewerOutputSchema,
+      attempt: reviewerAttempt,
+      environment: { CI: "true" },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      output: reviewer,
+      usage: { inputTokens: 12, outputTokens: 7 },
+      archiveStatus: "stored",
+    });
+    const archive = completeArchive(
+      await readSessionArchive(stateDirectory, observation.archiveId!),
+    );
+    expect(archive).toMatchObject({
+      rawFinalResponse: finalResponse,
+      normalizedOutput: reviewer,
+      usage: { inputTokens: 12, outputTokens: 7 },
+      sessionId: "recovery-thread",
+    });
+  });
+
+  test("recovers a verdict after quoted brace notation without invoking normalization", async () => {
+    const reviewer = {
+      sha,
+      verdict: "approved",
+      summary: 'The example remains `{"version":"v1"}`.',
+      findings: [],
+    } as const;
+    const finalResponse = `The example is {"version":"v1"}.\n${JSON.stringify(reviewer)}`;
+    let transformCalls = 0;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          transformCalls += 1;
+          throw new Error("normalizer should not be called");
+        },
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        attempt: reviewerAttempt,
+        environment: { CI: "true" },
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: reviewer, failure: null });
+    expect(transformCalls).toBe(0);
+  });
+
+  test("skips unbalanced non-review brace notation before a verdict", async () => {
+    const reviewer = {
+      sha,
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const finalResponse = `{ordinary notation without a closing brace\n${JSON.stringify(reviewer)}`;
+    let transformCalls = 0;
+    const session = new CodexCodingSession(
+      async () => testClient(async () => sdkTurn(finalResponse)),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          transformCalls += 1;
+          throw new Error("normalizer should not be called");
+        },
+      },
+    );
+
+    await expect(
+      session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        attempt: reviewerAttempt,
+        environment: { CI: "true" },
+      }),
+    ).resolves.toMatchObject({ status: "completed", output: reviewer, failure: null });
+    expect(transformCalls).toBe(0);
+  });
+
+  test("rejects competing review-shaped candidates during bounded recovery", async () => {
+    const reviewer = {
+      sha,
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    } as const;
+    const valid = JSON.stringify(reviewer);
+    const malformed = `{verdict: "changes_requested", sha: "${"b".repeat(40)}"}`;
+    const missingColon = `{"verdict" "changes_requested", "sha":"${"b".repeat(40)}"}`;
+    const oversized = JSON.stringify({
+      sha: "b".repeat(40),
+      verdict: "approved",
+      summary: "s".repeat(ROLE_RESULT_LIMITS.summaryMaxLength + 1),
+      findings: [],
+    });
+    const cases = [
+      ["malformed before", `${malformed}\n${valid}`],
+      ["malformed after", `${valid}\n${malformed}`],
+      ["missing colon before", `${missingColon}\n${valid}`],
+      ["oversized before", `${oversized}\n${valid}`],
+      ["oversized after", `${valid}\n${oversized}`],
+      ["multiple valid", `${valid}\n${JSON.stringify({ ...reviewer, verdict: "changes_requested" })}`],
+    ] as const;
+
+    for (const [name, finalResponse] of cases) {
+      const session = new CodexCodingSession(
+        async () => testClient(async () => sdkTurn(finalResponse)),
+        { environment: { CI: "true" }, profileResolver: syntheticProfileResolver },
+      );
+      const observation = await session.run({
+        role: "reviewer",
+        workspace: ".",
+        contract,
+        prompt: "review",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: reviewerOutputSchema,
+        attempt: `${reviewerAttempt}-${name}`,
+        environment: { CI: "true" },
+      });
+
+      expect(observation, name).toMatchObject({
+        status: "failed",
+        output: null,
+        failure: "coding session output normalization unavailable",
+        failureCode: "role_output_transform_unconfigured",
+      });
+    }
+  });
+
   test("uses chat completions for the schema-constrained production transform", async () => {
     const reviewer = {
       sha,
