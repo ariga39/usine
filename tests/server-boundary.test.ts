@@ -29,6 +29,34 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("CLI/server boundary", () => {
+  test("routes the full supported Task and Campaign ID lengths through public HTTP", async () => {
+    const root = await mkdtemp(join(tmpdir(), "usine-server-route-params-"));
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory);
+    const server = await startUsineServer({
+      environment: { USINE_STATE_DIR: stateDirectory },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      for (const taskId of ["t".repeat(100), "t".repeat(101), "t".repeat(128)]) {
+        const response = await fetch(new URL(`/v1/tasks/${taskId}`, server.url));
+        expect(response.status).toBe(404);
+        expect(await response.json()).toEqual({ code: "not_found", message: "task not found" });
+      }
+      const campaignId = `${"g".repeat(128)}:v${Number.MAX_SAFE_INTEGER}`;
+      expect(campaignId).toHaveLength(146);
+      const response = await fetch(new URL(`/v1/campaigns/${campaignId}`, server.url));
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        code: "not_found",
+        message: "campaign not found",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   test("traverses more than 200 admitted Tasks through the paged HTTP client", async () => {
     const root = await mkdtemp(join(tmpdir(), "usine-server-task-pages-"));
     const stateDirectory = join(root, "state");

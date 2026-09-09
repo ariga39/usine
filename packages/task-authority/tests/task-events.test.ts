@@ -356,6 +356,41 @@ describe("Task event stream", () => {
     expect(JSON.stringify(events)).not.toMatch(/arguments|result|credential|secret|token/i);
   });
 
+  test("does not advance recovery phase for unavailable MCP during startup", async () => {
+    const taskId = `events-mcp-recovery-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const { authority } = await authorityFor(taskId);
+    await authority.appendObservation(taskId, {
+      eventId: "coding-session-started-mcp-recovery",
+      occurredAtEpochMs: 204,
+      data: {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:mcp-recovery",
+        requestedProfile: "writer-profile",
+      },
+    });
+    await authority.appendObservation(taskId, {
+      eventId: "coding-mcp-unavailable-recovery",
+      occurredAtEpochMs: 205,
+      data: {
+        type: "coding_mcp_unavailable",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session:mcp-recovery",
+        server: "github_read",
+        reason: "startup_timeout",
+      },
+    });
+
+    await authority.recordRecoveryObservation(taskId, "server_restart");
+
+    const interrupted = (await authority.listEvents(taskId)).find(
+      (event) => event.data.type === "coding_session_interrupted",
+    );
+    expect(interrupted).toMatchObject({ data: { phase: "startup" } });
+  });
+
   test("replays bounded coding interruption phase and class with exact validation", async () => {
     const taskId = `events-interruption-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const { authority } = await authorityFor(taskId);

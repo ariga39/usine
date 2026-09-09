@@ -108,6 +108,9 @@ import { ensurePrivateStateDatabase } from "./private-state.js";
 type TaskEventEnvelope = ApiEventEnvelope;
 type LaunchMode = "deduplicated" | "replace";
 
+/** Maximum decoded route parameter length permitted by Task IDs and campaignIdFor. */
+const MAX_SUPPORTED_ROUTE_PARAM_LENGTH = 128 + 2 + String(Number.MAX_SAFE_INTEGER).length;
+
 export type TaskSubmission = ApiTaskSubmission;
 
 export interface ServerExecutionContext {
@@ -301,6 +304,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         eventHub,
         coordinateCampaigns: async () => coordinateCampaigns(),
       }).pipe(Layer.provide(NodeHttpServer.layerHttpServices)),
+    ).pipe(
+      Effect.provideService(HttpRouter.RouterConfig, {
+        maxParamLength: MAX_SUPPORTED_ROUTE_PARAM_LENGTH,
+      }),
     );
     const server = yield* NodeHttpServer.make(createServer, { host, port }).pipe(
       Effect.mapError((cause) => new Error(`server failed to listen: ${String(cause.cause)}`)),

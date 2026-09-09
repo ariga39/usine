@@ -519,7 +519,6 @@ export class TaskAuthority {
           data.type !== "coding_turn_started" &&
           data.type !== "coding_tool_completed" &&
           data.type !== "coding_mcp_tool_completed" &&
-          data.type !== "coding_mcp_unavailable" &&
           data.type !== "coding_turn_completed" &&
           data.type !== "coding_session_completed" &&
           data.type !== "coding_session_interrupted"
