@@ -18,6 +18,7 @@ const args = process.argv;
 const workspace = args[args.indexOf("--cd") + 1];
 if (!workspace) throw new Error("Codex workspace is required");
 const activation = Number(basename(workspace).split("-")[0]);
+process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "server-milestone-session" }) + "\n");
 let prompt = "";
 for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Usine role: fresh independent reviewer.");
@@ -65,7 +66,6 @@ const sha = prompt.match(/Candidate SHA: ([0-9a-f]{40})/)?.[1];
 const output = reviewer
   ? JSON.stringify({ sha, verdict: "approved", summary: "approved", findings: [] })
   : JSON.stringify({ status: "proposed", summary: "candidate" });
-process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "server-milestone-session" }) + "\n");
 process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", id: "message-1", text: output } }) + "\n");
 process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } }) + "\n");
 `;
@@ -447,7 +447,18 @@ async function runCli(
   argument: string,
   mode: "complete" | "kill" = "complete",
 ) {
-  return execa("node", ["--no-warnings", cliPath, command, argument], {
+  return runCliArgs(cliPath, fixture, forge, serverUrl, [command, argument], mode);
+}
+
+async function runCliArgs(
+  cliPath: string,
+  fixture: Fixture,
+  forge: ForgeServer,
+  serverUrl: string,
+  args: string[],
+  mode: "complete" | "kill" = "complete",
+) {
+  return execa("node", ["--no-warnings", cliPath, ...args], {
     cwd: fixture.repository,
     env: { ...environment(fixture, forge, mode), USINE_SERVER_URL: serverUrl },
     reject: false,
@@ -495,6 +506,15 @@ async function waitForMarker(path: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("timed out waiting for the Codex turn marker");
+}
+
+async function waitForCodingThread(stateDirectory: string, taskId: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const events = await lookupTaskEvents(stateDirectory, taskId);
+    if (events?.events.some((event) => event.data.type === "coding_thread_started")) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("timed out waiting for persisted coding thread activity");
 }
 
 function processAlive(pid: number): boolean {
@@ -718,6 +738,7 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      await waitForCodingThread(fixtureValue.stateDirectory, fixtureValue.taskId);
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -738,6 +759,12 @@ describe("server-owned delivery milestone", () => {
       expect(interrupted).not.toBeNull();
       expect(
         interruptedEvents?.events.some((event) => event.data.type === "coding_session_started"),
+      ).toBe(true);
+      expect(
+        interruptedEvents?.events.some((event) => event.data.type === "coding_thread_started"),
+      ).toBe(true);
+      expect(
+        interruptedEvents?.events.some((event) => event.data.type === "coding_session_interrupted"),
       ).toBe(true);
 
       await writeFile(join(fixtureValue.stateDirectory, "release-stale-child"), "release\n");
@@ -777,6 +804,54 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+        const evidenceResult = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          ["task", "evidence", fixtureValue.taskId, "--json"],
+        );
+        expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
+        const evidence = JSON.parse(evidenceResult.stdout) as {
+          roleRuns: {
+            implementer: Array<{
+              activation: number | null;
+              outcome: { status: string };
+              archive: { status: string };
+            }>;
+          };
+        };
+        expect(evidence.roleRuns.implementer).toHaveLength(2);
+        expect(evidence.roleRuns.implementer[0]).toMatchObject({
+          outcome: { status: "failed" },
+          archive: { status: "unavailable" },
+        });
+        expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
+        const usageResult = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          ["usage", "--task-id", fixtureValue.taskId, "--json"],
+        );
+        expect(usageResult.exitCode, usageResult.stderr).toBe(0);
+        const usage = JSON.parse(usageResult.stdout) as {
+          invocations: Array<{
+            role: string;
+            activation: number | null;
+            outcome: string;
+            usage: { coverage: string };
+          }>;
+        };
+        expect(usage.invocations).toHaveLength(3);
+        expect(usage.invocations.filter((invocation) => invocation.role === "implementer")).toHaveLength(2);
+        expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
+          outcome: "failed",
+          usage: { coverage: "unavailable" },
+        });
+        expect(usage.invocations.find((invocation) => invocation.activation === 2)?.outcome).toBe(
+          "succeeded",
+        );
         await expect(
           readFile(
             join(
@@ -841,6 +916,7 @@ describe("server-owned delivery milestone", () => {
         (result) => result.activeActivation === 1,
       );
       await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      await waitForCodingThread(fixtureValue.stateDirectory, fixtureValue.taskId);
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -872,6 +948,54 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
+        const evidenceResult = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          ["task", "evidence", fixtureValue.taskId, "--json"],
+        );
+        expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
+        const evidence = JSON.parse(evidenceResult.stdout) as {
+          roleRuns: {
+            implementer: Array<{
+              activation: number | null;
+              outcome: { status: string };
+              archive: { status: string };
+            }>;
+          };
+        };
+        expect(evidence.roleRuns.implementer).toHaveLength(2);
+        expect(evidence.roleRuns.implementer[0]).toMatchObject({
+          outcome: { status: "failed" },
+          archive: { status: "unavailable" },
+        });
+        expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
+        const usageResult = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          second.url,
+          ["usage", "--task-id", fixtureValue.taskId, "--json"],
+        );
+        expect(usageResult.exitCode, usageResult.stderr).toBe(0);
+        const usage = JSON.parse(usageResult.stdout) as {
+          invocations: Array<{
+            role: string;
+            activation: number | null;
+            outcome: string;
+            usage: { coverage: string };
+          }>;
+        };
+        expect(usage.invocations).toHaveLength(3);
+        expect(usage.invocations.filter((invocation) => invocation.role === "implementer")).toHaveLength(2);
+        expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
+          outcome: "failed",
+          usage: { coverage: "unavailable" },
+        });
+        expect(usage.invocations.find((invocation) => invocation.activation === 2)?.outcome).toBe(
+          "succeeded",
+        );
         expect(forge.pullRequests).toBe(1);
         expect(forge.attestations).toBe(1);
         expect(
