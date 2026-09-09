@@ -3047,6 +3047,69 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("accepts complete assessment evidence after the former cutoff within the Goal deadline", async () => {
+    const maxElapsedMs = 120_000;
+    const base = oneOutcomeFrontierGoal("campaign-repository");
+    const contract = {
+      ...base,
+      id: "campaign-459-late-assessment",
+      budget: { ...base.budget, maxElapsedMs },
+    };
+    let campaignCreatedAt = 0;
+    let assessorDeadline = 0;
+    let assessorCompletedAt = 0;
+    let controlledNow = Date.now();
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessorDeadline = request.deadlineEpochMs;
+      controlledNow = campaignCreatedAt + 60_001;
+      assessorCompletedAt = Date.now();
+      if (assessorCompletedAt >= request.deadlineEpochMs)
+        throw new Error("controlled assessor deadline elapsed");
+      return satisfiesDeliveredOutcome(request);
+    };
+    const fixtureValue = await frontierFixture(
+      contract,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+    );
+    const { contractPath, server, stateDirectory } = fixtureValue;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => controlledNow);
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        campaignCreatedAt = (
+          database.prepare("SELECT created_at FROM campaigns WHERE campaign_id = ?").get(
+            published.campaignId,
+          ) as { created_at: number }
+        ).created_at;
+        controlledNow = campaignCreatedAt;
+      } finally {
+        database.close();
+      }
+      await proposeCampaign(
+        server.url,
+        published.campaignId,
+        frontierProposal("late-assessment", "outcome-one"),
+      );
+      await handoffCampaign(server.url, published.campaignId);
+      const campaign = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (current) => current?.status === "accepted" || current?.status === "blocked",
+      );
+      expect(campaign).toMatchObject({ status: "accepted" });
+      expect(assessorCompletedAt).toBe(campaignCreatedAt + 60_001);
+      expect(assessorCompletedAt).toBeGreaterThan(campaignCreatedAt + 60_000);
+      expect(assessorDeadline).toBe(campaignCreatedAt + maxElapsedMs);
+    } finally {
+      clock.mockRestore();
+      await server.close();
+    }
+  });
+
   test.each(["satisfied", "gaps", "inconclusive"] as const)(
     "persists the owning Campaign assessor %s verdict and does not use Task completion as acceptance",
     async (verdict) => {
