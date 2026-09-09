@@ -236,6 +236,17 @@ function withProfileChecksum(
   };
 }
 
+export function withCodexProfileDeveloperInstructions(
+  selection: ResolvedCodexProfile,
+  developerInstructions: string,
+): ResolvedCodexProfile {
+  return withProfileChecksum({
+    ...selection,
+    developerInstructions,
+    config: { ...selection.config, developer_instructions: developerInstructions },
+  });
+}
+
 function resolvedProfileConfigSha256(
   selection: Omit<ResolvedCodexProfile, "configSha256">,
 ): string {

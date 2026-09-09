@@ -59,6 +59,8 @@ This document records why the current boundary exists and when it should be reco
 
 | D-042 | **Amends the count-budget aspects of D-035, D-036 and D-039.** Implementation and review counts may be explicitly unbounded using JSON `null`; finite counts retain their contract meaning. Admission, durable reservation, repair, retry, restart and Campaign remaining-budget projection share that policy. Finite parent authority rejects an unbounded child. | Repair needs vary by Task; a coordinator-selected two-attempt ceiling prevented addressing real review findings. No larger hidden ceiling replaces it. Existing deadlines, Task supply, capacity, cancellation, authority, immutable terminal facts and exact-SHA acceptance gates remain in force. |
 
+| D-043 | **Amends D-038 and D-039.** Campaign assessment and replacement planning use the original Goal deadline and their own effective role instructions, as defined in [DESIGN](DESIGN.md#41-campaign-facts). Late satisfied assessments cannot authorize acceptance; measured usage and non-accepting evidence remain observable. | Tie execution time to user authority instead of an undisclosed per-call limit, and separate role behavior from host model/authentication selection. Re-enter only for an explicit additional time constraint or evidence that this composition cannot preserve the role contract. |
+
 ## Selected dependencies
 
 These are the deliberately narrow primitives behind the decisions; current ownership and usage are described in [`DESIGN.md`](DESIGN.md#5-behavioral-packages-and-composition).

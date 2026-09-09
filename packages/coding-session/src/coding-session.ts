@@ -42,6 +42,7 @@ import {
   normalizeCodexProfileSelection,
   resolveCodexProfile,
   validateCodexProfile,
+  withCodexProfileDeveloperInstructions,
   type CodexProfileResolver,
 } from "./codex-profile.js";
 import {
@@ -51,7 +52,7 @@ import {
   type SessionArchiveOptions,
 } from "./session-archive.js";
 import { recoverReviewerOutput } from "./role-output.js";
-import { composeRoleQualityPrompt } from "./role-quality-contract.js";
+import { composeRoleQualityPrompt, ROLE_QUALITY_INSTRUCTIONS } from "./role-quality-contract.js";
 
 type ResolvedCodexProfile = ReturnType<typeof normalizeCodexProfileSelection>;
 
@@ -555,19 +556,27 @@ export class CodexCodingSession {
     try {
       const profileName = validateCodexProfile(request.profile);
       let profileSelection: ResolvedCodexProfile;
+      let effectiveProfileSelection: ResolvedCodexProfile;
       try {
         profileSelection = normalizeCodexProfileSelection(
           profileName,
           await this.profileResolver(profileName, request.environment ?? this.options.environment),
         );
+        effectiveProfileSelection =
+          request.role === "assessor" || request.role === "replacement-planner"
+            ? withCodexProfileDeveloperInstructions(
+                profileSelection,
+                ROLE_QUALITY_INSTRUCTIONS[request.role],
+              )
+            : profileSelection;
         const snapshot = sessionArchiveProfileSnapshot(profileName, {
-          ...profileSelection,
-          ...profileSelection.config,
+          ...effectiveProfileSelection,
+          ...effectiveProfileSelection.config,
         });
         archive?.setProfile(snapshot);
         effectiveProfile = {
           profileName,
-          configSha256: profileSelection.configSha256,
+          configSha256: effectiveProfileSelection.configSha256,
           adapter: null,
           configuredModel: safeEvidenceIdentity(snapshot.model),
           configuredProvider: safeEvidenceIdentity(snapshot.modelProvider),
@@ -659,7 +668,7 @@ export class CodexCodingSession {
         prompt: effectiveRequest.prompt,
         sandbox: effectiveRequest.sandbox,
         approvalPolicy: "never",
-        profile: codingSessionAdapterProfile(profileSelection),
+        profile: codingSessionAdapterProfile(effectiveProfileSelection),
         mcpServer: adapterMcpServer,
         outputSchema: z.toJSONSchema(effectiveRequest.outputSchema, { target: "openAi" }),
         environment: explicitWorkerEnvironment(

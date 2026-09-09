@@ -202,6 +202,8 @@ export USINE_POSTHOG_DEPLOYMENT="<DEPLOYMENT_LABEL>"
 
 ## 3. Publish a guardian-authored Campaign plan
 
+Assessments and replacement planning use the original Goal deadline, including time elapsed before a restart; there is no separate one-minute limit. They retain the selected profile's model/authentication settings but use their own role instructions, so a reviewer-specific profile instruction does not require a local workaround. A late satisfied result cannot make the Campaign accepted, and existing terminal Campaigns are not reopened. See [the Campaign policy](DESIGN.md#41-campaign-facts).
+
 Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. Re-publishing the same bytes cannot repair that immutable fact; after correcting the anchor, publish a new Goal version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
 
 The current contract shape is shown below. Set `delivery` or `merge` to `true` only when the authority source explicitly grants that effect.

@@ -1406,10 +1406,7 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
             remainingBudget,
             evidenceHash,
             invocationId,
-            deadlineEpochMs: Math.min(
-              Date.now() + 60_000,
-              campaign.createdAt.getTime() + contract.budget.maxElapsedMs,
-            ),
+            deadlineEpochMs: campaign.createdAt.getTime() + contract.budget.maxElapsedMs,
             supersedableProposalIds: revisionSources,
           });
         }
@@ -2308,6 +2305,22 @@ async function persistCampaignAssessment(
       const evidence = outcome ? campaignAssessmentEvidence(rows, results, outcome.id) : [];
       const lineageCurrent =
         current && outcome && assessmentEvidenceHash(outcome, evidence) === target.evidenceHash;
+      const goalDeadlineEpochMs = campaign
+        ? campaign.createdAt.getTime() +
+          decodePersistedGoalContract(campaign.contract).budget.maxElapsedMs
+        : null;
+      const persistedAssessment =
+        assessment.verdict === "satisfied" &&
+        goalDeadlineEpochMs !== null &&
+        assessment.completedAtEpochMs >= goalDeadlineEpochMs
+          ? {
+              ...assessment,
+              verdict: "inconclusive" as const,
+              summary: "Campaign assessor completed after the Goal deadline",
+              gaps: [],
+              evidence: [],
+            }
+          : assessment;
       if (!acceptAuthority) {
         await persistCancelledCampaignModelRun(
           handle.database,
@@ -2353,10 +2366,10 @@ async function persistCampaignAssessment(
           outcomeId: target.outcome.id,
           role: "assessor",
           evidenceHash: target.evidenceHash,
-          assessmentId: assessment.assessmentId,
-          assessment,
-          startedAtEpochMs: assessment.startedAtEpochMs,
-          completedAtEpochMs: assessment.completedAtEpochMs,
+          assessmentId: persistedAssessment.assessmentId,
+          assessment: persistedAssessment,
+          startedAtEpochMs: persistedAssessment.startedAtEpochMs,
+          completedAtEpochMs: persistedAssessment.completedAtEpochMs,
         })
         .onConflictDoNothing();
       await handle.database
@@ -2404,10 +2417,7 @@ async function assessCampaignTargets(
         outcome: target.outcome,
         evidence: target.evidence,
         repositories: target.repositories,
-        deadlineEpochMs: Math.min(
-          Date.now() + 60_000,
-          target.campaign.createdAt.getTime() + (target.contract.budget.maxElapsedMs || 60_000),
-        ),
+        deadlineEpochMs: target.campaign.createdAt.getTime() + target.contract.budget.maxElapsedMs,
         environment,
         signal,
       });
