@@ -30,7 +30,6 @@ import {
   taskContractSchema,
   type ServerHealth,
   type ServerSnapshot,
-  type TaskObservationEventInput,
   isTerminalState,
   isWaitingState,
 } from "@usine/task-authority";

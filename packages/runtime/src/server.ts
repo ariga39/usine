@@ -480,7 +480,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           queuedCampaignModelLaunch = undefined;
           await campaignCoordination;
           await Effect.runPromise(Scope.close(scope, Exit.void));
-          await Promise.allSettled([...activeTaskOperations]);
+          await Promise.allSettled(activeTaskOperations);
           await Promise.allSettled(activeCampaignModelOperations);
         })()),
     };
@@ -490,7 +490,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     queuedCampaignModelLaunch = undefined;
     await campaignCoordination;
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
-    await Promise.allSettled([...activeTaskOperations]);
+    await Promise.allSettled(activeTaskOperations);
     await Promise.allSettled(activeCampaignModelOperations);
     throw error;
   }
