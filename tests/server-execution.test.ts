@@ -1033,8 +1033,20 @@ describe("server-owned execution", () => {
       },
       { contractPath, rawContract },
     );
+    await authority.appendObservation(admitted.taskId, {
+      eventId: "recovery-open-session",
+      occurredAtEpochMs: Date.now(),
+      data: {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session-recovery",
+        requestedProfile: "writer-profile",
+      },
+    });
     handle.close();
 
+    await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
     await recordRecoveryObservation(stateDirectory, admitted.taskId, "server_restart");
     const historicalHandle = openSqliteDatabase(databasePath);
     try {
@@ -1062,12 +1074,28 @@ describe("server-owned execution", () => {
     expect(status).toEqual(admitted);
     const events = (await lookupTaskEvents(stateDirectory, admitted.taskId, 1, 10))!;
     expect(events.events.map((event) => event.data)).toEqual([
+      {
+        type: "coding_session_started",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session-recovery",
+        requestedProfile: "writer-profile",
+      },
+      {
+        type: "coding_session_interrupted",
+        role: "implementer",
+        activation: 1,
+        sessionId: "coding-session-recovery",
+        phase: "startup",
+        failureClass: "unknown",
+      },
+      { type: "recovery_observed", kind: "server_restart" },
       { type: "recovery_observed", kind: "server_restart" },
       { type: "recovery_observed", kind: "execution_owner_changed" },
       { type: "recovery_observed", kind: "execution_owner_changed" },
       { type: "recovery_observed", kind: "server_restart" },
     ]);
-    expect(new Set(events.events.map((event) => event.eventId)).size).toBe(4);
+    expect(new Set(events.events.map((event) => event.eventId)).size).toBe(7);
     expect(events.events.map((event) => event.eventId)).toEqual(
       (await lookupTaskEvents(stateDirectory, admitted.taskId, 1, 10))!.events.map(
         (event) => event.eventId,
