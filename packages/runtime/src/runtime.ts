@@ -521,7 +521,7 @@ export async function lookupTaskExecution(
 export async function retryTask(
   stateDirectory: string,
   taskId: string,
-  budget: number,
+  budget: number | null,
   onEvent?: (event: TaskEvent) => void,
 ): Promise<TaskResult> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");

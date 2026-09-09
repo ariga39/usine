@@ -8,6 +8,7 @@ import {
   remainingUntil,
   safeEvidenceIdentity,
   type GoalContract,
+  type CountBudget,
   type TaskContract,
 } from "@usine/task-authority";
 import type { CampaignAssessmentEvidence, CampaignAssessmentFact } from "@usine/task-authority";
@@ -194,8 +195,8 @@ export interface CampaignReplacementPlannerSessionContext {
   }[];
   readonly remainingBudget: {
     readonly tasks: number;
-    readonly implementerActivations: number;
-    readonly reviewCycles: number;
+    readonly implementerActivations: CountBudget;
+    readonly reviewCycles: CountBudget;
     readonly elapsedMs: number;
   };
 }

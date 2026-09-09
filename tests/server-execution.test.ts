@@ -45,7 +45,13 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 const forgeSecretToken = "forge-secret-token-181";
 const forgeSecretKeyPath = "forge-private-key-181.pem";
 
-async function fixture(): Promise<{
+async function fixture(
+  budget: TaskContract["budget"] = {
+    maxImplementerActivations: 2,
+    maxReviewCycles: 1,
+    maxElapsedMs: 60_000,
+  },
+): Promise<{
   contractPath: string;
   submission: TaskSubmission;
   stateDirectory: string;
@@ -72,7 +78,7 @@ async function fixture(): Promise<{
     instructions: "Exercise server-owned execution.",
     acceptance: ["The server owns execution."],
     nonGoals: [],
-    budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 60_000 },
+    budget,
     authorization: {
       source: `https://github.com/example/${taskId}/issues/153`,
       delivery: true,
@@ -462,6 +468,181 @@ describe("server-owned execution", () => {
       await expect(retryTask(server.url, admitted.taskId)).rejects.toBeInstanceOf(
         TaskRetryConflictError,
       );
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("continues through more than two implementations and reviews across restart before delivery", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture({
+      maxImplementerActivations: null,
+      maxReviewCycles: null,
+      maxElapsedMs: 60_000,
+    });
+    const candidateShas = ["c".repeat(40), "d".repeat(40), "e".repeat(40)];
+    let implementers = 0;
+    let reviewers = 0;
+    let deliveries = 0;
+    let externalEffects = 0;
+
+    const execute = async ({ authority, contract, result, signal }: ServerExecutionContext) => {
+      const resolved: ResolvedTaskContract = {
+        ...contract,
+        repository: { path: ".", owner: "example", name: repositoryName },
+        projectCheck: { command: "true", timeoutMs: 1_000 },
+        delivery: { ...contract.delivery, baseBranch: "main" },
+      };
+      return executeDeliveryRun(
+        {
+          contract: resolved,
+          contractHash: result.contractHash,
+          repositoryIdentity: result.writer.repositoryIdentity,
+          deadlineEpochMs: result.deadlineEpochMs,
+          implementer: {
+            role: "implementer",
+            profile: "writer-profile",
+            sandbox: "workspace-write",
+          },
+          reviewer: {
+            role: "reviewer",
+            profile: "reviewer-profile",
+            sandbox: "read-only",
+          },
+          signal,
+        },
+        {
+          authority,
+          workspace: {
+            quarantinePriorWriters: async () => undefined,
+            prepareWriter: async (_taskId, activation, baseSha) => ({
+              taskId: result.taskId,
+              activation,
+              path: ".",
+              baseSha,
+            }),
+            freeze: async (workspace) => ({
+              sha: candidateShas[workspace.activation - 1]!,
+              baseSha: workspace.baseSha,
+              workspace,
+            }),
+            quarantine: async () => undefined,
+          },
+          session: {
+            run: async () => {
+              implementers += 1;
+              return {
+                status: "completed" as const,
+                output: { status: "proposed" as const, summary: "candidate" },
+                summary: "completed",
+                failure: null,
+              };
+            },
+          },
+          quality: {
+            check: async (_contract, sha) => ({
+              sha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            }),
+            reviewWithObservation: async (_contract, sha, _check, cycle) => {
+              reviewers += 1;
+              return {
+                review: {
+                  sha,
+                  verdict: cycle < 3 ? ("changes_requested" as const) : ("approved" as const),
+                  summary: cycle < 3 ? "repair required" : "approved",
+                  findings: cycle < 3 ? [`repair ${cycle}`] : [],
+                },
+                usage: null,
+              };
+            },
+          },
+          forge: {
+            deliver: async (_contract, sha) => {
+              deliveries += 1;
+              if (externalEffects === 0) {
+                externalEffects = 1;
+                throw new ForgeDeliveryReconciliationError();
+              }
+              return {
+                sha,
+                effect: "github" as const,
+                prNumber: 456,
+                url: "https://example.invalid/pr/456",
+                attestationId: "unbounded-restart",
+              };
+            },
+          },
+        },
+      );
+    };
+
+    let server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const admitted = await submitTask(server.url, submission);
+      const waiting = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (task) => task.state === "waiting",
+      );
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        waiting: { reason: "delivery_reconciliation" },
+        candidateSha: candidateShas[2],
+        review: { sha: candidateShas[2], verdict: "approved" },
+        evidence: {
+          implementerActivations: 3,
+          reviewCycles: 3,
+          changesRequestedBatches: 2,
+        },
+      });
+      expect({ implementers, reviewers, deliveries }).toEqual({
+        implementers: 3,
+        reviewers: 3,
+        deliveries: 1,
+      });
+
+      await server.close();
+      server = await startUsineServer({
+        environment: environment(stateDirectory, repositoryName),
+        execute,
+        host: "127.0.0.1",
+        port: 0,
+      });
+
+      await expect(retryTask(server.url, admitted.taskId)).resolves.toMatchObject({
+        state: "reviewed",
+        evidence: { implementerActivations: 3, reviewCycles: 3 },
+      });
+      const terminal = await waitFor(
+        () => taskStatus(server.url, admitted.taskId),
+        (task) => task.state === "reviewed_pr",
+      );
+      expect(terminal).toMatchObject({
+        state: "reviewed_pr",
+        delivery: {
+          sha: candidateShas[2],
+          prNumber: 456,
+          attestationId: "unbounded-restart",
+        },
+        evidence: {
+          implementerActivations: 3,
+          reviewCycles: 3,
+          changesRequestedBatches: 2,
+        },
+      });
+      expect({ implementers, reviewers, deliveries }).toEqual({
+        implementers: 3,
+        reviewers: 3,
+        deliveries: 2,
+      });
     } finally {
       await server.close();
     }

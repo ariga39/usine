@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Schema } from "effect";
+import { countBudgetSchema, positiveCountBudgetSchema } from "./contract.js";
 
 const durableId = z
   .string()
@@ -42,8 +43,8 @@ export const goalContractSchema = z
       .object({
         maxElapsedMs: z.number().int().positive(),
         maxTasks: z.number().int().positive(),
-        maxImplementerActivations: z.number().int().min(0).max(2).default(0),
-        maxReviewCycles: z.number().int().min(0).max(2).default(0),
+        maxImplementerActivations: countBudgetSchema.default(0),
+        maxReviewCycles: countBudgetSchema.default(0),
       })
       .strict(),
   })
@@ -174,8 +175,8 @@ export const taskProposalSchema = z
     nonGoals: z.array(z.string().min(1)),
     effects: z.array(durableId).min(1),
     budget: z.object({
-      maxImplementerActivations: z.number().int().min(1).max(2),
-      maxReviewCycles: z.number().int().min(1).max(2),
+      maxImplementerActivations: positiveCountBudgetSchema,
+      maxReviewCycles: positiveCountBudgetSchema,
       maxElapsedMs: z.number().int().positive(),
     }),
     delivery: z
@@ -328,8 +329,8 @@ const campaignProposalSchema = Schema.Struct({
       nonGoals: Schema.Array(Schema.String),
       effects: Schema.Array(Schema.String),
       budget: Schema.Struct({
-        maxImplementerActivations: Schema.Int,
-        maxReviewCycles: Schema.Int,
+        maxImplementerActivations: Schema.NullOr(Schema.Int),
+        maxReviewCycles: Schema.NullOr(Schema.Int),
         maxElapsedMs: Schema.Int,
       }),
       delivery: Schema.optional(
@@ -361,8 +362,8 @@ export const campaignResourceSchema = Schema.Struct({
   budget: Schema.Struct({
     maxElapsedMs: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
     maxTasks: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxImplementerActivations: Schema.optional(Schema.Int),
-    maxReviewCycles: Schema.optional(Schema.Int),
+    maxImplementerActivations: Schema.optional(Schema.NullOr(Schema.Int)),
+    maxReviewCycles: Schema.optional(Schema.NullOr(Schema.Int)),
   }),
   status: campaignStatusSchema,
   planHandedOff: Schema.Boolean,

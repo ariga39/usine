@@ -1,4 +1,5 @@
 import type {
+  CountBudget,
   CampaignAssessment,
   CampaignAssessmentFact,
   CampaignAssessmentUsage,
@@ -45,8 +46,8 @@ export interface CampaignReplacementRequest {
   readonly repositories: readonly CampaignReplacementRepository[];
   readonly remainingBudget: {
     readonly tasks: number;
-    readonly implementerActivations: number;
-    readonly reviewCycles: number;
+    readonly implementerActivations: CountBudget;
+    readonly reviewCycles: CountBudget;
     readonly elapsedMs: number;
   };
   readonly deadlineEpochMs: number;

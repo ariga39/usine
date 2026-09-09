@@ -2,6 +2,7 @@ import type { WriterWorkspace } from "@usine/candidate-workspace";
 import { implementerOutputSchema, type SessionArchiveCaptureStatus } from "@usine/coding-session";
 import {
   deadlineExpired,
+  countBudgetExhausted,
   type CheckResult,
   type TaskObservationEventData,
   type TaskFailureClass,
@@ -274,8 +275,10 @@ export async function activateImplementer(
     if (attempt.failureClass === "cancellation") return attempt.result;
     if (
       attempt.retryable &&
-      attempt.result.evidence.implementerActivations <
-        input.contract.budget.maxImplementerActivations &&
+      !countBudgetExhausted(
+        input.contract.budget.maxImplementerActivations,
+        attempt.result.evidence.implementerActivations,
+      ) &&
       !deadlineExpired(attempt.result.deadlineEpochMs)
     ) {
       const resumeState: TaskWaitingResumeState | null =

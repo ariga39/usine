@@ -475,49 +475,59 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     });
   });
 
-  test("accepts one explicit retry while retaining the lease and active slot", async () => {
-    const path = await makeDatabase();
-    const first = authorityAt(path);
-    const second = authorityAt(path);
-    const taskId = `authority-retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const admitted = await first.admit({
-      contract: makeContract(taskId),
-      contractHash: "authority-retry-hash",
-      repositoryIdentity: `authority/retry-${taskId}`,
-      deadlineEpochMs: Date.now() + 30_000,
-    });
-    const reservation = await first.reserveActivation(taskId, 3);
-    const waiting = await first.recordWaiting(
-      { taskId, revision: reservation.result.revision },
-      {
-        reason: "network_interruption",
-        resumeState: "admitted",
-        activation: reservation.activation,
-      },
-    );
-    expect(waiting.state).toBe("waiting");
-    expect((await first.listRestartable()).activeTaskCount).toBe(1);
+  test.each([3, null])(
+    "accepts one explicit retry while retaining the lease and active slot with count limit %s",
+    async (limit) => {
+      const path = await makeDatabase();
+      const first = authorityAt(path);
+      const second = authorityAt(path);
+      const taskId = `authority-retry-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const admitted = await first.admit({
+        contract: {
+          ...makeContract(taskId),
+          budget: {
+            ...makeContract(taskId).budget,
+            maxImplementerActivations: limit,
+            maxReviewCycles: limit,
+          },
+        },
+        contractHash: "authority-retry-hash",
+        repositoryIdentity: `authority/retry-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      const reservation = await first.reserveActivation(taskId, limit);
+      const waiting = await first.recordWaiting(
+        { taskId, revision: reservation.result.revision },
+        {
+          reason: "network_interruption",
+          resumeState: "admitted",
+          activation: reservation.activation,
+        },
+      );
+      expect(waiting.state).toBe("waiting");
+      expect((await first.listRestartable()).activeTaskCount).toBe(1);
 
-    const retries = await Promise.allSettled([
-      first.retryTask(taskId, 3),
-      second.retryTask(taskId, 3),
-    ]);
-    expect(retries.filter((entry) => entry.status === "fulfilled")).toHaveLength(1);
-    expect(retries.filter((entry) => entry.status === "rejected")).toHaveLength(1);
-    const rejected = retries.find((entry) => entry.status === "rejected");
-    expect(rejected).toMatchObject({ reason: { code: "task_retry_conflict", retryable: false } });
+      const retries = await Promise.allSettled([
+        first.retryTask(taskId, limit),
+        second.retryTask(taskId, limit),
+      ]);
+      expect(retries.filter((entry) => entry.status === "fulfilled")).toHaveLength(1);
+      expect(retries.filter((entry) => entry.status === "rejected")).toHaveLength(1);
+      const rejected = retries.find((entry) => entry.status === "rejected");
+      expect(rejected).toMatchObject({ reason: { code: "task_retry_conflict", retryable: false } });
 
-    const resumed = await first.lookup(taskId);
-    expect(resumed).toMatchObject({
-      state: "admitted",
-      waiting: null,
-      evidence: { implementerActivations: 1 },
-    });
-    const restart = await first.listRestartable();
-    expect(restart.activeTaskCount).toBe(1);
-    expect(restart.restartable).toHaveLength(0);
-    expect(admitted.writer.repositoryIdentity).toBe(resumed?.writer.repositoryIdentity);
-  });
+      const resumed = await first.lookup(taskId);
+      expect(resumed).toMatchObject({
+        state: "admitted",
+        waiting: null,
+        evidence: { implementerActivations: 1 },
+      });
+      const restart = await first.listRestartable();
+      expect(restart.activeTaskCount).toBe(1);
+      expect(restart.restartable).toHaveLength(0);
+      expect(admitted.writer.repositoryIdentity).toBe(resumed?.writer.repositoryIdentity);
+    },
+  );
 
   test("retries delivery reconciliation even when the implementer budget is exhausted", async () => {
     const path = await makeDatabase();
@@ -1959,89 +1969,104 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     expect(admitted.taskId).toBe(taskId);
   }, 30_000);
 
-  test("takes over a durable reviewing reservation after restart and fences stale completion", async () => {
-    const path = await makeDatabase();
-    const firstAuthority = authorityAt(path);
-    const secondAuthority = authorityAt(path);
-    const taskId = `authority-review-takeover-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const admitted = await firstAuthority.admit({
-      contract: makeContract(taskId),
-      contractHash: "b".repeat(64),
-      repositoryIdentity: `authority/review-takeover-${taskId}`,
-      deadlineEpochMs: Date.now() + 30_000,
-    });
-    const activation = await firstAuthority.reserveActivation(taskId, 3);
-    const candidate = await firstAuthority.recordCandidate(
-      { taskId, revision: activation.result.revision },
-      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
-    );
-    const checked = await firstAuthority.recordCheck(
-      { taskId, revision: candidate.revision },
-      {
-        sha: "b".repeat(40),
-        status: "passed",
-        command: "true",
-        exitCode: 0,
-        stdout: "",
-        stderr: "",
-      },
-    );
-    const firstReservation = await firstAuthority.reserveReviewAttempt(
-      taskId,
-      3,
-      "process-owner-a",
-    );
-    expect(firstReservation).toMatchObject({
-      claimed: true,
-      cycle: 1,
-      result: {
-        state: "reviewing",
-        reviewAttempt: { ownerId: "process-owner-a" },
-        evidence: { reviewCycles: 1 },
-      },
-    });
+  test.each([3, null])(
+    "takes over a durable reviewing reservation after restart and fences stale completion with count limit %s",
+    async (limit) => {
+      const path = await makeDatabase();
+      const firstAuthority = authorityAt(path);
+      const secondAuthority = authorityAt(path);
+      const taskId = `authority-review-takeover-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const admitted = await firstAuthority.admit({
+        contract: {
+          ...makeContract(taskId),
+          budget: {
+            ...makeContract(taskId).budget,
+            maxImplementerActivations: limit,
+            maxReviewCycles: limit,
+          },
+        },
+        contractHash: "b".repeat(64),
+        repositoryIdentity: `authority/review-takeover-${taskId}`,
+        deadlineEpochMs: Date.now() + 30_000,
+      });
+      const activation = await firstAuthority.reserveActivation(taskId, limit);
+      const candidate = await firstAuthority.recordCandidate(
+        { taskId, revision: activation.result.revision },
+        { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+      );
+      const checked = await firstAuthority.recordCheck(
+        { taskId, revision: candidate.revision },
+        {
+          sha: "b".repeat(40),
+          status: "passed",
+          command: "true",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        },
+      );
+      const firstReservation = await firstAuthority.reserveReviewAttempt(
+        taskId,
+        limit,
+        "process-owner-a",
+      );
+      expect(firstReservation).toMatchObject({
+        claimed: true,
+        cycle: 1,
+        result: {
+          state: "reviewing",
+          reviewAttempt: { ownerId: "process-owner-a" },
+          evidence: { reviewCycles: 1 },
+        },
+      });
 
-    // The first process exits after reservation and before Quality Gate can
-    // produce either a verdict or an interruption fact.
-    const takeover = await secondAuthority.takeOverReviewAttempt(taskId, 3, "process-owner-b");
-    expect(takeover).toMatchObject({
-      claimed: true,
-      cycle: 2,
-      result: {
-        state: "reviewing",
+      // The first process exits after reservation and before Quality Gate can
+      // produce either a verdict or an interruption fact.
+      const takeover = await secondAuthority.takeOverReviewAttempt(
+        taskId,
+        limit,
+        "process-owner-b",
+      );
+      expect(takeover).toMatchObject({
+        claimed: true,
+        cycle: 2,
+        result: {
+          state: "reviewing",
+          candidateSha: "b".repeat(40),
+          check: { sha: "b".repeat(40), status: "passed" },
+          reviewAttempt: { ownerId: "process-owner-b" },
+          evidence: { reviewCycles: 2 },
+        },
+      });
+      await expect(
+        firstAuthority.recordReview(
+          { taskId, revision: firstReservation.result.revision },
+          { sha: "b".repeat(40), verdict: "approved", summary: "stale", findings: [] },
+          "process-owner-a",
+        ),
+      ).rejects.toThrow("stale task revision");
+
+      const reviewed = await secondAuthority.recordReview(
+        { taskId, revision: takeover.result.revision },
+        { sha: "b".repeat(40), verdict: "approved", summary: "fresh", findings: [] },
+        "process-owner-b",
+      );
+      expect(reviewed).toMatchObject({
+        state: "reviewed",
         candidateSha: "b".repeat(40),
         check: { sha: "b".repeat(40), status: "passed" },
-        reviewAttempt: { ownerId: "process-owner-b" },
+        review: { sha: "b".repeat(40), verdict: "approved" },
+        reviewAttempt: null,
         evidence: { reviewCycles: 2 },
-      },
-    });
-    await expect(
-      firstAuthority.recordReview(
-        { taskId, revision: firstReservation.result.revision },
-        { sha: "b".repeat(40), verdict: "approved", summary: "stale", findings: [] },
-        "process-owner-a",
-      ),
-    ).rejects.toThrow("stale task revision");
-
-    const reviewed = await secondAuthority.recordReview(
-      { taskId, revision: takeover.result.revision },
-      { sha: "b".repeat(40), verdict: "approved", summary: "fresh", findings: [] },
-      "process-owner-b",
-    );
-    expect(reviewed).toMatchObject({
-      state: "reviewed",
-      candidateSha: "b".repeat(40),
-      check: { sha: "b".repeat(40), status: "passed" },
-      review: { sha: "b".repeat(40), verdict: "approved" },
-      reviewAttempt: null,
-      evidence: { reviewCycles: 2 },
-    });
-    const events = await firstAuthority.listEvents(taskId);
-    expect(events.filter((event) => event.data.type === "review_started")).toHaveLength(2);
-    expect(events.filter((event) => event.data.type === "review_completed")).toHaveLength(1);
-    expect(admitted.taskId).toBe(taskId);
-    expect(checked.candidateSha).toBe("b".repeat(40));
-  }, 30_000);
+      });
+      const events = await firstAuthority.listEvents(taskId);
+      expect(events.filter((event) => event.data.type === "review_started")).toHaveLength(2);
+      expect(events.filter((event) => event.data.type === "review_completed")).toHaveLength(1);
+      expect(admitted.taskId).toBe(taskId);
+      expect(checked.candidateSha).toBe("b".repeat(40));
+    },
+    30_000,
+  );
 
   test.each(["blocked", "reviewed_pr"] as const)(
     "releases the repository lease when a task becomes %s and rejects stale observations",

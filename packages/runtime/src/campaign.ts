@@ -12,6 +12,9 @@ import {
   campaignReplacementRuns,
   campaignAssessmentUsageSchema,
   campaignIdFor,
+  countBudgetAllows,
+  countBudgetExhausted,
+  countBudgetRemaining,
   campaignProposals,
   campaignTouches,
   campaigns,
@@ -472,8 +475,11 @@ function blockerFor(
   if (proposal.merge && !contract.authority.merge)
     return "proposal merge authority is outside the Goal authority envelope";
   if (
-    contract.budget.maxImplementerActivations < proposal.budget.maxImplementerActivations ||
-    contract.budget.maxReviewCycles < proposal.budget.maxReviewCycles ||
+    !countBudgetAllows(
+      contract.budget.maxImplementerActivations,
+      proposal.budget.maxImplementerActivations,
+    ) ||
+    !countBudgetAllows(contract.budget.maxReviewCycles, proposal.budget.maxReviewCycles) ||
     proposal.budget.maxElapsedMs > contract.budget.maxElapsedMs
   )
     return "proposal budget is outside the Goal budget envelope";
@@ -1301,14 +1307,13 @@ function remainingCampaignBudget(
       0,
       decodePersistedGoalContract(campaign.contract).budget.maxTasks - rows.length,
     ),
-    implementerActivations: Math.max(
-      0,
-      decodePersistedGoalContract(campaign.contract).budget.maxImplementerActivations -
-        usedImplementerActivations,
+    implementerActivations: countBudgetRemaining(
+      decodePersistedGoalContract(campaign.contract).budget.maxImplementerActivations,
+      usedImplementerActivations,
     ),
-    reviewCycles: Math.max(
-      0,
-      decodePersistedGoalContract(campaign.contract).budget.maxReviewCycles - usedReviewCycles,
+    reviewCycles: countBudgetRemaining(
+      decodePersistedGoalContract(campaign.contract).budget.maxReviewCycles,
+      usedReviewCycles,
     ),
     elapsedMs: Math.max(
       0,
@@ -1426,8 +1431,8 @@ function replacementBudgetAvailable(
 ): boolean {
   return (
     remainingBudget.tasks >= 1 &&
-    remainingBudget.implementerActivations >= 1 &&
-    remainingBudget.reviewCycles >= 1 &&
+    !countBudgetExhausted(remainingBudget.implementerActivations, 0) &&
+    !countBudgetExhausted(remainingBudget.reviewCycles, 0) &&
     remainingBudget.elapsedMs >= 1
   );
 }
@@ -1499,8 +1504,11 @@ function replacementValidation(
     return { status: "duplicate", proposal: null, supersedesProposalId: null };
   if (
     !replacementBudgetAvailable(target.remainingBudget) ||
-    proposal.budget.maxImplementerActivations > target.remainingBudget.implementerActivations ||
-    proposal.budget.maxReviewCycles > target.remainingBudget.reviewCycles ||
+    !countBudgetAllows(
+      target.remainingBudget.implementerActivations,
+      proposal.budget.maxImplementerActivations,
+    ) ||
+    !countBudgetAllows(target.remainingBudget.reviewCycles, proposal.budget.maxReviewCycles) ||
     proposal.budget.maxElapsedMs > target.remainingBudget.elapsedMs
   )
     return { status: "budget_exhausted", proposal: null, supersedesProposalId: null };

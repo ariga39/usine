@@ -33,6 +33,7 @@ import {
   type TaskFailureClass,
 } from "./task-state.js";
 import { deadlineExpired } from "./remaining-until.js";
+import { countBudgetExhausted, type CountBudget } from "./contract.js";
 import {
   snapshotFromRegistration,
   repositoryResourceFromSnapshot,
@@ -777,7 +778,7 @@ export class TaskAuthority {
 
   async reserveReviewAttempt(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
     ownerId: string,
   ): Promise<ReviewAttemptReservationResult> {
     const reserve = async (database: AuthorityDatabase) => {
@@ -792,7 +793,8 @@ export class TaskAuthority {
       )
         throw new Error("task is not ready for a review attempt");
       const cycle = prior.evidence.reviewCycles + 1;
-      if (cycle > budget) throw new Error("review budget exhausted");
+      if (countBudgetExhausted(budget, prior.evidence.reviewCycles))
+        throw new Error("review budget exhausted");
       const lease = await database.query.repositoryLeases.findFirst({
         where: eq(repositoryLeases.repositoryIdentity, prior.writer.repositoryIdentity),
       });
@@ -830,7 +832,7 @@ export class TaskAuthority {
 
   async takeOverReviewAttempt(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
     ownerId: string,
   ): Promise<ReviewAttemptTakeoverResult> {
     const takeover = async (database: AuthorityDatabase) => {
@@ -844,7 +846,7 @@ export class TaskAuthority {
       if (!lease || lease.taskId !== prior.taskId)
         throw new Error("repository writer lease is stale");
       const cycle = prior.evidence.reviewCycles + 1;
-      if (cycle > budget)
+      if (countBudgetExhausted(budget, prior.evidence.reviewCycles))
         return {
           result: prior,
           claimed: false,
@@ -906,7 +908,7 @@ export class TaskAuthority {
 
   async reserveActivation(
     taskId: string,
-    budget: number,
+    budget: CountBudget,
   ): Promise<{ result: TaskResult; activation: number }> {
     const reserve = async (
       database: AuthorityDatabase,
@@ -921,7 +923,8 @@ export class TaskAuthority {
       if (!lease || lease.taskId !== prior.taskId)
         throw new Error("repository writer lease is stale");
       const activation = prior.evidence.implementerActivations + 1;
-      if (activation > budget) throw new Error("implementer activation budget exhausted");
+      if (countBudgetExhausted(budget, prior.evidence.implementerActivations))
+        throw new Error("implementer activation budget exhausted");
       const result: TaskResult = {
         ...prior,
         revision: prior.revision + 1,
@@ -966,7 +969,7 @@ export class TaskAuthority {
     return reserved.result;
   }
 
-  async retryTask(taskId: string, budget: number): Promise<TaskResult> {
+  async retryTask(taskId: string, budget: CountBudget): Promise<TaskResult> {
     const retry = async (
       database: AuthorityDatabase,
     ): Promise<{ result: TaskResult; events: TaskEvent[] }> => {
@@ -1018,7 +1021,7 @@ export class TaskAuthority {
       }
       if (
         prior.waiting.reason === "network_interruption" &&
-        prior.evidence.implementerActivations >= budget
+        countBudgetExhausted(budget, prior.evidence.implementerActivations)
       )
         throw new TaskRetryConflictError("activation_budget_exhausted", prior.state);
       const resumed = applyTaskFact(prior, { type: "retry" });

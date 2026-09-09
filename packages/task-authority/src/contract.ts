@@ -56,6 +56,23 @@ function isCanonicalGitHubIssueSource(source: unknown, issue: number): boolean {
   );
 }
 
+/** null explicitly leaves the count dimension unbounded. */
+export type CountBudget = number | null;
+export const countBudgetSchema = z.number().int().nonnegative().nullable();
+export const positiveCountBudgetSchema = z.number().int().positive().nullable();
+
+export function countBudgetExhausted(limit: CountBudget, used: number): boolean {
+  return limit !== null && used >= limit;
+}
+
+export function countBudgetAllows(parent: CountBudget, child: CountBudget): boolean {
+  return parent === null || (child !== null && child <= parent);
+}
+
+export function countBudgetRemaining(limit: CountBudget, used: number): CountBudget {
+  return limit === null ? null : Math.max(0, limit - used);
+}
+
 export const taskContractSchema = z
   .object({
     id: z
@@ -70,8 +87,8 @@ export const taskContractSchema = z
     acceptance: z.array(z.string().min(1)).min(1),
     nonGoals: z.array(z.string().min(1)),
     budget: z.object({
-      maxImplementerActivations: z.number().int().min(1).max(2),
-      maxReviewCycles: z.number().int().min(1).max(2),
+      maxImplementerActivations: positiveCountBudgetSchema,
+      maxReviewCycles: positiveCountBudgetSchema,
       maxElapsedMs: z.number().int().positive(),
     }),
     authorization: z.object({
