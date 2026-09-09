@@ -45,21 +45,32 @@ export function recoverReviewerOutput(finalResponse: string): ReviewerOutput | u
       continue;
     }
     const candidate = finalResponse.slice(start, end);
-    if (!looksLikeReviewerOutput(candidate)) {
+    let candidateJson: unknown;
+    try {
+      candidateJson = JSON.parse(candidate);
+    } catch {
+      if (looksLikeReviewerOutput(candidate)) return undefined;
       start = end - 1;
       continue;
     }
-    try {
-      const parsed = reviewerOutputSchema.safeParse(JSON.parse(candidate));
-      if (!parsed.success) return undefined;
+    const parsed = reviewerOutputSchema.safeParse(candidateJson);
+    if (parsed.success) {
       if (recovered !== undefined) return undefined;
       recovered = parsed.data;
-    } catch {
+    } else if (hasReviewerFields(candidateJson) || looksLikeReviewerOutput(candidate)) {
       return undefined;
     }
     start = end - 1;
   }
   return recovered;
+}
+
+function hasReviewerFields(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const present = ["sha", "verdict", "summary", "findings"].filter((field) =>
+    Object.prototype.hasOwnProperty.call(value, field),
+  );
+  return present.includes("verdict") || present.length >= 2;
 }
 
 function looksLikeReviewerOutput(value: string): boolean {

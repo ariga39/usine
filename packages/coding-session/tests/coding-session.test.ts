@@ -2119,6 +2119,7 @@ describe("Coding Session", () => {
     const valid = JSON.stringify(reviewer);
     const malformed = `{verdict: "changes_requested", sha: "${"b".repeat(40)}"}`;
     const missingColon = `{"verdict" "changes_requested", "sha":"${"b".repeat(40)}"}`;
+    const escapedValid = `{"\\u0073ha":"${"b".repeat(40)}","\\u0076erdict":"approved","\\u0073ummary":"another verdict","\\u0066indings":[]}`;
     const oversized = JSON.stringify({
       sha: "b".repeat(40),
       verdict: "approved",
@@ -2135,6 +2136,7 @@ describe("Coding Session", () => {
         "multiple valid",
         `${valid}\n${JSON.stringify({ ...reviewer, verdict: "changes_requested" })}`,
       ],
+      ["escaped valid competitor", `${valid}\n${escapedValid}`],
     ] as const;
 
     for (const [name, finalResponse] of cases) {

@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { expect, test } from "vite-plus/test";
-import { reviewerOutputSchema } from "@usine/coding-session";
+import {
+  CodexCodingSession,
+  readSessionArchive,
+  reviewerOutputSchema,
+  type CodingSessionClientFactory,
+} from "@usine/coding-session";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { QualityGate } from "@usine/quality-gate";
 import type { ResolvedTaskContract } from "@usine/task-authority";
@@ -14,6 +19,36 @@ const testEnvironment = {
   CI: "true",
   USINE_CHECK_POLICY: "credential-free",
 };
+
+function localSdkReviewerClient(
+  finalResponse: string,
+): Awaited<ReturnType<CodingSessionClientFactory>> {
+  type LocalThread = ReturnType<Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]>;
+  const thread = {
+    id: "quality-review-thread",
+    runStreamed: async () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "quality-review-thread" };
+        yield { type: "turn.started" };
+        yield {
+          type: "item.completed",
+          item: { type: "agent_message", id: "quality-review-message", text: finalResponse },
+        };
+        yield {
+          type: "turn.completed",
+          usage: {
+            input_tokens: 12,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 7,
+            reasoning_output_tokens: 0,
+          },
+        };
+      })(),
+    }),
+  } as unknown as LocalThread;
+  return { startThread: () => thread } as Awaited<ReturnType<CodingSessionClientFactory>>;
+}
 
 test("Quality Gate checks a disposable exact-SHA checkout before fresh review", async () => {
   const root = await mkdtemp(join(tmpdir(), "usine-quality-"));
@@ -157,6 +192,75 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
       phase: "turn",
       failureClass: "transient_capacity",
     },
+  });
+
+  let reviewerResponse = `Review notes include {version, fleets}.\n${JSON.stringify({
+    sha: base,
+    verdict: "approved",
+    summary: "The candidate satisfies the task contract.",
+    findings: [],
+  })}`;
+  const sessionStateDirectory = await mkdtemp(join(tmpdir(), "usine-quality-session-"));
+  const codingSession = new CodexCodingSession(
+    async () => localSdkReviewerClient(reviewerResponse),
+    {
+      environment: testEnvironment,
+      profileResolver: async () => ({ model: "fixture-model" }),
+      sessionArchive: { stateDirectory: sessionStateDirectory },
+    },
+  );
+  const integratedGate = new QualityGate({
+    workspace,
+    session: codingSession,
+    reviewer: {
+      role: "reviewer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+    },
+    environment: testEnvironment,
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+  const integratedReview = await integratedGate.reviewWithObservation(task, base, check, 2);
+  expect(integratedReview).toMatchObject({
+    review: {
+      sha: base,
+      verdict: "approved",
+      summary: "The candidate satisfies the task contract.",
+      findings: [],
+    },
+    usage: { inputTokens: 12, outputTokens: 7 },
+    archive: { status: "stored", completeness: "complete" },
+  });
+  const integratedArchive = await readSessionArchive(
+    sessionStateDirectory,
+    integratedReview.archive!.archiveId,
+  );
+  expect(integratedArchive).toMatchObject({
+    rawFinalResponse: reviewerResponse,
+    normalizedOutput: {
+      sha: base,
+      verdict: "approved",
+      findings: [],
+    },
+    usage: { inputTokens: 12, outputTokens: 7 },
+  });
+
+  reviewerResponse = `Review notes include {version, fleets}.\n${JSON.stringify({
+    sha: "b".repeat(40),
+    verdict: "approved",
+    summary: "The candidate satisfies the task contract.",
+    findings: [],
+  })}`;
+  const integratedStaleReview = await integratedGate.reviewWithObservation(task, base, check, 3);
+  expect(integratedStaleReview).toMatchObject({
+    review: {
+      sha: base,
+      verdict: "inconclusive",
+      summary: "review output was stale",
+      findings: [],
+    },
+    usage: { inputTokens: 12, outputTokens: 7 },
+    archive: { status: "stored", completeness: "complete" },
   });
 });
 
