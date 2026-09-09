@@ -780,7 +780,7 @@ describe("server-owned delivery milestone", () => {
           ),
           "utf8",
         ),
-      ).resolves.toBe("stale\n");
+      ).rejects.toMatchObject({ code: "ENOENT" });
 
       const second = await startServer(cliPath, fixtureValue, forge, "complete");
       try {
@@ -804,13 +804,12 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
-        const evidenceResult = await runCliArgs(
-          cliPath,
-          fixtureValue,
-          forge,
-          second.url,
-          ["task", "evidence", fixtureValue.taskId, "--json"],
-        );
+        const evidenceResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "task",
+          "evidence",
+          fixtureValue.taskId,
+          "--json",
+        ]);
         expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
         const evidence = JSON.parse(evidenceResult.stdout) as {
           roleRuns: {
@@ -823,17 +822,16 @@ describe("server-owned delivery milestone", () => {
         };
         expect(evidence.roleRuns.implementer).toHaveLength(2);
         expect(evidence.roleRuns.implementer[0]).toMatchObject({
-          outcome: { status: "failed" },
-          archive: { status: "unavailable" },
+          outcome: { status: "cancelled" },
+          archive: { status: "partial" },
         });
         expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
-        const usageResult = await runCliArgs(
-          cliPath,
-          fixtureValue,
-          forge,
-          second.url,
-          ["usage", "--task-id", fixtureValue.taskId, "--json"],
-        );
+        const usageResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "usage",
+          "--task-id",
+          fixtureValue.taskId,
+          "--json",
+        ]);
         expect(usageResult.exitCode, usageResult.stderr).toBe(0);
         const usage = JSON.parse(usageResult.stdout) as {
           invocations: Array<{
@@ -844,9 +842,11 @@ describe("server-owned delivery milestone", () => {
           }>;
         };
         expect(usage.invocations).toHaveLength(3);
-        expect(usage.invocations.filter((invocation) => invocation.role === "implementer")).toHaveLength(2);
+        expect(
+          usage.invocations.filter((invocation) => invocation.role === "implementer"),
+        ).toHaveLength(2);
         expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
-          outcome: "failed",
+          outcome: "cancelled",
           usage: { coverage: "unavailable" },
         });
         expect(usage.invocations.find((invocation) => invocation.activation === 2)?.outcome).toBe(
@@ -948,14 +948,51 @@ describe("server-owned delivery milestone", () => {
           delivery: { prNumber: 1, attestationId: "7" },
         });
         expect(terminal.candidateSha).toMatch(/^[0-9a-f]{40}$/);
-        const evidenceResult = await runCliArgs(
-          cliPath,
-          fixtureValue,
-          forge,
-          second.url,
-          ["task", "evidence", fixtureValue.taskId, "--json"],
-        );
+        const evidenceResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "task",
+          "evidence",
+          fixtureValue.taskId,
+          "--json",
+        ]);
         expect(evidenceResult.exitCode, evidenceResult.stderr).toBe(0);
+        const archiveListResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "archive",
+          "list",
+          fixtureValue.taskId,
+          "--json",
+        ]);
+        expect(archiveListResult.exitCode, archiveListResult.stderr).toBe(0);
+        const archiveList = (
+          JSON.parse(archiveListResult.stdout) as {
+            archives: Array<{
+              archiveId: string;
+              taskId: string;
+              role: string;
+              attempt: string;
+              status: string;
+              captureStatus: string;
+              completeness: string;
+            }>;
+          }
+        ).archives;
+        const originalArchive = archiveList.find(
+          (manifest) => manifest.role === "implementer" && manifest.attempt === "1",
+        );
+        if (originalArchive === undefined) throw new Error("original archive manifest is missing");
+        expect(originalArchive).toMatchObject({
+          taskId: fixtureValue.taskId,
+          status: "failed",
+          captureStatus: "stored",
+          completeness: "partial",
+        });
+        const archiveManifestResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "archive",
+          "manifest",
+          originalArchive.archiveId,
+          "--json",
+        ]);
+        expect(archiveManifestResult.exitCode, archiveManifestResult.stderr).toBe(0);
+        expect(JSON.parse(archiveManifestResult.stdout)).toMatchObject(originalArchive);
         const evidence = JSON.parse(evidenceResult.stdout) as {
           roleRuns: {
             implementer: Array<{
@@ -968,16 +1005,15 @@ describe("server-owned delivery milestone", () => {
         expect(evidence.roleRuns.implementer).toHaveLength(2);
         expect(evidence.roleRuns.implementer[0]).toMatchObject({
           outcome: { status: "failed" },
-          archive: { status: "unavailable" },
+          archive: { archiveId: originalArchive.archiveId, status: "partial" },
         });
         expect(evidence.roleRuns.implementer[1]?.outcome.status).toBe("succeeded");
-        const usageResult = await runCliArgs(
-          cliPath,
-          fixtureValue,
-          forge,
-          second.url,
-          ["usage", "--task-id", fixtureValue.taskId, "--json"],
-        );
+        const usageResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+          "usage",
+          "--task-id",
+          fixtureValue.taskId,
+          "--json",
+        ]);
         expect(usageResult.exitCode, usageResult.stderr).toBe(0);
         const usage = JSON.parse(usageResult.stdout) as {
           invocations: Array<{
@@ -988,7 +1024,9 @@ describe("server-owned delivery milestone", () => {
           }>;
         };
         expect(usage.invocations).toHaveLength(3);
-        expect(usage.invocations.filter((invocation) => invocation.role === "implementer")).toHaveLength(2);
+        expect(
+          usage.invocations.filter((invocation) => invocation.role === "implementer"),
+        ).toHaveLength(2);
         expect(usage.invocations.find((invocation) => invocation.activation === 1)).toMatchObject({
           outcome: "failed",
           usage: { coverage: "unavailable" },
