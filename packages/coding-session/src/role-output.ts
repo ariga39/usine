@@ -35,18 +35,50 @@ export function recoverReviewerOutput(finalResponse: string): ReviewerOutput | u
   for (let start = 0; start < finalResponse.length; start += 1) {
     if (finalResponse[start] !== "{") continue;
     const end = balancedJsonObjectEnd(finalResponse, start);
-    if (end === undefined) return undefined;
+    if (end === undefined) {
+      const nextObject = finalResponse.indexOf("{", start + 1);
+      const malformedCandidate = finalResponse.slice(
+        start,
+        nextObject === -1 ? finalResponse.length : nextObject,
+      );
+      if (looksLikeReviewerOutput(malformedCandidate)) return undefined;
+      continue;
+    }
+    const candidate = finalResponse.slice(start, end);
+    let candidateJson: unknown;
     try {
-      const parsed = reviewerOutputSchema.safeParse(JSON.parse(finalResponse.slice(start, end)));
-      if (!parsed.success) return undefined;
+      candidateJson = JSON.parse(candidate);
+    } catch {
+      if (looksLikeReviewerOutput(candidate)) return undefined;
+      start = end - 1;
+      continue;
+    }
+    const parsed = reviewerOutputSchema.safeParse(candidateJson);
+    if (parsed.success) {
       if (recovered !== undefined) return undefined;
       recovered = parsed.data;
-    } catch {
+    } else if (hasReviewerFields(candidateJson) || looksLikeReviewerOutput(candidate)) {
       return undefined;
     }
     start = end - 1;
   }
   return recovered;
+}
+
+function hasReviewerFields(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const present = ["sha", "verdict", "summary", "findings"].filter((field) =>
+    Object.prototype.hasOwnProperty.call(value, field),
+  );
+  return present.includes("verdict") || present.length >= 2;
+}
+
+function looksLikeReviewerOutput(value: string): boolean {
+  const fields = ["sha", "verdict", "summary", "findings"];
+  const present = fields.filter((field) =>
+    new RegExp(`(?:^|[,{]\\s*)["']?${field}["']?(?=\\s|:|,|})`).test(value),
+  );
+  return present.includes("verdict") || present.length >= 2;
 }
 
 function balancedJsonObjectEnd(value: string, start: number): number | undefined {
