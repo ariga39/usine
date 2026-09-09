@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,6 +32,7 @@ import {
   resolveCodexProfile,
   reviewerOutputSchema,
   type SessionArchive,
+  type SessionObservation,
   type CodexProfileResolver,
   type RoleOutputTransform,
 } from "@usine/coding-session";
@@ -39,7 +41,10 @@ import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
 import { createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { codexAdapterConfig } from "../src/codex-adapter-config.js";
 import { normalizeCodingSessionMcpServer } from "../src/coding-session-policy.js";
-import { composeRoleQualityPrompt } from "../src/role-quality-contract.js";
+import {
+  composeRoleQualityPrompt,
+  ROLE_QUALITY_INSTRUCTIONS,
+} from "../src/role-quality-contract.js";
 import type {
   CodingSessionAdapter,
   CodingSessionAdapterRequest,
@@ -706,6 +711,197 @@ describe("Coding Session", () => {
     expect(JSON.stringify(archiveProfile)).not.toContain("catalog-two.example.test");
     expect(archiveProfile).not.toHaveProperty("modelProviders");
     expect(archiveProfile).not.toHaveProperty("modelCatalogJson");
+  });
+
+  test("gives Campaign assessment its own effective instructions and matching native config", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-assessor-profile-"));
+    const privateProviders = { private: { base_url: "https://private.example.test" } };
+    const profileResolver: CodexProfileResolver = async (profile) => ({
+      model: profile === "reviewer-profile" ? "reviewer-model" : "implementer-model",
+      modelReasoningEffort: profile === "reviewer-profile" ? "high" : "low",
+      developerInstructions:
+        profile === "reviewer-profile"
+          ? "Reviewer role instruction: inspect the candidate independently."
+          : "Implementer role instruction: implement the frozen task contract.",
+      config: {
+        model_provider: "private-provider",
+        model_providers: privateProviders,
+        service_tier: "private-tier",
+      },
+    });
+    const capturedConfigs: CodexOptions[] = [];
+    const prompts: string[] = [];
+    const fakeClient = testClient(async (prompt) => {
+      prompts.push(prompt);
+      if (prompt.includes("Caller-owned Campaign assessment context:"))
+        return sdkTurn(JSON.stringify({ verdict: "inconclusive", summary: "no evidence" }));
+      if (prompt.includes("Caller-owned Task context:\nreview"))
+        return sdkTurn(
+          JSON.stringify({ sha, verdict: "approved", summary: "review", findings: [] }),
+        );
+      return sdkTurn(JSON.stringify({ status: "proposed", summary: "implementer" }));
+    }, "assessor-profile-thread");
+    const fakeThread = fakeClient.startThread();
+    const startThread = vi.spyOn(Codex.prototype, "startThread").mockImplementation(function (
+      this: Codex,
+      _options: ThreadOptions = {},
+    ) {
+      capturedConfigs.push((this as unknown as { options: CodexOptions }).options);
+      return fakeThread;
+    });
+    const session = new CodexCodingSession(undefined, {
+      environment: { CI: "true" },
+      profileResolver,
+      sessionArchive: { stateDirectory },
+    });
+    let assessorObservation: SessionObservation | undefined;
+    try {
+      await expect(
+        session.run({
+          role: "implementer",
+          workspace: "fixtures/writer",
+          contract,
+          prompt: "work",
+          profile: "implementer-profile",
+          sandbox: "workspace-write",
+          deadlineEpochMs: Date.now() + 10_000,
+          outputSchema: implementerOutputSchema,
+          attempt: implementerAttempt,
+        }),
+      ).resolves.toMatchObject({ status: "completed", output: { summary: "implementer" } });
+      await expect(
+        session.run({
+          role: "reviewer",
+          workspace: "fixtures/reviewer",
+          contract,
+          prompt: "review",
+          profile: "reviewer-profile",
+          sandbox: "read-only",
+          deadlineEpochMs: Date.now() + 10_000,
+          outputSchema: reviewerOutputSchema,
+          attempt: reviewerAttempt,
+        }),
+      ).resolves.toMatchObject({ status: "completed", output: { summary: "review" } });
+      assessorObservation = await session.run({
+        role: "assessor",
+        workspace: "fixtures/assessor",
+        prompt: "assessment",
+        profile: "reviewer-profile",
+        sandbox: "read-only",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: z.object({
+          verdict: z.literal("inconclusive"),
+          summary: z.string(),
+        }),
+        attempt: "assessment-attempt",
+        assessment: {
+          invocationId: "assessment-attempt",
+          campaignId: "campaign",
+          goalId: "goal",
+          goalVersion: 1,
+          goal: {
+            id: "goal",
+            version: 1,
+            objective: "Assess the Goal",
+            authority: {
+              source: "user:test",
+              publish: true,
+              delivery: true,
+              merge: false,
+              repositories: ["repository-test"],
+              effects: ["write", "publish"],
+            },
+            budget: {
+              maxElapsedMs: 120_000,
+              maxTasks: 1,
+              maxImplementerActivations: 1,
+              maxReviewCycles: 1,
+            },
+          },
+          outcome: {
+            id: "outcome",
+            title: "Assess the outcome",
+            acceptance: ["the outcome is assessed"],
+          },
+          evidence: [],
+        },
+      });
+      expect(assessorObservation).toMatchObject({
+        status: "completed",
+        output: { verdict: "inconclusive" },
+      });
+    } finally {
+      startThread.mockRestore();
+    }
+
+    expect(capturedConfigs).toHaveLength(3);
+    expect(capturedConfigs.map((options) => options.config?.developer_instructions)).toEqual([
+      "Implementer role instruction: implement the frozen task contract.",
+      "Reviewer role instruction: inspect the candidate independently.",
+      ROLE_QUALITY_INSTRUCTIONS.assessor,
+    ]);
+    expect(capturedConfigs.map((options) => options.config?.model_provider)).toEqual([
+      "private-provider",
+      "private-provider",
+      "private-provider",
+    ]);
+    expect(capturedConfigs.map((options) => options.config?.model_providers)).toEqual([
+      privateProviders,
+      privateProviders,
+      privateProviders,
+    ]);
+    expect(capturedConfigs[2]?.config?.model).toBe("reviewer-model");
+    expect(capturedConfigs[2]?.config?.service_tier).toBe("private-tier");
+    expect(prompts).toEqual([
+      composeRoleQualityPrompt("implementer", "work"),
+      composeRoleQualityPrompt("reviewer", "review"),
+      composeRoleQualityPrompt("assessor", "assessment"),
+    ]);
+
+    const expectedEffectiveConfig = {
+      model: "reviewer-model",
+      model_reasoning_effort: "high",
+      developer_instructions: ROLE_QUALITY_INSTRUCTIONS.assessor,
+      model_catalog_json: null,
+      model_provider: "private-provider",
+      model_providers: privateProviders,
+      model_reasoning_summary: null,
+      model_verbosity: null,
+      personality: null,
+      service_tier: "private-tier",
+    };
+    const configSha = (developerInstructions: string) => {
+      const config = { ...expectedEffectiveConfig, developer_instructions: developerInstructions };
+      const stableConfig = `{${Object.entries(config)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, value]) => `${JSON.stringify(key)}:${JSON.stringify(value)}`)
+        .join(",")}}`;
+      return createHash("sha256").update(stableConfig, "utf8").digest("hex");
+    };
+    const expectedEffectiveConfigSha = configSha(ROLE_QUALITY_INSTRUCTIONS.assessor);
+    const inheritedConfigSha = configSha(
+      "Reviewer role instruction: inspect the candidate independently.",
+    );
+    if (!assessorObservation) throw new Error("assessor observation is missing");
+    expect(assessorObservation.effectiveProfile?.configSha256).toBe(expectedEffectiveConfigSha);
+    expect(assessorObservation.effectiveProfile?.configSha256).not.toBe(inheritedConfigSha);
+    expect(assessorObservation.effectiveProfile?.developerInstructionsSha256).toBe(
+      createHash("sha256").update(ROLE_QUALITY_INSTRUCTIONS.assessor, "utf8").digest("hex"),
+    );
+    const archiveId = assessorObservation.archiveId;
+    if (!archiveId) throw new Error("assessor archive was not captured");
+    const archive = completeArchive(await readSessionArchive(stateDirectory, archiveId));
+    expect(archive.profile).toMatchObject({
+      name: "reviewer-profile",
+      model: "reviewer-model",
+      modelProvider: "private-provider",
+      serviceTier: "private-tier",
+      developerInstructions: ROLE_QUALITY_INSTRUCTIONS.assessor,
+    });
+    const { sha256, ...archiveProfileFields } = archive.profile;
+    expect(sha256).toBe(
+      createHash("sha256").update(JSON.stringify(archiveProfileFields), "utf8").digest("hex"),
+    );
   });
 
   test("applies synthetic role model selection at both adapter boundaries", async () => {
@@ -3323,6 +3519,7 @@ describe("Coding Session", () => {
 
   test("archives checkpoint replacement source IDs in the provider-neutral planner context", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-replacement-context-"));
+    let plannerRequest: CodingSessionAdapterRequest | undefined;
     const request: CampaignReplacementPlannerSessionRequest<null> = {
       role: "replacement-planner",
       attempt: "replacement-attempt",
@@ -3391,7 +3588,10 @@ describe("Coding Session", () => {
       {
         sdk: {
           name: "sdk",
-          run: async () => ({ finalResponse: "null", usage: null, sessionId: "session-test" }),
+          run: async (context) => {
+            plannerRequest = context;
+            return { finalResponse: "null", usage: null, sessionId: "session-test" };
+          },
         },
       },
     );
@@ -3405,6 +3605,17 @@ describe("Coding Session", () => {
       invocationId: "replacement-invocation",
       supersedableProposalIds: ["proposal-unowned"],
     });
+    expect(plannerRequest).toMatchObject({
+      role: "replacement-planner",
+      profile: {
+        model: "reviewer-model",
+        reasoningEffort: "high",
+        developerInstructions: ROLE_QUALITY_INSTRUCTIONS["replacement-planner"],
+      },
+    });
+    expect(archive.profile.developerInstructions).toBe(
+      ROLE_QUALITY_INSTRUCTIONS["replacement-planner"],
+    );
     expect(JSON.stringify(archive.contract)).not.toContain("provider");
   });
 
