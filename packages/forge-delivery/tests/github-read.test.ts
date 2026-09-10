@@ -22,7 +22,7 @@ test("observes only the configured exact-head pipeline entries", async () => {
       apiUrl: "https://github.invalid",
     },
     async (input) => {
-      const url = new URL(typeof input === "string" ? input : input.toString());
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       requests.push(url.pathname);
       if (url.pathname === "/repos/example/authorized/pulls/7")
         return Response.json({ head: { sha: exactSha } });
@@ -83,7 +83,7 @@ test("does not require an unconfigured pipeline source", async () => {
       apiUrl: "https://github.invalid",
     },
     async (input) => {
-      const url = new URL(typeof input === "string" ? input : input.toString());
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       requests.push(url.pathname);
       if (url.pathname === "/repos/example/authorized/pulls/7")
         return Response.json({ head: { sha: exactSha } });
