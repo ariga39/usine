@@ -95,6 +95,7 @@ const taskWaiting = Schema.Struct({
     "network_interruption",
     "delivery_reconciliation",
     "external_review",
+    "pipeline_checks",
     "review_interruption",
   ]),
   resumeState: Schema.Literals(["admitted", "checked", "reviewed", "reviewing"]),

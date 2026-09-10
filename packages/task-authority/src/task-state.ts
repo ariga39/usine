@@ -114,11 +114,13 @@ export type TaskWaitingReason =
   | "network_interruption"
   | "delivery_reconciliation"
   | "external_review"
+  | "pipeline_checks"
   | "review_interruption";
 export const PUBLIC_TASK_WAITING_REASONS = [
   "network_interruption",
   "delivery_reconciliation",
   "external_review",
+  "pipeline_checks",
 ] as const;
 export type PublicTaskWaitingReason = (typeof PUBLIC_TASK_WAITING_REASONS)[number];
 export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed" | "reviewing";
@@ -261,7 +263,8 @@ export function publicTaskRetryableFromResult(result: Pick<TaskResult, "waiting"
   return (
     result.waiting?.reason === "network_interruption" ||
     result.waiting?.reason === "delivery_reconciliation" ||
-    result.waiting?.reason === "external_review"
+    result.waiting?.reason === "external_review" ||
+    result.waiting?.reason === "pipeline_checks"
   );
 }
 
@@ -352,6 +355,10 @@ export function isTerminalState(state: TaskState): boolean {
 
 export function isWaitingState(state: TaskState): boolean {
   return state === "waiting";
+}
+
+export function isPipelineChecksWaiting(result: Pick<TaskResult, "waiting">): boolean {
+  return result.waiting?.reason === "pipeline_checks";
 }
 
 export interface CandidateFact {
@@ -632,7 +639,8 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         fact.waiting.reason === "network_interruption"
           ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
           : fact.waiting.reason === "delivery_reconciliation" ||
-              fact.waiting.reason === "external_review"
+              fact.waiting.reason === "external_review" ||
+              fact.waiting.reason === "pipeline_checks"
             ? result.state === "reviewed" &&
               result.activeActivation === null &&
               result.candidateFence === fact.waiting.activation &&

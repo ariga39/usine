@@ -15,6 +15,7 @@ import {
   ExternalReviewPendingError,
   ForgeAuthenticationError,
   ForgeDeliveryReconciliationError,
+  PipelineChecksPendingError,
 } from "@usine/forge-delivery";
 import {
   deadlineExpired,
@@ -91,6 +92,7 @@ interface DeliveryRunAuthority {
   }>;
   recordRepairBatch(observation: TaskObservation): Promise<TaskResult>;
   recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult>;
+  resumePipelineChecks(taskId: string, revision: number): Promise<TaskResult>;
   recordDelivery(observation: TaskObservation, delivery: DeliveryEffect): Promise<TaskResult>;
   block(
     observation: TaskObservation,
@@ -182,6 +184,10 @@ export async function executeDeliveryRun(
       return blockTask(services, result, "elapsed budget exhausted");
 
     if (isWaitingState(result.state)) {
+      if (result.waiting?.reason === "pipeline_checks") {
+        result = await services.authority.resumePipelineChecks(result.taskId, result.revision);
+        continue;
+      }
       if (result.waiting?.reason !== "review_interruption") return result;
       const failureClass = result.waiting.failureClass;
       if (!failureClass || !isTransientReviewerFailure(failureClass))
@@ -471,6 +477,16 @@ export async function executeDeliveryRun(
             { taskId: result.taskId, revision: result.revision },
             {
               reason: "external_review",
+              resumeState: "reviewed",
+              activation: result.candidateFence,
+              diagnostic: error.diagnostic,
+            },
+          );
+        if (error instanceof PipelineChecksPendingError && result.candidateFence !== null)
+          return services.authority.recordWaiting(
+            { taskId: result.taskId, revision: result.revision },
+            {
+              reason: "pipeline_checks",
               resumeState: "reviewed",
               activation: result.candidateFence,
               diagnostic: error.diagnostic,

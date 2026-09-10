@@ -22,7 +22,9 @@ test("observes only the configured exact-head pipeline entries", async () => {
       apiUrl: "https://github.invalid",
     },
     async (input) => {
-      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
       requests.push(url.pathname);
       if (url.pathname === "/repos/example/authorized/pulls/7")
         return Response.json({ head: { sha: exactSha } });
@@ -83,7 +85,9 @@ test("does not require an unconfigured pipeline source", async () => {
       apiUrl: "https://github.invalid",
     },
     async (input) => {
-      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
       requests.push(url.pathname);
       if (url.pathname === "/repos/example/authorized/pulls/7")
         return Response.json({ head: { sha: exactSha } });
@@ -102,6 +106,234 @@ test("does not require an unconfigured pipeline source", async () => {
       statusContexts: [],
     }),
   ).resolves.toMatchObject({ ready: true });
+  expect(requests).not.toContain(`/repos/example/authorized/commits/${exactSha}/status`);
+});
+
+test("accepts every selected check and status while ignoring other failures", async () => {
+  const requests: string[] = [];
+  const client = await createGithubApiClient(
+    { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+    async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      requests.push(url.pathname);
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      if (url.pathname.endsWith("/check-runs"))
+        return Response.json({
+          total_count: 4,
+          check_runs: [
+            { id: 10, name: "build", status: "completed", conclusion: "success" },
+            { id: 11, name: "lint", status: "completed", conclusion: "success" },
+            { id: 12, name: "unconfigured", status: "completed", conclusion: "failure" },
+            {
+              id: 13,
+              name: "test (ubuntu-latest, 24)",
+              status: "completed",
+              conclusion: "success",
+            },
+          ],
+        });
+      if (url.pathname.endsWith("/status"))
+        return Response.json({
+          total_count: 3,
+          statuses: [
+            { id: 10, context: "deploy", state: "success" },
+            { id: 11, context: "release", state: "success" },
+            { id: 12, context: "unconfigured", state: "failure" },
+          ],
+        });
+      return Response.json({ message: "not found" }, { status: 404 });
+    },
+  );
+
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["build", "lint", "test (ubuntu-latest, 24)"],
+      statusContexts: ["deploy", "release"],
+    }),
+  ).resolves.toMatchObject({ ready: true, sha: exactSha });
+  expect(requests).toEqual([
+    "/repos/example/authorized/pulls/7",
+    `/repos/example/authorized/commits/${exactSha}/check-runs`,
+    `/repos/example/authorized/commits/${exactSha}/status`,
+  ]);
+});
+
+test.each([
+  ["missing", [], undefined],
+  ["queued", [{ id: 10, name: "required", status: "queued", conclusion: null }], "queued"],
+  [
+    "in progress",
+    [{ id: 10, name: "required", status: "in_progress", conclusion: null }],
+    "in_progress",
+  ],
+  [
+    "failed",
+    [{ id: 10, name: "required", status: "completed", conclusion: "failure" }],
+    "completed/failure",
+  ],
+  [
+    "cancelled",
+    [{ id: 10, name: "required", status: "completed", conclusion: "cancelled" }],
+    "completed/cancelled",
+  ],
+  [
+    "timed out",
+    [{ id: 10, name: "required", status: "completed", conclusion: "timed_out" }],
+    "completed/timed_out",
+  ],
+  [
+    "skipped",
+    [{ id: 10, name: "required", status: "completed", conclusion: "skipped" }],
+    "completed/skipped",
+  ],
+  [
+    "neutral",
+    [{ id: 10, name: "required", status: "completed", conclusion: "neutral" }],
+    "completed/neutral",
+  ],
+] as const)(
+  "fails closed for %s selected check evidence",
+  async (_label, checkRuns, diagnostic) => {
+    const client = await createGithubApiClient(
+      { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+      async (input) => {
+        const url = new URL(
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+        );
+        if (url.pathname === "/repos/example/authorized/pulls/7")
+          return Response.json({ head: { sha: exactSha } });
+        return Response.json({ total_count: checkRuns.length, check_runs: checkRuns });
+      },
+    );
+    const evidence = await readGithubPipelineEvidence(
+      client,
+      { owner: "example", name: "authorized" },
+      7,
+      exactSha,
+      { checkRuns: ["required"], statusContexts: [] },
+    );
+    expect(evidence.ready).toBe(false);
+    expect(evidence.diagnostic).toContain(diagnostic ?? "missing");
+  },
+);
+
+test("rejects stale head evidence before reading either pipeline endpoint", async () => {
+  const requests: string[] = [];
+  const liveSha = "b".repeat(40);
+  const client = await createGithubApiClient(
+    { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+    async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      requests.push(url.pathname);
+      return Response.json({ head: { sha: liveSha } });
+    },
+  );
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["required"],
+      statusContexts: ["deploy"],
+    }),
+  ).resolves.toMatchObject({ ready: false, sha: liveSha });
+  expect(requests).toEqual(["/repos/example/authorized/pulls/7"]);
+});
+
+test("refuses ambiguous same-name check sources conservatively", async () => {
+  const client = await createGithubApiClient(
+    { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+    async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      return Response.json({
+        total_count: 2,
+        check_runs: [
+          {
+            id: 9,
+            name: "required",
+            status: "completed",
+            conclusion: "success",
+            app: { id: 1, slug: "first" },
+          },
+          {
+            id: 10,
+            name: "required",
+            status: "completed",
+            conclusion: "success",
+            app: { id: 2, slug: "second" },
+          },
+        ],
+      });
+    },
+  );
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["required"],
+      statusContexts: [],
+    }),
+  ).resolves.toMatchObject({
+    ready: false,
+    diagnostic: "check run 'required' has ambiguous sources",
+  });
+});
+
+test("fails closed when selected check evidence is truncated", async () => {
+  const client = await createGithubApiClient(
+    { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+    async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      return Response.json({
+        total_count: 51,
+        check_runs: [{ id: 10, name: "required", status: "completed", conclusion: "success" }],
+      });
+    },
+  );
+
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["required"],
+      statusContexts: [],
+    }),
+  ).resolves.toMatchObject({
+    ready: false,
+    diagnostic: "pipeline evidence was truncated",
+  });
+});
+
+test("reports selected endpoint read unavailability without requiring the other endpoint", async () => {
+  const requests: string[] = [];
+  const client = await createGithubApiClient(
+    { mode: "test", appSlug: "test-app", token: "test-token", apiUrl: "https://github.invalid" },
+    async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      requests.push(url.pathname);
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      return Response.json({ message: "forbidden" }, { status: 403 });
+    },
+  );
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["required"],
+      statusContexts: [],
+    }),
+  ).resolves.toMatchObject({
+    ready: false,
+    diagnostic:
+      "allowlisted pipeline evidence is unavailable; grant the Forge App Checks read permission",
+  });
   expect(requests).not.toContain(`/repos/example/authorized/commits/${exactSha}/status`);
 });
 

@@ -451,26 +451,38 @@ export async function readGithubPipelineEvidence(
     };
   }
 
-  const [checkRunsResponse, statusesResponse] = await Promise.all([
-    allowlist.checkRuns.length === 0
-      ? undefined
-      : client.octokit.rest.checks.listForRef({
-          owner: repository.owner,
-          repo: repository.name,
-          ref: expectedSha,
-          per_page: MAX_ITEMS,
-          ...(request ? { request } : {}),
-        }),
-    allowlist.statusContexts.length === 0
-      ? undefined
-      : client.octokit.rest.repos.getCombinedStatusForRef({
-          owner: repository.owner,
-          repo: repository.name,
-          ref: expectedSha,
-          per_page: MAX_ITEMS,
-          ...(request ? { request } : {}),
-        }),
-  ]);
+  let checkRunsResponse;
+  let statusesResponse;
+  try {
+    [checkRunsResponse, statusesResponse] = await Promise.all([
+      allowlist.checkRuns.length === 0
+        ? undefined
+        : client.octokit.rest.checks.listForRef({
+            owner: repository.owner,
+            repo: repository.name,
+            ref: expectedSha,
+            per_page: MAX_ITEMS,
+            ...(request ? { request } : {}),
+          }),
+      allowlist.statusContexts.length === 0
+        ? undefined
+        : client.octokit.rest.repos.getCombinedStatusForRef({
+            owner: repository.owner,
+            repo: repository.name,
+            ref: expectedSha,
+            per_page: MAX_ITEMS,
+            ...(request ? { request } : {}),
+          }),
+    ]);
+  } catch {
+    return {
+      sha: expectedSha,
+      ready: false,
+      checkRuns: [],
+      statusContexts: [],
+      diagnostic: pipelineEvidenceUnavailableDiagnostic(allowlist),
+    };
+  }
   const checkRuns = allowlist.checkRuns.map((name) => {
     const matching =
       checkRunsResponse?.data.check_runs.filter((check) => check.name === name) ?? [];
@@ -543,6 +555,14 @@ function latestBy<T>(items: readonly T[], key: (item: T) => number): T | undefin
     (latest, item) => (latest === undefined || key(item) > key(latest) ? item : latest),
     undefined,
   );
+}
+
+function pipelineEvidenceUnavailableDiagnostic(allowlist: GithubPipelineAllowlist): string {
+  const permissions = [
+    ...(allowlist.checkRuns.length > 0 ? ["Checks"] : []),
+    ...(allowlist.statusContexts.length > 0 ? ["Commit statuses"] : []),
+  ];
+  return `allowlisted pipeline evidence is unavailable; grant the Forge App ${permissions.join(" and ")} read permission${permissions.length === 1 ? "" : "s"}`;
 }
 
 async function readFile(

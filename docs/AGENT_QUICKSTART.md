@@ -139,6 +139,33 @@ export USINE_FORGE_PROFILE_RELEASE_GIT_URL="<GIT_REMOTE_URL>"
 
 The configured repository must match the registration's `owner` and `name`, case-insensitively. The App ID must be nonblank, and the installation ID must be a positive integer. Forge credentials are resolved only at the host execution boundary.
 
+An authorized merge may also use a host-only pipeline allowlist. Set one or both JSON string arrays;
+each entry is matched exactly:
+
+```sh
+export USINE_FORGE_PROFILE_RELEASE_PIPELINE_CHECK_RUNS='["build","lint"]'
+export USINE_FORGE_PROFILE_RELEASE_PIPELINE_STATUS_CONTEXTS='["deploy"]'
+```
+
+Omit both variables, or leave both JSON arrays empty, to preserve the existing merge behavior. Each
+array element is one exact name or context, so names containing commas (for example,
+`test (ubuntu-latest, 24)`) remain intact. A selected check-run name is satisfied only by its latest numeric GitHub check-run ID from the exact live Pull
+Request head, with `status=completed` and `conclusion=success`. A selected status context is
+satisfied only by its latest numeric status ID with `state=success`. Missing, pending, failed,
+cancelled, timed-out, skipped, neutral, stale, unavailable, truncated, or ambiguous same-name
+multi-App evidence fails closed. Non-selected checks and contexts do not affect this product gate;
+GitHub's own platform policy remains an additional final merge gate. No GitHub required-checks API
+is consulted.
+
+When a list is enabled, grant the Forge App the corresponding private-repository read permission:
+Checks: **Read** for `PIPELINE_CHECK_RUNS`, and Commit statuses: **Read** for
+`PIPELINE_STATUS_CONTEXTS`. Readiness checks only the selected permission and reports the observed
+access. If the capability is absent, or the evidence cannot be read, the Task exposes a bounded
+actionable `pipeline_checks` wait without exposing provider details. The server re-observes the same
+approved candidate and review bundle automatically at a bounded interval, including after restart,
+until the original Task deadline or cancellation; it does not call models to poll. A successful
+rerun can release the same candidate, while a changed live head must be observed and approved anew.
+
 An external GitHub review gate is optional and host-configured alongside the Forge profile. Omit the following variables to preserve the current merge behavior. To enable the gate, set the decision explicitly and allowlist stable GitHub user or App IDs; login names and App slugs are not authorization values:
 
 ```sh
@@ -156,6 +183,8 @@ Install the Forge App on the registered repository with these repository permiss
 | Contents | Read and write | Read the base and push the isolated candidate branch. |
 | Pull requests | Read and write | Create, inspect, attest, and, when authorized, merge the exact candidate PR. |
 | Issues | Read and write | Publish the exact-SHA attestation as an Issue/PR comment. |
+| Checks | Read | Required only when `PIPELINE_CHECK_RUNS` is non-empty. |
+| Commit statuses | Read | Required only when `PIPELINE_STATUS_CONTEXTS` is non-empty. |
 
 Before the first Task, run the same read-only readiness check used by the operator entry path after
 writing the host-private registration file in the registration section below:

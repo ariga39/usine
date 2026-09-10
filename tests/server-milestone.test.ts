@@ -115,6 +115,8 @@ interface ForgeServer {
   pullRequests: number;
   attestations: number;
   mergeCalls: number;
+  pipelineConfigured: boolean;
+  pipelineObservations: number;
   captureRequests: Array<{
     batch?: Array<{
       event?: string;
@@ -291,10 +293,15 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   };
 }
 
-async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<ForgeServer> {
+async function forgeServer(
+  fixture: Fixture,
+  mergeAuthorized = false,
+  pipelineConfigured = false,
+): Promise<ForgeServer> {
   let pullRequests = 0;
   let attestations = 0;
   let mergeCalls = 0;
+  let pipelineObservations = 0;
   let merged = false;
   let mergeCommitSha: string | null = null;
   let attestationBody: string | null = null;
@@ -371,6 +378,23 @@ async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<F
         merge_commit_sha: merged ? mergeCommitSha : null,
         mergeable: null,
         mergeable_state: null,
+      });
+      return;
+    }
+    if (pipelineConfigured && method === "GET" && url.pathname.endsWith("/check-runs")) {
+      const observation = pipelineObservations;
+      pipelineObservations += 1;
+      await jsonResponse(response, {
+        total_count: 1,
+        check_runs: [
+          {
+            id: observation + 1,
+            name: "build",
+            status: observation === 0 ? "queued" : "completed",
+            conclusion: observation === 0 ? null : "success",
+            app: { slug: "usine-app" },
+          },
+        ],
       });
       return;
     }
@@ -454,6 +478,10 @@ async function forgeServer(fixture: Fixture, mergeAuthorized = false): Promise<F
     get mergeCalls() {
       return mergeCalls;
     },
+    pipelineConfigured,
+    get pipelineObservations() {
+      return pipelineObservations;
+    },
     captureRequests,
     setCaptureStatus(status: number) {
       captureStatus = status;
@@ -477,6 +505,9 @@ function environment(
     USINE_FORGE_PROFILE_DEFAULT_API_URL: forge.url,
     USINE_FORGE_PROFILE_DEFAULT_GIT_URL: fixture.remote,
     USINE_FORGE_PROFILE_DEFAULT_REPOSITORY: `example/${fixture.taskId}`,
+    ...(forge.pipelineConfigured
+      ? { USINE_FORGE_PROFILE_DEFAULT_PIPELINE_CHECK_RUNS: JSON.stringify(["build"]) }
+      : {}),
     USINE_GOAL_PUBLICATION_SOURCE: `https://github.com/example/${fixture.taskId}/issues/154`,
     CODEX_HOME: join(fixture.root, "codex-home"),
     USINE_CODEX_PATH_OVERRIDE: fixture.fakeCodexPath,
@@ -802,6 +833,111 @@ describe("server-owned delivery milestone", () => {
       expect(await git(fixtureValue.remote, "rev-parse", "refs/heads/main")).toBe(
         terminal.delivery.merge.mergeCommitSha,
       );
+      expect(forge.pullRequests).toBe(1);
+      expect(forge.attestations).toBe(1);
+      expect(forge.mergeCalls).toBe(1);
+    } finally {
+      await stopServer(server);
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("automatically resumes a pending pipeline gate and merges the same approved candidate", async () => {
+    const fixtureValue = await fixture("pipeline-auto-merge", true);
+    const forge = await forgeServer(fixtureValue, true, true);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const server = await startServer(cliPath, fixtureValue, forge, "complete");
+    try {
+      const registered = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "register",
+        fixtureValue.registrationPath,
+      );
+      expect(registered.exitCode, registered.stderr).toBe(0);
+      const submit = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        "submit",
+        fixtureValue.contractPath,
+      );
+      expect(submit.exitCode, submit.stderr).toBe(0);
+
+      const waiting = await waitForStatus(
+        cliPath,
+        fixtureValue,
+        forge,
+        server.url,
+        (result) =>
+          result.state === "waiting" &&
+          (result.waiting as { reason?: string } | null)?.reason === "pipeline_checks",
+      );
+      expect(waiting).toMatchObject({
+        state: "waiting",
+        waiting: { reason: "pipeline_checks" },
+        check: { status: "passed" },
+        review: { verdict: "approved" },
+      });
+      expect(forge.mergeCalls).toBe(0);
+      expect(forge.pullRequests).toBe(1);
+      expect(forge.attestations).toBe(1);
+
+      let terminal: Record<string, unknown> | null = null;
+      for (let attempt = 0; attempt < 900; attempt += 1) {
+        const status = await runCli(
+          cliPath,
+          fixtureValue,
+          forge,
+          server.url,
+          "status",
+          fixtureValue.taskId,
+        );
+        if (status.exitCode === 0) {
+          const result = JSON.parse(status.stdout) as Record<string, unknown>;
+          if (result.state === "merged") {
+            terminal = result;
+            break;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(terminal).not.toBeNull();
+      if (!terminal) throw new Error("timed out waiting for automatic pipeline merge");
+      expect(terminal).toMatchObject({
+        state: "merged",
+        candidateSha: waiting.candidateSha,
+        evidence: { implementerActivations: 1, reviewCycles: 1 },
+        delivery: {
+          prNumber: 1,
+          attestationId: "7",
+          merge: { observedState: "merged" },
+        },
+      });
+
+      const historyResult = await runCliArgs(cliPath, fixtureValue, forge, server.url, [
+        "task",
+        "history",
+        fixtureValue.taskId,
+        "--json",
+      ]);
+      expect(historyResult.exitCode, historyResult.stderr).toBe(0);
+      const history = JSON.parse(historyResult.stdout) as {
+        events: Array<{ data: { type: string } }>;
+      };
+      expect(history.events.filter((event) => event.data.type === "candidate_frozen")).toHaveLength(
+        1,
+      );
+      expect(
+        history.events.filter((event) => event.data.type === "project_check_completed"),
+      ).toHaveLength(1);
+      expect(history.events.filter((event) => event.data.type === "review_completed")).toHaveLength(
+        1,
+      );
+      expect(forge.pipelineObservations).toBe(2);
       expect(forge.pullRequests).toBe(1);
       expect(forge.attestations).toBe(1);
       expect(forge.mergeCalls).toBe(1);

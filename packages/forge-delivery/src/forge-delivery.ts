@@ -73,6 +73,7 @@ export class ForgeDelivery {
         if (error instanceof DeliveryQuarantineError) throw error;
         if (error instanceof ForgeAuthenticationError) throw error;
         if (error instanceof ExternalReviewPendingError) throw error;
+        if (error instanceof PipelineChecksPendingError) throw error;
         const status = statusOf(error);
         if (
           status !== undefined &&

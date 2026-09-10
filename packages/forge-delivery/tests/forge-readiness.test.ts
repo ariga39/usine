@@ -117,6 +117,56 @@ describe("Forge readiness", () => {
     });
   });
 
+  test("requires only the selected private-repository pipeline read capability", async () => {
+    const { result } = await readiness(
+      {},
+      {
+        ...forge,
+        pipeline: { checkRuns: ["build"], statusContexts: [] },
+        permissions: {
+          contents: "write",
+          pull_requests: "write",
+          issues: "write",
+          checks: "read",
+        },
+      },
+    );
+    expect(result).toEqual({
+      ready: true,
+      appSlug: "forge-app",
+      installationId: 42,
+      repository: "owner/repo",
+      permissions: {
+        contents: "write",
+        pullRequests: "write",
+        issues: "write",
+        checks: "read",
+      },
+    });
+  });
+
+  test("reports selected pipeline capability gaps without requiring the other endpoint", async () => {
+    const { result } = await readiness(
+      {},
+      {
+        ...forge,
+        pipeline: { checkRuns: [], statusContexts: ["ci/deploy"] },
+        permissions: {
+          contents: "write",
+          pull_requests: "write",
+          issues: "write",
+          statuses: "none",
+        },
+      },
+    );
+    expect(result).toMatchObject({
+      ready: false,
+      code: "permission_missing",
+      permission: "statuses",
+      expected: "Commit statuses: read",
+    });
+  });
+
   test("reports a wrong nonblank App slug before repository readiness", async () => {
     const { result, requests } = await readiness({}, { ...forge, appSlug: "wrong-slug" });
 
