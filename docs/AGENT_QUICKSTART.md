@@ -19,7 +19,7 @@ Use this state-to-action guide while observing:
 - A running Campaign or Task: reread its current resource and durable history, then continue observing. Do not hand off again or create a replacement standalone Task.
 - A typed transient reviewer interruption: Delivery Run automatically claims a fresh reviewer attempt while the Candidate, passing Check Result, review budget, and original deadline remain valid. The public Task may project `checked` while history shows the interrupted and fresh review attempts; do not invoke `task retry`.
 - A `waiting` Task with `retryable: true`: inspect the current resource and history, then use the explicit same-Task retry only for the supported waiting reasons in section 6. It preserves the contract, authority, Candidate bundle where applicable, and original deadline.
-- A user-authorized observation that is record-for-later: retain the finding and evidence in the authorized Issue or a private handoff, record only its bounded intervention ID/count through the Campaign touch, keep the work running, and do not waive a product gate.
+- A user-authorized observation that is record-for-later: retain the finding and evidence in the authorized Issue or a private handoff, verify that record exists before claiming it is retained, and record only its bounded intervention ID/count through the Campaign touch. A touch ID does not store the finding text. Keep the work running and do not waive a product gate.
 - An explicit user stop, missing authority, or genuine terminal blocker: stop the scoped work and report the actual last observed state. Stopping the service is not a pause and does not freeze deadlines; do not abandon work without the contract's explicit abandonment authority.
 - Merged deliveries with an inconclusive assessment: report the delivery and Campaign verdict separately. Merged artifacts alone do not make a Campaign accepted, and unavailable usage remains unavailable rather than zero.
 
@@ -638,6 +638,8 @@ The server's default active-Task capacity is 1. A full capacity returns a retrya
 ## 7. Recovery and final report
 
 After a restart or recovery in a fresh context, reread the current Campaign and Task resources, durable Task history, and Campaign evidence before taking an action. Reconcile the current exact Candidate, Check Result, Review Verdict, Delivery Effect, deadlines, budgets, waiting reason, blocker, and assessment; process state, transcripts, hooks, and old instructions are not authority. A service shutdown proves only that the process stopped, not that a deadline was paused or a later durable state was reached.
+
+A failed observation, including a permission-denied process query, is unavailable evidence; it does not prove that the queried process or resource is absent. Use a successful relevant observation before reporting success, and distinguish a refused connection from a verified durable state.
 
 Report these facts separately:
 
