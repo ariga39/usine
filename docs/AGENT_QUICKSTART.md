@@ -254,7 +254,29 @@ Assessments and replacement planning use the original Goal deadline, including t
 
 Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. Re-publishing the same bytes cannot repair that immutable fact; after correcting the anchor, publish a new Goal version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
 
-The current contract shape is shown below. Set `delivery` or `merge` to `true` only when the authority source explicitly grants that effect.
+### Select elapsed budgets before publication
+
+Goal Contracts, Task Proposals and standalone Task Contracts require a positive finite integer
+`maxElapsedMs`. This schema requirement does not supply a default duration. Preserve the current
+user's explicit limits and any applicable host policy; an unrelated trial or an executable example
+is not authority for the current work.
+
+When no applicable duration is specified, choose a task-specific planning estimate within the
+authorized scope. Account for the actual implementation, dependency/check work, review and repair,
+delivery, and Campaign assessment involved. Record each selected value, its source, and the relevant
+scope assumptions with the versioned plan before publication and handoff. Label an operator estimate
+as an operator choice, not a user requirement. A reversible estimate does not need routine user
+confirmation; conflicting constraints or a genuinely missing product/authority decision do.
+
+Choose elapsed time separately from implementation/review counts: `null` makes those counts
+unbounded, not time. Each Proposal's duration must fit the Goal envelope. The Goal's deadline begins
+at Campaign creation and each Task retains its first admitted deadline; restart and retry never
+renew either deadline, and terminal Tasks remain terminal. See the [budget and lifecycle
+contract](DESIGN.md#42-task-facts).
+
+The current contract shape is shown below. Its numeric budgets are illustrative, not selected limits
+for a new task. Set `delivery` or `merge` to `true` only when the authority source explicitly grants
+that effect.
 
 ```json
 {
@@ -423,6 +445,9 @@ node apps/cli/dist/cli.mjs repository get "<REPOSITORY_ID>" --json
 ## 5. Write and submit a Task Contract
 
 The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. For a standalone Task, the authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`. Campaign-derived Task Contracts are admitted only by Campaign coordination: they retain the Goal source and may carry the proposal's optional same-Repository Task Issue without requiring it to match that source.
+
+Apply the [elapsed-budget selection rule](#select-elapsed-budgets-before-publication) before
+committing a standalone Task too; the sample `maxElapsedMs` below is not a runtime default.
 
 Current contract shape:
 
