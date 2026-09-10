@@ -75,3 +75,13 @@ These are two one-off walkthroughs, not evidence that one estimated duration is 
 the new guide improves model accuracy by a measured percentage. The historical trial's operator
 choice, correct runtime expiry, unfinished plugin, and independently diagnosed execution defects
 remain separate facts. This change does not extend that trial or authorize another one.
+
+Operator-reported usage, summed across all assistant messages in each exported phase:
+
+| Phase | Messages | Input | Output | Reasoning | Cache read |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 23 | 126,782 | 11,786 | 5,700 | 1,120,128 |
+| Candidate | 25 | 71,249 | 8,153 | 9,514 | 1,358,848 |
+
+Cache-write counters were zero in both phases. These are operator-session observations, not product
+Campaign usage, billable totals, a causal cost comparison, or a profile recommendation.
