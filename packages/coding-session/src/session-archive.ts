@@ -6,6 +6,7 @@ import { z } from "zod";
 import type {
   ProviderNeutralCompletedEvidence,
   ProviderNeutralUsage,
+  ProviderNeutralUsageCompleteness,
 } from "./coding-session-adapter.js";
 
 const archiveIdPattern = /^archive_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -87,6 +88,7 @@ export const sessionArchiveSchema = z
         reasoningOutputTokens: z.number().int().nonnegative().optional(),
       })
       .nullable(),
+    usageCompleteness: z.enum(["complete", "partial"]).optional(),
     byteLength: z.number().int().nonnegative(),
     truncated: z.boolean(),
     warnings: z.array(z.string()),
@@ -109,6 +111,7 @@ const sessionArchiveTombstoneSchema = z
     adapter: z.enum(["sdk", "app-server", "opencode2"]).nullable(),
     phase: z.enum(["startup", "thread", "turn", "output"]).nullable(),
     failureClass: failureClassSchema,
+    usageCompleteness: z.enum(["complete", "partial"]).optional(),
     byteLength: z.number().int().nonnegative(),
     truncated: z.literal(false),
     warnings: z.array(z.string()),
@@ -133,6 +136,7 @@ export interface SessionArchiveManifest {
   status: SessionArchiveStatus;
   captureStatus: SessionArchiveCaptureStatus;
   completeness: "complete" | "partial";
+  usageCompleteness?: ProviderNeutralUsageCompleteness;
   sessionId: string | null;
   adapter: SessionArchive["adapter"];
   phase: SessionArchive["phase"];
@@ -227,6 +231,7 @@ export class SessionArchiveWriter {
       rawFinalResponse: null,
       normalizedOutput: null,
       usage: null,
+      usageCompleteness: undefined,
       byteLength: 0,
       truncated: false,
       warnings: [],
@@ -262,14 +267,24 @@ export class SessionArchiveWriter {
     void this.schedulePersist();
   }
 
-  setUsage(usage: ProviderNeutralUsage | null): void {
+  setUsage(
+    usage: ProviderNeutralUsage | null,
+    completeness?: ProviderNeutralUsageCompleteness,
+  ): void {
+    if (this.record.usageCompleteness === "complete" && completeness === "partial") return;
     this.record.usage = usage;
+    if (completeness !== undefined) this.record.usageCompleteness = completeness;
     void this.schedulePersist();
   }
 
-  setProviderResult(rawFinalResponse: string, usage: CompleteSessionArchive["usage"]): void {
+  setProviderResult(
+    rawFinalResponse: string,
+    usage: CompleteSessionArchive["usage"],
+    completeness?: ProviderNeutralUsageCompleteness,
+  ): void {
     this.record.rawFinalResponse = rawFinalResponse;
     this.record.usage = usage;
+    if (completeness !== undefined) this.record.usageCompleteness = completeness;
     this.providerCompleted = true;
     void this.schedulePersist();
   }
@@ -289,6 +304,7 @@ export class SessionArchiveWriter {
     status: SessionArchiveStatus;
     sessionId: string | null;
     usage: CompleteSessionArchive["usage"];
+    usageCompleteness?: ProviderNeutralUsageCompleteness;
     failure: string | null;
     phase: SessionArchive["phase"];
     failureClass: SessionArchive["failureClass"];
@@ -300,7 +316,13 @@ export class SessionArchiveWriter {
   }> {
     this.record.status = input.status;
     this.record.sessionId = input.sessionId ?? this.record.sessionId;
-    this.record.usage = input.usage ?? this.record.usage;
+    if (!(this.record.usageCompleteness === "complete" && input.usageCompleteness === "partial"))
+      this.record.usage = input.usage ?? this.record.usage;
+    if (
+      input.usageCompleteness !== undefined &&
+      !(this.record.usageCompleteness === "complete" && input.usageCompleteness === "partial")
+    )
+      this.record.usageCompleteness = input.usageCompleteness;
     this.record.failure = input.failure;
     this.record.phase = input.phase ?? this.record.phase;
     this.record.failureClass = input.failureClass;
@@ -726,6 +748,7 @@ function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
     failureClass,
     byteLength,
     truncated,
+    usageCompleteness,
     warnings,
   } = archive;
   return {
@@ -745,6 +768,7 @@ function manifestFromArchive(archive: SessionArchive): SessionArchiveManifest {
     failureClass,
     byteLength,
     truncated,
+    ...(usageCompleteness === undefined ? {} : { usageCompleteness }),
     warnings: [...warnings],
   };
 }

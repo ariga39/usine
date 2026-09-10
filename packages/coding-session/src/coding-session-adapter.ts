@@ -23,9 +23,12 @@ export interface ProviderNeutralUsage {
   readonly reasoningOutputTokens?: number;
 }
 
+export type ProviderNeutralUsageCompleteness = "complete" | "partial";
+
 export interface ProviderNeutralUsageObservation {
   readonly usage: ProviderNeutralUsage;
   readonly semantics: "delta" | "replacement";
+  readonly completeness?: ProviderNeutralUsageCompleteness;
   readonly actualModel?: { readonly model: string; readonly provider: string };
 }
 

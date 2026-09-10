@@ -4,6 +4,7 @@ import {
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
   type CampaignAssessorSessionRequest,
+  type ProviderNeutralUsageCompleteness,
 } from "@usine/coding-session";
 import type {
   CampaignAssessmentEvidence,
@@ -82,6 +83,7 @@ function emptyUsage(): CampaignAssessmentUsage {
     cacheWriteInputTokens: null,
     outputTokens: null,
     reasoningOutputTokens: null,
+    coverage: "unavailable",
   };
 }
 
@@ -94,6 +96,7 @@ function usageFrom(
     outputTokens?: number;
     reasoningOutputTokens?: number;
   } | null,
+  completeness?: ProviderNeutralUsageCompleteness,
 ): CampaignAssessmentUsage {
   return {
     inputTokens: usage?.inputTokens ?? null,
@@ -102,6 +105,16 @@ function usageFrom(
     cacheWriteInputTokens: usage?.cacheWriteInputTokens ?? null,
     outputTokens: usage?.outputTokens ?? null,
     reasoningOutputTokens: usage?.reasoningOutputTokens ?? null,
+    coverage:
+      usage === null
+        ? "unavailable"
+        : (completeness ??
+          (usage.inputTokens !== undefined &&
+          usage.cachedInputTokens !== undefined &&
+          usage.uncachedInputTokens !== undefined &&
+          usage.outputTokens !== undefined
+            ? "complete"
+            : "partial")),
   };
 }
 
@@ -179,8 +192,15 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
         result,
       );
       if (result.status !== "completed" || !result.output)
-        return { ...inconclusive(result.summary, usageFrom(result.usage)), modelRuns };
-      return { ...result.output, usage: usageFrom(result.usage), modelRuns };
+        return {
+          ...inconclusive(result.summary, usageFrom(result.usage, result.usageCompleteness)),
+          modelRuns,
+        };
+      return {
+        ...result.output,
+        usage: usageFrom(result.usage, result.usageCompleteness),
+        modelRuns,
+      };
     } catch {
       return inconclusive("Campaign assessor was unavailable");
     }

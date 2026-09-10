@@ -28,6 +28,7 @@ export {
 } from "./coding-session.js";
 export type {
   ProviderNeutralUsage,
+  ProviderNeutralUsageCompleteness,
   ProviderNeutralUsageObservation,
 } from "./coding-session-adapter.js";
 export {

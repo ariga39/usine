@@ -357,6 +357,7 @@ describe("usage report projection", () => {
         outputTokens?: number;
       } | null;
       semantics: "delta" | "replacement";
+      usageCompleteness?: "complete" | "partial";
     }): UsageReportSource => {
       const roleFields = input.role === "reviewer" ? { reviewCycle: 1 } : {};
       const events: TaskEvent[] = [
@@ -379,6 +380,7 @@ describe("usage report projection", () => {
                 sessionId: input.sessionId,
                 source: "provider",
                 semantics: input.semantics,
+                ...(input.usageCompleteness ? { usageCompleteness: input.usageCompleteness } : {}),
                 actualModel: { model: "provider/gpt-5", provider: "provider:actual" },
                 usage: input.usage,
               }),
@@ -412,6 +414,7 @@ describe("usage report projection", () => {
           sessionId: "interrupted-complete",
           startedAtEpochMs: 511_537,
           semantics: "replacement",
+          usageCompleteness: "partial",
           usage: {
             inputTokens: 120,
             cachedInputTokens: 20,
@@ -454,7 +457,7 @@ describe("usage report projection", () => {
         cacheWriteInputTokens: null,
         outputTokens: 8,
         reasoningOutputTokens: null,
-        coverage: "complete",
+        coverage: "partial",
       },
     });
     expect(

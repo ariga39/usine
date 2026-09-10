@@ -71,6 +71,9 @@ export function campaignModelRunFromObservation(
           cacheWriteInputTokens: observation.usage.cacheWriteInputTokens ?? null,
           outputTokens: observation.usage.outputTokens ?? null,
           reasoningOutputTokens: observation.usage.reasoningOutputTokens ?? null,
+          coverage:
+            observation.usageCompleteness ??
+            (campaignUsageDimensionsComplete(observation.usage) ? "complete" : "partial"),
         }
       : null,
   };
@@ -114,4 +117,14 @@ export function campaignModelRunFromObservation(
         : null,
     },
   ];
+}
+
+function campaignUsageDimensionsComplete(usage: SessionObservation["usage"]): boolean {
+  return (
+    usage !== null &&
+    usage.inputTokens !== undefined &&
+    usage.cachedInputTokens !== undefined &&
+    usage.uncachedInputTokens !== undefined &&
+    usage.outputTokens !== undefined
+  );
 }

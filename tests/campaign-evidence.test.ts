@@ -660,6 +660,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     failure: "private provider diagnostic",
     phase: "output",
     failureClass: "transport",
+    usageCompleteness: "partial",
   } satisfies SessionObservation;
   const repository = { id: "repo-one", owner: "example", name: "repo-one" };
   const modelRuns = [
@@ -709,6 +710,9 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     failureClass: "network",
   });
   expect(modelRuns).toHaveLength(3);
+  expect(modelRuns.find((run) => run.role === "replacement-planner")?.usage).toMatchObject({
+    coverage: "partial",
+  });
 
   const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
   try {
@@ -800,7 +804,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     role: "replacement-planner",
     outcome: "failed",
     failureClass: "protocol",
-    usage: { inputTokens: 40, cachedInputTokens: 5, outputTokens: 0 },
+    usage: { inputTokens: 40, cachedInputTokens: 5, outputTokens: 0, coverage: "partial" },
   });
   expect(second!.runs.every((run) => run.taskId !== null)).toBe(true);
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);

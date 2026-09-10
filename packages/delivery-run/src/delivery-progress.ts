@@ -40,6 +40,7 @@ export function emitCodingObservation(
           ...(reviewCycle === undefined ? {} : { reviewCycle }),
           source: observation.source,
           semantics: observation.semantics,
+          ...(observation.completeness ? { usageCompleteness: observation.completeness } : {}),
           ...(observation.actualModel ? { actualModel: observation.actualModel } : {}),
           usage: observation.usage,
         };
