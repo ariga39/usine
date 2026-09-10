@@ -16,6 +16,7 @@ import {
   type ForgeDeliveryOptions,
 } from "./forge-policy.js";
 import { externalReviewBlocksMerge, readGithubNativeReviews } from "./external-review.js";
+import { readGithubPipelineEvidence } from "./github-read.js";
 
 function statusOf(error: unknown): number | undefined {
   return typeof error === "object" && error !== null && "status" in error
@@ -31,6 +32,15 @@ export class ExternalReviewPendingError extends Error {
   constructor(readonly diagnostic: string) {
     super(diagnostic);
     this.name = "ExternalReviewPendingError";
+  }
+}
+
+export class PipelineChecksPendingError extends Error {
+  readonly code = "pipeline_checks_pending" as const;
+
+  constructor(readonly diagnostic: string) {
+    super(diagnostic);
+    this.name = "PipelineChecksPendingError";
   }
 }
 
@@ -246,6 +256,7 @@ export class ForgeDelivery {
       );
     await this.ensureAttestation(client, owner, repo, livePullRequest.number, marker, body);
     await this.enforceExternalReviewGate(client, owner, repo, livePullRequest.number, sha);
+    await this.enforcePipelineGate(client, owner, repo, livePullRequest.number, sha);
     let mergeResponse: Awaited<ReturnType<typeof client.octokit.rest.pulls.merge>>;
     try {
       mergeResponse = await client.octokit.rest.pulls.merge({
@@ -328,6 +339,41 @@ export class ForgeDelivery {
     });
     const blocker = externalReviewBlocksMerge(policy, evidence, headSha);
     if (blocker) throw new ExternalReviewPendingError(blocker);
+  }
+
+  private async enforcePipelineGate(
+    client: Awaited<ReturnType<typeof createGithubApiClient>>,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    headSha: string,
+  ): Promise<void> {
+    const pipeline = this.options.forge.pipeline;
+    if (!pipeline || (pipeline.checkRuns.length === 0 && pipeline.statusContexts.length === 0))
+      return;
+    let evidence;
+    try {
+      evidence = await readGithubPipelineEvidence(
+        client,
+        { owner, name: repo },
+        pullNumber,
+        headSha,
+        pipeline,
+        {
+          timeout: remainingUntil(this.options.deadlineEpochMs),
+          retries: 0,
+          signal: this.options.signal,
+        },
+      );
+    } catch {
+      throw new PipelineChecksPendingError(
+        "allowlisted pipeline evidence is unavailable; grant the Forge App Checks and Commit statuses read permissions",
+      );
+    }
+    if (!evidence.ready)
+      throw new PipelineChecksPendingError(
+        evidence.diagnostic ?? "allowlisted pipeline checks have not all succeeded on the current head",
+      );
   }
 
   private async probeMerged(

@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { remainingUntil } from "@usine/task-authority";
 import { Duration, Effect } from "effect";
-import type { GithubApiPolicy, ForgeClient } from "./forge-policy.js";
+import type { GithubApiPolicy, ForgeClient, GithubPipelineAllowlist } from "./forge-policy.js";
 import { createGithubApiClient } from "./forge-policy.js";
 import { readGithubReviewEvidence } from "./external-review.js";
 import { z } from "zod";
@@ -28,6 +28,22 @@ export const githubReadToolNames = [
 
 export type GithubReadToolName = (typeof githubReadToolNames)[number];
 export type GithubReadRole = "implementer" | "reviewer";
+
+export interface GithubPipelineEvidence {
+  readonly sha: string;
+  readonly ready: boolean;
+  readonly checkRuns: readonly {
+    readonly name: string;
+    readonly status: string;
+    readonly conclusion: string | null;
+    readonly source: string | null;
+  }[];
+  readonly statusContexts: readonly {
+    readonly context: string;
+    readonly state: string;
+  }[];
+  readonly diagnostic?: string;
+}
 
 export interface GithubReadMcpOptions {
   repository: { owner: string; name: string };
@@ -403,6 +419,130 @@ async function readPullRequestChecks(
       conclusion: check.conclusion,
     })),
   });
+}
+
+/**
+ * Observe the configured pipeline entries for one live Pull Request head.
+ * This is the only boundary that interprets GitHub check-run and status
+ * payloads for the merge gate.
+ */
+export async function readGithubPipelineEvidence(
+  client: ForgeClient,
+  repository: { readonly owner: string; readonly name: string },
+  pullNumber: number,
+  expectedSha: string,
+  allowlist: GithubPipelineAllowlist,
+  request?: { readonly timeout: number; readonly retries: 0; readonly signal?: AbortSignal },
+): Promise<GithubPipelineEvidence> {
+  const pullRequest = await client.octokit.rest.pulls.get({
+    owner: repository.owner,
+    repo: repository.name,
+    pull_number: pullNumber,
+    ...(request ? { request } : {}),
+  });
+  const liveSha = pullRequest.data.head.sha;
+  if (liveSha !== expectedSha) {
+    return {
+      sha: liveSha,
+      ready: false,
+      checkRuns: [],
+      statusContexts: [],
+      diagnostic: `pipeline evidence is stale: Pull Request head is ${liveSha}`,
+    };
+  }
+
+  const [checkRunsResponse, statusesResponse] = await Promise.all([
+    allowlist.checkRuns.length === 0
+      ? undefined
+      : client.octokit.rest.checks.listForRef({
+          owner: repository.owner,
+          repo: repository.name,
+          ref: expectedSha,
+          per_page: MAX_ITEMS,
+          ...(request ? { request } : {}),
+        }),
+    allowlist.statusContexts.length === 0
+      ? undefined
+      : client.octokit.rest.repos.getCombinedStatusForRef({
+          owner: repository.owner,
+          repo: repository.name,
+          ref: expectedSha,
+          per_page: MAX_ITEMS,
+          ...(request ? { request } : {}),
+        }),
+  ]);
+  const checkRuns = allowlist.checkRuns.map((name) => {
+    const matching =
+      checkRunsResponse?.data.check_runs.filter((check) => check.name === name) ?? [];
+    return latestBy(matching, (check) => check.id);
+  });
+  const statuses = allowlist.statusContexts.map((context) => {
+    const matching =
+      statusesResponse?.data.statuses.filter((status) => status.context === context) ?? [];
+    return latestBy(matching, (status) => status.id);
+  });
+  const checkSources = allowlist.checkRuns.map((name) => {
+    const sources = new Set(
+      (checkRunsResponse?.data.check_runs ?? [])
+        .filter((check) => check.name === name)
+        .map((check) => check.app?.id ?? check.app?.slug ?? check.app?.name ?? null),
+    );
+    return { name, ambiguous: sources.size > 1 };
+  });
+  const truncated =
+    (checkRunsResponse?.data.total_count ?? 0) > MAX_ITEMS ||
+    (statusesResponse?.data.total_count ?? 0) > MAX_ITEMS;
+  const checkEvidence = checkRuns.flatMap((check, index) =>
+    check === undefined
+      ? []
+      : [
+          {
+            name: allowlist.checkRuns[index]!,
+            status: check.status,
+            conclusion: check.conclusion,
+            source: check.app?.slug ?? check.app?.name ?? null,
+          },
+        ],
+  );
+  const statusEvidence = statuses.flatMap((status, index) =>
+    status === undefined
+      ? []
+      : [{ context: allowlist.statusContexts[index]!, state: status.state }],
+  );
+  const failures = [
+    ...(truncated ? ["pipeline evidence was truncated"] : []),
+    ...allowlist.checkRuns.flatMap((name, index) => {
+      const check = checkRuns[index];
+      const source = checkSources[index];
+      return source?.ambiguous
+        ? [`check run '${name}' has ambiguous sources`]
+        : check?.status === "completed" && check.conclusion === "success"
+          ? []
+          : [
+              `check run '${name}' is ${check ? `${check.status}/${check.conclusion ?? "no conclusion"}` : "missing"}`,
+            ];
+    }),
+    ...allowlist.statusContexts.flatMap((context, index) => {
+      const status = statuses[index];
+      return status?.state === "success"
+        ? []
+        : [`status context '${context}' is ${status?.state ?? "missing"}`];
+    }),
+  ];
+  return {
+    sha: expectedSha,
+    ready: failures.length === 0,
+    checkRuns: checkEvidence,
+    statusContexts: statusEvidence,
+    ...(failures.length > 0 ? { diagnostic: failures.join("; ").slice(0, 512) } : {}),
+  };
+}
+
+function latestBy<T>(items: readonly T[], key: (item: T) => number): T | undefined {
+  return items.reduce<T | undefined>(
+    (latest, item) => (latest === undefined || key(item) > key(latest) ? item : latest),
+    undefined,
+  );
 }
 
 async function readFile(

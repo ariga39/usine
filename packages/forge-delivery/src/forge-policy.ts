@@ -16,7 +16,17 @@ const PORTABLE_ENVIRONMENT_KEYS = [
   "PATHEXT",
 ] as const;
 
-export type ForgeReadinessPermission = "contents" | "pull_requests" | "issues";
+export type ForgeReadinessPermission =
+  | "contents"
+  | "pull_requests"
+  | "issues"
+  | "checks"
+  | "statuses";
+
+export interface GithubPipelineAllowlist {
+  readonly checkRuns: readonly string[];
+  readonly statusContexts: readonly string[];
+}
 
 export type GithubApiPolicy =
   | {
@@ -43,9 +53,11 @@ export type GithubApiPolicy =
 export type ForgePolicy =
   | (Extract<GithubApiPolicy, { mode: "test" }> & {
       gitUrl: string;
+      pipeline?: GithubPipelineAllowlist;
     })
   | (Extract<GithubApiPolicy, { mode: "app" }> & {
       gitUrl: string;
+      pipeline?: GithubPipelineAllowlist;
     });
 
 export interface ExternalReviewPolicy {
@@ -114,6 +126,8 @@ export type ForgeReadinessResult =
         readonly contents: "write";
         readonly pullRequests: "write";
         readonly issues: "write";
+        readonly checks?: "read" | "write";
+        readonly statuses?: "read" | "write";
       };
     }
   | {
@@ -298,6 +312,29 @@ export async function checkForgeReadiness(
           action: `Update the Forge App installation permission for ${label} to write, then rerun readiness.`,
         };
     }
+    if (options.forge.pipeline) {
+      const requirements = [
+        ...(options.forge.pipeline.checkRuns.length > 0
+          ? ([["checks", "Actions checks"]] as const)
+          : []),
+        ...(options.forge.pipeline.statusContexts.length > 0
+          ? ([["statuses", "Commit statuses"]] as const)
+          : []),
+      ];
+      for (const requirement of requirements) {
+        const [permission, label] = requirement;
+        const observed = permissions[permission];
+        if (observed !== "read" && observed !== "write")
+          return {
+            ready: false,
+            code: "permission_missing",
+            permission,
+            expected: `${label}: read`,
+            observed: `${label}: ${observed ?? "unavailable"}`,
+            action: `Update the Forge App installation permission for ${label} to read, then rerun readiness.`,
+          };
+      }
+    }
 
     const repositoryResponse = await client.octokit.request("GET /repos/{owner}/{repo}", {
       owner: options.repository.owner,
@@ -319,7 +356,17 @@ export async function checkForgeReadiness(
       appSlug: options.forge.appSlug,
       installationId,
       repository: repositoryName,
-      permissions: { contents: "write", pullRequests: "write", issues: "write" },
+      permissions: {
+        contents: "write",
+        pullRequests: "write",
+        issues: "write",
+        ...(options.forge.pipeline?.checkRuns.length
+          ? { checks: permissions.checks === "write" ? "write" : "read" }
+          : {}),
+        ...(options.forge.pipeline?.statusContexts.length
+          ? { statuses: permissions.statuses === "write" ? "write" : "read" }
+          : {}),
+      },
     };
   } catch (error) {
     const status = providerStatusOf(error);
@@ -422,7 +469,7 @@ function installationAuthenticationFrom(value: unknown): InstallationAuthenticat
   if (typeof rawPermissions !== "object" || rawPermissions === null)
     return { token, installationId };
   const permissions: Partial<Record<ForgeReadinessPermission, string>> = {};
-  for (const permission of ["contents", "pull_requests", "issues"] as const) {
+  for (const permission of ["contents", "pull_requests", "issues", "checks", "statuses"] as const) {
     const observed = Reflect.get(rawPermissions, permission);
     if (typeof observed === "string") permissions[permission] = observed;
   }

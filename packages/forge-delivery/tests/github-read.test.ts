@@ -4,11 +4,106 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { describe, expect, test } from "vite-plus/test";
 import {
   createGithubReadMcpServer,
+  readGithubPipelineEvidence,
   startGithubReadMcpHttp,
   type GithubReadMcpHttpHandle,
 } from "../src/index.js";
+import { createGithubApiClient } from "../src/index.js";
 
 const exactSha = "a".repeat(40);
+
+test("observes only the configured exact-head pipeline entries", async () => {
+  const requests: string[] = [];
+  const client = await createGithubApiClient(
+    {
+      mode: "test",
+      appSlug: "test-app",
+      token: "test-token",
+      apiUrl: "https://github.invalid",
+    },
+    async (input) => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      requests.push(url.pathname);
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      if (url.pathname === `/repos/example/authorized/commits/${exactSha}/check-runs`)
+        return Response.json({
+          total_count: 2,
+          check_runs: [
+            {
+              id: 9,
+              name: "required",
+              status: "completed",
+              conclusion: "success",
+              app: { id: 42, slug: "ci" },
+            },
+            {
+              id: 10,
+              name: "required",
+              status: "queued",
+              conclusion: null,
+              app: { id: 42, slug: "ci" },
+            },
+          ],
+        });
+      if (url.pathname === `/repos/example/authorized/commits/${exactSha}/status`)
+        return Response.json({
+          total_count: 1,
+          statuses: [{ id: 1, context: "deploy", state: "success" }],
+        });
+      return Response.json({ message: "not found" }, { status: 404 });
+    },
+  );
+
+  const evidence = await readGithubPipelineEvidence(
+    client,
+    { owner: "example", name: "authorized" },
+    7,
+    exactSha,
+    { checkRuns: ["required"], statusContexts: ["deploy"] },
+  );
+
+  expect(evidence).toMatchObject({ sha: exactSha, ready: false });
+  expect(evidence.diagnostic).toContain("required");
+  expect(evidence.diagnostic).toContain("queued");
+  expect(requests).toEqual([
+    "/repos/example/authorized/pulls/7",
+    `/repos/example/authorized/commits/${exactSha}/check-runs`,
+    `/repos/example/authorized/commits/${exactSha}/status`,
+  ]);
+});
+
+test("does not require an unconfigured pipeline source", async () => {
+  const requests: string[] = [];
+  const client = await createGithubApiClient(
+    {
+      mode: "test",
+      appSlug: "test-app",
+      token: "test-token",
+      apiUrl: "https://github.invalid",
+    },
+    async (input) => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      requests.push(url.pathname);
+      if (url.pathname === "/repos/example/authorized/pulls/7")
+        return Response.json({ head: { sha: exactSha } });
+      if (url.pathname === `/repos/example/authorized/commits/${exactSha}/check-runs`)
+        return Response.json({
+          total_count: 1,
+          check_runs: [{ id: 10, name: "required", status: "completed", conclusion: "success" }],
+        });
+      return Response.json({ message: "unconfigured source must not be read" }, { status: 403 });
+    },
+  );
+
+  await expect(
+    readGithubPipelineEvidence(client, { owner: "example", name: "authorized" }, 7, exactSha, {
+      checkRuns: ["required"],
+      statusContexts: [],
+    }),
+  ).resolves.toMatchObject({ ready: true });
+  expect(requests).not.toContain(`/repos/example/authorized/commits/${exactSha}/status`);
+});
 
 describe("host-owned GitHub read MCP", () => {
   test("uses a separate host credential and exposes only bounded exact reads", async () => {
