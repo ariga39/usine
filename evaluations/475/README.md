@@ -131,7 +131,35 @@ by the provider remains unavailable. Raw archives and machine/profile details
 remain private. No pricing, historical backfill, remote PostHog delivery or
 Campaign acceptance is claimed.
 
-A fresh ordinary observation of the strengthened case is pending. It uses the
-same model/profile and Task behavior, with only the missing query-credential
-combination added to the host check. Neither a statistical model improvement
-nor general prevention of implementation mistakes is inferred.
+### Strengthened-case observation
+
+A fresh ordinary observation on the same Usine source and model/profile produced
+candidate `a6fce2532d13e11d9a574a726569e5f01a4f7c35` from fixture base
+`afdc1198161a6594c918e0b5f334d96b5b0bce02`, again in one implementation activation.
+Task behavior was unchanged; the only case change added the missing query-token
+combination. The exact-SHA full registered command passed, including rejection
+of query credentials with and without a valid Bearer header. Only implementation
+and deployment documentation changed; the frozen tests, dependency/lockfile,
+scripts and tool configuration were unchanged.
+
+The observer stopped after the persisted check, before any review reservation,
+repair or forge effect. One complete untruncated implementation archive and one
+complete usage invocation were retained. All six pinned source reads succeeded.
+
+| Strengthened-case measurement | Observed value |
+| --- | ---: |
+| Total input tokens, including cache reads | 883,384 |
+| Cache-read input tokens | 816,640 |
+| Uncached input tokens | 66,744 |
+| Cache-write input tokens | 0 |
+| Output tokens, including reasoning | 19,836 |
+| Reasoning output tokens | 9,991 |
+| Implementation elapsed time | 446,800 ms |
+| Whole observation elapsed time | 455,267 ms |
+
+The final positive control passes all three tests; the final invented-interface
+control passes its build/self-test and fails both host tests. The measured gain
+is an earlier, source-grounded falsifier and one observed compliant candidate
+for this bounded case. The initial green-but-incomplete check and additional
+validation cost remain visible. These two observations do not establish a
+statistical model improvement, cost reduction or general prevention of mistakes.
