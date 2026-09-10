@@ -26,4 +26,25 @@ node apps/cli/dist/cli.mjs profile evaluate "<TARGET_DIRECTORY>/evaluations/462/
 
 Generation and plan admission make no model request. Evaluation requires scoped external-model authority and uses the shipped fresh read-only reviewer, archive and usage path; it does not run a target migration or publish a forge effect. Keep generated registration, private profiles, raw reports and archives local. Publish only sanitized per-case outcomes, exact revisions, coverage and usage. Any instruction change must be evaluated against the same frozen cases; do not manufacture a baseline failure or infer universal correctness from three examples.
 
-Current checkpoint: actual checks and shipped plan admission pass. Live semantic results and independent final review remain pending.
+## Observed results
+
+The shipped CLI completed all six observations at Usine source `da0afe05dffbdfa501d67206cecc1fc33ef5dddc`. Both arms used the same model stack, developer instructions and frozen cases; only reasoning changed. This is a current-profile characterization, not a before/after instruction improvement or a production profile promotion.
+
+Base: `00d2294462ca4149044895de65c636a55b40702c`. Exact Candidates:
+
+| Case | Candidate SHA | Baseline verdict | Candidate-arm verdict |
+| --- | --- | --- | --- |
+| A | `8a49a6331825d6328e07eba3bea806580d250fbe` | `changes_requested` | `changes_requested` |
+| B | `92701ad765b5c596384c2d131ca380b008c1e562` | `changes_requested` | `changes_requested` |
+| C | `979906bf5714bfe9843aa1e6823c8176a32261a5` | `approved` | `approved` |
+
+Both A verdicts explicitly reconciled the logged missing `count` against the contract despite green checks. Both B verdicts identified the absent runtime export and explained how the declaration and standalone double hid the broken application relationship; direct import evidence established the failure. Both C verdicts accepted the additive change with no findings or unrelated demands.
+
+| Arm | Correct | False approvals | False change requests | Inconclusive runs | Elapsed ms | Input tokens | Output tokens | Tool failures |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 3 | 0 | 0 | 0 | 187,510 | 182,459 | 3,812 | 2 |
+| Candidate | 3 | 0 | 0 | 0 | 175,235 | 206,578 | 3,678 | 2 |
+
+All six archives were revalidated as stored/complete by the evaluator; all six runs had reported input/output usage. The four recorded tool failures include the expected broken-import probe and three command sequences stopped by unmatched environment/file discovery. They are retained, not converted to zero. No raw transcript or host configuration is published here.
+
+The evaluator recommendation is `inconclusive` with no inconclusive-run reasons: both arms passed correctness, but the comparison does not select an overall winner. This is not an inconclusive semantic verdict for the six cases. There is no measured instruction improvement, statistical reliability guarantee, billing claim, or authority to repair or reclassify the historical target Campaign. The existing reviewer instructions already distinguish this corpus, so no extra instruction policy was added. Retain these cases for future evaluation against the same labels when evidence warrants a change.
