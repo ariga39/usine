@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:net";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable } from "node:stream";
 import { createOpencodeClient, type Config } from "@opencode-ai/sdk/v2";
 import { z } from "zod";
 import { mergeProviderNeutralUsage } from "@usine/task-authority";
@@ -25,8 +26,10 @@ import {
 } from "./opencode2-sandbox.js";
 
 const STARTUP_POLL_MS = 20;
+const STARTUP_HEALTH_ATTEMPT_TIMEOUT_MS = 1_000;
 const GRACEFUL_INTERRUPT_WAIT_MS = 1_000;
 const CHILD_CLOSE_WAIT_MS = 1_000;
+const STARTUP_STDERR_LIMIT = 16 * 1024;
 const sessionInfoSchema = z.object({ id: z.string().min(1) });
 const promptAdmissionSchema = z.object({ sessionID: z.string().min(1) });
 const PERMISSION_REPLY_TIMEOUT_MS = 1_000;
@@ -99,6 +102,10 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     let primaryFailure: unknown;
     let result: CodingSessionAdapterResult | undefined;
     let cleanupFailure: unknown;
+    let startupStderr = "";
+    let startupStderrTruncated = false;
+    let stderrClosed: Promise<void> | undefined;
+    let stderrStream: Readable | undefined;
 
     try {
       const port = await availablePort();
@@ -112,6 +119,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         mkdir(join(privateDirectory, "xdg-data"), { recursive: true }),
         mkdir(join(privateDirectory, "xdg-state"), { recursive: true }),
         mkdir(join(privateDirectory, "xdg-cache"), { recursive: true }),
+        mkdir(join(privateDirectory, "tmp"), { recursive: true }),
       ]);
       const sandbox = await this.sandbox.prepare({
         workspace: context.workspace,
@@ -141,10 +149,27 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
             XDG_DATA_HOME: join(privateDirectory, "xdg-data"),
             XDG_STATE_HOME: join(privateDirectory, "xdg-state"),
             XDG_CACHE_HOME: join(privateDirectory, "xdg-cache"),
+            TMPDIR: join(privateDirectory, "tmp"),
           },
-          stdio: "ignore",
+          stdio: ["ignore", "ignore", "pipe"],
         },
       );
+      const stderr = server.stderr;
+      if (stderr) {
+        stderrStream = stderr;
+        stderr.setEncoding("utf8");
+        stderrClosed = new Promise<void>((resolve) => stderr.once("end", resolve));
+        stderr.on("data", (chunk: string) => {
+          if (startupStderrTruncated) return;
+          const remaining = STARTUP_STDERR_LIMIT - startupStderr.length;
+          if (remaining <= 0) {
+            startupStderrTruncated = true;
+            return;
+          }
+          startupStderr += chunk.slice(0, remaining);
+          if (chunk.length > remaining) startupStderrTruncated = true;
+        });
+      }
       server.once("error", () => undefined);
       childSettled = childSettlement(server);
       client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
@@ -481,8 +506,25 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       try {
         if (context.signal.aborted) await gracefulInterrupt();
         if (server && childSettled) await settleChild(server, childSettled);
+        if (stderrClosed) {
+          await waitForChildSettlement(stderrClosed, CHILD_CLOSE_WAIT_MS);
+          stderrStream?.destroy();
+        }
       } catch (error) {
         cleanupFailure = error;
+      }
+      if (phase === "startup" && startupStderr) {
+        try {
+          await context.onItemCompleted?.({
+            type: "command_execution",
+            id: "opencode2-startup-stderr",
+            status: "failed",
+            command: "opencode serve",
+            output: startupStderr + (startupStderrTruncated ? "\n[truncated]" : ""),
+          });
+        } catch {
+          // Private diagnostics never replace the provider result.
+        }
       }
       try {
         if (privateDirectory) await rm(privateDirectory, { recursive: true, force: true });
@@ -735,8 +777,16 @@ async function waitUntilReady(
       if (signal.aborted)
         throw new CodingSessionInterruption("startup", "cancellation", "coding session cancelled");
       try {
+        const healthSignal = AbortSignal.any([
+          signal,
+          AbortSignal.timeout(STARTUP_HEALTH_ATTEMPT_TIMEOUT_MS),
+        ]);
         await Promise.race([
-          client.v2.health.get({ responseStyle: "data", throwOnError: true, signal }),
+          client.v2.health.get({
+            responseStyle: "data",
+            throwOnError: true,
+            signal: healthSignal,
+          }),
           processFailure,
         ]);
         return;

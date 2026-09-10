@@ -144,6 +144,8 @@ export function sandboxProfile(input: {
     '(import "system.sb")',
     "(allow process-exec process-fork)",
     "(allow network-outbound)",
+    '(allow network-bind (local ip "localhost:*"))',
+    '(allow network-inbound (local ip "localhost:*"))',
     `(allow file-read* file-map-executable ${subpath(nodeDirectory)})`,
     `(allow file-read* file-map-executable ${subpath(opencodeDirectory)})`,
     `(allow file-read* file-map-executable ${subpath(privateDirectory)})`,
