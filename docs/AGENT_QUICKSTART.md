@@ -10,18 +10,20 @@ This guide operates the Task delivery leaf and guardian-authored Campaign entry 
 
 Use one continuous route for an authorized Campaign: configure the host, start the local server, register the Repository, publish the committed Goal Contract, submit its complete proposal set, inspect the durable Campaign, and hand it off exactly once. Leave the suitable default adapter selected unless the host has deliberately qualified one of the bounded alternatives; model/profile selection and adapter selection are separate host concerns. For a standalone Task, use the standalone contract and `submit` route in section 5; do not use repeated standalone submissions to advance a Campaign.
 
-After handoff, keep the server running and observe `campaign get`, `task get`, `task history`, `task watch`, and `campaign evidence` as applicable. The server admits eligible proposals and advances dependent Tasks; routine progress, an empty frontier, a process exit, or a status message is not completion. Use only the explicit limits in the applicable committed Goal, Proposal, or Task Contract: a finite count limits that dimension, `null` leaves a count unbounded, and `maxElapsedMs` is the original deadline. A restart or retry does not create a new deadline or an invented per-step limit.
+After handoff, keep the server running and observe `campaign get`, `task get`, `task history`, `task watch`, and `campaign evidence` as applicable. The server admits eligible proposals and advances dependent Tasks; routine progress, an empty frontier, a process exit, or a status message is not completion. Use only the explicit limits in the applicable committed Goal, Proposal, or Task Contract: a finite count limits that dimension, `null` leaves a count unbounded, and `maxElapsedMs` is the applicable duration budget from which the admitted deadline is derived. A restart or retry does not create a new deadline or an invented per-step limit.
+
+Local build, health, and configuration checks establish local readiness and resource shape; they do not prove live model execution. Optional profile evaluations are controlled external calls and require the applicable authority. Forge readiness is an authenticated read-only check, not proof of delivery.
 
 Use this state-to-action guide while observing:
 
 - A running Campaign or Task: reread its current resource and durable history, then continue observing. Do not hand off again or create a replacement standalone Task.
 - A typed transient reviewer interruption: Delivery Run automatically claims a fresh reviewer attempt while the Candidate, passing Check Result, review budget, and original deadline remain valid. The public Task may project `checked` while history shows the interrupted and fresh review attempts; do not invoke `task retry`.
 - A `waiting` Task with `retryable: true`: inspect the current resource and history, then use the explicit same-Task retry only for the supported waiting reasons in section 6. It preserves the contract, authority, Candidate bundle where applicable, and original deadline.
-- A user-authorized observation that is record-for-later: record its bounded decision touch, keep the work running, and do not waive a product gate.
+- A user-authorized observation that is record-for-later: retain the finding and evidence in the authorized Issue or a private handoff, record only its bounded intervention ID/count through the Campaign touch, keep the work running, and do not waive a product gate.
 - An explicit user stop, missing authority, or genuine terminal blocker: stop the scoped work and report the actual last observed state. Stopping the service is not a pause and does not freeze deadlines; do not abandon work without the contract's explicit abandonment authority.
 - Merged deliveries with an inconclusive assessment: report the delivery and Campaign verdict separately. Merged artifacts alone do not make a Campaign accepted, and unavailable usage remains unavailable rather than zero.
 
-When recovering in a fresh context, locate the current committed authority and reread the durable Campaign/Task resources and history; do not depend on an old transcript. The final report separates delivered Outcomes, actual Campaign status and assessments, exact final artifact checks, observability and usage coverage, unresolved problems, and checks not performed. If a service stopped before a reread, report the last observed durable state and label restart/reconciliation as unperformed rather than claiming a later state.
+When recovering in a fresh context, locate the current committed authority and reread the durable Campaign/Task resources and history; do not depend on an old transcript. Maintain one current handoff containing the authority/revision, verified result, and next action; supersede stale live instructions when facts change. The final report separates delivered Outcomes, actual Campaign status and assessments, exact final artifact checks, observability and usage coverage, unresolved problems, and checks not performed. If a service stopped before a reread, report the last observed durable state and label restart/reconciliation as unperformed rather than claiming a later state.
 
 ## 1. Prerequisites and build
 
@@ -631,6 +633,8 @@ node apps/cli/dist/cli.mjs task retry "<TASK_ID>" --json
 
 The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority. Delivery reconciliation and external-review recovery reuse the approved bundle and require the original deadline; implementer recovery reserves the next implementer activation and also requires its applicable count budget. Reviewer interruption recovery is automatic and is not this mutation. Restart alone, re-submission, project-check failures, provider configuration failures, deterministic reviewer failures, and other non-retryable classes do not enter this explicit path. A retry against a non-waiting Task returns a retry conflict.
 
+The server's default active-Task capacity is 1. A full capacity returns a retryable API error; wait for an active Task to become terminal before submitting another Task or adjust `USINE_ACTIVE_TASK_CAPACITY` to a positive finite value appropriate for the host. Capacity is a bounded admission setting, not a queue.
+
 ## 7. Recovery and final report
 
 After a restart or recovery in a fresh context, reread the current Campaign and Task resources, durable Task history, and Campaign evidence before taking an action. Reconcile the current exact Candidate, Check Result, Review Verdict, Delivery Effect, deadlines, budgets, waiting reason, blocker, and assessment; process state, transcripts, hooks, and old instructions are not authority. A service shutdown proves only that the process stopped, not that a deadline was paused or a later durable state was reached.
@@ -642,8 +646,6 @@ Report these facts separately:
 - Observability: the resources, history, evidence pages, and usage actually read. Keep unavailable usage or coverage as `null`/`unavailable`; never turn missing dimensions into zero.
 - Unresolved problems: blockers, missing authority, drift, inconclusive assessments, and failed gates. Do not waive or silently rerun a product gate.
 - Unperformed checks: anything not reread, reconciled, or verified after a stop or restart. State the last observed durable resource rather than claiming a later state.
-
-The server's default active-Task capacity is 1. A full capacity returns a retryable API error; wait for an active Task to become terminal before submitting another Task or adjust `USINE_ACTIVE_TASK_CAPACITY` to a positive finite value appropriate for the host. Capacity is a bounded admission setting, not a queue.
 
 ## 8. Stable exit codes
 
