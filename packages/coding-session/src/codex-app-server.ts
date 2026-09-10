@@ -44,7 +44,7 @@ export class CodexAppServerAdapter implements CodingSessionAdapter {
     const { mcpServer, onUsage, profile, ...adapterContext } = context;
     return runCodexAppServer({
       ...adapterContext,
-      config: codexAdapterConfig(profile, mcpServer),
+      config: codexAdapterConfig(profile, context.role, mcpServer),
       onUsage,
     });
   }

@@ -326,6 +326,16 @@ Isolation is capability-based:
 | Reviewer | Fresh read-only exact-SHA checkout plus scratch | Provider/task environment and optional bounded read MCP | No Forge credential |
 | Delivery | No candidate execution | GitHub and configured Git remote | Short-lived host-scoped Forge capability |
 
+Coding Session network access is role-specific. The Codex SDK and App Server receive
+`sandbox_workspace_write.network_access = true` only for implementer sessions; reviewers,
+assessors, and replacement-planners receive `false`. The workspace-write sandbox and all
+credential boundaries remain in force, so this permits task-required dependency installation
+and local loopback operations without granting Forge credentials or publication authority.
+OpenCode2 retains its separately qualified host policy. A provider or host refusal remains a
+host/provider restriction; denied operations cannot count as passing evidence. A tool failure
+may occur inside an otherwise completed turn and is not automatically a typed failed Coding
+Session. Existing typed startup/session refusal behavior remains unchanged.
+
 Codex sandbox and host permissions are the default isolation mechanism. Containers, VMs, remote sandboxes, queues, and distributed runners are not hidden prerequisites or domain concepts.
 
 ## 11. Current evidence and limits

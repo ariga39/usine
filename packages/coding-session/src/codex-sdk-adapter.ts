@@ -73,7 +73,7 @@ export class CodexSdkAdapter implements CodingSessionAdapter {
   private async createClient(context: CodingSessionAdapterRequest): Promise<Codex> {
     const options: CodexOptions = {
       env: context.environment,
-      config: codexAdapterConfig(context.profile, context.mcpServer),
+      config: codexAdapterConfig(context.profile, context.role, context.mcpServer),
       ...(this.options.codexPathOverride
         ? { codexPathOverride: this.options.codexPathOverride }
         : {}),

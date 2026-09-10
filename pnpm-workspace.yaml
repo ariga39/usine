@@ -5,14 +5,14 @@ allowBuilds:
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   - "@opencode-ai/sdk@1.18.25"
-  - "@openai/codex-sdk@0.153.4"
-  - "@openai/codex@0.153.4"
-  - "@openai/codex@0.153.4-linux-x64"
-  - "@openai/codex@0.153.4-linux-arm64"
-  - "@openai/codex@0.153.4-darwin-x64"
-  - "@openai/codex@0.153.4-darwin-arm64"
-  - "@openai/codex@0.153.4-win32-x64"
-  - "@openai/codex@0.153.4-win32-arm64"
+  - "@openai/codex-sdk@0.154.0"
+  - "@openai/codex@0.154.0"
+  - "@openai/codex@0.154.0-linux-x64"
+  - "@openai/codex@0.154.0-linux-arm64"
+  - "@openai/codex@0.154.0-darwin-x64"
+  - "@openai/codex@0.154.0-darwin-arm64"
+  - "@openai/codex@0.154.0-win32-x64"
+  - "@openai/codex@0.154.0-win32-arm64"
 
 packages:
   - packages/candidate-workspace
