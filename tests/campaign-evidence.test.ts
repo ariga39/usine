@@ -653,8 +653,10 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     usage: {
       inputTokens: 40,
       cachedInputTokens: 5,
-      uncachedInputTokens: 35,
-      outputTokens: 0,
+      uncachedInputTokens: 33,
+      cacheWriteInputTokens: 2,
+      outputTokens: 2,
+      reasoningOutputTokens: 1,
     },
     summary: "failed",
     failure: "private provider diagnostic",
@@ -804,7 +806,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     role: "replacement-planner",
     outcome: "failed",
     failureClass: "protocol",
-    usage: { inputTokens: 40, cachedInputTokens: 5, outputTokens: 0, coverage: "partial" },
+    usage: { inputTokens: 40, cachedInputTokens: 5, outputTokens: 2, coverage: "partial" },
   });
   expect(second!.runs.every((run) => run.taskId !== null)).toBe(true);
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
@@ -841,6 +843,20 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
       $ai_model: "actual-normalizer",
       $ai_provider: "attested-normalizer-provider",
       adapter: "role-output-normalizer",
+    },
+  });
+  expect(
+    modelEvents.find((event) => event.properties.invocation_id === "planner-invocation"),
+  ).toMatchObject({
+    properties: {
+      invocation_id: "planner-invocation",
+      $ai_input_tokens: 40,
+      $ai_cache_read_input_tokens: 5,
+      uncached_input_tokens: 33,
+      $ai_cache_creation_input_tokens: 2,
+      $ai_output_tokens: 2,
+      reasoning_output_tokens: 1,
+      token_coverage: "partial",
     },
   });
   expect(JSON.stringify(postHog)).not.toContain("private provider diagnostic");
