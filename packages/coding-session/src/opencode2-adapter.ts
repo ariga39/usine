@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:net";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable } from "node:stream";
 import { createOpencodeClient, type Config } from "@opencode-ai/sdk/v2";
 import { z } from "zod";
 import { mergeProviderNeutralUsage } from "@usine/task-authority";
@@ -103,6 +104,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     let startupStderr = "";
     let startupStderrTruncated = false;
     let stderrClosed: Promise<void> | undefined;
+    let stderrStream: Readable | undefined;
 
     try {
       const port = await availablePort();
@@ -153,6 +155,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       );
       const stderr = server.stderr;
       if (stderr) {
+        stderrStream = stderr;
         stderr.setEncoding("utf8");
         stderrClosed = new Promise<void>((resolve) => stderr.once("end", resolve));
         stderr.on("data", (chunk: string) => {
@@ -502,7 +505,10 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       try {
         if (context.signal.aborted) await gracefulInterrupt();
         if (server && childSettled) await settleChild(server, childSettled);
-        await stderrClosed;
+        if (stderrClosed) {
+          await waitForChildSettlement(stderrClosed, CHILD_CLOSE_WAIT_MS);
+          stderrStream?.destroy();
+        }
       } catch (error) {
         cleanupFailure = error;
       }

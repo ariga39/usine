@@ -95,6 +95,7 @@ async function fixture(
     | "wait"
     | "prompt-failure"
     | "startup-failure"
+    | "startup-stderr-descendant"
     | "startup-abort"
     | "no-response"
     | "stream-closed"
@@ -139,6 +140,7 @@ async function fixture(
     join(bin, "opencode"),
     `#!/usr/bin/env node
 import { appendFileSync } from "node:fs";
+import { spawn as spawnChild } from "node:child_process";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 const args = process.argv.slice(2);
@@ -170,6 +172,14 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
 }) + "\\n");
 if (${JSON.stringify(mode)} === "startup-failure") {
   process.stderr.write("private startup stderr with /secret/path and credential=hidden\\n");
+  process.exit(17);
+}
+if (${JSON.stringify(mode)} === "startup-stderr-descendant") {
+  process.stderr.write("private descendant startup stderr\\n");
+  const descendant = spawnChild(process.execPath, ["-e", "setTimeout(() => {}, 4000)"], {
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+  appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ descendantProcessId: descendant.pid }) + "\\n");
   process.exit(17);
 }
 let eventResponse;
@@ -404,6 +414,27 @@ async function waitForProtocolFact(protocolLog: string, fact: string): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`fixture did not record ${fact}`);
+}
+
+async function terminateFixtureDescendant(protocolLog: string): Promise<void> {
+  const match = (await readFile(protocolLog, "utf8")).match(/"descendantProcessId":(\d+)/);
+  if (!match) return;
+  const processId = Number(match[1]);
+  try {
+    process.kill(processId, "SIGKILL");
+  } catch {
+    return;
+  }
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(processId, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("fixture descendant did not terminate");
 }
 
 describe("OpenCode2 bounded adapter", () => {
@@ -852,6 +883,36 @@ describe("OpenCode2 bounded adapter", () => {
     ).rejects.toMatchObject({ phase: "startup", failureClass: "transport" });
     await assertPrivateRunGone(testFixture);
     await testFixture.close();
+  });
+
+  test("bounds startup stderr settlement when a descendant holds the pipe", async () => {
+    const testFixture = await fixture("startup-stderr-descendant");
+    const completedItems: ProviderNeutralCompletedEvidence[] = [];
+    const startedAt = performance.now();
+    try {
+      await expect(
+        fixtureAdapter(testFixture.stateDirectory).run({
+          ...request(testFixture.workspace, testFixture.environment, AbortSignal.timeout(5_000)),
+          onItemCompleted: (item) => {
+            completedItems.push(item);
+          },
+        }),
+      ).rejects.toMatchObject({ phase: "startup" });
+      expect(performance.now() - startedAt).toBeLessThan(2_500);
+      expect(completedItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "command_execution",
+            id: "opencode2-startup-stderr",
+            output: expect.stringContaining("private descendant startup stderr"),
+          }),
+        ]),
+      );
+      await waitForProtocolFact(testFixture.protocolLog, '"descendantProcessId"');
+    } finally {
+      await terminateFixtureDescendant(testFixture.protocolLog);
+      await testFixture.close();
+    }
   });
 
   test("preserves typed startup cancellation and settles the direct child", async () => {
