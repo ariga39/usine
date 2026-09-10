@@ -97,6 +97,7 @@ async function fixture(
     | "startup-failure"
     | "startup-stderr-descendant"
     | "startup-abort"
+    | "health-stall-then-success"
     | "no-response"
     | "stream-closed"
     | "no-reasoning"
@@ -189,6 +190,7 @@ let idle = false;
 const pendingEvents = [];
 const pendingGlobalEvents = [];
 let prompted = false;
+let healthRequests = 0;
 const readBody = (req) => new Promise((resolve) => {
   let body = "";
   req.on("data", (chunk) => { body += chunk; });
@@ -215,7 +217,12 @@ const response = (res, status, body) => {
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (req.method === "GET" && url.pathname === "/api/health") {
-    appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ health: true }) + "\\n");
+    healthRequests += 1;
+    appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ health: true, attempt: healthRequests }) + "\\n");
+    if (${JSON.stringify(mode)} === "health-stall-then-success" && healthRequests === 1) {
+      req.once("aborted", () => appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ healthCancelled: true }) + "\\n"));
+      return;
+    }
     if (${JSON.stringify(mode)} === "startup-abort") return;
     return response(res, 200, { healthy: true });
   }
@@ -944,6 +951,31 @@ describe("OpenCode2 bounded adapter", () => {
     await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
+
+  test("cancels a stalled health attempt before creating the session", async () => {
+    const testFixture = await fixture("health-stall-then-success");
+    try {
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+      const run = fixtureAdapter(testFixture.stateDirectory).run({
+        ...request(testFixture.workspace, testFixture.environment, signal),
+        onPhase: (phase) => {
+          if (phase === "thread") controller.abort();
+        },
+      });
+      await expect(run).rejects.toMatchObject({ phase: "thread", failureClass: "cancellation" });
+      const protocol = await readFile(testFixture.protocolLog, "utf8");
+      expect(protocol).toContain('"healthCancelled":true');
+      expect(protocol).toContain('"attempt":2');
+      expect(protocol.indexOf('"healthCancelled":true')).toBeLessThan(
+        protocol.indexOf('"attempt":2'),
+      );
+      expect(protocol).not.toContain('"sessionCreate"');
+      await assertPrivateRunGone(testFixture);
+    } finally {
+      await testFixture.close();
+    }
+  }, 15_000);
 
   test("maps prompt admission failure without an unhandled completion rejection", async () => {
     const testFixture = await fixture("prompt-failure");

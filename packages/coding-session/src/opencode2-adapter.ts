@@ -26,6 +26,7 @@ import {
 } from "./opencode2-sandbox.js";
 
 const STARTUP_POLL_MS = 20;
+const STARTUP_HEALTH_ATTEMPT_TIMEOUT_MS = 1_000;
 const GRACEFUL_INTERRUPT_WAIT_MS = 1_000;
 const CHILD_CLOSE_WAIT_MS = 1_000;
 const STARTUP_STDERR_LIMIT = 16 * 1024;
@@ -776,8 +777,16 @@ async function waitUntilReady(
       if (signal.aborted)
         throw new CodingSessionInterruption("startup", "cancellation", "coding session cancelled");
       try {
+        const healthSignal = AbortSignal.any([
+          signal,
+          AbortSignal.timeout(STARTUP_HEALTH_ATTEMPT_TIMEOUT_MS),
+        ]);
         await Promise.race([
-          client.v2.health.get({ responseStyle: "data", throwOnError: true, signal }),
+          client.v2.health.get({
+            responseStyle: "data",
+            throwOnError: true,
+            signal: healthSignal,
+          }),
           processFailure,
         ]);
         return;
