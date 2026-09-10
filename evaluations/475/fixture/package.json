@@ -1,0 +1,30 @@
+{
+  "name": "poi-plugin-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "scripts": {
+    "build": "vp pack",
+    "format:check": "vp fmt --check",
+    "lint": "vp lint",
+    "typecheck": "vp check --no-fmt --no-lint",
+    "test": "vp test run",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "@types/react": "18.3.27",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "7.0.2",
+    "vite-plus": "0.2.9"
+  },
+  "packageManager": "pnpm@11.22.0",
+  "poiPlugin": {
+    "id": "Server",
+    "name": "Server",
+    "description": "Read-only host data"
+  }
+}
