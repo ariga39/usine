@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import {
@@ -30,6 +31,14 @@ function truncateCheckStream(output: string, stream: "stdout" | "stderr"): strin
   const available = CHECK_STREAM_LIMIT - marker.length;
   const headLength = Math.ceil(available / 2);
   return `${output.slice(0, headLength)}${marker}${output.slice(-(available - headLength))}`;
+}
+
+async function checkoutDirectoryAvailable(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export interface QualityGateOptions {
@@ -129,7 +138,8 @@ export class QualityGate {
             result.code === "ENOENT" &&
             result.exitCode === undefined &&
             !result.timedOut &&
-            !result.isCanceled
+            !result.isCanceled &&
+            (await checkoutDirectoryAvailable(path))
           )
             return {
               kind: "capability_blocked",

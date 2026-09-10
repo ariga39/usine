@@ -560,7 +560,7 @@ function isTransientReviewerFailure(
 function isProjectCheckCapabilityBlocker(
   result: QualityGateCheckResult,
 ): result is ProjectCheckCapabilityBlocker {
-  return result.kind === "capability_blocked";
+  return "kind" in result && result.kind === "capability_blocked";
 }
 
 function reviewBlockerClassification(
