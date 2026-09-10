@@ -1,6 +1,11 @@
 import type { CampaignAssessmentUsage } from "@usine/task-authority";
 import { taskFailureClassFromProvider } from "@usine/task-authority";
-import type { SessionObservation, SessionRole } from "@usine/coding-session";
+import type {
+  ProviderNeutralUsage,
+  ProviderNeutralUsageCompleteness,
+  SessionObservation,
+  SessionRole,
+} from "@usine/coding-session";
 
 /** Provider-neutral evidence for one Campaign-only model invocation. */
 export interface CampaignModelRunDraft {
@@ -71,6 +76,7 @@ export function campaignModelRunFromObservation(
           cacheWriteInputTokens: observation.usage.cacheWriteInputTokens ?? null,
           outputTokens: observation.usage.outputTokens ?? null,
           reasoningOutputTokens: observation.usage.reasoningOutputTokens ?? null,
+          coverage: campaignUsageCoverage(observation.usage, observation.usageCompleteness),
         }
       : null,
   };
@@ -114,4 +120,18 @@ export function campaignModelRunFromObservation(
         : null,
     },
   ];
+}
+
+export function campaignUsageCoverage(
+  usage: ProviderNeutralUsage | null,
+  completeness?: ProviderNeutralUsageCompleteness,
+): "complete" | "partial" | "unavailable" {
+  if (usage === null) return "unavailable";
+  if (completeness === "partial") return "partial";
+  return usage.inputTokens !== undefined &&
+    usage.cachedInputTokens !== undefined &&
+    usage.uncachedInputTokens !== undefined &&
+    usage.outputTokens !== undefined
+    ? "complete"
+    : "partial";
 }

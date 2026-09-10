@@ -210,7 +210,8 @@ export async function listCampaignEvidenceSources(
           outputTokens: usage?.outputTokens ?? null,
           reasoningOutputTokens: usage?.reasoningOutputTokens ?? null,
           coverage:
-            usage === null
+            usage?.coverage ??
+            (usage === null
               ? ("unavailable" as const)
               : [
                     usage.inputTokens,
@@ -219,7 +220,7 @@ export async function listCampaignEvidenceSources(
                     usage.outputTokens,
                   ].every((value) => value !== null)
                 ? ("complete" as const)
-                : ("partial" as const),
+                : ("partial" as const)),
         },
       },
     ];

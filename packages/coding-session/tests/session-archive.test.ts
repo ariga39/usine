@@ -132,6 +132,44 @@ describe("Session Archive operator boundary", () => {
     expect(archive.byteLength).toBeLessThanOrEqual(700);
   });
 
+  test("keeps a finalized provider usage snapshot after a later session failure", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-usage-"));
+    const writer = new SessionArchiveWriter(
+      { stateDirectory },
+      {
+        taskId: contract.id,
+        role: "reviewer",
+        attempt: "final-usage",
+        contract,
+        prompt: "review",
+      },
+    );
+    await writer.begin();
+    writer.setUsage({ inputTokens: 12, outputTokens: 8 }, "partial");
+    writer.setProviderResult("final response", { inputTokens: 20, outputTokens: 9 }, "complete");
+    const result = await writer.finish({
+      status: "failed",
+      sessionId: "thread-final-usage",
+      usage: { inputTokens: 12, outputTokens: 8 },
+      usageCompleteness: "partial",
+      failure: "stream failed after provider completion",
+      phase: "output",
+      failureClass: "transport",
+    });
+
+    await expect(exportSessionArchive(stateDirectory, result.archiveId)).resolves.toMatchObject({
+      status: "failed",
+      completeness: "complete",
+      usage: { inputTokens: 20, outputTokens: 9 },
+      usageCompleteness: "complete",
+    });
+    await expect(
+      readSessionArchiveManifest(stateDirectory, result.archiveId),
+    ).resolves.toMatchObject({
+      usageCompleteness: "complete",
+    });
+  });
+
   test("retains neutral evidence and sanitized profile facts", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "usine-session-archive-evidence-"));
     const runtimePath = resolve(tmpdir(), `usine-runtime-path-${Date.now()}`);

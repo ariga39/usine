@@ -129,6 +129,9 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.usageCompleteness
+        ? { usageCompleteness: observation.usageCompleteness }
+        : {}),
       ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
@@ -159,6 +162,9 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.usageCompleteness
+        ? { usageCompleteness: observation.usageCompleteness }
+        : {}),
       ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
@@ -188,6 +194,9 @@ async function runCodingAttempt(
       requestedProfile: observation.requestedProfile ?? input.implementer.profile,
       ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
       usage: observation.usage ?? null,
+      ...(observation.usageCompleteness
+        ? { usageCompleteness: observation.usageCompleteness }
+        : {}),
       ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
       ...archiveReference(observation),
     });
@@ -207,6 +216,7 @@ async function runCodingAttempt(
     requestedProfile: observation.requestedProfile ?? input.implementer.profile,
     ...(observation.effectiveProfile ? { effectiveProfile: observation.effectiveProfile } : {}),
     usage: observation.usage ?? null,
+    ...(observation.usageCompleteness ? { usageCompleteness: observation.usageCompleteness } : {}),
     ...(observation.normalizer ? { normalizer: observation.normalizer } : {}),
     ...archiveReference(observation),
   });

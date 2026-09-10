@@ -103,6 +103,7 @@ const eventData = Schema.Union([
     sessionId: safeObservationId,
     source: usageObservationSource,
     semantics: Schema.Literals(["delta", "replacement"]),
+    usageCompleteness: Schema.optional(archiveCompleteness),
     actualModel: Schema.optional(
       Schema.Struct({
         model: safeEvidenceValue,
@@ -176,6 +177,7 @@ const eventData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    usageCompleteness: Schema.optional(archiveCompleteness),
     normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),
@@ -313,6 +315,7 @@ const observationData = Schema.Union([
     sessionId: safeObservationId,
     source: usageObservationSource,
     semantics: Schema.Literals(["delta", "replacement"]),
+    usageCompleteness: Schema.optional(archiveCompleteness),
     actualModel: Schema.optional(
       Schema.Struct({
         model: safeEvidenceValue,
@@ -386,6 +389,7 @@ const observationData = Schema.Union([
     requestedProfile: Schema.optional(safeProfileName),
     effectiveProfile: Schema.optional(effectiveProfile),
     usage: Schema.optional(Schema.NullOr(usage)),
+    usageCompleteness: Schema.optional(archiveCompleteness),
     normalizer: Schema.optional(normalizer),
     archive: Schema.optional(archiveReference),
   }),

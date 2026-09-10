@@ -2108,6 +2108,133 @@ describe("Coding Session", () => {
     ]);
   });
 
+  test("keeps a no-marker provider observation out of the normalizer invocation", async () => {
+    const observations: CodingSessionObservation[] = [];
+    const providerUsage = {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      uncachedInputTokens: 0,
+      cacheWriteInputTokens: 60,
+      outputTokens: 7,
+      reasoningOutputTokens: 3,
+    };
+    const normalizerUsage = {
+      inputTokens: 5,
+      cachedInputTokens: 2,
+      uncachedInputTokens: 3,
+      outputTokens: 2,
+      reasoningOutputTokens: 1,
+    };
+    const provider: CodingSessionAdapter = {
+      name: "app-server",
+      run: async (request) => {
+        await request.onUsage?.({ semantics: "replacement", usage: providerUsage });
+        return { finalResponse: "provider prose", usage: null, sessionId: "app-server-session" };
+      },
+    };
+    const session = createCodexCodingSessionForTesting(
+      undefined,
+      {
+        environment: { CI: "true" },
+        adapterSelectionEnvironment: {
+          USINE_CODEX_APP_SERVER_PROFILES: "implementer-profile",
+        },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async ({ onUsage }) => {
+          await onUsage?.({ semantics: "replacement", usage: normalizerUsage });
+          return { status: "proposed", summary: "normalized" };
+        },
+      },
+      { "app-server": provider },
+    );
+
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      attempt: implementerAttempt,
+      onObservation: (event) => {
+        observations.push(event);
+      },
+    });
+
+    expect(observation).toMatchObject({
+      status: "completed",
+      usage: providerUsage,
+      normalizer: { usage: normalizerUsage },
+    });
+    expect(observations.filter((event) => event.type === "usage_observed")).toEqual([
+      {
+        type: "usage_observed",
+        source: "provider",
+        semantics: "replacement",
+        usage: providerUsage,
+      },
+      {
+        type: "usage_observed",
+        source: "role_output_normalizer",
+        semantics: "replacement",
+        usage: normalizerUsage,
+      },
+    ]);
+  });
+
+  test("preserves complete provider usage when output normalization fails", async () => {
+    const providerUsage = {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      uncachedInputTokens: 0,
+      cacheWriteInputTokens: 60,
+      outputTokens: 7,
+      reasoningOutputTokens: 3,
+    };
+    const session = new CodexCodingSession(
+      async () =>
+        testClient(
+          async () =>
+            sdkTurn("provider prose", {
+              input_tokens: 100,
+              cached_input_tokens: 40,
+              cache_write_input_tokens: 60,
+              output_tokens: 7,
+              reasoning_output_tokens: 3,
+            }),
+          "provider-complete-session",
+        ),
+      {
+        environment: { CI: "true" },
+        profileResolver: syntheticProfileResolver,
+        roleOutputTransform: async () => {
+          throw new Error("normalization failed after provider completion");
+        },
+      },
+    );
+
+    const observation = await session.run({
+      role: "implementer",
+      workspace: ".",
+      contract,
+      prompt: "work",
+      profile: "implementer-profile",
+      sandbox: "workspace-write",
+      deadlineEpochMs: Date.now() + 10_000,
+      outputSchema: implementerOutputSchema,
+      attempt: implementerAttempt,
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      failureCode: "role_output_transform_failed",
+      usage: providerUsage,
+      normalizer: { status: "failed", usage: null },
+    });
+  });
+
   test("normalizes an unrecoverable reviewer response through the coordinator transform", async () => {
     const reviewer = {
       sha: "29122cf5c32a160d5ed6c6a7f68d61fc2c0c9117",

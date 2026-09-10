@@ -12,10 +12,12 @@ import {
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
   type CampaignReplacementPlannerSessionRequest,
+  type ProviderNeutralUsageCompleteness,
 } from "@usine/coding-session";
 import { z } from "zod";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
 import {
+  campaignUsageCoverage,
   campaignModelRunFromObservation,
   type CampaignModelRunDraft,
 } from "./campaign-model-run.js";
@@ -75,6 +77,7 @@ function usageFrom(
     outputTokens?: number;
     reasoningOutputTokens?: number;
   } | null,
+  completeness?: ProviderNeutralUsageCompleteness,
 ): CampaignAssessmentUsage | null {
   return usage === null
     ? null
@@ -85,6 +88,7 @@ function usageFrom(
         cacheWriteInputTokens: usage.cacheWriteInputTokens ?? null,
         outputTokens: usage.outputTokens ?? null,
         reasoningOutputTokens: usage.reasoningOutputTokens ?? null,
+        coverage: campaignUsageCoverage(usage, completeness),
       };
 }
 
@@ -191,7 +195,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
       );
       return {
         proposal: result.status === "completed" ? (result.output ?? null) : null,
-        usage: usageFrom(result.usage),
+        usage: usageFrom(result.usage, result.usageCompleteness),
         modelRuns: modelRun,
       };
     } catch {

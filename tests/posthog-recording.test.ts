@@ -596,7 +596,12 @@ test("captures persisted evidence from Task events using the Batch protocol", as
       model_identity_source: "configured",
       $ai_model: "configured-model",
       $ai_input_tokens: 4,
-      uncached_input_tokens: 3,
+      $ai_cache_read_input_tokens: 1,
+      uncached_input_tokens: 1,
+      $ai_cache_creation_input_tokens: 2,
+      $ai_output_tokens: 2,
+      reasoning_output_tokens: 1,
+      token_coverage: "partial",
       $ai_cache_reporting_exclusive: false,
     },
   });
@@ -873,7 +878,15 @@ async function campaignFixture(
             developerInstructionsSha256: null,
             serviceTier: "default",
           },
-          usage: { inputTokens: 4, cachedInputTokens: 1, uncachedInputTokens: 3, outputTokens: 2 },
+          usage: {
+            inputTokens: 4,
+            cachedInputTokens: 1,
+            uncachedInputTokens: 1,
+            cacheWriteInputTokens: 2,
+            outputTokens: 2,
+            reasoningOutputTokens: 1,
+          },
+          usageCompleteness: "partial",
         },
       });
       if (!deliver)

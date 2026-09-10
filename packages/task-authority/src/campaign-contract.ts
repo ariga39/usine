@@ -229,6 +229,7 @@ export const campaignAssessmentUsageSchema = Schema.Struct({
   cacheWriteInputTokens: Schema.NullOr(Schema.Natural),
   outputTokens: Schema.NullOr(Schema.Natural),
   reasoningOutputTokens: Schema.NullOr(Schema.Natural),
+  coverage: Schema.optional(Schema.Literals(["complete", "partial", "unavailable"])),
 });
 
 /** Where a public Campaign usage projection obtained its token amounts. */

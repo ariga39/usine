@@ -7,6 +7,7 @@ import {
   type RolePolicy,
   type SessionArchiveCaptureStatus,
   type ProviderNeutralUsage,
+  type ProviderNeutralUsageCompleteness,
   type RoleOutputNormalizerObservation,
 } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
@@ -43,6 +44,7 @@ export interface QualityGateOptions {
 export interface ReviewAttemptObservation {
   review: ReviewVerdict | null;
   usage: SessionUsage | null;
+  usageCompleteness?: ProviderNeutralUsageCompleteness;
   normalizer?: RoleOutputNormalizerObservation;
   requestedProfile?: string;
   effectiveProfile?: EffectiveSessionProfile;
@@ -65,6 +67,7 @@ interface QualityGateSession {
         phase?: SessionObservation<ReviewerOutput>["phase"];
         failureClass?: SessionObservation<ReviewerOutput>["failureClass"];
         usage?: SessionUsage | null;
+        usageCompleteness?: SessionObservation<ReviewerOutput>["usageCompleteness"];
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
         archiveCompleteness?: "complete" | "partial";
@@ -174,6 +177,9 @@ export class QualityGate {
           return {
             review: null,
             usage: observation.usage ?? null,
+            ...(observation.usageCompleteness
+              ? { usageCompleteness: observation.usageCompleteness }
+              : {}),
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
             effectiveProfile: observation.effectiveProfile,
             normalizer: observation.normalizer,
@@ -206,6 +212,9 @@ export class QualityGate {
               findings: [],
             },
             usage: observation.usage ?? null,
+            ...(observation.usageCompleteness
+              ? { usageCompleteness: observation.usageCompleteness }
+              : {}),
             requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
             effectiveProfile: observation.effectiveProfile,
             normalizer: observation.normalizer,
@@ -224,6 +233,9 @@ export class QualityGate {
         return {
           review: observation.output,
           usage: observation.usage ?? null,
+          ...(observation.usageCompleteness
+            ? { usageCompleteness: observation.usageCompleteness }
+            : {}),
           requestedProfile: observation.requestedProfile ?? this.options.reviewer.profile,
           effectiveProfile: observation.effectiveProfile,
           normalizer: observation.normalizer,

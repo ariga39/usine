@@ -120,6 +120,7 @@ interface DeliveryRunSession {
         phase?: SessionObservation<ImplementerOutput>["phase"];
         failureClass?: SessionObservation<ImplementerOutput>["failureClass"];
         usage?: SessionObservation<ImplementerOutput>["usage"];
+        usageCompleteness?: "complete" | "partial";
         archiveId?: string;
         archiveStatus?: SessionArchiveCaptureStatus;
         archiveCompleteness?: "complete" | "partial";
@@ -295,6 +296,7 @@ export async function executeDeliveryRun(
       let reviewRequestedProfile: string | undefined;
       let reviewEffectiveProfile: ReviewAttemptObservation["effectiveProfile"];
       let reviewUsage: ReviewAttemptObservation["usage"] = null;
+      let reviewUsageCompleteness: ReviewAttemptObservation["usageCompleteness"];
       let reviewNormalizer: ReviewAttemptObservation["normalizer"];
       const reviewObservationCounter = { value: 0 };
       const reviewInvocationId = randomUUID();
@@ -336,6 +338,7 @@ export async function executeDeliveryRun(
         reviewRequestedProfile = observation.requestedProfile;
         reviewEffectiveProfile = observation.effectiveProfile;
         reviewUsage = observation.usage;
+        reviewUsageCompleteness = observation.usageCompleteness;
         reviewNormalizer = observation.normalizer;
         if (observation.interruption)
           await emitCodingInterruption(
@@ -364,6 +367,7 @@ export async function executeDeliveryRun(
             sessionId: reviewSessionId,
             requestedProfile: input.reviewer?.profile,
             usage: reviewUsage,
+            ...(reviewUsageCompleteness ? { usageCompleteness: reviewUsageCompleteness } : {}),
             ...(reviewNormalizer ? { normalizer: reviewNormalizer } : {}),
           },
         });
@@ -394,6 +398,7 @@ export async function executeDeliveryRun(
           requestedProfile: reviewRequestedProfile ?? input.reviewer?.profile,
           ...(reviewEffectiveProfile ? { effectiveProfile: reviewEffectiveProfile } : {}),
           usage: reviewUsage,
+          ...(reviewUsageCompleteness ? { usageCompleteness: reviewUsageCompleteness } : {}),
           ...(reviewNormalizer ? { normalizer: reviewNormalizer } : {}),
           ...(reviewArchive ? { archive: reviewArchive } : {}),
         },

@@ -256,6 +256,7 @@ interface MutableInvocation {
   interrupted: InterruptedSession | null;
   failureClass: TaskFailureClass | null;
   providerUsage: SessionUsage | null;
+  providerUsageCompleteness: "complete" | "partial" | null;
   actualModel: string | null;
   actualModelProvider: string | null;
   normalizerActualModel: string | null;
@@ -416,7 +417,10 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
           data.semantics === "replacement"
             ? data.usage
             : mergeProviderNeutralUsage(run.providerUsage, data.usage);
-      else {
+      if (data.source === "provider") {
+        if (data.usageCompleteness !== undefined)
+          run.providerUsageCompleteness = data.usageCompleteness;
+      } else {
         run.normalizerAttempted = true;
         run.normalizerUsage =
           data.semantics === "replacement"
@@ -434,7 +438,10 @@ function invocationsForSource(source: UsageReportSource): UsageInvocation[] {
       run.session = data;
       run.completedAtEpochMs = event.occurredAtEpochMs;
       // An absent final provider snapshot must not erase prior incremental usage.
-      if (data.usage !== undefined && data.usage !== null) run.providerUsage = data.usage;
+      if (data.usage !== undefined && data.usage !== null) {
+        run.providerUsage = data.usage;
+        run.providerUsageCompleteness = data.usageCompleteness ?? "complete";
+      }
       if (data.effectiveProfile?.actualModel) run.actualModel = data.effectiveProfile.actualModel;
       if (data.effectiveProfile?.actualModelProvider)
         run.actualModelProvider = data.effectiveProfile.actualModelProvider;
@@ -479,6 +486,7 @@ function getOrCreateRun(
     interrupted: null,
     failureClass: null,
     providerUsage: null,
+    providerUsageCompleteness: null,
     actualModel: null,
     actualModelProvider: null,
     normalizerActualModel: null,
@@ -564,11 +572,14 @@ function invocationFromRun(
     outcome: outcome === "succeeded" ? "succeeded" : outcome,
     occurredAtEpochMs: run.completedAtEpochMs ?? run.startedAtEpochMs,
     elapsedMs,
-    usage: usageAmounts(usage),
+    usage: usageAmounts(usage, normalizer ? undefined : run.providerUsageCompleteness),
   };
 }
 
-function usageAmounts(usage: SessionUsage | null): UsageAmounts {
+function usageAmounts(
+  usage: SessionUsage | null,
+  completeness?: "complete" | "partial" | null,
+): UsageAmounts {
   const values = {
     inputTokens: usage?.inputTokens,
     cachedInputTokens: usage?.cachedInputTokens,
@@ -591,7 +602,14 @@ function usageAmounts(usage: SessionUsage | null): UsageAmounts {
     cacheWriteInputTokens: values.cacheWriteInputTokens ?? null,
     outputTokens: values.outputTokens ?? null,
     reasoningOutputTokens: values.reasoningOutputTokens ?? null,
-    coverage: usage === null || known === 0 ? "unavailable" : known === 4 ? "complete" : "partial",
+    coverage:
+      usage === null || known === 0
+        ? "unavailable"
+        : completeness === "partial"
+          ? "partial"
+          : known === 4
+            ? "complete"
+            : "partial",
   };
 }
 

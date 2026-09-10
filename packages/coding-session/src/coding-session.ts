@@ -26,6 +26,7 @@ import {
   type CodingSessionAdapterRequest,
   type ProviderNeutralCompletedEvidence,
   type ProviderNeutralUsage,
+  type ProviderNeutralUsageCompleteness,
   type ProviderNeutralUsageObservation,
 } from "./coding-session-adapter.js";
 import { CodexSdkAdapter } from "./codex-sdk-adapter.js";
@@ -236,6 +237,7 @@ export type CodingSessionObservation =
       source: "provider" | "role_output_normalizer";
       usage: ProviderNeutralUsage;
       semantics: ProviderNeutralUsageObservation["semantics"];
+      completeness?: ProviderNeutralUsageCompleteness;
       actualModel?: ProviderNeutralUsageObservation["actualModel"];
     }
   | {
@@ -353,6 +355,7 @@ export interface SessionObservation<T = unknown> {
   status: "completed" | "failed" | "cancelled";
   output: T | null;
   usage: ProviderNeutralUsage | null;
+  usageCompleteness?: ProviderNeutralUsageCompleteness;
   summary: string;
   failure: string | null;
   phase: CodingSessionPhase | null;
@@ -499,6 +502,7 @@ export class CodexCodingSession {
       failure: observation.failure,
       phase: observation.phase,
       failureClass: observation.failureClass,
+      usageCompleteness: observation.usageCompleteness,
     });
     return {
       ...publicObservation,
@@ -550,6 +554,7 @@ export class CodexCodingSession {
     }
     let effectiveProfile = unavailableEffectiveProfile();
     let observedUsage: ProviderNeutralUsage | null = null;
+    let providerUsageCompleteness: ProviderNeutralUsageCompleteness | undefined;
     let normalizerUsage: ProviderNeutralUsage | null = null;
     let normalizerActualModel: { model: string; provider: string } | undefined;
     let normalizerAttempted = false;
@@ -652,14 +657,18 @@ export class CodexCodingSession {
             observation.semantics === "replacement"
               ? observation.usage
               : mergeProviderNeutralUsage(observedUsage, observation.usage);
-        else {
+        if (source === "provider") {
+          if (observation.completeness !== undefined)
+            providerUsageCompleteness = observation.completeness;
+        } else {
           if (observation.actualModel) normalizerActualModel = observation.actualModel;
           normalizerUsage =
             observation.semantics === "replacement"
               ? observation.usage
               : mergeProviderNeutralUsage(normalizerUsage, observation.usage);
         }
-        if (source === "provider") archive?.setUsage(usageFrom(observedUsage));
+        if (source === "provider")
+          archive?.setUsage(usageFrom(observedUsage), observation.completeness);
         await onObservation?.({ type: "usage_observed", source, ...observation });
       };
       const result = await adapter.run({
@@ -698,7 +707,11 @@ export class CodexCodingSession {
       archive?.setPhase("output");
       archive?.setSessionId(result.sessionId);
       const providerUsage = result.usage ?? observedUsage;
-      archive?.setProviderResult(result.finalResponse, usageFrom(providerUsage));
+      archive?.setProviderResult(
+        result.finalResponse,
+        usageFrom(providerUsage),
+        providerUsageCompleteness,
+      );
       let parsed = effectiveRequest.outputSchema.safeParse(outputFrom(result));
       if (!parsed.success && effectiveRequest.role === "reviewer") {
         const recovered = recoverReviewerOutput(result.finalResponse);
@@ -713,6 +726,7 @@ export class CodexCodingSession {
             sessionId: result.sessionId,
             output: null,
             usage: usageFrom(providerUsage),
+            ...usageCompletenessFrom(providerUsageCompleteness),
             summary: "coding session output normalization unavailable",
             failure: "coding session output normalization unavailable",
             phase,
@@ -738,6 +752,7 @@ export class CodexCodingSession {
               sessionId: null,
               output: null,
               usage: usageFrom(providerUsage),
+              ...usageCompletenessFrom(providerUsageCompleteness),
               normalizer: normalizerObservation(
                 this.options.roleOutputTransform,
                 normalizerUsage,
@@ -757,6 +772,7 @@ export class CodexCodingSession {
             sessionId: result.sessionId,
             output: null,
             usage: usageFrom(providerUsage),
+            ...usageCompletenessFrom(providerUsageCompleteness),
             summary: "coding session output normalization failed",
             failure: "coding session output normalization failed",
             phase,
@@ -781,6 +797,7 @@ export class CodexCodingSession {
             sessionId: result.sessionId,
             output: null,
             usage: usageFrom(providerUsage),
+            ...usageCompletenessFrom(providerUsageCompleteness),
             summary: "coding session normalized output did not match role schema",
             failure: "coding session normalized output did not match role schema",
             phase,
@@ -804,6 +821,7 @@ export class CodexCodingSession {
         sessionId: result.sessionId,
         output: parsed.data,
         usage: usageFrom(providerUsage),
+        ...usageCompletenessFrom(providerUsageCompleteness),
         summary: "coding session completed",
         failure: null,
         phase: null,
@@ -840,6 +858,7 @@ export class CodexCodingSession {
         sessionId: null,
         output: null,
         usage: usageFrom(observedUsage),
+        ...usageCompletenessFrom(providerUsageCompleteness),
         summary: safeFailureMessage(interruption),
         failure: safeFailureMessage(interruption),
         phase: interruption.phase,
@@ -932,6 +951,12 @@ function usageFrom(usage: ProviderNeutralUsage | null | undefined): SessionObser
       : { reasoningOutputTokens: usage.reasoningOutputTokens }),
   };
   return Object.keys(normalized).length === 0 ? null : normalized;
+}
+
+function usageCompletenessFrom(
+  completeness: ProviderNeutralUsageCompleteness | undefined,
+): Pick<SessionObservation, "usageCompleteness"> {
+  return completeness === undefined ? {} : { usageCompleteness: completeness };
 }
 
 function normalizerObservation(
