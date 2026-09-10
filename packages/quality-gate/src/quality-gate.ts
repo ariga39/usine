@@ -56,6 +56,15 @@ export interface ReviewAttemptObservation {
   };
 }
 
+/** A project check could not start because the Quality Gate's shell was unavailable. */
+export interface ProjectCheckCapabilityBlocker {
+  readonly kind: "capability_blocked";
+  readonly operation: "project_check";
+  readonly owner: "quality_gate";
+}
+
+export type QualityGateCheckResult = CheckResult | ProjectCheckCapabilityBlocker;
+
 interface QualityGateWorkspace {
   withCheckout<T>(purpose: string, sha: string, callback: (path: string) => Promise<T>): Promise<T>;
 }
@@ -81,7 +90,11 @@ interface QualityGateSession {
 export class QualityGate {
   constructor(private readonly options: QualityGateOptions) {}
 
-  async check(contract: ResolvedTaskContract, sha: string, cycle: number): Promise<CheckResult> {
+  async check(
+    contract: ResolvedTaskContract,
+    sha: string,
+    cycle: number,
+  ): Promise<QualityGateCheckResult> {
     return this.options.workspace.withCheckout(
       `check-${contract.id}-${cycle}`,
       sha,
@@ -111,6 +124,18 @@ export class QualityGate {
             reject: false,
           });
           if (this.options.signal?.aborted) throw new Error("project check cancelled");
+          if (
+            result.failed &&
+            result.code === "ENOENT" &&
+            result.exitCode === undefined &&
+            !result.timedOut &&
+            !result.isCanceled
+          )
+            return {
+              kind: "capability_blocked",
+              operation: "project_check",
+              owner: "quality_gate",
+            };
         } catch (error) {
           if (this.options.signal?.aborted) throw error;
           return {

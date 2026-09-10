@@ -243,6 +243,56 @@ describe("Task Authority module contract", () => {
     expect(resumed).toMatchObject({ state: "admitted", waiting: null, activeActivation: null });
   });
 
+  test("fences a project-check capability wait to the unchanged candidate", () => {
+    const candidate: TaskResult = {
+      ...checkedTask(),
+      state: "candidate",
+      check: null,
+      activeActivation: null,
+    };
+    const waiting = applyTaskFact(candidate, {
+      type: "waiting",
+      waiting: {
+        reason: "project_check_capability",
+        resumeState: "candidate",
+        activation: 1,
+        diagnostic:
+          "project check cannot start: Quality Gate shell capability is unavailable; restore the host runner and retry",
+      },
+    });
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "project_check_capability", resumeState: "candidate", activation: 1 },
+      candidateSha: sha,
+      check: null,
+      activeActivation: null,
+    });
+    expect(taskResourceFromResult(waiting)).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "project_check_capability",
+        diagnostic:
+          "project check cannot start: Quality Gate shell capability is unavailable; restore the host runner and retry",
+      },
+      retryable: true,
+    });
+    expect(applyTaskFact(waiting, { type: "retry" })).toMatchObject({
+      state: "candidate",
+      waiting: null,
+      candidateSha: sha,
+      check: null,
+    });
+    expect(() =>
+      applyTaskFact(
+        { ...candidate, candidateFence: 2 },
+        {
+          type: "waiting",
+          waiting: { reason: "project_check_capability", resumeState: "candidate", activation: 1 },
+        },
+      ),
+    ).toThrow("waiting activation is stale");
+  });
+
   test("keeps an approved delivery waiting until an explicit reconciliation retry", () => {
     const reviewed: TaskResult = {
       schemaVersion: 4,

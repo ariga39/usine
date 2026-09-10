@@ -131,6 +131,32 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   });
   const check = await gate.check(task, base, 1);
   expect(check.status).toBe("passed");
+  const capability = await new QualityGate({
+    workspace,
+    session: {
+      run: async () => {
+        throw new Error("reviewer should not start");
+      },
+    },
+    reviewer: {
+      role: "reviewer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+    },
+    environment: { PATH: join(root, "missing-bin") },
+    deadlineEpochMs: Date.now() + 30_000,
+  }).check(task, base, 1);
+  expect(capability).toEqual({
+    kind: "capability_blocked",
+    operation: "project_check",
+    owner: "quality_gate",
+  });
+  const launchedFailure = await gate.check(
+    { ...task, projectCheck: { command: "exit 127", timeoutMs: 10_000 } },
+    base,
+    1,
+  );
+  expect(launchedFailure).toMatchObject({ status: "failed", exitCode: 127 });
   const boundedCheck = await gate.check(
     {
       ...task,

@@ -112,18 +112,25 @@ export interface TaskCampaignAssociation {
 
 export type TaskWaitingReason =
   | "network_interruption"
+  | "project_check_capability"
   | "delivery_reconciliation"
   | "external_review"
   | "pipeline_checks"
   | "review_interruption";
 export const PUBLIC_TASK_WAITING_REASONS = [
   "network_interruption",
+  "project_check_capability",
   "delivery_reconciliation",
   "external_review",
   "pipeline_checks",
 ] as const;
 export type PublicTaskWaitingReason = (typeof PUBLIC_TASK_WAITING_REASONS)[number];
-export type TaskWaitingResumeState = "admitted" | "checked" | "reviewed" | "reviewing";
+export type TaskWaitingResumeState =
+  | "admitted"
+  | "candidate"
+  | "checked"
+  | "reviewed"
+  | "reviewing";
 export interface TaskWaiting {
   reason: TaskWaitingReason;
   resumeState: TaskWaitingResumeState;
@@ -262,6 +269,7 @@ export function publicTaskWaitingFromResult(
 export function publicTaskRetryableFromResult(result: Pick<TaskResult, "waiting">): boolean {
   return (
     result.waiting?.reason === "network_interruption" ||
+    result.waiting?.reason === "project_check_capability" ||
     result.waiting?.reason === "delivery_reconciliation" ||
     result.waiting?.reason === "external_review" ||
     result.waiting?.reason === "pipeline_checks"
@@ -638,19 +646,26 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       const validActivation =
         fact.waiting.reason === "network_interruption"
           ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
-          : fact.waiting.reason === "delivery_reconciliation" ||
-              fact.waiting.reason === "external_review" ||
-              fact.waiting.reason === "pipeline_checks"
-            ? result.state === "reviewed" &&
+          : fact.waiting.reason === "project_check_capability"
+            ? result.state === "candidate" &&
               result.activeActivation === null &&
               result.candidateFence === fact.waiting.activation &&
               result.candidateSha !== null &&
-              result.check?.sha === result.candidateSha &&
-              result.check.status === "passed" &&
-              result.review?.sha === result.candidateSha &&
-              result.review.verdict === "approved" &&
+              result.check === null &&
               fact.waiting.activation > 0
-            : false;
+            : fact.waiting.reason === "delivery_reconciliation" ||
+                fact.waiting.reason === "external_review" ||
+                fact.waiting.reason === "pipeline_checks"
+              ? result.state === "reviewed" &&
+                result.activeActivation === null &&
+                result.candidateFence === fact.waiting.activation &&
+                result.candidateSha !== null &&
+                result.check?.sha === result.candidateSha &&
+                result.check.status === "passed" &&
+                result.review?.sha === result.candidateSha &&
+                result.review.verdict === "approved" &&
+                fact.waiting.activation > 0
+              : false;
       if (
         !validActivation ||
         !Number.isSafeInteger(fact.waiting.activation) ||

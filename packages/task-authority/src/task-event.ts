@@ -240,6 +240,7 @@ const eventData = Schema.Union([
     type: Schema.Literal("task_waiting"),
     reason: Schema.Literals([
       "network_interruption",
+      "project_check_capability",
       "delivery_reconciliation",
       "external_review",
       "pipeline_checks",
@@ -253,6 +254,7 @@ const eventData = Schema.Union([
     type: Schema.Literal("task_retry_accepted"),
     reason: Schema.Literals([
       "network_interruption",
+      "project_check_capability",
       "delivery_reconciliation",
       "external_review",
       "pipeline_checks",

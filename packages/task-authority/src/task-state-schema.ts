@@ -93,12 +93,13 @@ const waitingDiagnostic = Schema.String.check(Schema.isMaxLength(512));
 const taskWaiting = Schema.Struct({
   reason: Schema.Literals([
     "network_interruption",
+    "project_check_capability",
     "delivery_reconciliation",
     "external_review",
     "pipeline_checks",
     "review_interruption",
   ]),
-  resumeState: Schema.Literals(["admitted", "checked", "reviewed", "reviewing"]),
+  resumeState: Schema.Literals(["admitted", "candidate", "checked", "reviewed", "reviewing"]),
   activation: Schema.Natural,
   failureClass: Schema.optional(Schema.Literals(TASK_FAILURE_CLASSES)),
   diagnostic: Schema.optional(waitingDiagnostic),

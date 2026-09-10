@@ -9,7 +9,11 @@ import type {
   SessionRequest,
   RoleOutputNormalizerObservation,
 } from "@usine/coding-session";
-import type { ReviewAttemptObservation } from "@usine/quality-gate";
+import type {
+  ProjectCheckCapabilityBlocker,
+  QualityGateCheckResult,
+  ReviewAttemptObservation,
+} from "@usine/quality-gate";
 import {
   DeliveryQuarantineError,
   ExternalReviewPendingError,
@@ -132,7 +136,11 @@ interface DeliveryRunSession {
 }
 
 interface DeliveryRunQuality {
-  check(contract: ResolvedTaskContract, sha: string, cycle: number): Promise<CheckResult>;
+  check(
+    contract: ResolvedTaskContract,
+    sha: string,
+    cycle: number,
+  ): Promise<QualityGateCheckResult>;
   reviewWithObservation(
     contract: ResolvedTaskContract,
     sha: string,
@@ -223,8 +231,27 @@ export async function executeDeliveryRun(
       const cycle = result.evidence.reviewCycles + 1;
       let check: CheckResult;
       try {
-        check = await services.quality.check(input.contract, result.candidateSha, cycle);
+        const checkResult = await services.quality.check(
+          input.contract,
+          result.candidateSha,
+          cycle,
+        );
         throwIfAborted(input.signal);
+        if (isProjectCheckCapabilityBlocker(checkResult)) {
+          if (result.candidateFence === null)
+            return blockTask(services, result, "candidate phase has no coding activation fence");
+          return services.authority.recordWaiting(
+            { taskId: result.taskId, revision: result.revision },
+            {
+              reason: "project_check_capability",
+              resumeState: "candidate",
+              activation: result.candidateFence,
+              diagnostic:
+                "project check cannot start: Quality Gate shell capability is unavailable; restore the host runner and retry",
+            },
+          );
+        }
+        check = checkResult;
       } catch (error) {
         if (input.signal?.aborted) throw error;
         return blockTask(services, result, error instanceof Error ? error.message : String(error));
@@ -528,6 +555,12 @@ function isTransientReviewerFailure(
     failureClass === "network" ||
     failureClass === "timeout"
   );
+}
+
+function isProjectCheckCapabilityBlocker(
+  result: QualityGateCheckResult,
+): result is ProjectCheckCapabilityBlocker {
+  return result.kind === "capability_blocked";
 }
 
 function reviewBlockerClassification(
