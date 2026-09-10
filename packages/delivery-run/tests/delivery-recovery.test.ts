@@ -15,6 +15,7 @@ import {
   DeliveryQuarantineError,
   ExternalReviewPendingError,
   ForgeDeliveryReconciliationError,
+  PipelineChecksPendingError,
 } from "@usine/forge-delivery";
 import {
   applyTaskFact,
@@ -172,6 +173,8 @@ function fakeAuthority(initial: TaskResult) {
       observation: { taskId: string; revision: number },
       waiting: NonNullable<TaskResult["waiting"]>,
     ) => transition(observation, { type: "waiting", waiting }),
+    resumePipelineChecks: (taskId: string, revision: number) =>
+      transition({ taskId, revision }, { type: "retry" }),
     recordDelivery: (
       observation: { taskId: string; revision: number },
       delivery: TaskResult["delivery"],
@@ -771,6 +774,78 @@ describe("Delivery Run durable phase recovery", () => {
     });
     expect(deliveries).toBe(2);
     expect(implementerActivations).toBe(0);
+    expect(reviews).toBe(0);
+  });
+
+  test("automatically resumes a pending pipeline wait with the approved bundle", async () => {
+    const id = `pipeline-checks-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const fake = fakeAuthority(persistedResult("reviewed", id));
+    let deliveries = 0;
+    let checks = 0;
+    let reviews = 0;
+    const services = servicesFor(
+      fake.authority,
+      {
+        check: async () => {
+          checks += 1;
+          throw new Error("project check must not rerun");
+        },
+        reviewWithObservation: async () => {
+          reviews += 1;
+          throw new Error("review must not rerun");
+        },
+      },
+      {
+        deliver: async (_contract, candidateSha, check, review) => {
+          deliveries += 1;
+          expect(check.sha).toBe(candidateSha);
+          expect(review).toMatchObject({ sha: candidateSha, verdict: "approved" });
+          if (deliveries === 1)
+            throw new PipelineChecksPendingError("check run 'required' is queued");
+          return {
+            sha: candidateSha,
+            effect: "github" as const,
+            prNumber: 80,
+            url: "https://example.invalid/pr/80",
+            attestationId: "pipeline-ready",
+          };
+        },
+      },
+    );
+
+    const waiting = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "pipeline-checks-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      services,
+    );
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      waiting: { reason: "pipeline_checks", diagnostic: "check run 'required' is queued" },
+      candidateSha: sha,
+      review: { sha, verdict: "approved" },
+    });
+
+    const delivered = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "pipeline-checks-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      services,
+    );
+    expect(delivered).toMatchObject({
+      state: "reviewed_pr",
+      delivery: { attestationId: "pipeline-ready" },
+    });
+    expect(deliveries).toBe(2);
+    expect(checks).toBe(0);
     expect(reviews).toBe(0);
   });
 

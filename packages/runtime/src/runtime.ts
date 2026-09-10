@@ -32,6 +32,7 @@ import {
   type ServerSnapshot,
   isTerminalState,
   isWaitingState,
+  isPipelineChecksWaiting,
 } from "@usine/task-authority";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import {
@@ -148,6 +149,7 @@ async function readBoundedTaskContractFile(contractPath: string): Promise<string
 export {
   runtimePolicyFromEnvironment,
   forgePolicyFromEnvironment,
+  pipelinePolicyFromEnvironment,
   forgeReadinessFromEnvironment,
   externalReviewPolicyFromEnvironment,
   githubReadPolicyFromEnvironment,
@@ -687,7 +689,9 @@ export async function executeAdmittedTask(
     if (!existing) throw new Error("task is not admitted");
     if (
       isTerminalState(existing.state) ||
-      (isWaitingState(existing.state) && existing.waiting?.reason !== "review_interruption")
+      (isWaitingState(existing.state) &&
+        existing.waiting?.reason !== "review_interruption" &&
+        !isPipelineChecksWaiting(existing))
     )
       return existing;
     if (hashTaskContract(input.rawContract) !== existing.contractHash)

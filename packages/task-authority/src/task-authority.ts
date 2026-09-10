@@ -655,7 +655,11 @@ export class TaskAuthority {
       }
       if (isTerminalState(result.state)) continue;
       activeTaskCount += 1;
-      if (isWaitingState(result.state) && result.waiting?.reason !== "review_interruption")
+      if (
+        isWaitingState(result.state) &&
+        result.waiting?.reason !== "review_interruption" &&
+        result.waiting?.reason !== "pipeline_checks"
+      )
         continue;
       if (!row.rawContract || !result.repository) continue;
       restartable.push({
@@ -1029,6 +1033,15 @@ export class TaskAuthority {
 
   recordWaiting(observation: TaskObservation, waiting: TaskWaiting): Promise<TaskResult> {
     return this.persistFact(observation, { type: "waiting", waiting });
+  }
+
+  async resumePipelineChecks(taskId: string, revision: number): Promise<TaskResult> {
+    const current = await this.lookup(taskId);
+    if (!current) throw new Error("task is not admitted");
+    if (current.revision !== revision) throw new Error("stale task revision");
+    if (current.state !== "waiting" || current.waiting?.reason !== "pipeline_checks")
+      return current;
+    return this.retryTask(taskId, null);
   }
 
   block(

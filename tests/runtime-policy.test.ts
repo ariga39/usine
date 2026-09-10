@@ -6,6 +6,7 @@ import {
   forgePolicyFromEnvironment,
   forgeReadinessFromEnvironment,
   githubReadPolicyFromEnvironment,
+  pipelinePolicyFromEnvironment,
   runtimePolicyFromEnvironment,
 } from "@usine/runtime";
 
@@ -395,6 +396,39 @@ describe("runtime composition", () => {
         reviewRepository,
       ),
     ).toThrow("explicitly true or false");
+  });
+
+  test("parses optional pipeline check-run and status-context allowlists", () => {
+    const repository = { owner: "owner", name: "repo", forgeProfile: "release" };
+    expect(pipelinePolicyFromEnvironment({}, repository)).toBeUndefined();
+    expect(
+      pipelinePolicyFromEnvironment(
+        {
+          USINE_FORGE_PROFILE_RELEASE_PIPELINE_CHECK_RUNS:
+            '["build", "test (ubuntu-latest, 24)", "build"]',
+          USINE_FORGE_PROFILE_RELEASE_PIPELINE_STATUS_CONTEXTS: '["deploy"]',
+        },
+        repository,
+      ),
+    ).toEqual({
+      checkRuns: ["build", "test (ubuntu-latest, 24)"],
+      statusContexts: ["deploy"],
+    });
+    expect(
+      pipelinePolicyFromEnvironment(
+        {
+          USINE_FORGE_PROFILE_RELEASE_PIPELINE_CHECK_RUNS: "",
+          USINE_FORGE_PROFILE_RELEASE_PIPELINE_STATUS_CONTEXTS: " ",
+        },
+        repository,
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      pipelinePolicyFromEnvironment(
+        { USINE_FORGE_PROFILE_RELEASE_PIPELINE_CHECK_RUNS: '["build", ""]' },
+        repository,
+      ),
+    ).toThrow("JSON string array of nonblank entries");
   });
 
   test("returns bounded readiness failures for missing host identity, installation, and binding", async () => {

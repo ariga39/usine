@@ -17,6 +17,7 @@ import {
   type GithubApiPolicy,
   type GithubReadToolName,
   type ExternalReviewPolicy,
+  type GithubPipelineAllowlist,
 } from "@usine/forge-delivery";
 import { forgeProfileSchema } from "@usine/task-authority";
 
@@ -236,6 +237,7 @@ export function forgePolicyFromEnvironment(
       repositoryIdentity(repository),
     );
   const prefix = `USINE_FORGE_PROFILE_${profile.toUpperCase().replaceAll("-", "_")}_`;
+  const pipeline = pipelinePolicyFromEnvironment(environment, repository);
   const appSlug = requiredProfileValue(
     environment[`${prefix}APP_SLUG`],
     "unauthorized",
@@ -265,7 +267,14 @@ export function forgePolicyFromEnvironment(
   if (testToken) {
     if (!apiUrl || !isLoopbackHttpUrl(apiUrl))
       throw new Error("test GitHub token is restricted to loopback API URL");
-    return { mode: "test", appSlug, token: testToken, apiUrl, gitUrl };
+    return {
+      mode: "test",
+      appSlug,
+      token: testToken,
+      apiUrl,
+      gitUrl,
+      ...(pipeline ? { pipeline } : {}),
+    };
   }
 
   const appId = requiredProfileValue(
@@ -290,7 +299,52 @@ export function forgePolicyFromEnvironment(
       repositoryIdentity(repository),
       "installation_id",
     );
-  return { mode: "app", appSlug, appId, installationId, privateKeyPath, gitUrl };
+  return {
+    mode: "app",
+    appSlug,
+    appId,
+    installationId,
+    privateKeyPath,
+    gitUrl,
+    ...(pipeline ? { pipeline } : {}),
+  };
+}
+
+export function pipelinePolicyFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  repository: { owner: string; name: string; forgeProfile: string },
+): GithubPipelineAllowlist | undefined {
+  const profile = repository.forgeProfile.trim();
+  if (!forgeProfileSchema.safeParse(profile).success) throw new Error("Forge profile is malformed");
+  const prefix = `USINE_FORGE_PROFILE_${profile.toUpperCase().replaceAll("-", "_")}_`;
+  const checkRuns = pipelineAllowlistEntries(
+    environment[`${prefix}PIPELINE_CHECK_RUNS`],
+    `${prefix}PIPELINE_CHECK_RUNS`,
+  );
+  const statusContexts = pipelineAllowlistEntries(
+    environment[`${prefix}PIPELINE_STATUS_CONTEXTS`],
+    `${prefix}PIPELINE_STATUS_CONTEXTS`,
+  );
+  if (checkRuns.length === 0 && statusContexts.length === 0) return undefined;
+  return { checkRuns, statusContexts };
+}
+
+function pipelineAllowlistEntries(value: string | undefined, name: string): string[] {
+  const raw = value?.trim();
+  if (!raw) return [];
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    throw new Error(`${name} must be a JSON string array of nonblank entries`);
+  }
+  if (
+    !Array.isArray(decoded) ||
+    decoded.some((entry) => typeof entry !== "string" || entry.trim().length === 0)
+  )
+    throw new Error(`${name} must be a JSON string array of nonblank entries`);
+  const entries = decoded.map((entry) => entry.trim());
+  return [...new Set(entries)];
 }
 
 export async function forgeReadinessFromEnvironment(

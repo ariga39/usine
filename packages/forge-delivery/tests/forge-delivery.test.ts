@@ -7,8 +7,10 @@ import {
   approvalAttestationBody,
   ForgeDelivery,
   ForgeDeliveryReconciliationError,
+  PipelineChecksPendingError,
   forgeGitEnvironment,
   type ExternalReviewPolicy,
+  type GithubPipelineAllowlist,
 } from "../src/index.js";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { taskContractSchema, type ResolvedTaskContract } from "@usine/task-authority";
@@ -239,6 +241,8 @@ type ForgeServerState = {
   mergeResponseSha?: "missing" | "malformed";
   mergeRefusal?: string;
   authoritativeHeadSha?: string;
+  pipelineCheckRuns?: Array<Record<string, unknown>>;
+  pipelineStatuses?: Array<Record<string, unknown>>;
   lastPullRequest?: { title: string; body: string };
   requests: string[];
 };
@@ -317,6 +321,16 @@ function controlledFetch(state: ForgeServerState): typeof fetch {
     }
     if (method === "GET" && pathname === "/repos/owner/repo/pulls/1/reviews")
       return Response.json(state.reviews ?? []);
+    if (method === "GET" && pathname.endsWith("/check-runs"))
+      return Response.json({
+        total_count: state.pipelineCheckRuns?.length ?? 0,
+        check_runs: state.pipelineCheckRuns ?? [],
+      });
+    if (method === "GET" && pathname.endsWith("/status"))
+      return Response.json({
+        total_count: state.pipelineStatuses?.length ?? 0,
+        statuses: state.pipelineStatuses ?? [],
+      });
     if (method === "GET" && pathname === "/apps/external-review-app")
       return Response.json({ id: 42, slug: "external-review-app" });
     if (method === "GET" && pathname === "/apps/trusted-reviewer")
@@ -469,6 +483,7 @@ function forge(
   apiUrl: string,
   gitUrl: string,
   externalReview?: ExternalReviewPolicy,
+  pipeline?: GithubPipelineAllowlist,
 ): ForgeDelivery {
   return new ForgeDelivery({
     repository,
@@ -479,6 +494,7 @@ function forge(
       token: "test-token",
       apiUrl,
       gitUrl,
+      ...(pipeline ? { pipeline } : {}),
     },
     ...(externalReview ? { externalReview } : {}),
     environment: process.env,
@@ -813,6 +829,98 @@ describe.sequential("Forge Delivery reconciliation", () => {
     ).rejects.toThrow("App/Bot");
     expect(state.commentCreates).toBe(0);
   });
+
+  test("does not call merge while an allowlisted check is pending", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+        },
+      ],
+      comments: [],
+      pipelineCheckRuns: [
+        { id: 10, name: "build", status: "completed", conclusion: "success" },
+        { id: 11, name: "lint", status: "queued", conclusion: null },
+      ],
+      pipelineStatuses: [{ id: 12, context: "deploy", state: "success" }],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    const task = contract("forge-pipeline-pending", true);
+    await expect(
+      withControlledFetch(state, (apiUrl) =>
+        forge(fixture.repository, apiUrl, fixture.remote, undefined, {
+          checkRuns: ["build", "lint"],
+          statusContexts: ["deploy"],
+        }).deliver(
+          task,
+          fixture.candidateSha,
+          { ...passingCheck, sha: fixture.candidateSha },
+          { ...approvedReview, sha: fixture.candidateSha },
+        ),
+      ),
+    ).rejects.toBeInstanceOf(PipelineChecksPendingError);
+    expect(state.mergeCalls ?? 0).toBe(0);
+    expect(state.requests.every((request) => !request.includes("/required"))).toBe(true);
+  });
+
+  test("calls merge only after every selected check and status succeeds", async () => {
+    const fixture = await repositoryFixture();
+    const state: ForgeServerState = {
+      candidateSha: fixture.candidateSha,
+      headSha: fixture.candidateSha,
+      pullRequests: [
+        {
+          number: 1,
+          state: "open",
+          head: { sha: fixture.candidateSha },
+          html_url: "http://example.invalid/pull/1",
+          mergeable: true,
+          mergeable_state: "clean",
+        },
+      ],
+      comments: [],
+      pipelineCheckRuns: [
+        { id: 10, name: "build", status: "completed", conclusion: "success" },
+        { id: 11, name: "lint", status: "completed", conclusion: "success" },
+        { id: 12, name: "ignored", status: "completed", conclusion: "failure" },
+      ],
+      pipelineStatuses: [
+        { id: 20, context: "deploy", state: "success" },
+        { id: 21, context: "release", state: "success" },
+        { id: 22, context: "ignored", state: "failure" },
+      ],
+      failAfterPullRequestCreate: false,
+      failAfterCommentCreate: false,
+      pullRequestCreates: 0,
+      commentCreates: 0,
+      requests: [],
+    };
+    state.mergeCommitSha = await remoteMergeCommit(fixture);
+    const task = contract("forge-pipeline-merge", true);
+    const result = await withControlledFetch(state, (apiUrl) =>
+      forge(fixture.repository, apiUrl, fixture.remote, undefined, {
+        checkRuns: ["build", "lint"],
+        statusContexts: ["deploy", "release"],
+      }).deliver(
+        task,
+        fixture.candidateSha,
+        { ...passingCheck, sha: fixture.candidateSha },
+        { ...approvedReview, sha: fixture.candidateSha },
+      ),
+    );
+    expect(result.merge?.approvedHeadSha).toBe(fixture.candidateSha);
+    expect(state.mergeCalls).toBe(1);
+  }, 30_000);
 
   test("materializes a remote-only merge for CandidateWorkspace after accepted delivery", async () => {
     const fixture = await repositoryFixture();

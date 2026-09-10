@@ -26,6 +26,8 @@ import {
   type TaskResult,
   taskResourceFromResult,
   isTerminalState,
+  isWaitingState,
+  isPipelineChecksWaiting,
 } from "@usine/task-authority";
 import {
   CampaignContentConflictError,
@@ -247,6 +249,7 @@ class TransientEventHub {
 
 const DEFAULT_EVENT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_EVENT_WAIT_TIMEOUT_MS = 60_000;
+const PIPELINE_REOBSERVE_INTERVAL_MS = 15_000;
 export async function startUsineServer(options: UsineServerOptions): Promise<RunningUsineServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
@@ -267,6 +270,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   let queuedCampaignModelLaunch: ReturnType<typeof setImmediate> | undefined;
   let campaignModelWorkGeneration = 0;
   const activeTaskOperations = new Set<Promise<unknown>>();
+  const pipelineRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const onEvent = (event: TaskEvent): void => {
     eventDispatch = eventDispatch
       .then(async () => {
@@ -322,6 +326,12 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     yield* Effect.acquireRelease(Effect.void, () => Effect.sync(() => eventHub.shutdown()));
 
     launchTask = (task, mode = "deduplicated") => {
+      if (mode === "deduplicated" && pipelineRecoveryTimers.has(task.result.taskId)) return;
+      const pendingTimer = pipelineRecoveryTimers.get(task.result.taskId);
+      if (pendingTimer !== undefined) {
+        clearTimeout(pendingTimer);
+        pipelineRecoveryTimers.delete(task.result.taskId);
+      }
       runTask(
         task.result.taskId,
         Effect.tryPromise({
@@ -337,8 +347,13 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
             );
             activeTaskOperations.add(operation);
             void operation.then(
-              () => activeTaskOperations.delete(operation),
-              () => activeTaskOperations.delete(operation),
+              (result) => {
+                activeTaskOperations.delete(operation);
+                if (isPipelineChecksWaiting(result)) schedulePipelineRecovery(task);
+              },
+              () => {
+                activeTaskOperations.delete(operation);
+              },
             );
             return operation;
           },
@@ -346,6 +361,21 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         }).pipe(Effect.asVoid),
         mode === "deduplicated" ? { onlyIfMissing: true } : undefined,
       );
+    };
+
+    const schedulePipelineRecovery = (task: AdmittedTask): void => {
+      if (serverClosed) return;
+      if (pipelineRecoveryTimers.has(task.result.taskId)) return;
+      const delay = Math.min(
+        PIPELINE_REOBSERVE_INTERVAL_MS,
+        Math.max(0, task.result.deadlineEpochMs - Date.now()),
+      );
+      const timer = setTimeout(() => {
+        if (pipelineRecoveryTimers.get(task.result.taskId) !== timer) return;
+        pipelineRecoveryTimers.delete(task.result.taskId);
+        if (!serverClosed) launchTask(task);
+      }, delay);
+      pipelineRecoveryTimers.set(task.result.taskId, timer);
     };
 
     launchCampaignModelWork = (work) => {
@@ -407,7 +437,10 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           { launchModelWork: launchCampaignModelWork },
         );
         for (const admission of admissions) {
-          if (!isTerminalState(admission.result.state) && admission.result.state !== "waiting")
+          if (
+            !isTerminalState(admission.result.state) &&
+            (!isWaitingState(admission.result.state) || isPipelineChecksWaiting(admission.result))
+          )
             launchTask(admission);
         }
       });
@@ -485,6 +518,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           serverClosed = true;
           if (queuedCampaignModelLaunch !== undefined) clearImmediate(queuedCampaignModelLaunch);
           queuedCampaignModelLaunch = undefined;
+          for (const timer of pipelineRecoveryTimers.values()) clearTimeout(timer);
+          pipelineRecoveryTimers.clear();
           await campaignCoordination;
           await Effect.runPromise(Scope.close(scope, Exit.void));
           await Promise.allSettled(activeTaskOperations);
@@ -495,6 +530,8 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     serverClosed = true;
     if (queuedCampaignModelLaunch !== undefined) clearImmediate(queuedCampaignModelLaunch);
     queuedCampaignModelLaunch = undefined;
+    for (const timer of pipelineRecoveryTimers.values()) clearTimeout(timer);
+    pipelineRecoveryTimers.clear();
     await campaignCoordination;
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
     await Promise.allSettled(activeTaskOperations);
@@ -699,7 +736,10 @@ function createApiLayer(options: {
             options.onEvent,
           );
           const { result, input, contract: admittedContract } = admitted;
-          if (!isTerminalState(result.state) && result.state !== "waiting")
+          if (
+            !isTerminalState(result.state) &&
+            (!isWaitingState(result.state) || isPipelineChecksWaiting(result))
+          )
             options.launch({ input, contract: admittedContract, result });
           return taskResourceForApi(result);
         }),
@@ -714,7 +754,10 @@ function createApiLayer(options: {
             contract.budget.maxImplementerActivations,
             options.onEvent,
           );
-          if (!isTerminalState(result.state) && result.state !== "waiting")
+          if (
+            !isTerminalState(result.state) &&
+            (!isWaitingState(result.state) || isPipelineChecksWaiting(result))
+          )
             options.launch({ input, contract, result }, "replace");
           return taskResourceForApi(result);
         }),

@@ -240,6 +240,7 @@ const eventData = Schema.Union([
       "network_interruption",
       "delivery_reconciliation",
       "external_review",
+      "pipeline_checks",
       "review_interruption",
     ]),
     activation: Schema.Natural,
@@ -248,7 +249,12 @@ const eventData = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("task_retry_accepted"),
-    reason: Schema.Literals(["network_interruption", "delivery_reconciliation", "external_review"]),
+    reason: Schema.Literals([
+      "network_interruption",
+      "delivery_reconciliation",
+      "external_review",
+      "pipeline_checks",
+    ]),
     activation: Schema.Natural,
   }),
   Schema.Struct({

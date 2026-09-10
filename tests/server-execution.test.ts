@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 import {
   lookupTaskStatus,
   lookupTaskEvents,
@@ -180,7 +180,212 @@ function blockedExecutor(seen: string[]): (context: ServerExecutionContext) => P
   };
 }
 
+async function recordPipelineWaiting({
+  authority,
+  contract,
+  result,
+  executionOwnerId,
+}: Pick<
+  ServerExecutionContext,
+  "authority" | "contract" | "result" | "executionOwnerId"
+>): Promise<TaskResult> {
+  const activation = await authority.reserveActivation(
+    result.taskId,
+    contract.budget.maxImplementerActivations,
+  );
+  const candidate = await authority.recordCandidate(
+    { taskId: result.taskId, revision: activation.result.revision },
+    { sha: contract.baseSha, baseSha: contract.baseSha, fence: activation.activation },
+  );
+  await authority.recordCheck(
+    { taskId: result.taskId, revision: candidate.revision },
+    {
+      sha: contract.baseSha,
+      status: "passed",
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    },
+  );
+  const reviewAttempt = await authority.reserveReviewAttempt(
+    result.taskId,
+    contract.budget.maxReviewCycles,
+    executionOwnerId,
+  );
+  const reviewed = await authority.recordReview(
+    { taskId: result.taskId, revision: reviewAttempt.result.revision },
+    { sha: contract.baseSha, verdict: "approved", summary: "approved", findings: [] },
+    executionOwnerId,
+  );
+  return authority.recordWaiting(
+    { taskId: result.taskId, revision: reviewed.revision },
+    {
+      reason: "pipeline_checks",
+      resumeState: "reviewed",
+      activation: reviewed.candidateFence!,
+      diagnostic: "pipeline checks pending",
+    },
+  );
+}
+
 describe("server-owned execution", () => {
+  test("uses one bounded default pipeline observation timer per waiting Task", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const allowWaiting = deferred<void>();
+    const waiting = deferred<void>();
+    const completed = deferred<void>();
+    const recoveryCallbacks: Array<() => void> = [];
+    let executions = 0;
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, contract, result, executionOwnerId }) => {
+        executions += 1;
+        if (executions === 1) {
+          await allowWaiting.promise;
+          const paused = await recordPipelineWaiting({
+            authority,
+            contract,
+            result,
+            executionOwnerId,
+          });
+          waiting.resolve();
+          return paused;
+        }
+        const blocked = await authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "pipeline checks passed",
+        );
+        completed.resolve();
+        return blocked;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    const originalSetTimeout = globalThis.setTimeout;
+    let captureRecoveryTimers = false;
+    const timerSpy = vi.spyOn(globalThis, "setTimeout");
+    timerSpy.mockImplementation((handler, delay, ...args) => {
+      if (captureRecoveryTimers && delay === 15_000 && typeof handler === "function") {
+        recoveryCallbacks.push(() => handler(...args));
+        return {} as ReturnType<typeof setTimeout>;
+      }
+      return originalSetTimeout(handler, delay, ...args);
+    });
+    try {
+      await submitTask(server.url, submission);
+      captureRecoveryTimers = true;
+      allowWaiting.resolve();
+      await waiting.promise;
+      await submitTask(server.url, submission);
+      await submitTask(server.url, submission);
+      expect(executions).toBe(1);
+      expect(recoveryCallbacks).toHaveLength(1);
+      recoveryCallbacks[0]!();
+      await completed.promise;
+      expect(executions).toBe(2);
+    } finally {
+      timerSpy.mockRestore();
+      await server.close();
+    }
+  });
+
+  test("re-enters a durable pipeline wait after server restart", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture();
+    const waiting = deferred<void>();
+    let firstExecutions = 0;
+    const first = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async (context) => {
+        firstExecutions += 1;
+        const paused = await recordPipelineWaiting(context);
+        waiting.resolve();
+        return paused;
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    await submitTask(first.url, submission);
+    await waiting.promise;
+    await first.close();
+
+    let restartedExecutions = 0;
+    const second = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async ({ authority, result }) => {
+        restartedExecutions += 1;
+        return authority.block(
+          { taskId: result.taskId, revision: result.revision },
+          "pipeline deadline test complete",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      const completed = await waitFor(
+        () => taskStatus(second.url, submission.repositoryId!),
+        (result) => result.state === "blocked",
+      );
+      expect(completed).toMatchObject({
+        state: "blocked",
+        candidateSha: expect.any(String),
+        check: { status: "passed" },
+        review: { verdict: "approved" },
+      });
+      expect(firstExecutions).toBe(1);
+      expect(restartedExecutions).toBe(1);
+    } finally {
+      await second.close();
+    }
+  }, 30_000);
+
+  test("stops automatic pipeline recovery at the original deadline", async () => {
+    const { submission, stateDirectory, repositoryName } = await fixture({
+      maxImplementerActivations: 1,
+      maxReviewCycles: 1,
+      maxElapsedMs: 2_000,
+    });
+    const waiting = deferred<void>();
+    let executions = 0;
+    const server = await startUsineServer({
+      environment: environment(stateDirectory, repositoryName),
+      execute: async (context) => {
+        executions += 1;
+        if (executions === 1) {
+          const paused = await recordPipelineWaiting(context);
+          waiting.resolve();
+          return paused;
+        }
+        return context.authority.block(
+          { taskId: context.result.taskId, revision: context.result.revision },
+          Date.now() >= context.result.deadlineEpochMs
+            ? "elapsed budget exhausted"
+            : "unexpected early pipeline recovery",
+        );
+      },
+      host: "127.0.0.1",
+      port: 0,
+    });
+    try {
+      await submitTask(server.url, submission);
+      await waiting.promise;
+      let completed: TaskResource | null = null;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        completed = await taskStatus(server.url, submission.repositoryId!);
+        if (completed?.state === "blocked") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(completed).not.toBeNull();
+      if (!completed)
+        throw new Error("pipeline recovery did not complete before the test deadline");
+      expect(completed.blocker).toEqual({ classification: "elapsed_budget" });
+      expect(executions).toBe(2);
+    } finally {
+      await server.close();
+    }
+  }, 15_000);
+
   test("shares repeated close completion across task interruption and leaves the server closed", async () => {
     const { submission, stateDirectory, repositoryName } = await fixture();
     const started = deferred<void>();
