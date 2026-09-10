@@ -104,7 +104,7 @@ const campaigns = new Map([
       "planning",
       true,
       [outcome("outcome-d1", "Continue the authorized work")],
-      [proposal("proposal-1", "outcome-d1", "task-d-work")],
+      [proposal("proposal-1", "outcome-d1", "task-d")],
     ),
   ],
   [
@@ -473,7 +473,7 @@ const server = createServer(async (request, response) => {
         event(
           "event-c-2",
           { type: "task_retry_accepted", reason: "external_review", activation: 1 },
-          events.at(-1)?.sequence + 1 ?? 1,
+          (events.at(-1)?.sequence ?? 0) + 1,
           resource.taskId,
         ),
       ]);
