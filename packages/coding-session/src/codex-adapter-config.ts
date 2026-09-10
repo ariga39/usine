@@ -2,6 +2,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import type {
   CodingSessionAdapterMcpServer,
   CodingSessionAdapterProfile,
+  CodingSessionAdapterRequest,
   ProviderNeutralJsonValue,
 } from "./coding-session-adapter.js";
 
@@ -10,6 +11,7 @@ export type CodexNativeConfig = NonNullable<CodexOptions["config"]>;
 /** Codex's native config projection is private to its peer adapters. */
 export function codexAdapterConfig(
   profile: CodingSessionAdapterProfile,
+  role: CodingSessionAdapterRequest["role"],
   mcpServer?: CodingSessionAdapterMcpServer,
 ): CodexNativeConfig {
   return {
@@ -28,6 +30,7 @@ export function codexAdapterConfig(
     model: profile.model,
     ...(profile.reasoningEffort ? { model_reasoning_effort: profile.reasoningEffort } : {}),
     approval_policy: "never",
+    sandbox_workspace_write: { network_access: role === "implementer" },
     mcp_servers: {},
     ...(mcpServer ? codexMcpServerConfig(mcpServer) : {}),
   };

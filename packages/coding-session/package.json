@@ -16,7 +16,7 @@
   "dependencies": {
     "@ai-sdk/openai": "latest",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@openai/codex-sdk": "0.153.4",
+    "@openai/codex-sdk": "0.154.0",
     "@opencode-ai/sdk": "1.18.25",
     "@usine/task-authority": "workspace:*",
     "ai": "latest",

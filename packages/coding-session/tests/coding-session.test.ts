@@ -38,6 +38,7 @@ import {
 } from "@usine/coding-session";
 import { decodeTaskObservationEventInput, type TaskContract } from "@usine/task-authority";
 import { sessionArchiveProfileSnapshot } from "../src/session-archive.js";
+import { CodexAppServerAdapter } from "../src/codex-app-server.js";
 import { createCodexCodingSessionForTesting } from "../src/coding-session.js";
 import { codexAdapterConfig } from "../src/codex-adapter-config.js";
 import { normalizeCodingSessionMcpServer } from "../src/coding-session-policy.js";
@@ -149,8 +150,9 @@ async function fakeAppServerEnvironment(
   expectedModel = "fixture-model",
   expectedReasoning = "minimal",
   expectedDeveloperInstructions = "Fixture reviewer instructions",
+  expectedSandbox = "read-only",
 ): Promise<{
-  environment: NodeJS.ProcessEnv;
+  environment: Record<string, string>;
   stateDirectory: string;
   protocolLogPath: string;
   pidPath: string;
@@ -186,6 +188,15 @@ const expectedMcpConfig = ${JSON.stringify(expectedMcpConfig)};
 const expectedModel = ${JSON.stringify(expectedModel)};
 const expectedReasoning = ${JSON.stringify(expectedReasoning)};
 const expectedDeveloperInstructions = ${JSON.stringify(expectedDeveloperInstructions)};
+const expectedSandbox = ${JSON.stringify(expectedSandbox)};
+const expectedNetworkAccess = ${JSON.stringify(
+      (
+        expectedMcpConfig as
+          | { sandbox_workspace_write?: { network_access?: boolean } }
+          | null
+          | undefined
+      )?.sandbox_workspace_write?.network_access ?? null,
+    )};
 if (process.argv[2] !== "app-server") {
   process.stderr.write("unexpected Codex transport arguments\\n");
   process.exit(2);
@@ -233,14 +244,16 @@ const handle = (message) => {
         message.params?.config?.model_reasoning_effort !== expectedReasoning ||
         message.params?.config?.developer_instructions !== expectedDeveloperInstructions ||
         message.params?.approvalPolicy !== "never" ||
-        message.params?.sandbox !== "read-only") {
+        message.params?.sandbox !== expectedSandbox) {
       process.stderr.write("profile configuration was not forwarded\\n");
       process.exit(3);
     }
     if (
       expectedMcpConfig !== null &&
       (message.params?.config?.approval_policy !== expectedMcpConfig.approval_policy ||
-        JSON.stringify(message.params?.config?.mcp_servers) !== JSON.stringify(expectedMcpConfig.mcp_servers))
+        JSON.stringify(message.params?.config?.mcp_servers) !== JSON.stringify(expectedMcpConfig.mcp_servers) ||
+        (expectedNetworkAccess !== null &&
+          message.params?.config?.sandbox_workspace_write?.network_access !== expectedNetworkAccess))
     ) {
       process.stderr.write("MCP configuration was not forwarded\\n");
       process.exit(3);
@@ -1033,6 +1046,10 @@ describe("Coding Session", () => {
       "Implementer role instruction: implement the frozen task contract.",
       "Reviewer role instruction: inspect the candidate independently.",
     ]);
+    expect(capturedConfigs.map((options) => options.config?.sandbox_workspace_write)).toEqual([
+      { network_access: true },
+      { network_access: false },
+    ]);
     expect(
       capturedConfigs.every((options) => options.env?.developer_instructions === undefined),
     ).toBe(true);
@@ -1091,6 +1108,40 @@ describe("Coding Session", () => {
     ).toThrow("assigned to both codex-app-server and opencode2");
   });
 
+  test("forwards implementer network access through the app-server request", async () => {
+    const profile = {
+      model: "fixture-model",
+      reasoningEffort: "minimal" as const,
+      developerInstructions: "Fixture reviewer instructions",
+    };
+    const fixture = await fakeAppServerEnvironment(
+      "success",
+      codexAdapterConfig(profile, "implementer"),
+      "fixture-model",
+      "minimal",
+      "Fixture reviewer instructions",
+      "workspace-write",
+    );
+    try {
+      await expect(
+        new CodexAppServerAdapter().run({
+          role: "implementer",
+          workspace: fixture.stateDirectory,
+          prompt: "work",
+          sandbox: "workspace-write",
+          approvalPolicy: "never",
+          profile,
+          outputSchema: {},
+          environment: fixture.environment,
+          signal: AbortSignal.timeout(10_000),
+        }),
+      ).resolves.toMatchObject({ sessionId: "thread-fixture" });
+      await expectAppServerChildSettled(fixture);
+    } finally {
+      await fixture.close();
+    }
+  });
+
   test("executes an app-server reviewer and settles its direct child", async () => {
     const mcpServer: CodingSessionMcpServer = {
       name: "github_read",
@@ -1108,6 +1159,7 @@ describe("Coding Session", () => {
           reasoningEffort: "minimal",
           developerInstructions: "Fixture reviewer instructions",
         },
+        "reviewer",
         normalizeCodingSessionMcpServer(mcpServer),
       ),
     );
@@ -1590,7 +1642,11 @@ describe("Coding Session", () => {
       .parse(
         JSON.parse(
           JSON.stringify(
-            codexAdapterConfig({ model: "fixture-model" }, normalizeCodingSessionMcpServer(server)),
+            codexAdapterConfig(
+              { model: "fixture-model" },
+              "reviewer",
+              normalizeCodingSessionMcpServer(server),
+            ),
           ),
         ),
       );
