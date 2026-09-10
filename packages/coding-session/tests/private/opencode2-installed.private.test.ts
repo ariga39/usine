@@ -1,121 +1,129 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { readFileSync, readdirSync } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
-import { createServer } from "node:net";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
 import { OpenCode2Adapter } from "../../src/opencode2-adapter.js";
-import {
-  DarwinOpenCode2Sandbox,
-  sandboxProfile,
-  type OpenCode2Sandbox,
-} from "../../src/opencode2-sandbox.js";
+import { DarwinOpenCode2Sandbox, type OpenCode2Sandbox } from "../../src/opencode2-sandbox.js";
 
 const enabled = process.env.USINE_PRIVATE_OPENCODE2_QUALIFICATION === "1";
-const SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
+const PROBE_RESPONSE = "qualification probe";
 
 describe.skipIf(!enabled)("private installed OpenCode2 qualification", () => {
   test.each(["implementer", "reviewer"] as const)(
-    "%s starts without a model request and remains loopback-only for inbound traffic",
+    "%s starts without a model request and serves only its loopback endpoint",
     async (role) => {
       const root = await mkdtemp(join(tmpdir(), "usine-opencode2-qualification-"));
       const stateDirectory = join(root, "state");
       const workspace = join(root, "workspace");
+      const outsideTemporaryDirectory = join(root, "outside-tmp");
       const launchRecord = join(root, "launch-record");
       const controller = new AbortController();
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]);
       const phases: string[] = [];
       const observations: unknown[] = [];
+      const sessions: string[] = [];
       const usage: unknown[] = [];
-      let qualification: { wildcardBindAllowed: boolean; nonLoopbackBytes: number } | undefined;
-      let probeFailure: unknown;
+      let endpointFailure: unknown;
+      const address = Object.values(networkInterfaces())
+        .flat()
+        .find((entry) => entry?.family === "IPv4" && !entry.internal)?.address;
+      if (!address) throw new Error("non-loopback IPv4 qualification address was unavailable");
+      let privateDirectory = "";
       await mkdir(workspace, { recursive: true });
+      await mkdir(outsideTemporaryDirectory);
 
       const sandbox: OpenCode2Sandbox = {
         prepare: async (request) => {
           const prepared = await new DarwinOpenCode2Sandbox().prepare(request);
-          const wrapper = join(request.privateDirectory, "qualification-wrapper");
-          const wrapperScript = [
-            "#!/bin/sh",
-            'printf \'%s %s\\n\' "$$" "$*" > ' + shellQuote(launchRecord),
-            "exec " +
-              shellQuote(prepared.launch.command) +
-              " " +
-              prepared.launch.args.map(shellQuote).join(" ") +
-              ' "$@"',
-            "",
-          ].join("\n");
-          await writeFile(wrapper, wrapperScript, { encoding: "utf8", mode: 0o700 });
-          await chmod(wrapper, 0o700);
+          privateDirectory = request.privateDirectory;
+          const wrapper = join(privateDirectory, "qualification-wrapper");
+          await writeFile(
+            wrapper,
+            [
+              "#!/bin/sh",
+              'printf \'%s\\n%s\\n%s\\n\' "$$" "$TMPDIR" "$*" > ' + shellQuote(launchRecord),
+              "exec " +
+                shellQuote(prepared.launch.command) +
+                " " +
+                prepared.launch.args.map(shellQuote).join(" ") +
+                ' "$@"',
+              "",
+            ].join("\n"),
+            { encoding: "utf8", mode: 0o700 },
+          );
           return { ...prepared, launch: { command: wrapper, args: [] } };
         },
       };
 
       try {
-        const run = new OpenCode2Adapter(stateDirectory, sandbox).run({
-          role,
-          workspace,
-          prompt: "qualification stops after health; do not create a session",
-          sandbox: role === "implementer" ? "workspace-write" : "read-only",
-          approvalPolicy: "never",
-          profile: { model: "qualification-unused-model" },
-          outputSchema: {},
-          environment: { PATH: process.env.PATH ?? "" },
-          signal,
-          onObservation: (observation) => {
-            observations.push(observation);
-          },
-          onUsage: (observation) => {
-            usage.push(observation);
-          },
-          onPhase: (phase) => {
-            phases.push(phase);
-            if (phase !== "thread") return;
-            try {
-              const record = readLaunchRecord(launchRecord);
-              qualification = {
-                wildcardBindAllowed: wildcardBindAllowed(
-                  sandboxProfile({
-                    workspace,
-                    privateDirectory: requestPrivateDirectory(stateDirectory),
-                    opencodeExecutable: process.execPath,
-                    role,
-                  }),
-                ),
-                nonLoopbackBytes: nonLoopbackBytes(record.port),
-              };
-            } catch (error) {
-              probeFailure = error;
-            } finally {
+        await assertReachableInterface(address);
+        await expect(
+          new OpenCode2Adapter(stateDirectory, sandbox).run({
+            role,
+            workspace,
+            prompt: "qualification stops after health; do not create a session",
+            sandbox: role === "implementer" ? "workspace-write" : "read-only",
+            approvalPolicy: "never",
+            profile: { model: "qualification-unused-model" },
+            outputSchema: {},
+            environment: { PATH: process.env.PATH ?? "", TMPDIR: outsideTemporaryDirectory },
+            signal,
+            onObservation: (observation) => {
+              observations.push(observation);
+            },
+            onSessionId: (session) => {
+              sessions.push(session);
+            },
+            onUsage: (observation) => {
+              usage.push(observation);
+            },
+            onPhase: (phase) => {
+              phases.push(phase);
+              if (phase !== "thread") return;
+              try {
+                const record = readLaunchRecord(launchRecord);
+                expect(healthStatus("127.0.0.1", record.port)).toBe(200);
+                expect(healthStatus(address, record.port)).toBe(0);
+              } catch (error) {
+                endpointFailure = error;
+              }
               controller.abort();
-            }
-          },
-        });
-        await expect(run).rejects.toMatchObject({
-          phase: "thread",
-          failureClass: "cancellation",
-        });
-        if (probeFailure !== undefined) throw probeFailure;
-        expect(qualification).toEqual({
-          wildcardBindAllowed: true,
-          nonLoopbackBytes: 0,
-        });
+              throw new Error("qualification completed before session creation");
+            },
+          }),
+        ).rejects.toMatchObject({ phase: "thread", failureClass: "cancellation" });
+        if (endpointFailure !== undefined) throw endpointFailure;
         expect(phases).toEqual(["thread"]);
-        expect(observations).toEqual([expect.objectContaining({ type: "sandbox_verified", role })]);
-        expect(observations).not.toEqual(
-          expect.arrayContaining([expect.objectContaining({ type: "thread_started" })]),
-        );
+        expect(observations).toEqual([
+          expect.objectContaining({
+            type: "sandbox_verified",
+            role,
+            workspaceRead: "verified",
+            workspaceWrite: role === "implementer" ? "verified" : "denied",
+            externalRead: "denied",
+            externalWrite: "denied",
+            subprocess: "inherited",
+          }),
+        ]);
+        expect(sessions).toEqual([]);
         expect(usage).toEqual([]);
 
         const record = readLaunchRecord(launchRecord);
         expect(record.hostname).toBe("127.0.0.1");
-        expect(() => process.kill(record.pid, 0)).toThrow();
-        await expect(reusablePort(record.port)).resolves.toBeUndefined();
-        await expect(readdir(stateDirectory)).resolves.not.toContain(
-          expect.stringContaining("opencode-private-"),
+        expect(record.temporaryDirectory).toBe(join(privateDirectory, "tmp"));
+        expect(record.temporaryDirectory).not.toBe(outsideTemporaryDirectory);
+        expect(() => process.kill(record.pid, 0)).toThrowError(
+          expect.objectContaining({ code: "ESRCH" }),
         );
+        await expect(reusablePort(record.port)).resolves.toBeUndefined();
+        expect(
+          (await readdir(stateDirectory)).some((name) => name.startsWith("opencode-private-")),
+        ).toBe(false);
       } finally {
+        controller.abort();
         await rm(root, { recursive: true, force: true });
       }
     },
@@ -123,58 +131,75 @@ describe.skipIf(!enabled)("private installed OpenCode2 qualification", () => {
   );
 });
 
-function readLaunchRecord(path: string): { pid: number; port: number; hostname: string } {
-  const record = readFileSync(path, "utf8");
-  const pid = Number(record.match(/^(\d+)/)?.[1]);
-  const port = Number(record.match(/--port=(\d+)/)?.[1]);
-  const hostname = record.match(/--hostname=([^ ]+)/)?.[1] ?? "";
-  if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(port) || !hostname)
+function readLaunchRecord(path: string): {
+  pid: number;
+  port: number;
+  hostname: string;
+  temporaryDirectory: string;
+} {
+  const [pidText, temporaryDirectory = "", args = ""] = readFileSync(path, "utf8").split("\n");
+  const pid = Number(pidText);
+  const port = Number(args.match(/--port=(\d+)/)?.[1]);
+  const hostname = args.match(/--hostname=(\S+)/)?.[1] ?? "";
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    !Number.isSafeInteger(port) ||
+    port <= 0 ||
+    !hostname
+  )
     throw new Error("installed OpenCode2 launch record was incomplete");
-  return { pid, port, hostname };
+  return { pid, port, hostname, temporaryDirectory };
 }
 
-function wildcardBindAllowed(profile: string): boolean {
-  const script =
-    'const s=require("node:net").createServer();s.once("error",()=>process.exit(0));s.listen(0,"0.0.0.0",()=>process.exit(11));';
-  const result = spawnSync(SANDBOX_EXECUTABLE, ["-p", profile, process.execPath, "-e", script], {
-    stdio: "ignore",
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 11 && result.status !== 0)
-    throw new Error("wildcard bind qualification probe did not complete");
-  return result.status === 11;
+async function assertReachableInterface(address: string): Promise<void> {
+  const control = createServer((socket) => socket.end(PROBE_RESPONSE));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      control.once("error", reject);
+      control.listen(0, "0.0.0.0", resolve);
+    });
+    const bound = control.address();
+    if (!bound || typeof bound === "string") throw new Error("control listener was unavailable");
+    // Run asynchronously: this positive-control server is in the test process.
+    const response = await new Promise<string>((resolve) => {
+      const socket = connect({ host: address, port: bound.port });
+      let output = "";
+      const finish = (): void => {
+        socket.destroy();
+        resolve(output);
+      };
+      socket.setTimeout(700, finish);
+      socket.on("data", (chunk: Buffer) => {
+        output += chunk.toString();
+      });
+      socket.once("end", finish);
+      socket.once("error", finish);
+    });
+    expect(response).toBe(PROBE_RESPONSE);
+  } finally {
+    await new Promise<void>((resolve) => control.close(() => resolve()));
+  }
 }
 
-function nonLoopbackBytes(port: number): number {
-  const address = Object.values(networkInterfaces())
-    .flat()
-    .find((entry) => entry?.family === "IPv4" && !entry.internal)?.address;
-  if (!address) throw new Error("non-loopback IPv4 qualification address was unavailable");
+function healthStatus(host: string, port: number): number {
   const script = [
-    'const net=require("node:net");',
-    "let bytes=0;",
-    "let finished=false;",
-    "const finish=()=>{if(finished)return;finished=true;console.log(bytes);process.exit(0);};",
-    "const socket=net.createConnection({host:" +
-      JSON.stringify(address) +
+    'const http=require("node:http");',
+    "let done=false;const finish=code=>{if(done)return;done=true;console.log(code);process.exit(0);};",
+    "const request=http.get({host:" +
+      JSON.stringify(host) +
       ",port:" +
       String(port) +
-      ",timeout:700});",
-    "socket.on('data',(chunk)=>{bytes+=chunk.length;});",
-    "socket.on('error',finish);",
-    "socket.on('timeout',finish);",
-    "socket.on('close',finish);",
-    "setTimeout(finish,1000);",
+      ',path:"/api/health",timeout:700},response=>{response.resume();finish(response.statusCode);});',
+    'request.on("error",()=>finish(0));request.on("timeout",()=>{request.destroy();finish(0);});',
   ].join("");
-  const output = execFileSync(process.execPath, ["-e", script], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 2_000,
-  });
-  const bytes = Number(output.trim());
-  if (!Number.isSafeInteger(bytes) || bytes < 0)
-    throw new Error("non-loopback inbound qualification probe was invalid");
-  return bytes;
+  return Number(
+    execFileSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2_000,
+    }).trim(),
+  );
 }
 
 function reusablePort(port: number): Promise<void> {
@@ -185,14 +210,6 @@ function reusablePort(port: number): Promise<void> {
       server.close((error) => (error ? reject(error) : resolve()));
     });
   });
-}
-
-function requestPrivateDirectory(stateDirectory: string): string {
-  const privateDirectory = readdirSync(stateDirectory).find((entry) =>
-    entry.startsWith("opencode-private-"),
-  );
-  if (!privateDirectory) throw new Error("installed OpenCode2 private directory was unavailable");
-  return join(stateDirectory, privateDirectory);
 }
 
 function shellQuote(value: string): string {
