@@ -254,6 +254,134 @@ function servicesFor(
 }
 
 describe("Delivery Run durable phase recovery", () => {
+  test("waits on an unchanged candidate when the project-check shell cannot start", async () => {
+    const id = "project-check-capability-recovery";
+    const fake = fakeAuthority(persistedResult("candidate", id));
+    let checks = 0;
+    let reviews = 0;
+    let deliveries = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "project-check-capability-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            checks += 1;
+            if (checks === 1)
+              return {
+                kind: "capability_blocked" as const,
+                operation: "project_check" as const,
+                owner: "quality_gate" as const,
+              };
+            return {
+              sha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          },
+          reviewWithObservation: async () => {
+            reviews += 1;
+            return {
+              review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+              usage: null,
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            deliveries += 1;
+            return {
+              sha,
+              effect: "github" as const,
+              prNumber: 80,
+              url: "https://example.invalid/pr/80",
+              attestationId: "capability-recovery",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "project_check_capability",
+        resumeState: "candidate",
+        activation: 1,
+        diagnostic:
+          "project check cannot start: Quality Gate shell capability is unavailable; restore the host runner and retry",
+      },
+      candidateSha: sha,
+      check: null,
+    });
+    expect(fake.getImplementerActivations()).toBe(0);
+
+    await fake.retry();
+    const recovered = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "project-check-capability-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            checks += 1;
+            return {
+              sha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          },
+          reviewWithObservation: async () => {
+            reviews += 1;
+            return {
+              review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+              usage: null,
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            deliveries += 1;
+            return {
+              sha,
+              effect: "github" as const,
+              prNumber: 80,
+              url: "https://example.invalid/pr/80",
+              attestationId: "capability-recovery",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(recovered).toMatchObject({
+      state: "reviewed_pr",
+      candidateSha: sha,
+      check: { status: "passed" },
+    });
+    expect(fake.getImplementerActivations()).toBe(0);
+    expect(checks).toBe(2);
+    expect(reviews).toBe(1);
+    expect(deliveries).toBe(1);
+  });
+
   test("automatically makes one fresh transient reviewer attempt for the same candidate and check", async () => {
     const id = "transient-review-recovery";
     const fake = fakeAuthority(persistedResult("checked", id));

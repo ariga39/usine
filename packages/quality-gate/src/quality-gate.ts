@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import {
@@ -32,6 +33,14 @@ function truncateCheckStream(output: string, stream: "stdout" | "stderr"): strin
   return `${output.slice(0, headLength)}${marker}${output.slice(-(available - headLength))}`;
 }
 
+async function checkoutDirectoryAvailable(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export interface QualityGateOptions {
   workspace: QualityGateWorkspace;
   session: QualityGateSession;
@@ -55,6 +64,15 @@ export interface ReviewAttemptObservation {
     completeness?: "complete" | "partial";
   };
 }
+
+/** A project check could not start because the Quality Gate's shell was unavailable. */
+export interface ProjectCheckCapabilityBlocker {
+  readonly kind: "capability_blocked";
+  readonly operation: "project_check";
+  readonly owner: "quality_gate";
+}
+
+export type QualityGateCheckResult = CheckResult | ProjectCheckCapabilityBlocker;
 
 interface QualityGateWorkspace {
   withCheckout<T>(purpose: string, sha: string, callback: (path: string) => Promise<T>): Promise<T>;
@@ -81,7 +99,11 @@ interface QualityGateSession {
 export class QualityGate {
   constructor(private readonly options: QualityGateOptions) {}
 
-  async check(contract: ResolvedTaskContract, sha: string, cycle: number): Promise<CheckResult> {
+  async check(
+    contract: ResolvedTaskContract,
+    sha: string,
+    cycle: number,
+  ): Promise<QualityGateCheckResult> {
     return this.options.workspace.withCheckout(
       `check-${contract.id}-${cycle}`,
       sha,
@@ -111,6 +133,19 @@ export class QualityGate {
             reject: false,
           });
           if (this.options.signal?.aborted) throw new Error("project check cancelled");
+          if (
+            result.failed &&
+            result.code === "ENOENT" &&
+            result.exitCode === undefined &&
+            !result.timedOut &&
+            !result.isCanceled &&
+            (await checkoutDirectoryAvailable(path))
+          )
+            return {
+              kind: "capability_blocked",
+              operation: "project_check",
+              owner: "quality_gate",
+            };
         } catch (error) {
           if (this.options.signal?.aborted) throw error;
           return {

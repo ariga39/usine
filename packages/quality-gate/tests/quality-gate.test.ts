@@ -10,8 +10,13 @@ import {
   type CodingSessionClientFactory,
 } from "@usine/coding-session";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import { QualityGate } from "@usine/quality-gate";
-import type { ResolvedTaskContract } from "@usine/task-authority";
+import { QualityGate, type QualityGateCheckResult } from "@usine/quality-gate";
+import type { CheckResult, ResolvedTaskContract } from "@usine/task-authority";
+
+function requireCheckResult(result: QualityGateCheckResult): CheckResult {
+  if ("kind" in result) throw new Error("expected a project check result");
+  return result;
+}
 
 const contract = { id: "quality-test" } as ResolvedTaskContract;
 const testEnvironment = {
@@ -129,19 +134,47 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     environment: testEnvironment,
     deadlineEpochMs: Date.now() + 30_000,
   });
-  const check = await gate.check(task, base, 1);
+  const check = requireCheckResult(await gate.check(task, base, 1));
   expect(check.status).toBe("passed");
-  const boundedCheck = await gate.check(
-    {
-      ...task,
-      projectCheck: {
-        command:
-          'test -f ready.txt && node -e \'process.stdout.write("stdout-head" + "x".repeat(20000) + "stdout-tail"); process.stderr.write("stderr-head" + "y".repeat(20000) + "stderr-tail")\'',
-        timeoutMs: 10_000,
+  const capability = await new QualityGate({
+    workspace,
+    session: {
+      run: async () => {
+        throw new Error("reviewer should not start");
       },
     },
+    reviewer: {
+      role: "reviewer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+    },
+    environment: { PATH: join(root, "missing-bin") },
+    deadlineEpochMs: Date.now() + 30_000,
+  }).check(task, base, 1);
+  expect(capability).toEqual({
+    kind: "capability_blocked",
+    operation: "project_check",
+    owner: "quality_gate",
+  });
+  const launchedFailure = await gate.check(
+    { ...task, projectCheck: { command: "exit 127", timeoutMs: 10_000 } },
     base,
     1,
+  );
+  expect(launchedFailure).toMatchObject({ status: "failed", exitCode: 127 });
+  const boundedCheck = requireCheckResult(
+    await gate.check(
+      {
+        ...task,
+        projectCheck: {
+          command:
+            'test -f ready.txt && node -e \'process.stdout.write("stdout-head" + "x".repeat(20000) + "stdout-tail"); process.stderr.write("stderr-head" + "y".repeat(20000) + "stderr-tail")\'',
+          timeoutMs: 10_000,
+        },
+      },
+      base,
+      1,
+    ),
   );
   expect(boundedCheck.stdout.length).toBeLessThanOrEqual(16_384);
   expect(boundedCheck.stdout).toContain("[stdout truncated to 16384 characters]");
@@ -261,6 +294,47 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
     },
     usage: { inputTokens: 12, outputTokens: 7 },
     archive: { status: "stored", completeness: "complete" },
+  });
+});
+
+test("does not call an unavailable checkout a missing shell", async () => {
+  const root = await mkdtemp(join(tmpdir(), "usine-quality-missing-checkout-"));
+  const command = "true";
+  const sha = "a".repeat(40);
+  const gate = new QualityGate({
+    workspace: {
+      withCheckout: async (_purpose, _sha, callback) => callback(join(root, "checkout")),
+    },
+    session: {
+      run: async () => {
+        throw new Error("reviewer should not start");
+      },
+    },
+    reviewer: {
+      role: "reviewer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+    },
+    environment: { PATH: join(root, "missing-bin") },
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+
+  await expect(
+    gate.check(
+      {
+        ...contract,
+        projectCheck: { command, timeoutMs: 10_000 },
+      } as ResolvedTaskContract,
+      sha,
+      1,
+    ),
+  ).resolves.toEqual({
+    sha,
+    status: "failed",
+    command,
+    exitCode: 1,
+    stdout: "",
+    stderr: "",
   });
 });
 

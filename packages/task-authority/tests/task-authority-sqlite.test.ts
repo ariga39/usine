@@ -529,6 +529,70 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     },
   );
 
+  test("persists and explicitly retries a project-check capability wait on the same candidate", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = `authority-project-check-capability-${Date.now()}`;
+    const admitted = await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: `authority/project-check-capability-${taskId}`,
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const activation = await authority.reserveActivation(taskId, 3);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha: "b".repeat(40), baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    const waiting = await authority.recordWaiting(
+      { taskId, revision: candidate.revision },
+      {
+        reason: "project_check_capability",
+        resumeState: "candidate",
+        activation: activation.activation,
+        diagnostic:
+          "project check cannot start: Quality Gate shell capability is unavailable; restore the host runner and retry",
+      },
+    );
+
+    expect(waiting).toMatchObject({
+      state: "waiting",
+      candidateSha: candidate.candidateSha,
+      check: null,
+      waiting: { reason: "project_check_capability", resumeState: "candidate", activation: 1 },
+    });
+    expect(taskResourceFromResult(waiting)).toMatchObject({
+      waiting: { reason: "project_check_capability", diagnostic: expect.any(String) },
+      retryable: true,
+    });
+    expect((await authority.listRestartable()).activeTaskCount).toBe(1);
+
+    const resumed = await authority.retryTask(taskId, 3);
+    expect(resumed).toMatchObject({
+      state: "candidate",
+      candidateSha: candidate.candidateSha,
+      check: null,
+      waiting: null,
+      evidence: { implementerActivations: 1 },
+    });
+    expect((await authority.listRestartable()).activeTaskCount).toBe(1);
+    expect(await authority.listEvents(taskId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: "task_waiting",
+            reason: "project_check_capability",
+            activation: 1,
+          }),
+        }),
+        expect.objectContaining({
+          data: { type: "task_retry_accepted", reason: "project_check_capability", activation: 1 },
+        }),
+      ]),
+    );
+    expect(admitted.writer).toEqual(resumed.writer);
+  });
+
   test("retries delivery reconciliation even when the implementer budget is exhausted", async () => {
     const path = await makeDatabase();
     const authority = authorityAt(path);
