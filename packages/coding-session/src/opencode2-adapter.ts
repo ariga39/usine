@@ -27,6 +27,7 @@ import {
 const STARTUP_POLL_MS = 20;
 const GRACEFUL_INTERRUPT_WAIT_MS = 1_000;
 const CHILD_CLOSE_WAIT_MS = 1_000;
+const STARTUP_STDERR_LIMIT = 16 * 1024;
 const sessionInfoSchema = z.object({ id: z.string().min(1) });
 const promptAdmissionSchema = z.object({ sessionID: z.string().min(1) });
 const PERMISSION_REPLY_TIMEOUT_MS = 1_000;
@@ -99,6 +100,9 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
     let primaryFailure: unknown;
     let result: CodingSessionAdapterResult | undefined;
     let cleanupFailure: unknown;
+    let startupStderr = "";
+    let startupStderrTruncated = false;
+    let stderrClosed: Promise<void> | undefined;
 
     try {
       const port = await availablePort();
@@ -112,6 +116,7 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
         mkdir(join(privateDirectory, "xdg-data"), { recursive: true }),
         mkdir(join(privateDirectory, "xdg-state"), { recursive: true }),
         mkdir(join(privateDirectory, "xdg-cache"), { recursive: true }),
+        mkdir(join(privateDirectory, "tmp"), { recursive: true }),
       ]);
       const sandbox = await this.sandbox.prepare({
         workspace: context.workspace,
@@ -141,10 +146,25 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
             XDG_DATA_HOME: join(privateDirectory, "xdg-data"),
             XDG_STATE_HOME: join(privateDirectory, "xdg-state"),
             XDG_CACHE_HOME: join(privateDirectory, "xdg-cache"),
+            TMPDIR: join(privateDirectory, "tmp"),
           },
-          stdio: "ignore",
+          stdio: ["ignore", "ignore", "pipe"],
         },
       );
+      if (server.stderr) {
+        server.stderr.setEncoding("utf8");
+        stderrClosed = new Promise<void>((resolve) => server.stderr!.once("end", resolve));
+        server.stderr.on("data", (chunk: string) => {
+          if (startupStderrTruncated) return;
+          const remaining = STARTUP_STDERR_LIMIT - startupStderr.length;
+          if (remaining <= 0) {
+            startupStderrTruncated = true;
+            return;
+          }
+          startupStderr += chunk.slice(0, remaining);
+          if (chunk.length > remaining) startupStderrTruncated = true;
+        });
+      }
       server.once("error", () => undefined);
       childSettled = childSettlement(server);
       client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
@@ -481,8 +501,22 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
       try {
         if (context.signal.aborted) await gracefulInterrupt();
         if (server && childSettled) await settleChild(server, childSettled);
+        await stderrClosed;
       } catch (error) {
         cleanupFailure = error;
+      }
+      if (phase === "startup" && startupStderr) {
+        try {
+          await context.onItemCompleted?.({
+            type: "command_execution",
+            id: "opencode2-startup-stderr",
+            status: "failed",
+            command: "opencode serve",
+            output: startupStderr + (startupStderrTruncated ? "\n[truncated]" : ""),
+          });
+        } catch {
+          // Private diagnostics never replace the provider result.
+        }
       }
       try {
         if (privateDirectory) await rm(privateDirectory, { recursive: true, force: true });

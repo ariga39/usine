@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
@@ -61,8 +62,12 @@ const facadeContract = {
   },
 } satisfies TaskContract;
 const launchRecordSchema = z.object({
+  args: z.array(z.string()),
   processId: z.number().int().positive(),
-  environment: z.object({ OPENCODE_CONFIG_DIR: z.string().min(1) }),
+  environment: z.object({
+    OPENCODE_CONFIG_DIR: z.string().min(1),
+    TMPDIR: z.string().min(1),
+  }),
 });
 
 function fixtureAdapter(stateDirectory: string): OpenCode2Adapter {
@@ -152,6 +157,7 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+    TMPDIR: process.env.TMPDIR,
     OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
     OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
     OPENCODE_DISABLE_PROJECT_CONFIG: process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
@@ -162,7 +168,10 @@ appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({
   hostileConfigPresent: process.env.OPENCODE_CONFIG_DIR?.includes("hostile") ?? false,
   config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"),
 }) + "\\n");
-if (${JSON.stringify(mode)} === "startup-failure") process.exit(17);
+if (${JSON.stringify(mode)} === "startup-failure") {
+  process.stderr.write("private startup stderr with /secret/path and credential=hidden\\n");
+  process.exit(17);
+}
 let eventResponse;
 let globalEventResponse;
 let waitResponse;
@@ -196,6 +205,7 @@ const response = (res, status, body) => {
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (req.method === "GET" && url.pathname === "/api/health") {
+    appendFileSync(${JSON.stringify(protocolLog)}, JSON.stringify({ health: true }) + "\\n");
     if (${JSON.stringify(mode)} === "startup-abort") return;
     return response(res, 200, { healthy: true });
   }
@@ -370,6 +380,13 @@ async function assertPrivateRunGone(testFixture: {
     JSON.parse((await readFile(testFixture.protocolLog, "utf8")).split("\n")[0]),
   );
   expect(() => process.kill(launch.processId, 0)).toThrow();
+  const port = Number(launch.args.find((arg) => arg.startsWith("--port="))?.slice(7));
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(port, "127.0.0.1", () => resolve());
+  });
+  await new Promise<void>((resolve) => listener.close(() => resolve()));
   await expect(access(dirname(launch.environment.OPENCODE_CONFIG_DIR))).rejects.toMatchObject({
     code: "ENOENT",
   });
@@ -409,6 +426,11 @@ describe("OpenCode2 bounded adapter", () => {
     expect(reviewer).not.toContain(`(allow file-write* (subpath "${workspace}"))`);
     expect(implementer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
     expect(reviewer).toContain(`(allow file-write* (subpath "${privateDirectory}"))`);
+    for (const profile of [implementer, reviewer]) {
+      expect(profile).toContain('(allow network-bind (local ip "localhost:*"))');
+      expect(profile).toContain('(allow network-inbound (local ip "localhost:*"))');
+      expect(profile).not.toContain("(allow network-inbound)");
+    }
   });
 
   test("binds OpenCode edit permission to the Coding Session role, not sandbox intent", () => {
@@ -731,6 +753,10 @@ describe("OpenCode2 bounded adapter", () => {
     expect(launch.environment.XDG_DATA_HOME).not.toContain("hostile-home");
     expect(launch.environment.XDG_STATE_HOME).not.toContain("hostile-home");
     expect(launch.environment.XDG_CACHE_HOME).not.toContain("hostile-home");
+    expect(launch.environment.TMPDIR).toBe(
+      join(dirname(launch.environment.OPENCODE_CONFIG_DIR), "tmp"),
+    );
+    expect(launch.environment.TMPDIR).not.toContain("hostile-home");
     expect(launch.environment.OPENCODE_DISABLE_PROJECT_CONFIG).toBe("1");
     expect(launch.environment.OPENCODE_DISABLE_AUTOUPDATE).toBe("1");
     expect(launch.environment.OPENCODE_DISABLE_SHARE).toBe("1");
@@ -837,6 +863,23 @@ describe("OpenCode2 bounded adapter", () => {
     await waitForProtocolFact(testFixture.protocolLog, '"startupBlocked":true');
     controller.abort();
     await expect(run).rejects.toMatchObject({ phase: "startup", failureClass: "cancellation" });
+    await assertPrivateRunGone(testFixture);
+    await testFixture.close();
+  });
+
+  test("proves health before session creation and releases the listener after cancellation", async () => {
+    const testFixture = await fixture("success");
+    const controller = new AbortController();
+    const run = fixtureAdapter(testFixture.stateDirectory).run({
+      ...request(testFixture.workspace, testFixture.environment, controller.signal),
+      onPhase: (phase) => {
+        if (phase === "thread") controller.abort();
+      },
+    });
+    await expect(run).rejects.toMatchObject({ phase: "thread", failureClass: "cancellation" });
+    const protocol = await readFile(testFixture.protocolLog, "utf8");
+    expect(protocol).toContain('"health":true');
+    expect(protocol).not.toContain('"sessionCreate"');
     await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
@@ -1001,6 +1044,61 @@ describe("OpenCode2 bounded adapter", () => {
         entries.filter((entry) => entry.startsWith("opencode-private-")),
       ),
     ).resolves.toEqual([]);
+    await testFixture.close();
+  });
+
+  test("keeps startup stderr in the private archive and returns a sanitized typed failure", async () => {
+    const testFixture = await fixture("startup-failure");
+    const session = createCodexCodingSessionForTesting(
+      undefined,
+      {
+        environment: testFixture.environment,
+        openCode2StateDirectory: testFixture.stateDirectory,
+        sessionArchive: { stateDirectory: testFixture.stateDirectory },
+        adapterSelectionEnvironment: {
+          USINE_OPENCODE2_PROFILES: "reviewer-profile",
+        },
+        profileResolver: async () =>
+          normalizeCodexProfileSelection("reviewer-profile", {
+            model: "fixture-model",
+            developerInstructions: "private instructions",
+            config: { model_provider: "fixture-provider" },
+          }),
+      },
+      { opencode2: fixtureAdapter(testFixture.stateDirectory) },
+    );
+    const observation = await session.run({
+      role: "reviewer",
+      workspace: testFixture.workspace,
+      contract: facadeContract,
+      prompt: "review fixture",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+      deadlineEpochMs: Date.now() + 5_000,
+      outputSchema: reviewerOutputSchema,
+      attempt,
+    });
+
+    expect(observation).toMatchObject({
+      status: "failed",
+      phase: "startup",
+      failureClass: "transport",
+    });
+    expect(JSON.stringify(observation)).not.toContain("private startup stderr");
+    expect(JSON.stringify(observation)).not.toContain("/secret/path");
+    expect(JSON.stringify(observation)).not.toContain("credential=hidden");
+    const archive = await readSessionArchive(testFixture.stateDirectory, observation.archiveId!);
+    expect(archive).toMatchObject({ status: "failed", completeness: "partial" });
+    expect(archive.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "command_execution",
+          id: "opencode2-startup-stderr",
+          output: expect.stringContaining("private startup stderr"),
+        }),
+      ]),
+    );
+    await assertPrivateRunGone(testFixture);
     await testFixture.close();
   });
 });
