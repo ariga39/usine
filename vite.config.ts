@@ -18,7 +18,12 @@ export default defineConfig({
       correctness: "error",
       suspicious: "warn",
     },
-    ignorePatterns: repositoryState,
+    // External target templates are type-aware checked in their generated projects.
+    ignorePatterns: [
+      ...repositoryState,
+      "evaluations/475/controls/**",
+      "evaluations/475/fixture/**",
+    ],
     options: {
       typeAware: true,
       typeCheck: true,

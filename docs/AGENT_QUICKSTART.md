@@ -424,6 +424,17 @@ Create a host-private JSON file and replace its placeholders. The registration s
 
 `id`, profile names, owner/name, branch, and Git author values must be nonblank. `forgeProfile` and `githubReadProfile` use lowercase kebab-case. `projectCheck.timeoutMs` is a positive integer. The server keeps repository paths and profile names host-private; `repository list`, `repository get`, and Task resources expose only the safe Repository projection.
 
+For host plugins and integrations, select a project check that loads the built
+entry through the real host contract. Pin accessible host/reference sources in
+the task context; derive test doubles from those sources, not the proposed
+implementation. Include the user's required toolchain as actual dependencies
+and executed scripts. A self-consistent unit test does not prove host loading,
+settings or deployment compatibility. Qualify the check with a valid control
+and a known incompatible control when the boundary is uncertain; the bounded
+[host-plugin case](../evaluations/475/README.md) demonstrates this selection.
+Keep the existing independent exact-SHA review gate and label unexercised UI or
+deployment behavior explicitly.
+
 Start the server in the configured host environment and leave it running:
 
 ```sh
