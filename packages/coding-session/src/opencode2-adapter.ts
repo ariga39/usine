@@ -151,10 +151,11 @@ export class OpenCode2Adapter implements CodingSessionAdapter {
           stdio: ["ignore", "ignore", "pipe"],
         },
       );
-      if (server.stderr) {
-        server.stderr.setEncoding("utf8");
-        stderrClosed = new Promise<void>((resolve) => server.stderr!.once("end", resolve));
-        server.stderr.on("data", (chunk: string) => {
+      const stderr = server.stderr;
+      if (stderr) {
+        stderr.setEncoding("utf8");
+        stderrClosed = new Promise<void>((resolve) => stderr.once("end", resolve));
+        stderr.on("data", (chunk: string) => {
           if (startupStderrTruncated) return;
           const remaining = STARTUP_STDERR_LIMIT - startupStderr.length;
           if (remaining <= 0) {

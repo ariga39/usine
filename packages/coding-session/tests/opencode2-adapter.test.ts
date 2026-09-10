@@ -1089,6 +1089,7 @@ describe("OpenCode2 bounded adapter", () => {
     expect(JSON.stringify(observation)).not.toContain("credential=hidden");
     const archive = await readSessionArchive(testFixture.stateDirectory, observation.archiveId!);
     expect(archive).toMatchObject({ status: "failed", completeness: "partial" });
+    if (!("items" in archive)) throw new Error("expected a complete startup archive");
     expect(archive.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
