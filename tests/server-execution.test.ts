@@ -197,7 +197,7 @@ async function recordPipelineWaiting({
     { taskId: result.taskId, revision: activation.result.revision },
     { sha: contract.baseSha, baseSha: contract.baseSha, fence: activation.activation },
   );
-  const checked = await authority.recordCheck(
+  await authority.recordCheck(
     { taskId: result.taskId, revision: candidate.revision },
     {
       sha: contract.baseSha,
