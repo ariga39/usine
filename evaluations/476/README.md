@@ -53,5 +53,25 @@ identical to merge `6bb910477462d5488e2c350de0ca0cb7ff71f388`.
 
 This baseline did not reproduce silent copying. It supports a narrow discoverability correction,
 not a claim that the old guide lacked all budget guidance or that a larger number would have
-completed the historical plugin. Fresh candidate-route observation and independent exact-SHA
-review remain required before delivery. Raw preparation files and operator records stay private.
+completed the historical plugin. Raw preparation files and operator records stay private.
+
+## Candidate observation
+
+A different fresh operator followed the guide at `2c40bfbac8221f4bc14c94c889e839ae4823f03b`, with
+the same inputs and no baseline answers or evaluator labels. It produced and read back both actual
+Goal/Proposal pairs and their recovery notes. Independent schema, parent-duration and explicit-null
+count checks passed again; the implementation/review counts were not converted into time limits.
+
+- Case A selected a four-hour Campaign and two-hour Task, attributed to the current feature,
+  checks, review/repair, delivery and assessment. It identified this as an operator estimate, not
+  user or host policy, and did not request routine confirmation. The two-hour value equals the
+  earlier trial's Task duration; the retained evidence is the stated current-scope basis, not a
+  claim that numerical equality proves or excludes anchoring.
+- Case B preserved the explicit fifty-minute Campaign and thirty-minute Task exactly.
+- Both notes retained the original deadline and terminal-state rules and separated performed
+  preparation checks from unperformed publication, runtime, persistence and delivery.
+
+These are two one-off walkthroughs, not evidence that one estimated duration is optimal or that
+the new guide improves model accuracy by a measured percentage. The historical trial's operator
+choice, correct runtime expiry, unfinished plugin, and independently diagnosed execution defects
+remain separate facts. This change does not extend that trial or authorize another one.
