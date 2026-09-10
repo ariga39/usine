@@ -105,6 +105,9 @@ test("real configuration events apply auth, port, LAN and enabled changes withou
   expect(await status(currentPort)).toBe(401);
   expect(await status(currentPort, { headers: auth("incorrect") })).toBe(401);
   expect((await request(currentPort, {}, "127.0.0.1", `?token=${token}`)).status).not.toBe(200);
+  expect(
+    (await request(currentPort, { headers: auth() }, "127.0.0.1", `?token=${token}`)).status,
+  ).toBe(400);
   expect(await untrustedHostStatus(currentPort)).toBe(403);
   expect(
     await status(currentPort, { headers: { ...auth(), Origin: "https://untrusted.invalid" } }),

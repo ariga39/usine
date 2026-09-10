@@ -89,5 +89,49 @@ elapsed bound estimates this finite resource endpoint, settings and check task;
 it is not a product default. Activation/review counts remain `null`. The observer
 does not restart or reopen the terminal historical Campaign.
 
-The ordinary-path result is pending. No successful model implementation or
-measured prompt/profile improvement is claimed by the control matrix alone.
+### First observation and corrected falsifier
+
+The ordinary SDK path on source `2c796e7568ba3fbb3f4fd1fb0d3468f4fcea3508`
+produced candidate `95d922770f34aa40b874b87f808fa17a742bc8fb` from fixture base
+`41227a9327fe449d9312057af7897f3c8b389208` in one implementation activation. Its
+exact-SHA frozen install and full Vite+ command passed, including both host tests.
+The candidate changed only implementation and deployment documentation; host
+tests, package scripts, dependencies, lockfile and tool configuration were
+unchanged. The archive confirms successful reads of all six pinned public
+host/reference sources, a stored complete capture and no truncation.
+
+A subsequent real HTTP probe of that unchanged candidate found an oracle gap:
+a URL containing `?token=...` returned 200 when a valid Bearer header was also
+present. The original test checked query credentials only without that header.
+The strengthened host test now requires rejection in both combinations. The
+positive control still passes all three tests. This is a retained first-candidate
+failure, not a waived requirement or a reason to expand role prompts.
+
+The first observer's event callback ran too late to stop review reservation.
+Its guarded review boundary threw before any reviewer model call, leaving a
+cancelled synthetic reviewer observation and a checked candidate; its final
+no-review-start assertion failed. No reviewer model, repair or forge ran. That
+record is preserved, and the next observation stops directly after the owning
+`recordCheck` operation persists. Do not interpret the aggregate's partial usage
+coverage as missing implementer usage or invent reviewer tokens.
+
+| First implementation measurement | Observed value |
+| --- | ---: |
+| Total input tokens, including cache reads | 911,484 |
+| Cache-read input tokens | 849,408 |
+| Uncached input tokens | 62,076 |
+| Cache-write input tokens | 0 |
+| Output tokens, including reasoning | 14,874 |
+| Reasoning output tokens | 5,563 |
+| Implementation elapsed time | 378,915 ms |
+| Whole observation elapsed time | 389,298 ms |
+
+The provider-reported implementation usage is complete; identity not attested
+by the provider remains unavailable. Raw archives and machine/profile details
+remain private. No pricing, historical backfill, remote PostHog delivery or
+Campaign acceptance is claimed.
+
+A fresh ordinary observation of the strengthened case is pending. It uses the
+same model/profile and Task behavior, with only the missing query-credential
+combination added to the host check. Neither a statistical model improvement
+nor general prevention of implementation mistakes is inferred.
