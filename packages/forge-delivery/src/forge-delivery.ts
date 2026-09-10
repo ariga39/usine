@@ -372,7 +372,8 @@ export class ForgeDelivery {
     }
     if (!evidence.ready)
       throw new PipelineChecksPendingError(
-        evidence.diagnostic ?? "allowlisted pipeline checks have not all succeeded on the current head",
+        evidence.diagnostic ??
+          "allowlisted pipeline checks have not all succeeded on the current head",
       );
   }
 
