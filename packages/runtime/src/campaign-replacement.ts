@@ -17,6 +17,7 @@ import {
 import { z } from "zod";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
 import {
+  campaignUsageCoverage,
   campaignModelRunFromObservation,
   type CampaignModelRunDraft,
 } from "./campaign-model-run.js";
@@ -87,14 +88,7 @@ function usageFrom(
         cacheWriteInputTokens: usage.cacheWriteInputTokens ?? null,
         outputTokens: usage.outputTokens ?? null,
         reasoningOutputTokens: usage.reasoningOutputTokens ?? null,
-        coverage:
-          completeness ??
-          (usage.inputTokens !== undefined &&
-          usage.cachedInputTokens !== undefined &&
-          usage.uncachedInputTokens !== undefined &&
-          usage.outputTokens !== undefined
-            ? "complete"
-            : "partial"),
+        coverage: campaignUsageCoverage(usage, completeness),
       };
 }
 

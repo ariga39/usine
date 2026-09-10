@@ -712,7 +712,34 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
     failureClass: "network",
   });
   expect(modelRuns).toHaveLength(3);
+  expect(modelRuns.find((run) => run.role === "assessor")?.usage?.coverage).toBe("complete");
   expect(modelRuns.find((run) => run.role === "replacement-planner")?.usage).toMatchObject({
+    coverage: "partial",
+  });
+  const completeButMissingUncached = campaignModelRunFromObservation(
+    "assessor",
+    repository,
+    "complete-but-missing-uncached",
+    Date.now() - 50,
+    {
+      ...successfulObservation,
+      usage: {
+        inputTokens: 10,
+        cachedInputTokens: 9,
+        cacheWriteInputTokens: 2,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+      },
+      usageCompleteness: "complete",
+    },
+  );
+  expect(completeButMissingUncached[0]?.usage).toEqual({
+    inputTokens: 10,
+    cachedInputTokens: 9,
+    uncachedInputTokens: null,
+    cacheWriteInputTokens: 2,
+    outputTokens: 3,
+    reasoningOutputTokens: 1,
     coverage: "partial",
   });
 
