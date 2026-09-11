@@ -754,15 +754,20 @@ test("captures terminal Campaign progress when a delayed assessor completes", as
 test("a failed PostHog capture does not block the Campaign event entry", async () => {
   const fixture = await campaignFixture(503);
   await waitForRequest(fixture.posthog, (value) => value.batch?.length === 4);
-  const beforeRetry = fixture.posthog.requests.length;
+  let explicitAttempts = 0;
+  const explicitFetch: typeof fetch = async (input, init) => {
+    explicitAttempts += 1;
+    return fetch(input, init);
+  };
   await expect(
     captureCampaignEvidence(
       fixture.environment.USINE_STATE_DIR!,
       fixture.published.campaignId,
       fixture.environment,
+      explicitFetch,
     ),
   ).rejects.toThrow("PostHog batch request failed");
-  expect(fixture.posthog.requests.length).toBe(beforeRetry + 1);
+  expect(explicitAttempts).toBe(1);
   expect(acknowledgementCount(fixture.environment.USINE_STATE_DIR!)).toBe(0);
 });
 
