@@ -6,6 +6,9 @@ import { and, asc, eq, gt, max, sql } from "drizzle-orm";
 import {
   applyMigrations,
   acceptedTaskDelivery,
+  acceptanceCriterionText,
+  decodeAcceptanceChecks,
+  normalizeAcceptanceCriteria,
   campaignAssessmentSchema,
   campaignAssessments,
   campaignModelRuns,
@@ -45,6 +48,7 @@ import {
   type TaskResult,
   type TaskContract,
   type TaskProposal,
+  type AcceptanceCheck,
   taskProposalSchema,
   isTerminalState,
 } from "@usine/task-authority";
@@ -80,6 +84,12 @@ const CAMPAIGN_COMPATIBILITY_ADAPTERS = new Set([
   "campaign-usage-compatibility",
   "legacy-compatibility",
 ]);
+
+function acceptanceChecksFromRepositoryRow(
+  row: typeof repositories.$inferSelect,
+): AcceptanceCheck[] {
+  return decodeAcceptanceChecks(row.acceptanceChecks);
+}
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -336,7 +346,7 @@ function proposalResource(
             repositoryRevision: row.readyRepositoryRevision,
             taskId: row.taskId,
             instructions: proposal.instructions,
-            acceptance: proposal.acceptance,
+            acceptance: proposal.acceptance.map(acceptanceCriterionText),
             nonGoals: proposal.nonGoals,
             effects: proposal.effects,
             ...(proposal.delivery ? { delivery: proposal.delivery } : {}),
@@ -377,13 +387,16 @@ function campaignTaskContract(
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
   const outcomeTitle = sanitizeCampaignDeliveryText(outcome?.title ?? "Authorized outcome");
   const deliveryTitle = outcomeTitle.slice(0, MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH).trimEnd();
-  const acceptance = proposal.acceptance.map(sanitizeCampaignDeliveryText);
+  const acceptance = proposal.acceptance;
+  const acceptanceText = acceptance.map((criterion) =>
+    sanitizeCampaignDeliveryText(acceptanceCriterionText(criterion)),
+  );
   const goalIssue = canonicalGitHubIssueSource(contract.authority.source);
   const deliveryBody = [
     `Outcome: ${outcomeTitle || "Authorized outcome"}`,
     "",
     "Acceptance criteria:",
-    ...acceptance.map((criterion) => `- ${criterion}`),
+    ...acceptanceText.map((criterion) => `- ${criterion}`),
     ...(goalIssue ? ["", `Goal: ${goalIssue}`] : []),
   ].join("\n");
   const task: TaskContract = {
@@ -391,7 +404,7 @@ function campaignTaskContract(
     repositoryId: proposal.repositoryId,
     baseSha,
     instructions: proposal.instructions,
-    acceptance: [...proposal.acceptance],
+    acceptance,
     nonGoals: [...proposal.nonGoals],
     budget: {
       maxImplementerActivations: null,
@@ -2151,7 +2164,11 @@ async function generateCampaignReplacements(
         goalId: target.campaign.goalId,
         goalVersion: target.campaign.goalVersion,
         goal: target.contract,
-        outcome: target.outcome,
+        outcome: {
+          ...target.outcome,
+          acceptance: target.outcome.acceptance.map(acceptanceCriterionText),
+          criteria: normalizeAcceptanceCriteria(target.outcome.acceptance),
+        },
         assessment: target.assessment,
         evidenceHash: target.evidenceHash,
         evidence: target.evidence,
@@ -2490,7 +2507,11 @@ async function assessCampaignTargets(
         goalId: target.campaign.goalId,
         goalVersion: target.campaign.goalVersion,
         goal: target.contract,
-        outcome: target.outcome,
+        outcome: {
+          ...target.outcome,
+          acceptance: target.outcome.acceptance.map(acceptanceCriterionText),
+          criteria: normalizeAcceptanceCriteria(target.outcome.acceptance),
+        },
         evidence: target.evidence,
         repositories: target.repositories,
         environment,
@@ -2674,6 +2695,7 @@ async function admitReadyCampaignTasks(
                   command: repository.projectCheckCommand,
                   timeoutMs: repository.projectCheckTimeoutMs,
                 },
+                acceptanceChecks: acceptanceChecksFromRepositoryRow(repository),
                 gitAuthor: { name: repository.gitAuthorName, email: repository.gitAuthorEmail },
                 ...(repository.headSha ? { headSha: repository.headSha } : {}),
               },

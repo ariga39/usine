@@ -4,6 +4,7 @@ import type {
   CampaignAssessmentUsage,
   GoalContract,
   TaskProposal,
+  TextAcceptanceOutcome,
 } from "@usine/task-authority";
 import { taskProposalSchema } from "@usine/task-authority";
 import {
@@ -13,6 +14,7 @@ import {
   type CampaignReplacementPlannerSessionRequest,
   type ProviderNeutralUsageCompleteness,
 } from "@usine/coding-session";
+import { acceptanceCriterionText } from "@usine/task-authority";
 import { z } from "zod";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
 import {
@@ -37,7 +39,8 @@ export interface CampaignReplacementRequest {
   readonly goalId: string;
   readonly goalVersion: number;
   readonly goal: GoalContract;
-  readonly outcome: GoalContract["outcomes"][number];
+  /** Display text and criterion metadata projected from the owning Outcome. */
+  readonly outcome: Omit<GoalContract["outcomes"][number], "acceptance"> & TextAcceptanceOutcome;
   readonly assessment: CampaignAssessment;
   readonly evidenceHash: string;
   readonly evidence: readonly CampaignAssessmentFact[];
@@ -139,6 +142,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           id: request.outcome.id,
           title: request.outcome.title,
           acceptance: request.outcome.acceptance,
+          criteria: request.outcome.criteria,
         },
         assessment: {
           assessmentId: request.assessment.assessmentId,
@@ -154,7 +158,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           outcomeId: proposal.outcomeId,
           repositoryId: proposal.repositoryId,
           instructions: proposal.instructions,
-          acceptance: proposal.acceptance,
+          acceptance: proposal.acceptance.map(acceptanceCriterionText),
           effects: proposal.effects,
           merge: proposal.merge,
         })),

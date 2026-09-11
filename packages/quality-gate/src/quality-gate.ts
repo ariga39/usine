@@ -13,8 +13,10 @@ import {
 } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import {
+  mandatoryAcceptanceCheckIds,
   originalTaskContract,
   remainingUntil,
+  type AcceptanceCheckResult,
   type CheckResult,
   type ReviewVerdict,
   taskFailureClassFromProvider,
@@ -160,7 +162,7 @@ export class QualityGate {
             ),
           };
         }
-        return {
+        const projectCheck = {
           sha,
           status: result.exitCode === 0 ? ("passed" as const) : ("failed" as const),
           command: contract.projectCheck.command,
@@ -168,8 +170,67 @@ export class QualityGate {
           stdout: truncateCheckStream(result.stdout, "stdout"),
           stderr: truncateCheckStream(result.stderr, "stderr"),
         };
+        if (projectCheck.status !== "passed") return projectCheck;
+        const acceptanceChecks = await this.runAcceptanceChecks(contract, path, sha);
+        const failedAcceptanceCheck = acceptanceChecks.find((check) => check.status !== "passed");
+        return failedAcceptanceCheck
+          ? {
+              ...projectCheck,
+              status: "failed" as const,
+              exitCode: failedAcceptanceCheck.exitCode,
+              stderr: "mandatory acceptance check did not pass",
+              acceptanceChecks,
+            }
+          : { ...projectCheck, ...(acceptanceChecks.length > 0 ? { acceptanceChecks } : {}) };
       },
     );
+  }
+
+  private async runAcceptanceChecks(
+    contract: ResolvedTaskContract,
+    candidatePath: string,
+    sha: string,
+  ): Promise<AcceptanceCheckResult[]> {
+    const selected = mandatoryAcceptanceCheckIds(contract.acceptance);
+    if (selected.length === 0) return [];
+    const registered = new Map((contract.acceptanceChecks ?? []).map((check) => [check.id, check]));
+    const results: AcceptanceCheckResult[] = [];
+    for (const id of selected) {
+      const check = registered.get(id);
+      if (!check) {
+        results.push({ id, sha, status: "unavailable", exitCode: 127, reason: "missing_verifier" });
+        continue;
+      }
+      try {
+        const result = await execa("sh", ["-c", check.command], {
+          cwd: check.workingDirectory,
+          env: { ...this.options.environment, USINE_CANDIDATE_PATH: candidatePath },
+          extendEnv: false,
+          timeout: remainingUntil(this.options.deadlineEpochMs, check.timeoutMs),
+          cancelSignal: this.options.signal,
+          killDescendants: true,
+          reject: false,
+        });
+        results.push({
+          id,
+          sha,
+          status: result.exitCode === 0 ? "passed" : "failed",
+          exitCode: result.exitCode ?? 1,
+        });
+      } catch (error) {
+        if (this.options.signal?.aborted) throw error;
+        const unavailable =
+          error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+        results.push({
+          id,
+          sha,
+          status: unavailable ? "unavailable" : "failed",
+          exitCode: unavailable ? 127 : 124,
+          ...(unavailable ? { reason: "spawn_unavailable" as const } : {}),
+        });
+      }
+    }
+    return results;
   }
 
   async reviewWithObservation(

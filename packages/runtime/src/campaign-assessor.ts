@@ -11,6 +11,7 @@ import type {
   CampaignAssessmentFact,
   CampaignAssessmentUsage,
   GoalContract,
+  TextAcceptanceOutcome,
 } from "@usine/task-authority";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
 import {
@@ -34,7 +35,8 @@ export interface CampaignAssessmentRequest {
   readonly goalId: string;
   readonly goalVersion: number;
   readonly goal: GoalContract;
-  readonly outcome: GoalContract["outcomes"][number];
+  /** Display text and criterion metadata projected from the owning Outcome. */
+  readonly outcome: Omit<GoalContract["outcomes"][number], "acceptance"> & TextAcceptanceOutcome;
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
   readonly environment: NodeJS.ProcessEnv;
@@ -164,6 +166,7 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
             id: request.outcome.id,
             title: request.outcome.title,
             acceptance: request.outcome.acceptance,
+            criteria: request.outcome.criteria,
           },
           evidence: request.evidence,
         },

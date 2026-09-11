@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { Schema } from "effect";
+import { acceptanceCriterionSchema } from "./acceptance.js";
+import { acceptanceCriterionText, normalizeAcceptanceCriteria } from "./acceptance.js";
 
 const durableId = z
   .string()
@@ -12,7 +14,7 @@ const outcomeSchema = z
   .object({
     id: durableId,
     title: z.string().min(1),
-    acceptance: z.array(z.string().min(1)).min(1),
+    acceptance: z.array(acceptanceCriterionSchema).min(1),
     dependsOn: z.array(durableId).default([]),
     parentId: durableId.nullable().default(null),
     status: z.enum(["live", "superseded"]).default("live"),
@@ -154,7 +156,7 @@ export const taskProposalSchema = z
     dependsOn: z.array(durableId).default([]),
     repositoryId: durableId,
     instructions: z.string().min(1),
-    acceptance: z.array(z.string().min(1)).min(1),
+    acceptance: z.array(acceptanceCriterionSchema).min(1),
     nonGoals: z.array(z.string().min(1)),
     effects: z.array(durableId).min(1),
     delivery: z
@@ -284,6 +286,16 @@ const campaignOutcomeSchema = Schema.Struct({
   id: Schema.String,
   title: Schema.String,
   acceptance: Schema.Array(Schema.String),
+  criteria: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        criterion: Schema.String,
+        mandatory: Schema.Boolean,
+        checkId: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
   dependsOn: Schema.Array(Schema.String),
   parentId: Schema.NullOr(Schema.String),
   status: Schema.Literals(["planned", "accepted", "superseded"]),
@@ -397,7 +409,10 @@ export function campaignResourceFromContract(
   const outcomes = contract.outcomes.map((outcome) => ({
     id: outcome.id,
     title: outcome.title,
-    acceptance: outcome.acceptance,
+    acceptance: outcome.acceptance.map(acceptanceCriterionText),
+    ...(outcome.acceptance.some((criterion) => typeof criterion !== "string")
+      ? { criteria: normalizeAcceptanceCriteria(outcome.acceptance) }
+      : {}),
     dependsOn: outcome.dependsOn,
     parentId: outcome.parentId,
     status:

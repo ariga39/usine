@@ -28,6 +28,7 @@ export const repositories = sqliteTable("repositories", {
   headSha: text("head_sha"),
   projectCheckCommand: text("project_check_command").notNull(),
   projectCheckTimeoutMs: integer("project_check_timeout_ms").notNull(),
+  acceptanceChecks: text("acceptance_checks", { mode: "json" }).notNull(),
   gitAuthorName: text("git_author_name").notNull(),
   gitAuthorEmail: text("git_author_email").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })

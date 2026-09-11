@@ -136,6 +136,17 @@ const repositoryRegistrationSchema = Schema.Struct({
   forgeProfile: Schema.String,
   githubReadProfile: Schema.optional(Schema.NullOr(Schema.String)),
   projectCheck: Schema.Struct({ command: Schema.String, timeoutMs: Schema.Int }),
+  acceptanceChecks: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        source: Schema.Literal("host"),
+        workingDirectory: Schema.String,
+        command: Schema.String,
+        timeoutMs: Schema.Int,
+      }),
+    ),
+  ),
   gitAuthor: Schema.Struct({ name: Schema.String, email: Schema.String }),
 });
 const taskSubmissionSchema = Schema.Struct({

@@ -336,6 +336,7 @@ test("does not accept a missing mandatory Vite+ requirement behind a green candi
       {
         id: "vite-plus",
         source: "host",
+        workingDirectory: process.cwd(),
         command: "false",
         timeoutMs: 10_000,
       },

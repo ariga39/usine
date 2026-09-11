@@ -38,6 +38,7 @@ import { deadlineExpired } from "./remaining-until.js";
 import { countBudgetExhausted, type CountBudget } from "./contract.js";
 import {
   snapshotFromRegistration,
+  decodeAcceptanceChecks,
   repositoryResourceFromSnapshot,
   taskSnapshotFromRegistration,
   type RepositoryRegistration,
@@ -88,8 +89,13 @@ function repositoryPolicySelectionChanged(
     existing.implementerProfile !== input.implementerProfile ||
     existing.reviewerProfile !== input.reviewerProfile ||
     existing.forgeProfile !== input.forgeProfile ||
-    existing.githubReadProfile !== (input.githubReadProfile ?? null)
+    existing.githubReadProfile !== (input.githubReadProfile ?? null) ||
+    JSON.stringify(existing.acceptanceChecks) !== JSON.stringify(input.acceptanceChecks ?? [])
   );
+}
+
+function acceptanceChecksFromRow(row: typeof repositories.$inferSelect) {
+  return decodeAcceptanceChecks(row.acceptanceChecks);
 }
 
 export interface TaskAuthorityOptions {
@@ -199,6 +205,7 @@ export class TaskAuthority {
             revision: sql`${repositories.revision} + 1`,
             projectCheckCommand: input.projectCheck.command,
             projectCheckTimeoutMs: input.projectCheck.timeoutMs,
+            acceptanceChecks: input.acceptanceChecks ?? [],
             gitAuthorName: input.gitAuthor.name,
             gitAuthorEmail: input.gitAuthor.email,
             updatedAt: new Date(),
@@ -219,6 +226,7 @@ export class TaskAuthority {
         headSha: null,
         projectCheckCommand: input.projectCheck.command,
         projectCheckTimeoutMs: input.projectCheck.timeoutMs,
+        acceptanceChecks: input.acceptanceChecks ?? [],
         gitAuthorName: input.gitAuthor.name,
         gitAuthorEmail: input.gitAuthor.email,
       });
@@ -247,6 +255,7 @@ export class TaskAuthority {
             command: row.projectCheckCommand,
             timeoutMs: row.projectCheckTimeoutMs,
           },
+          acceptanceChecks: acceptanceChecksFromRow(row),
           gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
         }
       : null;
@@ -270,6 +279,7 @@ export class TaskAuthority {
         githubReadProfile: row.githubReadProfile,
         ...(row.headSha ? { headSha: row.headSha } : {}),
         projectCheck: { command: row.projectCheckCommand, timeoutMs: row.projectCheckTimeoutMs },
+        acceptanceChecks: acceptanceChecksFromRow(row),
         gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
       },
       row.revision,
@@ -297,6 +307,7 @@ export class TaskAuthority {
           githubReadProfile: row.githubReadProfile,
           ...(row.headSha ? { headSha: row.headSha } : {}),
           projectCheck: { command: row.projectCheckCommand, timeoutMs: row.projectCheckTimeoutMs },
+          acceptanceChecks: acceptanceChecksFromRow(row),
           gitAuthor: { name: row.gitAuthorName, email: row.gitAuthorEmail },
         },
         row.revision,

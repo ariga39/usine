@@ -32,6 +32,16 @@ export interface CheckResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Results of caller-owned mandatory checks, bounded and exact-SHA bound. */
+  acceptanceChecks?: readonly AcceptanceCheckResult[];
+}
+
+export interface AcceptanceCheckResult {
+  id: string;
+  sha: string;
+  status: "passed" | "failed" | "unavailable";
+  exitCode: number;
+  reason?: "missing_verifier" | "spawn_unavailable";
 }
 
 export interface ReviewVerdict {
