@@ -103,9 +103,11 @@ function repositorySnapshotsEqual(
   left: TaskRepositorySnapshot,
   right: TaskRepositorySnapshot,
 ): boolean {
+  const { acceptanceChecks: leftChecks, ...leftRepository } = left;
+  const { acceptanceChecks: rightChecks, ...rightRepository } = right;
   return (
-    JSON.stringify({ ...left, acceptanceChecks: left.acceptanceChecks ?? [] }) ===
-    JSON.stringify({ ...right, acceptanceChecks: right.acceptanceChecks ?? [] })
+    JSON.stringify({ ...leftRepository, acceptanceChecks: leftChecks ?? [] }) ===
+    JSON.stringify({ ...rightRepository, acceptanceChecks: rightChecks ?? [] })
   );
 }
 
