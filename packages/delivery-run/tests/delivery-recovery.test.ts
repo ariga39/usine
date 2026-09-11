@@ -382,6 +382,147 @@ describe("Delivery Run durable phase recovery", () => {
     expect(deliveries).toBe(1);
   });
 
+  test("waits on unavailable host acceptance evidence without repairing the candidate", async () => {
+    const id = "acceptance-capability-recovery";
+    const fake = fakeAuthority(persistedResult("candidate", id));
+    let checks = 0;
+    let reviews = 0;
+    let deliveries = 0;
+    const result = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "acceptance-capability-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            checks += 1;
+            return checks === 1
+              ? {
+                  sha,
+                  status: "failed" as const,
+                  command: "true",
+                  exitCode: 127,
+                  stdout: "",
+                  stderr: "mandatory acceptance check did not pass",
+                  acceptanceChecks: [
+                    {
+                      id: "required",
+                      sha,
+                      status: "unavailable" as const,
+                      exitCode: 127,
+                      reason: "spawn_unavailable" as const,
+                    },
+                  ],
+                }
+              : {
+                  sha,
+                  status: "passed" as const,
+                  command: "true",
+                  exitCode: 0,
+                  stdout: "",
+                  stderr: "",
+                };
+          },
+          reviewWithObservation: async () => {
+            reviews += 1;
+            return {
+              review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+              usage: null,
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            deliveries += 1;
+            return {
+              sha,
+              effect: "github" as const,
+              prNumber: 80,
+              url: "https://example.invalid/pr/80",
+              attestationId: "acceptance-capability-recovery",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(result).toMatchObject({
+      state: "waiting",
+      waiting: {
+        reason: "project_check_capability",
+        resumeState: "candidate",
+        activation: 1,
+      },
+      candidateSha: sha,
+      check: {
+        status: "failed",
+        acceptanceChecks: [
+          { id: "required", sha, status: "unavailable", reason: "spawn_unavailable" },
+        ],
+      },
+    });
+    expect(checks).toBe(1);
+    expect(fake.getImplementerActivations()).toBe(0);
+    expect(reviews).toBe(0);
+    expect(deliveries).toBe(0);
+
+    await fake.retry();
+    const recovered = await executeDeliveryRun(
+      {
+        contract: contract(id),
+        contractHash: "acceptance-capability-hash",
+        repositoryIdentity: `recovery/${id}`,
+        deadlineEpochMs: Date.now() + 60_000,
+        implementer,
+      },
+      servicesFor(
+        fake.authority,
+        {
+          check: async () => {
+            checks += 1;
+            return {
+              sha,
+              status: "passed" as const,
+              command: "true",
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          },
+          reviewWithObservation: async () => {
+            reviews += 1;
+            return {
+              review: { sha, verdict: "approved" as const, summary: "approved", findings: [] },
+              usage: null,
+            };
+          },
+        },
+        {
+          deliver: async () => {
+            deliveries += 1;
+            return {
+              sha,
+              effect: "github" as const,
+              prNumber: 80,
+              url: "https://example.invalid/pr/80",
+              attestationId: "acceptance-capability-recovery",
+            };
+          },
+        },
+      ),
+    );
+    expect(recovered).toMatchObject({ state: "reviewed_pr", candidateSha: sha });
+    expect(checks).toBe(2);
+    expect(fake.getImplementerActivations()).toBe(0);
+    expect(reviews).toBe(1);
+    expect(deliveries).toBe(1);
+  });
+
   test("automatically makes one fresh transient reviewer attempt for the same candidate and check", async () => {
     const id = "transient-review-recovery";
     const fake = fakeAuthority(persistedResult("checked", id));

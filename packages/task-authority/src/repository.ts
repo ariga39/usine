@@ -16,6 +16,53 @@ const nonBlank = z
 
 const exactSha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
 
+export interface AcceptanceCheck {
+  readonly id: string;
+  readonly source: "host";
+  readonly workingDirectory: string;
+  readonly command: string;
+  readonly timeoutMs: number;
+  /** The caller attests that stdout follows the strict safe observation contract. */
+  readonly publicObservation?: "safe-json-v1";
+}
+
+const safeObservationText = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !/\p{Cc}/u.test(value))
+  .refine((value) => !/[\\/]|:\/\//u.test(value))
+  .refine((value) => !/\b(?:api[_-]?key|secret|token|password|credential|bearer)\b/iu.test(value));
+
+export const acceptanceObservationSchema = z
+  .object({
+    artifact: safeObservationText,
+    entry: safeObservationText,
+    observation: safeObservationText,
+  })
+  .strict();
+
+export type AcceptanceObservation = z.infer<typeof acceptanceObservationSchema>;
+
+export function decodeAcceptanceObservation(input: unknown): AcceptanceObservation {
+  return acceptanceObservationSchema.parse(input);
+}
+
+export const acceptanceCheckSchema = z
+  .object({
+    id: identifier,
+    source: z.literal("host"),
+    workingDirectory: nonBlank,
+    command: nonBlank,
+    timeoutMs: z.number().int().positive(),
+    publicObservation: z.literal("safe-json-v1").optional(),
+  })
+  .strict();
+
+export function decodeAcceptanceChecks(input: unknown): AcceptanceCheck[] {
+  return z.array(acceptanceCheckSchema).parse(input);
+}
+
 export const forgeProfileSchema = z
   .string()
   .regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/, "must use lowercase kebab-case");
@@ -35,11 +82,12 @@ export const repositoryRegistrationSchema = z
       command: z.string().min(1),
       timeoutMs: z.number().int().positive(),
     }),
+    acceptanceChecks: z.array(acceptanceCheckSchema).default([]),
     gitAuthor: z.object({ name: nonBlank, email: nonBlank }),
   })
   .strict();
 
-export type RepositoryRegistration = z.infer<typeof repositoryRegistrationSchema>;
+export type RepositoryRegistration = z.input<typeof repositoryRegistrationSchema>;
 
 export const repositoryResourceSchema = z
   .object({
@@ -73,6 +121,7 @@ export function taskSnapshotFromRegistration(
     name: registration.name,
     baseBranch: registration.baseBranch,
     projectCheck: { ...registration.projectCheck },
+    acceptanceChecks: (registration.acceptanceChecks ?? []).map((check) => ({ ...check })),
     gitAuthor: { ...registration.gitAuthor },
   };
 }
@@ -86,6 +135,7 @@ export function snapshotFromRegistration(registration: RepositoryRegistration): 
     ...registration,
     githubReadProfile: registration.githubReadProfile ?? null,
     projectCheck: { ...registration.projectCheck },
+    acceptanceChecks: (registration.acceptanceChecks ?? []).map((check) => ({ ...check })),
     gitAuthor: { ...registration.gitAuthor },
   };
 }

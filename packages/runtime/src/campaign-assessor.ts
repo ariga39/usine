@@ -11,6 +11,7 @@ import type {
   CampaignAssessmentFact,
   CampaignAssessmentUsage,
   GoalContract,
+  TextAcceptanceOutcome,
 } from "@usine/task-authority";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
 import {
@@ -34,7 +35,8 @@ export interface CampaignAssessmentRequest {
   readonly goalId: string;
   readonly goalVersion: number;
   readonly goal: GoalContract;
-  readonly outcome: GoalContract["outcomes"][number];
+  /** Display text and criterion metadata projected from the owning Outcome. */
+  readonly outcome: Omit<GoalContract["outcomes"][number], "acceptance"> & TextAcceptanceOutcome;
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
   readonly environment: NodeJS.ProcessEnv;
@@ -70,6 +72,29 @@ const assessmentOutputSchema = z
           fact: z.enum(["candidate", "check", "review", "delivery"]),
           status: z.string().min(1),
           sha: z.string().regex(/^[0-9a-f]{40}$/),
+          candidateObservedAtEpochMs: z.number().int().nonnegative().optional(),
+          criterionId: z.string().optional(),
+          criterion: z.string().optional(),
+          mandatory: z.boolean().optional(),
+          checkId: z.string().optional(),
+          artifact: z.literal("exact_candidate_checkout").optional(),
+          checkExitCode: z.number().int().optional(),
+          checkReason: z
+            .enum(["missing_verifier", "spawn_unavailable", "invalid_observation"])
+            .optional(),
+          checkOutputDigest: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .optional(),
+          checkObservation: z
+            .object({ artifact: z.string(), entry: z.string(), observation: z.string() })
+            .strict()
+            .optional(),
+          reviewSummary: z.string().max(2000).optional(),
+          reviewFindings: z.array(z.string().max(1000)).max(32).optional(),
+          deliveryPrNumber: z.number().int().nonnegative().optional(),
+          deliveryAttestationId: z.string().optional(),
+          deliveryMerged: z.boolean().optional(),
         }),
       )
       .max(128),
@@ -164,6 +189,7 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
             id: request.outcome.id,
             title: request.outcome.title,
             acceptance: request.outcome.acceptance,
+            criteria: request.outcome.criteria,
           },
           evidence: request.evidence,
         },

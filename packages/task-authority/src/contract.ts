@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { acceptanceCriteriaSchema } from "./acceptance.js";
 import type { RepositorySnapshot } from "./repository.js";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
@@ -84,7 +85,7 @@ export const taskContractSchema = z
     repositoryId,
     baseSha: sha,
     instructions: z.string().min(1),
-    acceptance: z.array(z.string().min(1)).min(1),
+    acceptance: acceptanceCriteriaSchema,
     nonGoals: z.array(z.string().min(1)),
     budget: z.object({
       maxImplementerActivations: positiveCountBudgetSchema,
@@ -145,6 +146,7 @@ export type TaskContract = z.infer<typeof taskContractSchema>;
 export type ResolvedTaskContract = Omit<TaskContract, "delivery"> & {
   repository: Pick<RepositorySnapshot, "path" | "owner" | "name">;
   projectCheck: RepositorySnapshot["projectCheck"];
+  acceptanceChecks?: RepositorySnapshot["acceptanceChecks"];
   delivery: TaskContract["delivery"] & { baseBranch: string };
 };
 
@@ -152,7 +154,7 @@ export function resolveTaskContract(
   contract: TaskContract,
   repository: Pick<
     RepositorySnapshot,
-    "id" | "path" | "owner" | "name" | "baseBranch" | "projectCheck"
+    "id" | "path" | "owner" | "name" | "baseBranch" | "projectCheck" | "acceptanceChecks"
   >,
 ): ResolvedTaskContract {
   if (contract.repositoryId !== repository.id)
@@ -162,6 +164,7 @@ export function resolveTaskContract(
       ...contract,
       repository: { path: repository.path, owner: repository.owner, name: repository.name },
       projectCheck: { ...repository.projectCheck },
+      acceptanceChecks: (repository.acceptanceChecks ?? []).map((check) => ({ ...check })),
       delivery: { ...contract.delivery, baseBranch: repository.baseBranch },
     };
   }
@@ -180,13 +183,20 @@ export function resolveTaskContract(
     ...contract,
     repository: { path: repository.path, owner: repository.owner, name: repository.name },
     projectCheck: { ...repository.projectCheck },
+    acceptanceChecks: (repository.acceptanceChecks ?? []).map((check) => ({ ...check })),
     delivery: { ...contract.delivery, baseBranch: repository.baseBranch },
   };
 }
 
 /** Return the caller-owned contract without host-resolved Repository facts. */
 export function originalTaskContract(contract: ResolvedTaskContract): TaskContract {
-  const { repository: _repository, projectCheck: _projectCheck, delivery, ...original } = contract;
+  const {
+    repository: _repository,
+    projectCheck: _projectCheck,
+    acceptanceChecks: _acceptanceChecks,
+    delivery,
+    ...original
+  } = contract;
   const { baseBranch: _baseBranch, ...originalDelivery } = delivery;
   return { ...original, delivery: originalDelivery };
 }

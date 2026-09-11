@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { TaskContract } from "./contract.js";
-import type { RepositorySnapshot, TaskRepositorySnapshot } from "./repository.js";
+import type {
+  AcceptanceObservation,
+  RepositorySnapshot,
+  TaskRepositorySnapshot,
+} from "./repository.js";
 
 export type TaskState =
   | "admitted"
@@ -32,6 +36,18 @@ export interface CheckResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Results of caller-owned mandatory checks, bounded and exact-SHA bound. */
+  acceptanceChecks?: readonly AcceptanceCheckResult[];
+}
+
+export interface AcceptanceCheckResult {
+  id: string;
+  sha: string;
+  status: "passed" | "failed" | "unavailable";
+  exitCode: number;
+  outputDigest?: string;
+  observation?: AcceptanceObservation;
+  reason?: "missing_verifier" | "spawn_unavailable" | "invalid_observation";
 }
 
 export interface ReviewVerdict {
@@ -647,11 +663,19 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
         fact.waiting.reason === "network_interruption"
           ? result.activeActivation === fact.waiting.activation && fact.waiting.activation > 0
           : fact.waiting.reason === "project_check_capability"
-            ? result.state === "candidate" &&
-              result.activeActivation === null &&
-              result.candidateFence === fact.waiting.activation &&
-              result.candidateSha !== null &&
-              result.check === null &&
+            ? ((result.state === "candidate" &&
+                result.activeActivation === null &&
+                result.candidateFence === fact.waiting.activation &&
+                result.candidateSha !== null &&
+                result.check === null) ||
+                (result.state === "checked" &&
+                  result.activeActivation === null &&
+                  result.candidateFence === fact.waiting.activation &&
+                  result.candidateSha !== null &&
+                  result.check?.sha === result.candidateSha &&
+                  result.check.acceptanceChecks?.some(
+                    (acceptanceCheck) => acceptanceCheck.status === "unavailable",
+                  ) === true)) &&
               fact.waiting.activation > 0
             : fact.waiting.reason === "delivery_reconciliation" ||
                 fact.waiting.reason === "external_review" ||
@@ -669,7 +693,15 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
       if (
         !validActivation ||
         !Number.isSafeInteger(fact.waiting.activation) ||
-        fact.waiting.resumeState !== result.state
+        (fact.waiting.resumeState !== result.state &&
+          !(
+            fact.waiting.reason === "project_check_capability" &&
+            result.state === "checked" &&
+            fact.waiting.resumeState === "candidate" &&
+            result.check?.acceptanceChecks?.some(
+              (acceptanceCheck) => acceptanceCheck.status === "unavailable",
+            ) === true
+          ))
       )
         throw new Error("waiting activation is stale");
       return {
@@ -681,11 +713,18 @@ export function applyTaskFact(result: TaskResult, fact: TaskFact): TaskResult {
     case "retry":
       if (result.state !== "waiting" || !result.waiting)
         throw new Error("task is not waiting for an explicit retry");
+      const clearUnavailableAcceptanceCheck =
+        result.waiting.reason === "project_check_capability" &&
+        result.waiting.resumeState === "candidate" &&
+        result.check?.acceptanceChecks?.some(
+          (acceptanceCheck) => acceptanceCheck.status === "unavailable",
+        ) === true;
       return {
         ...result,
         state: result.waiting.resumeState,
         waiting: null,
         activeActivation: null,
+        ...(clearUnavailableAcceptanceCheck ? { check: null } : {}),
       };
     case "blocked":
       if (!canTransition(result.state, "blocked"))

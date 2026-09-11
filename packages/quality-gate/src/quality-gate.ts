@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import {
@@ -13,8 +14,11 @@ import {
 } from "@usine/coding-session";
 import type { ReviewerOutput, SessionObservation, SessionRequest } from "@usine/coding-session";
 import {
+  decodeAcceptanceObservation,
+  mandatoryAcceptanceCheckIds,
   originalTaskContract,
   remainingUntil,
+  type AcceptanceCheckResult,
   type CheckResult,
   type ReviewVerdict,
   taskFailureClassFromProvider,
@@ -24,7 +28,6 @@ import {
 type SessionUsage = ProviderNeutralUsage;
 
 const CHECK_STREAM_LIMIT = 16_384;
-
 function truncateCheckStream(output: string, stream: "stdout" | "stderr"): string {
   if (output.length <= CHECK_STREAM_LIMIT) return output;
   const marker = `\n[${stream} truncated to ${CHECK_STREAM_LIMIT} characters]\n`;
@@ -160,7 +163,7 @@ export class QualityGate {
             ),
           };
         }
-        return {
+        const projectCheck = {
           sha,
           status: result.exitCode === 0 ? ("passed" as const) : ("failed" as const),
           command: contract.projectCheck.command,
@@ -168,8 +171,101 @@ export class QualityGate {
           stdout: truncateCheckStream(result.stdout, "stdout"),
           stderr: truncateCheckStream(result.stderr, "stderr"),
         };
+        if (projectCheck.status !== "passed") return projectCheck;
+        const acceptanceChecks = await this.runAcceptanceChecks(contract, path, sha);
+        const failedAcceptanceCheck = acceptanceChecks.find((check) => check.status !== "passed");
+        return failedAcceptanceCheck
+          ? {
+              ...projectCheck,
+              status: "failed" as const,
+              exitCode: failedAcceptanceCheck.exitCode,
+              stderr: "mandatory acceptance check did not pass",
+              acceptanceChecks,
+            }
+          : { ...projectCheck, ...(acceptanceChecks.length > 0 ? { acceptanceChecks } : {}) };
       },
     );
+  }
+
+  private async runAcceptanceChecks(
+    contract: ResolvedTaskContract,
+    candidatePath: string,
+    sha: string,
+  ): Promise<AcceptanceCheckResult[]> {
+    const selected = mandatoryAcceptanceCheckIds(contract.acceptance);
+    if (selected.length === 0) return [];
+    const registered = new Map((contract.acceptanceChecks ?? []).map((check) => [check.id, check]));
+    const results: AcceptanceCheckResult[] = [];
+    for (const id of selected) {
+      const check = registered.get(id);
+      if (!check) {
+        results.push({ id, sha, status: "unavailable", exitCode: 127, reason: "missing_verifier" });
+        continue;
+      }
+      try {
+        const result = await execa("sh", ["-c", check.command], {
+          cwd: check.workingDirectory,
+          env: { ...this.options.environment, USINE_CANDIDATE_PATH: candidatePath },
+          extendEnv: false,
+          timeout: remainingUntil(this.options.deadlineEpochMs, check.timeoutMs),
+          cancelSignal: this.options.signal,
+          killDescendants: true,
+          reject: false,
+        });
+        if (this.options.signal?.aborted) throw new Error("acceptance check cancelled");
+        const unavailable =
+          result.failed &&
+          result.code === "ENOENT" &&
+          result.exitCode === undefined &&
+          !result.timedOut &&
+          !result.isCanceled;
+        const observation =
+          check.publicObservation === "safe-json-v1"
+            ? (() => {
+                try {
+                  return decodeAcceptanceObservation(JSON.parse(result.stdout));
+                } catch {
+                  return undefined;
+                }
+              })()
+            : undefined;
+        const invalidObservation = !unavailable && result.exitCode === 0 && !observation;
+        results.push({
+          id,
+          sha,
+          status:
+            unavailable || invalidObservation
+              ? "unavailable"
+              : result.exitCode === 0
+                ? "passed"
+                : "failed",
+          exitCode: unavailable ? 127 : result.timedOut ? 124 : (result.exitCode ?? 1),
+          ...(unavailable
+            ? { reason: "spawn_unavailable" as const }
+            : invalidObservation
+              ? { reason: "invalid_observation" as const }
+              : {}),
+          outputDigest: createHash("sha256")
+            .update(result.stdout, "utf8")
+            .update("\u0000", "utf8")
+            .update(result.stderr, "utf8")
+            .digest("hex"),
+          ...(observation ? { observation } : {}),
+        });
+      } catch (error) {
+        if (this.options.signal?.aborted) throw error;
+        const unavailable =
+          error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+        results.push({
+          id,
+          sha,
+          status: unavailable ? "unavailable" : "failed",
+          exitCode: unavailable ? 127 : 124,
+          ...(unavailable ? { reason: "spawn_unavailable" as const } : {}),
+        });
+      }
+    }
+    return results;
   }
 
   async reviewWithObservation(

@@ -829,6 +829,9 @@ describe("Coding Session", () => {
             id: "outcome",
             title: "Assess the outcome",
             acceptance: ["the outcome is assessed"],
+            criteria: [
+              { id: "criterion-0", criterion: "the outcome is assessed", mandatory: true },
+            ],
           },
           evidence: [],
         },
@@ -3728,6 +3731,9 @@ describe("Coding Session", () => {
           id: "outcome-test",
           title: "Preserve the campaign outcome",
           acceptance: ["The replacement remains bounded."],
+          criteria: [
+            { id: "criterion-0", criterion: "The replacement remains bounded.", mandatory: true },
+          ],
         },
         assessment: {
           assessmentId: "assessment-test",

@@ -10,6 +10,7 @@ import {
   safeEvidenceIdentity,
   type GoalContract,
   type TaskContract,
+  type NormalizedAcceptanceCriterion,
 } from "@usine/task-authority";
 import type { CampaignAssessmentEvidence, CampaignAssessmentFact } from "@usine/task-authority";
 import { z } from "zod";
@@ -151,6 +152,7 @@ export interface CampaignAssessmentSessionContext {
     readonly id: string;
     readonly title: string;
     readonly acceptance: readonly string[];
+    readonly criteria: readonly NormalizedAcceptanceCriterion[];
   };
   readonly evidence: readonly CampaignAssessmentFact[];
 }

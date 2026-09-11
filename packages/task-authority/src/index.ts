@@ -1,4 +1,5 @@
 export * from "./contract.js";
+export * from "./acceptance.js";
 export * from "./campaign-contract.js";
 export * from "./repository.js";
 export * from "./resource.js";

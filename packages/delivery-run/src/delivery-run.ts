@@ -260,6 +260,18 @@ export async function executeDeliveryRun(
         { taskId: result.taskId, revision: result.revision },
         check,
       );
+      if (hasUnavailableAcceptanceEvidence(check) && result.candidateFence !== null) {
+        return services.authority.recordWaiting(
+          { taskId: result.taskId, revision: result.revision },
+          {
+            reason: "project_check_capability",
+            resumeState: "candidate",
+            activation: result.candidateFence,
+            diagnostic:
+              "mandatory acceptance evidence is unavailable; restore the host verifier and retry",
+          },
+        );
+      }
       continue;
     }
 
@@ -561,6 +573,13 @@ function isProjectCheckCapabilityBlocker(
   result: QualityGateCheckResult,
 ): result is ProjectCheckCapabilityBlocker {
   return "kind" in result && result.kind === "capability_blocked";
+}
+
+function hasUnavailableAcceptanceEvidence(check: CheckResult): boolean {
+  return (
+    check.acceptanceChecks?.some((acceptanceCheck) => acceptanceCheck.status === "unavailable") ??
+    false
+  );
 }
 
 function reviewBlockerClassification(

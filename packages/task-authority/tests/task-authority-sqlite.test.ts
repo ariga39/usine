@@ -416,6 +416,25 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
       authority.registerRepository({ ...registration, githubReadProfile: undefined }),
     ).resolves.toMatchObject({ githubReadProfile: null });
     expect(admitted.repository).not.toHaveProperty("githubReadProfile");
+    const historical = structuredClone(admitted);
+    delete historical.repository!.acceptanceChecks;
+    const legacyDatabase = new DatabaseSync(path);
+    legacyDatabase
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(JSON.stringify(historical), admitted.taskId);
+    legacyDatabase.close();
+    await expect(
+      authorityAt(path).admit({
+        contract: {
+          ...makeContract("read-profile-normalization-task"),
+          repositoryId: registration.id,
+        },
+        contractHash: "read-profile-normalization-hash",
+        repositoryIdentity: "example/read-profile-normalization",
+        repository: registration,
+        deadlineEpochMs: Date.now() + 30_000,
+      }),
+    ).resolves.toMatchObject({ taskId: admitted.taskId, revision: admitted.revision });
   });
 
   test("allows unrelated updates while active and capability-policy changes after lease release", async () => {
@@ -982,6 +1001,104 @@ describe("Task Authority SQLite concurrency and terminal leases", () => {
     expect(admitted.repository).toBeDefined();
     expect(JSON.stringify(admitted.repository)).not.toContain("read-one");
     expect(admitted.repository).not.toHaveProperty("githubReadProfile");
+  });
+
+  test("rechecks unavailable acceptance on the same candidate after restart and retains both observations", async () => {
+    const path = await makeDatabase();
+    const authority = authorityAt(path);
+    const taskId = "acceptance-retry-history";
+    await authority.admit({
+      contract: makeContract(taskId),
+      contractHash: "a".repeat(64),
+      repositoryIdentity: "authority/retry-history",
+      deadlineEpochMs: Date.now() + 30_000,
+    });
+    const activation = await authority.reserveActivation(taskId, 3);
+    const sha = "b".repeat(40);
+    const candidate = await authority.recordCandidate(
+      { taskId, revision: activation.result.revision },
+      { sha, baseSha: "a".repeat(40), fence: activation.activation },
+    );
+    const unavailable = {
+      sha,
+      status: "failed" as const,
+      command: "true",
+      exitCode: 127,
+      stdout: "",
+      stderr: "",
+      acceptanceChecks: [
+        {
+          id: "required",
+          sha,
+          status: "unavailable" as const,
+          exitCode: 127,
+          reason: "spawn_unavailable" as const,
+        },
+      ],
+    };
+    const checked = await authority.recordCheck(
+      { taskId, revision: candidate.revision },
+      unavailable,
+    );
+    await authority.recordWaiting(
+      { taskId, revision: checked.revision },
+      {
+        reason: "project_check_capability",
+        resumeState: "candidate",
+        activation: activation.activation,
+      },
+    );
+    const restarted = authorityAt(path);
+    expect(await restarted.lookup(taskId)).toMatchObject({
+      state: "waiting",
+      candidateSha: sha,
+      check: unavailable,
+    });
+    const retried = await restarted.retryTask(taskId, 3);
+    expect(retried).toMatchObject({
+      state: "candidate",
+      candidateSha: sha,
+      candidateFence: activation.activation,
+      check: null,
+      evidence: { implementerActivations: 1 },
+    });
+    await restarted.recordCheck(
+      { taskId, revision: retried.revision },
+      {
+        ...unavailable,
+        status: "passed",
+        exitCode: 0,
+        acceptanceChecks: [
+          {
+            id: "required",
+            sha,
+            status: "passed",
+            exitCode: 0,
+            outputDigest: "c".repeat(64),
+            observation: {
+              artifact: "shipped entry",
+              entry: "verify",
+              observation: "executed required behavior",
+            },
+          },
+        ],
+      },
+    );
+    const history = (await authorityAt(path).listEvents(taskId)).filter(
+      (event) => event.data.type === "project_check_completed",
+    );
+    expect(history.map((event) => event.data)).toMatchObject([
+      {
+        outcome: "failed",
+        acceptanceChecks: [{ status: "unavailable", reason: "spawn_unavailable" }],
+      },
+      {
+        outcome: "passed",
+        acceptanceChecks: [
+          { status: "passed", observation: { observation: "executed required behavior" } },
+        ],
+      },
+    ]);
   });
 
   test("quarantines unsupported durable state at the lookup boundary", async () => {

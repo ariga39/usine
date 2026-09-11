@@ -6,6 +6,10 @@ import { and, asc, eq, gt, max, sql } from "drizzle-orm";
 import {
   applyMigrations,
   acceptedTaskDelivery,
+  acceptanceCriterionText,
+  combineAcceptanceCriteria,
+  decodeAcceptanceChecks,
+  normalizeAcceptanceCriteria,
   campaignAssessmentSchema,
   campaignAssessments,
   campaignModelRuns,
@@ -45,6 +49,7 @@ import {
   type TaskResult,
   type TaskContract,
   type TaskProposal,
+  type AcceptanceCheck,
   taskProposalSchema,
   isTerminalState,
 } from "@usine/task-authority";
@@ -80,6 +85,12 @@ const CAMPAIGN_COMPATIBILITY_ADAPTERS = new Set([
   "campaign-usage-compatibility",
   "legacy-compatibility",
 ]);
+
+function acceptanceChecksFromRepositoryRow(
+  row: typeof repositories.$inferSelect,
+): AcceptanceCheck[] {
+  return decodeAcceptanceChecks(row.acceptanceChecks);
+}
 
 export class GoalContractInputError extends Error {
   readonly code = "validation";
@@ -336,7 +347,7 @@ function proposalResource(
             repositoryRevision: row.readyRepositoryRevision,
             taskId: row.taskId,
             instructions: proposal.instructions,
-            acceptance: proposal.acceptance,
+            acceptance: proposal.acceptance.map(acceptanceCriterionText),
             nonGoals: proposal.nonGoals,
             effects: proposal.effects,
             ...(proposal.delivery ? { delivery: proposal.delivery } : {}),
@@ -377,13 +388,16 @@ function campaignTaskContract(
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
   const outcomeTitle = sanitizeCampaignDeliveryText(outcome?.title ?? "Authorized outcome");
   const deliveryTitle = outcomeTitle.slice(0, MAX_CAMPAIGN_DELIVERY_TITLE_LENGTH).trimEnd();
-  const acceptance = proposal.acceptance.map(sanitizeCampaignDeliveryText);
+  const acceptance = proposal.acceptance;
+  const acceptanceText = acceptance.map((criterion) =>
+    sanitizeCampaignDeliveryText(acceptanceCriterionText(criterion)),
+  );
   const goalIssue = canonicalGitHubIssueSource(contract.authority.source);
   const deliveryBody = [
     `Outcome: ${outcomeTitle || "Authorized outcome"}`,
     "",
     "Acceptance criteria:",
-    ...acceptance.map((criterion) => `- ${criterion}`),
+    ...acceptanceText.map((criterion) => `- ${criterion}`),
     ...(goalIssue ? ["", `Goal: ${goalIssue}`] : []),
   ].join("\n");
   const task: TaskContract = {
@@ -391,7 +405,7 @@ function campaignTaskContract(
     repositoryId: proposal.repositoryId,
     baseSha,
     instructions: proposal.instructions,
-    acceptance: [...proposal.acceptance],
+    acceptance,
     nonGoals: [...proposal.nonGoals],
     budget: {
       maxImplementerActivations: null,
@@ -575,6 +589,20 @@ function acceptedCampaignDelivery(
 ): AcceptedCampaignDelivery | null {
   const association = result?.campaign;
   const accepted = acceptedTaskDelivery(result);
+  const mandatoryChecks = normalizeAcceptanceCriteria(proposal.acceptance).filter(
+    (criterion, index) =>
+      typeof proposal.acceptance[index] !== "string" && criterion.mandatory && criterion.checkId,
+  );
+  const mandatoryChecksPassed = mandatoryChecks.every((criterion) =>
+    result?.check?.acceptanceChecks?.some(
+      (check) =>
+        check.id === criterion.checkId &&
+        check.sha === result.candidateSha &&
+        check.status === "passed" &&
+        check.outputDigest !== undefined &&
+        check.observation !== undefined,
+    ),
+  );
   if (
     !result ||
     !accepted ||
@@ -585,7 +613,8 @@ function acceptedCampaignDelivery(
     association.goalVersion !== campaign.goalVersion ||
     association.outcomeId !== proposal.outcomeId ||
     result.repository?.id !== proposal.repositoryId ||
-    result.mergeAuthorized !== proposal.merge
+    result.mergeAuthorized !== proposal.merge ||
+    !mandatoryChecksPassed
   )
     return null;
   return { delivery: accepted.delivery, mergedHeadSha: accepted.mergedHeadSha };
@@ -861,7 +890,7 @@ async function reconcile(
     }
     const currentAssessments = liveOutcomes.map((outcome) => {
       const currentOutcome = currentCampaignOutcome(outcome, rows);
-      const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+      const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
       const assessment = assessments.get(outcome.id);
       return {
         outcome: currentOutcome,
@@ -1038,16 +1067,31 @@ async function reconcileWithRepositoryHeads(
   }
 }
 
+type CampaignTaskResult = TaskResult & { readonly candidateObservedAtEpochMs?: number };
+
 async function campaignTaskResults(
   database: CampaignDatabase,
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   taskFacts: CampaignTaskFacts = new Map(),
-): Promise<Map<string, TaskResult>> {
-  const results = new Map<string, TaskResult>();
+): Promise<Map<string, CampaignTaskResult>> {
+  const results = new Map<string, CampaignTaskResult>();
   for (const row of rows) {
     if (!row.taskId) continue;
     const result = await campaignTaskLookup(database, row.taskId, taskFacts);
-    if (result) results.set(row.proposalId, result);
+    if (!result) continue;
+    const candidateEvent = result.candidateSha
+      ? await database.query.taskEvents.findFirst({
+          where: (events, { and, eq }) =>
+            and(
+              eq(events.taskId, result.taskId),
+              eq(events.eventId, `candidate:${result.candidateSha}`),
+            ),
+        })
+      : undefined;
+    results.set(row.proposalId, {
+      ...result,
+      ...(candidateEvent ? { candidateObservedAtEpochMs: candidateEvent.occurredAtEpochMs } : {}),
+    });
   }
   return results;
 }
@@ -1071,54 +1115,155 @@ async function campaignTaskLookup(
 
 function campaignAssessmentEvidence(
   rows: readonly (typeof campaignProposals.$inferSelect)[],
-  results: ReadonlyMap<string, TaskResult>,
-  outcomeId: string,
+  results: ReadonlyMap<string, CampaignTaskResult>,
+  outcome: GoalContract["outcomes"][number],
 ): CampaignAssessmentFact[] {
   const evidence: CampaignAssessmentFact[] = [];
+  const outcomeCriteria = normalizeAcceptanceCriteria(outcome.acceptance);
+  type CriterionAssignment = {
+    readonly outcomeIndex: number;
+    readonly sourceCriterion: ReturnType<typeof normalizeAcceptanceCriteria>[number];
+    readonly sourceStructured: boolean;
+  };
+  const assignmentsFor = (proposal: TaskProposal): CriterionAssignment[] => {
+    const used = new Set<number>();
+    const sourceCriteria = normalizeAcceptanceCriteria(proposal.acceptance);
+    return proposal.acceptance.flatMap((candidate, sourceIndex) => {
+      const candidateText = acceptanceCriterionText(candidate);
+      const candidateId = typeof candidate === "string" ? undefined : candidate.id;
+      const index = outcomeCriteria.findIndex((criterion, criterionIndex) => {
+        if (used.has(criterionIndex)) return false;
+        return candidateId !== undefined
+          ? criterion.id === candidateId
+          : criterion.criterion === candidateText;
+      });
+      if (index < 0) return [];
+      used.add(index);
+      const sourceCriterion = sourceCriteria[sourceIndex];
+      return sourceCriterion
+        ? [
+            {
+              outcomeIndex: index,
+              sourceCriterion,
+              sourceStructured: typeof proposal.acceptance[sourceIndex] !== "string",
+            },
+          ]
+        : [];
+    });
+  };
+  const withCriterion = (
+    fact: CampaignAssessmentFact,
+    assignment: CriterionAssignment,
+  ): CampaignAssessmentFact =>
+    assignment.sourceStructured
+      ? {
+          ...fact,
+          criterionId: assignment.sourceCriterion.id,
+          criterion: assignment.sourceCriterion.criterion,
+          mandatory: assignment.sourceCriterion.mandatory,
+          ...(assignment.sourceCriterion.checkId
+            ? { checkId: assignment.sourceCriterion.checkId }
+            : {}),
+        }
+      : fact;
   for (const row of rows) {
     if (row.status === "superseded") continue;
     const proposal = decodePersistedTaskProposal(row.proposal);
-    if (proposal.outcomeId !== outcomeId) continue;
+    if (proposal.outcomeId !== outcome.id) continue;
     const result = results.get(row.proposalId);
     if (!result?.candidateSha || !EXACT_SHA.test(result.candidateSha)) continue;
-    evidence.push({
+    const base = {
       repositoryId: proposal.repositoryId,
       proposalId: row.proposalId,
       taskId: result.taskId,
-      fact: "candidate",
-      status: result.state,
       sha: result.candidateSha,
-    });
+      artifact: "exact_candidate_checkout" as const,
+      ...(result.candidateObservedAtEpochMs !== undefined
+        ? { candidateObservedAtEpochMs: result.candidateObservedAtEpochMs }
+        : {}),
+    };
+    const assignments = assignmentsFor(proposal);
+    const add = (fact: CampaignAssessmentFact, assignment?: CriterionAssignment): void => {
+      evidence.push(assignment ? withCriterion(fact, assignment) : fact);
+    };
+    if (assignments.length === 0) add({ ...base, fact: "candidate", status: result.state });
+    for (const assignment of assignments) {
+      add({ ...base, fact: "candidate", status: result.state }, assignment);
+      const check = assignment.sourceCriterion.checkId
+        ? result.check?.acceptanceChecks?.find(
+            (candidate) =>
+              candidate.id === assignment.sourceCriterion.checkId &&
+              candidate.sha === result.candidateSha,
+          )
+        : undefined;
+      if (check)
+        add(
+          {
+            ...base,
+            fact: "check",
+            status: check.status,
+            sha: check.sha,
+            checkId: check.id,
+            checkExitCode: check.exitCode,
+            ...(check.reason ? { checkReason: check.reason } : {}),
+            ...(check.outputDigest ? { checkOutputDigest: check.outputDigest } : {}),
+            ...(check.observation ? { checkObservation: check.observation } : {}),
+          },
+          assignment,
+        );
+    }
     if (result.check?.sha === result.candidateSha && EXACT_SHA.test(result.check.sha))
-      evidence.push({
-        repositoryId: proposal.repositoryId,
-        proposalId: row.proposalId,
-        taskId: result.taskId,
+      add({
+        ...base,
         fact: "check",
         status: result.check.status,
         sha: result.check.sha,
+        checkId: "project-check",
+        checkExitCode: result.check.exitCode,
+        checkOutputDigest: createHash("sha256")
+          .update(result.check.stdout, "utf8")
+          .update("\u0000", "utf8")
+          .update(result.check.stderr, "utf8")
+          .digest("hex"),
       });
     if (result.review?.sha === result.candidateSha && EXACT_SHA.test(result.review.sha))
-      evidence.push({
-        repositoryId: proposal.repositoryId,
-        proposalId: row.proposalId,
-        taskId: result.taskId,
-        fact: "review",
-        status: result.review.verdict,
-        sha: result.review.sha,
-      });
+      (assignments.length > 0 ? assignments : [undefined]).forEach((assignment) =>
+        add(
+          {
+            ...base,
+            fact: "review",
+            status: result.review!.verdict,
+            sha: result.review!.sha,
+            reviewSummary: boundedCampaignEvidenceText(result.review!.summary, 2000),
+            reviewFindings: result
+              .review!.findings.map((finding) => boundedCampaignEvidenceText(finding, 1000))
+              .slice(0, 32),
+          },
+          assignment,
+        ),
+      );
     const accepted = acceptedTaskDelivery(result);
     if (accepted)
-      evidence.push({
-        repositoryId: proposal.repositoryId,
-        proposalId: row.proposalId,
-        taskId: result.taskId,
-        fact: "delivery",
-        status: result.state,
-        sha: accepted.delivery.sha,
-      });
+      (assignments.length > 0 ? assignments : [undefined]).forEach((assignment) =>
+        add(
+          {
+            ...base,
+            fact: "delivery",
+            status: result.state,
+            sha: accepted.delivery.sha,
+            deliveryPrNumber: accepted.delivery.prNumber,
+            deliveryAttestationId: accepted.delivery.attestationId,
+            deliveryMerged: accepted.mergedHeadSha !== null,
+          },
+          assignment,
+        ),
+      );
   }
   return evidence;
+}
+
+function boundedCampaignEvidenceText(value: string, limit: number): string {
+  return sanitizeCampaignDeliveryText(value).slice(0, limit);
 }
 
 function currentCampaignOutcome(
@@ -1134,7 +1279,7 @@ function currentCampaignOutcome(
     ? outcome
     : {
         ...outcome,
-        acceptance: [...new Set([...outcome.acceptance, ...additions])],
+        acceptance: combineAcceptanceCriteria(outcome.acceptance, additions),
       };
 }
 
@@ -1146,7 +1291,29 @@ function assessmentEvidenceHash(
 }
 
 function assessmentFactKey(item: CampaignAssessmentFact): string {
-  return `${item.repositoryId}\u0000${item.proposalId}\u0000${item.taskId}\u0000${item.fact}\u0000${item.status}\u0000${item.sha}`;
+  return JSON.stringify([
+    item.repositoryId,
+    item.proposalId,
+    item.taskId,
+    item.fact,
+    item.status,
+    item.sha,
+    item.candidateObservedAtEpochMs ?? null,
+    item.criterionId ?? null,
+    item.criterion ?? null,
+    item.mandatory ?? null,
+    item.checkId ?? null,
+    item.artifact ?? null,
+    item.checkExitCode ?? null,
+    item.checkReason ?? null,
+    item.checkOutputDigest ?? null,
+    item.checkObservation ?? null,
+    item.reviewSummary ?? null,
+    item.reviewFindings ?? null,
+    item.deliveryPrNumber ?? null,
+    item.deliveryAttestationId ?? null,
+    item.deliveryMerged ?? null,
+  ]);
 }
 
 function resolveAssessmentReferences(
@@ -1158,15 +1325,79 @@ function resolveAssessmentReferences(
   readonly criteriaSatisfied: boolean;
 } {
   const source = new Set(evidence.map(assessmentFactKey));
+  const criteria = normalizeAcceptanceCriteria(outcome.acceptance);
   const resolved = references.filter(
     (item) =>
-      item.criterionIndex < outcome.acceptance.length && source.has(assessmentFactKey(item)),
+      item.criterionIndex < criteria.length &&
+      source.has(assessmentFactKey(item)) &&
+      (typeof outcome.acceptance[item.criterionIndex] === "string" ||
+        (item.criterionId === criteria[item.criterionIndex]?.id &&
+          item.criterion === criteria[item.criterionIndex]?.criterion &&
+          item.mandatory === criteria[item.criterionIndex]?.mandatory &&
+          item.checkId === (criteria[item.criterionIndex]?.checkId ?? undefined))),
   );
   return {
     references: resolved,
-    criteriaSatisfied: outcome.acceptance.every((_, criterionIndex) =>
-      resolved.some((item) => item.criterionIndex === criterionIndex && item.fact === "delivery"),
-    ),
+    criteriaSatisfied: criteria.every((criterion, criterionIndex) => {
+      if (!criterion.mandatory) return true;
+      const criterionReferences = resolved.filter((item) => item.criterionIndex === criterionIndex);
+      if (typeof outcome.acceptance[criterionIndex] === "string")
+        return criterionReferences.some(
+          (item) => item.fact === "delivery" && item.artifact === "exact_candidate_checkout",
+        );
+      return criterionReferences
+        .filter((item) => item.fact === "candidate")
+        .some((candidate) => {
+          const observedAt = candidate.candidateObservedAtEpochMs;
+          if (
+            observedAt === undefined ||
+            evidence.some(
+              (item) =>
+                item.fact === "candidate" &&
+                item.repositoryId === candidate.repositoryId &&
+                (item.candidateObservedAtEpochMs === undefined ||
+                  item.candidateObservedAtEpochMs > observedAt ||
+                  (item.candidateObservedAtEpochMs === observedAt &&
+                    item.taskId !== candidate.taskId)),
+            )
+          )
+            return false;
+          const completeBundle = criterionReferences.filter(
+            (item) =>
+              item.repositoryId === candidate.repositoryId &&
+              item.proposalId === candidate.proposalId &&
+              item.taskId === candidate.taskId &&
+              item.sha === candidate.sha,
+          );
+          const hasDelivery = completeBundle.some(
+            (item) =>
+              item.fact === "delivery" &&
+              item.artifact === "exact_candidate_checkout" &&
+              item.deliveryPrNumber !== undefined &&
+              item.deliveryAttestationId !== undefined,
+          );
+          if (!hasDelivery) return false;
+          const hasReview = completeBundle.some(
+            (item) =>
+              item.fact === "review" &&
+              item.status === "approved" &&
+              item.reviewSummary !== undefined &&
+              item.reviewFindings !== undefined,
+          );
+          const hasCheck = criterion.checkId
+            ? completeBundle.some(
+                (item) =>
+                  item.fact === "check" &&
+                  item.status === "passed" &&
+                  item.checkId === criterion.checkId &&
+                  item.artifact === "exact_candidate_checkout" &&
+                  item.checkOutputDigest !== undefined &&
+                  item.checkObservation !== undefined,
+              )
+            : true;
+          return hasReview && hasCheck;
+        });
+    }),
   };
 }
 
@@ -1393,7 +1624,7 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           if (hasUsefulCampaignWork(outcomeRows, outcomeResults) && revisionSources.length === 0)
             continue;
           const assessment = assessments.get(outcome.id);
-          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+          const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
           const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           if (
             !assessment ||
@@ -1567,7 +1798,7 @@ async function currentReplacementTarget(
   const results = await campaignTaskResults(database, rows);
   if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) return null;
   const outcome = currentCampaignOutcome(baseOutcome, rows);
-  const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+  const evidence = campaignAssessmentEvidence(rows, results, outcome);
   if (assessmentEvidenceHash(outcome, evidence) !== target.evidenceHash) return null;
   const assessment = (await campaignAssessmentRows(database, campaign.campaignId)).get(outcome.id);
   if (
@@ -2151,7 +2382,11 @@ async function generateCampaignReplacements(
         goalId: target.campaign.goalId,
         goalVersion: target.campaign.goalVersion,
         goal: target.contract,
-        outcome: target.outcome,
+        outcome: {
+          ...target.outcome,
+          acceptance: target.outcome.acceptance.map(acceptanceCriterionText),
+          criteria: normalizeAcceptanceCriteria(target.outcome.acceptance),
+        },
         assessment: target.assessment,
         evidenceHash: target.evidenceHash,
         evidence: target.evidence,
@@ -2249,7 +2484,7 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
           (candidate) => candidate.status === "live",
         )) {
           const currentOutcome = currentCampaignOutcome(outcome, rows);
-          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+          const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
           const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           const current = assessments.get(outcome.id);
           const currentRun = current
@@ -2385,7 +2620,7 @@ async function persistCampaignAssessment(
         : undefined;
       const outcome =
         campaign && baseOutcome ? currentCampaignOutcome(baseOutcome, rows) : undefined;
-      const evidence = outcome ? campaignAssessmentEvidence(rows, results, outcome.id) : [];
+      const evidence = outcome ? campaignAssessmentEvidence(rows, results, outcome) : [];
       const lineageCurrent =
         current && outcome && assessmentEvidenceHash(outcome, evidence) === target.evidenceHash;
       const persistedAssessment = assessment;
@@ -2490,7 +2725,11 @@ async function assessCampaignTargets(
         goalId: target.campaign.goalId,
         goalVersion: target.campaign.goalVersion,
         goal: target.contract,
-        outcome: target.outcome,
+        outcome: {
+          ...target.outcome,
+          acceptance: target.outcome.acceptance.map(acceptanceCriterionText),
+          criteria: normalizeAcceptanceCriteria(target.outcome.acceptance),
+        },
         evidence: target.evidence,
         repositories: target.repositories,
         environment,
@@ -2674,6 +2913,7 @@ async function admitReadyCampaignTasks(
                   command: repository.projectCheckCommand,
                   timeoutMs: repository.projectCheckTimeoutMs,
                 },
+                acceptanceChecks: acceptanceChecksFromRepositoryRow(repository),
                 gitAuthor: { name: repository.gitAuthorName, email: repository.gitAuthorEmail },
                 ...(repository.headSha ? { headSha: repository.headSha } : {}),
               },
@@ -2745,7 +2985,7 @@ async function resourceFromDatabase(
       .filter((outcome) => {
         const currentOutcome = currentCampaignOutcome(outcome, rows);
         const assessment = assessments.get(outcome.id);
-        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
         return (
           outcomeEvidence.has(outcome.id) &&
           assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&
@@ -2857,6 +3097,23 @@ export async function proposeCampaign(
         .where(eq(campaignProposals.campaignId, campaignId));
       const sequence = (sequenceRow[0]?.sequence ?? 0) + 1;
       const contract = decodePersistedGoalContract(campaign.contract);
+      const outcome = contract.outcomes.find((item) => item.id === proposal.outcomeId);
+      if (outcome) {
+        const rows = await database.query.campaignProposals.findMany({
+          where: eq(campaignProposals.campaignId, campaignId),
+          orderBy: asc(campaignProposals.sequence),
+        });
+        try {
+          combineAcceptanceCriteria(
+            currentCampaignOutcome(outcome, rows).acceptance,
+            proposal.acceptance,
+          );
+        } catch (error) {
+          throw new GoalContractInputError(
+            error instanceof Error ? error.message : "conflicting acceptance criterion",
+          );
+        }
+      }
       await database.insert(campaignProposals).values({
         campaignId,
         proposalId: proposal.proposalId,
@@ -2954,7 +3211,7 @@ export async function checkpointCampaign(
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
         const currentOutcome = currentCampaignOutcome(outcome, rows);
-        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
         return (
           assessments.get(outcome.id)?.evidenceHash !==
           assessmentEvidenceHash(currentOutcome, evidence)
@@ -2964,7 +3221,7 @@ export async function checkpointCampaign(
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
         const currentOutcome = currentCampaignOutcome(outcome, rows);
-        const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+        const evidence = campaignAssessmentEvidence(rows, results, currentOutcome);
         const assessment = assessments.get(outcome.id);
         return (
           assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&

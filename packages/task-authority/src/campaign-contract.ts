@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { Schema } from "effect";
+import { acceptanceCriteriaSchema } from "./acceptance.js";
+import { acceptanceCriterionText, normalizeAcceptanceCriteria } from "./acceptance.js";
 
 const durableId = z
   .string()
@@ -12,7 +14,7 @@ const outcomeSchema = z
   .object({
     id: durableId,
     title: z.string().min(1),
-    acceptance: z.array(z.string().min(1)).min(1),
+    acceptance: acceptanceCriteriaSchema,
     dependsOn: z.array(durableId).default([]),
     parentId: durableId.nullable().default(null),
     status: z.enum(["live", "superseded"]).default("live"),
@@ -154,7 +156,7 @@ export const taskProposalSchema = z
     dependsOn: z.array(durableId).default([]),
     repositoryId: durableId,
     instructions: z.string().min(1),
-    acceptance: z.array(z.string().min(1)).min(1),
+    acceptance: acceptanceCriteriaSchema,
     nonGoals: z.array(z.string().min(1)),
     effects: z.array(durableId).min(1),
     delivery: z
@@ -238,6 +240,29 @@ const campaignAssessmentFactFields = {
   fact: Schema.Literals(["candidate", "check", "review", "delivery"]),
   status: Schema.String,
   sha: exactSha,
+  candidateObservedAtEpochMs: Schema.optional(Schema.Natural),
+  criterionId: Schema.optional(Schema.String),
+  criterion: Schema.optional(Schema.String),
+  mandatory: Schema.optional(Schema.Boolean),
+  checkId: Schema.optional(Schema.String),
+  artifact: Schema.optional(Schema.Literal("exact_candidate_checkout")),
+  checkExitCode: Schema.optional(Schema.Int),
+  checkReason: Schema.optional(
+    Schema.Literals(["missing_verifier", "spawn_unavailable", "invalid_observation"]),
+  ),
+  checkOutputDigest: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
+  checkObservation: Schema.optional(
+    Schema.Struct({
+      artifact: Schema.String.check(Schema.isMaxLength(512)),
+      entry: Schema.String.check(Schema.isMaxLength(512)),
+      observation: Schema.String.check(Schema.isMaxLength(512)),
+    }),
+  ),
+  reviewSummary: Schema.optional(Schema.String.check(Schema.isMaxLength(2000))),
+  reviewFindings: Schema.optional(Schema.Array(Schema.String.check(Schema.isMaxLength(1000)))),
+  deliveryPrNumber: Schema.optional(Schema.Natural),
+  deliveryAttestationId: Schema.optional(Schema.String),
+  deliveryMerged: Schema.optional(Schema.Boolean),
 };
 
 /** A mechanically resolved fact supplied to the assessor without a criterion claim. */
@@ -284,6 +309,16 @@ const campaignOutcomeSchema = Schema.Struct({
   id: Schema.String,
   title: Schema.String,
   acceptance: Schema.Array(Schema.String),
+  criteria: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        criterion: Schema.String,
+        mandatory: Schema.Boolean,
+        checkId: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
   dependsOn: Schema.Array(Schema.String),
   parentId: Schema.NullOr(Schema.String),
   status: Schema.Literals(["planned", "accepted", "superseded"]),
@@ -397,7 +432,10 @@ export function campaignResourceFromContract(
   const outcomes = contract.outcomes.map((outcome) => ({
     id: outcome.id,
     title: outcome.title,
-    acceptance: outcome.acceptance,
+    acceptance: outcome.acceptance.map(acceptanceCriterionText),
+    ...(outcome.acceptance.some((criterion) => typeof criterion !== "string")
+      ? { criteria: normalizeAcceptanceCriteria(outcome.acceptance) }
+      : {}),
     dependsOn: outcome.dependsOn,
     parentId: outcome.parentId,
     status:
