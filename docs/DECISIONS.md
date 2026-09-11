@@ -68,6 +68,8 @@ This document records why the current boundary exists and when it should be reco
 
 ## Selected dependencies
 
+Under Issue #484, mandatory acceptance extends D-009, D-038 and D-045 at the existing boundaries: Task Authority owns immutable structured criterion identity and selected Repository configuration; Quality Gate owns candidate-independent host observations; Campaign coordination owns current exact-evidence satisfaction. Optional criteria remain nonblocking. Caller-pinned source outside candidate write scope and actual artifact/entry assertions replace reliance on candidate-owned self-checks; no policy language or new planner platform is introduced. Host verification unavailable follows the existing candidate-fenced wait/retry path without futile writer activation, preserving both observations in history. Configuration freezing is not a claim that arbitrary host files or observation strings are immutable or secret-free. Re-enter stronger verifier isolation only when the supported deployment threat model or a concrete incident requires it. Mechanics and limitations are in [DESIGN](DESIGN.md#8-candidate-checks-review-delivery-and-github-capabilities).
+
 These are the deliberately narrow primitives behind the decisions; current ownership and usage are described in [`DESIGN.md`](DESIGN.md#5-behavioral-packages-and-composition).
 
 - [Node 24 SQLite](https://nodejs.org/api/sqlite.html) for local transactions and file-backed durable facts.

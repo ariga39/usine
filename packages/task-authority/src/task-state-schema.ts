@@ -44,6 +44,23 @@ const persistedTaskState = Schema.Literals([
   "blocked",
 ]);
 const publicTaskState = Schema.Literals(PUBLIC_TASK_STATES);
+export const acceptanceCheckResultSchema = Schema.Struct({
+  id: Schema.String,
+  sha: exactSha,
+  status: Schema.Literals(["passed", "failed", "unavailable"]),
+  exitCode: Schema.Int,
+  outputDigest: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
+  observation: Schema.optional(
+    Schema.Struct({
+      artifact: Schema.String.check(Schema.isMaxLength(512)),
+      entry: Schema.String.check(Schema.isMaxLength(512)),
+      observation: Schema.String.check(Schema.isMaxLength(512)),
+    }),
+  ),
+  reason: Schema.optional(
+    Schema.Literals(["missing_verifier", "spawn_unavailable", "invalid_observation"]),
+  ),
+});
 const checkResult = Schema.Struct({
   sha: exactSha,
   status: Schema.Literals(["passed", "failed"]),
@@ -51,17 +68,7 @@ const checkResult = Schema.Struct({
   exitCode: Schema.Int,
   stdout: Schema.String,
   stderr: Schema.String,
-  acceptanceChecks: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        id: Schema.String,
-        sha: exactSha,
-        status: Schema.Literals(["passed", "failed", "unavailable"]),
-        exitCode: Schema.Int,
-        reason: Schema.optional(Schema.Literals(["missing_verifier", "spawn_unavailable"])),
-      }),
-    ),
-  ),
+  acceptanceChecks: Schema.optional(Schema.Array(acceptanceCheckResultSchema)),
 });
 const reviewVerdict = Schema.Struct({
   sha: exactSha,
@@ -106,6 +113,7 @@ const repositorySnapshot = Schema.Struct({
         workingDirectory: Schema.String,
         command: Schema.String,
         timeoutMs: Schema.Int,
+        publicObservation: Schema.optional(Schema.Literal("safe-json-v1")),
       }),
     ),
   ),

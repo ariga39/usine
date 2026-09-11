@@ -25,6 +25,51 @@ export const acceptanceCriterionSchema = z.union([
 
 export type AcceptanceCriterion = z.infer<typeof acceptanceCriterionSchema>;
 
+export const acceptanceCriteriaSchema = z
+  .array(acceptanceCriterionSchema)
+  .min(1)
+  .superRefine((criteria, context) => {
+    const ids = new Set<string>();
+    for (const [index, criterion] of criteria.entries()) {
+      if (typeof criterion === "string") continue;
+      if (ids.has(criterion.id))
+        context.addIssue({
+          code: "custom",
+          path: [index, "id"],
+          message: "acceptance criterion IDs must be unique",
+        });
+      ids.add(criterion.id);
+    }
+  });
+
+/** Add obligations without changing the meaning of an existing identifier. */
+export function combineAcceptanceCriteria(
+  existing: readonly AcceptanceCriterion[],
+  additions: readonly AcceptanceCriterion[],
+): AcceptanceCriterion[] {
+  const combined = [...existing];
+  for (const addition of additions) {
+    if (typeof addition === "string") {
+      if (!combined.includes(addition)) combined.push(addition);
+      continue;
+    }
+    const previous = combined.find(
+      (criterion) => typeof criterion !== "string" && criterion.id === addition.id,
+    );
+    if (previous && typeof previous !== "string") {
+      if (
+        previous.criterion !== addition.criterion ||
+        previous.mandatory !== addition.mandatory ||
+        previous.checkId !== addition.checkId
+      )
+        throw new Error(
+          "acceptance criterion identity conflicts with an existing requirement; use a new identifier or an authorized Goal revision",
+        );
+    } else combined.push(addition);
+  }
+  return combined;
+}
+
 export interface NormalizedAcceptanceCriterion {
   readonly id: string;
   readonly criterion: string;
@@ -61,11 +106,4 @@ export function mandatoryAcceptanceCheckIds(
         .map((criterion) => criterion.checkId!),
     ),
   ];
-}
-
-export function acceptanceCriterionForIndex(
-  acceptance: readonly AcceptanceCriterion[],
-  index: number,
-): NormalizedAcceptanceCriterion | undefined {
-  return normalizeAcceptanceCriteria(acceptance)[index];
 }

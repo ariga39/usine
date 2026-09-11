@@ -5,6 +5,7 @@ import {
   taskFailureClassFromProvider,
 } from "./task-state.js";
 import { safeEvidenceIdentity } from "./evidence-identity.js";
+import { acceptanceCheckResultSchema } from "./task-state-schema.js";
 
 const safeEventId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/));
 const safeObservationId = Schema.String.check(
@@ -197,6 +198,7 @@ const eventData = Schema.Union([
     cycle: Schema.Natural,
     outcome: Schema.Literals(["passed", "failed"]),
     exitCode: Schema.Int,
+    acceptanceChecks: Schema.optional(Schema.Array(acceptanceCheckResultSchema)),
   }),
   Schema.Struct({
     type: Schema.Literal("review_started"),

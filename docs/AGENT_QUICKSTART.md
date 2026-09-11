@@ -449,6 +449,54 @@ Registration output is JSON. Confirm the public projection without expecting pat
 node apps/cli/dist/cli.mjs repository get "<REPOSITORY_ID>" --json
 ```
 
+### Mandatory acceptance checks
+
+Use a structured criterion for an explicit obligation; `mandatory: false` records a preference that does not independently block acceptance. Put the requirement on the Goal Outcome and on the proposal responsible for verifying it:
+
+```json
+{
+  "id": "required-toolchain",
+  "criterion": "The shipped entry is built and verified with the required toolchain",
+  "mandatory": true,
+  "checkId": "toolchain-entry"
+}
+```
+
+Register the matching check in the host-private Repository registration file, then run the existing `register` command:
+
+```json
+{
+  "acceptanceChecks": [
+    {
+      "id": "toolchain-entry",
+      "source": "host",
+      "workingDirectory": "<FROZEN_VERIFIER_DIRECTORY>",
+      "command": "node verify-entry.mjs",
+      "timeoutMs": 120000,
+      "publicObservation": "safe-json-v1"
+    }
+  ]
+}
+```
+
+This fragment belongs in the complete registration, not in the committed Goal. Keep the verifier and its pinned expectations outside the candidate's writable workspace. Derive it from the required host/reference source at a recorded immutable revision, freeze its dependencies and source for the run, and qualify the same verifier against a real valid artifact and a known incompatible artifact. The host owns that freeze: `source: "host"` and a directory name alone do not make mutable files immutable. Usine freezes the selected configuration into the admitted Task; changing registration does not rewrite that Task.
+
+The project check runs first for preparation/build. The selected host command then receives `USINE_CANDIDATE_PATH`, a disposable checkout of the exact candidate. It must inspect or exercise that candidate's shipped entry; merely running a candidate-owned self-test or trusting its successful script is insufficient. A removed optional self-test is not itself failure when the actual required artifact still works.
+
+On success, the verifier writes exactly one JSON object to stdout:
+
+```json
+{"artifact":"shipped entry","entry":"verification pipeline","observation":"executed the required toolchain and loaded the entry"}
+```
+
+These are caller-authored **intended-public observations**, not raw diagnostic output. Each nonempty field is at most 512 characters; control characters, path separators and common secret labels are rejected. Use logical artifact/entry labels, not paths. These filters cannot establish that arbitrary text is secret-free: the host must ensure the verifier emits no credentials, machine identifiers, private source or untrusted raw output. There is no raw-output fallback. Usine records an output digest plus valid structured observation and carries them, the original criterion identity and exact SHA to the reviewer and final assessor.
+
+A launched failing check is candidate failure and follows ordinary repair. A missing verifier, failed spawn or successful exit without the opted-in valid observation is unavailable evidence: delivery waits on `project_check_capability`, retaining the candidate. Restore the frozen host verifier and use `task retry "<TASK_ID>"`; the same candidate is rechecked without another writer activation, and prior check observations remain in history. An admitted missing selection/configuration requires attributable replacement work with a corrected snapshot, not repeated retries or mutation of the old Task.
+
+At apparent completion, current mandatory criteria need a matching current candidate/check/review/delivery bundle. An older passing artifact cannot satisfy a later candidate. Repeated identical additions deduplicate; an existing structured ID cannot change meaning, checker or mandatory status. Use a new ID to add an obligation, or an explicitly authorized Goal revision to replace one. A structured semantic requirement without `checkId` still requires exact review/delivery evidence but does not acquire an invented mechanical proof. Legacy text criteria retain their prior behavior.
+
+When discovering a missing regression, append attributable work through the existing Campaign proposal route and include its acceptance check. For example, rapid load/unload was omitted from the trial's target requirements and selected tests; that was an operator acceptance-selection omission, not an Usine plugin implementation defect. Recording it only in a handoff would not make the factory execute or verify it.
+
 ## 5. Write and submit a Task Contract
 
 The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. For a standalone Task, the authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`. Campaign-derived Task Contracts are admitted only by Campaign coordination: they retain the Goal source and may carry the proposal's optional same-Repository Task Issue without requiring it to match that source.

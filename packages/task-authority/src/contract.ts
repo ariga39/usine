@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { acceptanceCriterionSchema } from "./acceptance.js";
+import { acceptanceCriteriaSchema } from "./acceptance.js";
 import type { RepositorySnapshot } from "./repository.js";
 
 const sha = z.string().regex(/^[0-9a-f]{40}$/, "must be a full lowercase commit SHA");
@@ -85,7 +85,7 @@ export const taskContractSchema = z
     repositoryId,
     baseSha: sha,
     instructions: z.string().min(1),
-    acceptance: z.array(acceptanceCriterionSchema).min(1),
+    acceptance: acceptanceCriteriaSchema,
     nonGoals: z.array(z.string().min(1)),
     budget: z.object({
       maxImplementerActivations: positiveCountBudgetSchema,

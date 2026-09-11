@@ -22,6 +22,30 @@ export interface AcceptanceCheck {
   readonly workingDirectory: string;
   readonly command: string;
   readonly timeoutMs: number;
+  /** The caller attests that stdout follows the strict safe observation contract. */
+  readonly publicObservation?: "safe-json-v1";
+}
+
+const safeObservationText = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => !/\p{Cc}/u.test(value))
+  .refine((value) => !/[\\/]|:\/\//u.test(value))
+  .refine((value) => !/\b(?:api[_-]?key|secret|token|password|credential|bearer)\b/iu.test(value));
+
+export const acceptanceObservationSchema = z
+  .object({
+    artifact: safeObservationText,
+    entry: safeObservationText,
+    observation: safeObservationText,
+  })
+  .strict();
+
+export type AcceptanceObservation = z.infer<typeof acceptanceObservationSchema>;
+
+export function decodeAcceptanceObservation(input: unknown): AcceptanceObservation {
+  return acceptanceObservationSchema.parse(input);
 }
 
 export const acceptanceCheckSchema = z
@@ -31,6 +55,7 @@ export const acceptanceCheckSchema = z
     workingDirectory: nonBlank,
     command: nonBlank,
     timeoutMs: z.number().int().positive(),
+    publicObservation: z.literal("safe-json-v1").optional(),
   })
   .strict();
 

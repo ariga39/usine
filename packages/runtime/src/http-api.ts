@@ -144,6 +144,7 @@ const repositoryRegistrationSchema = Schema.Struct({
         workingDirectory: Schema.String,
         command: Schema.String,
         timeoutMs: Schema.Int,
+        publicObservation: Schema.optional(Schema.Literal("safe-json-v1")),
       }),
     ),
   ),

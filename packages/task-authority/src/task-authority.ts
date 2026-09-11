@@ -44,6 +44,7 @@ import {
   type RepositoryRegistration,
   type RepositoryResource,
   type RepositorySnapshot,
+  type TaskRepositorySnapshot,
 } from "./repository.js";
 
 import {
@@ -96,6 +97,16 @@ function repositoryPolicySelectionChanged(
 
 function acceptanceChecksFromRow(row: typeof repositories.$inferSelect) {
   return decodeAcceptanceChecks(row.acceptanceChecks);
+}
+
+function repositorySnapshotsEqual(
+  left: TaskRepositorySnapshot,
+  right: TaskRepositorySnapshot,
+): boolean {
+  return (
+    JSON.stringify({ ...left, acceptanceChecks: left.acceptanceChecks ?? [] }) ===
+    JSON.stringify({ ...right, acceptanceChecks: right.acceptanceChecks ?? [] })
+  );
 }
 
 export interface TaskAuthorityOptions {
@@ -726,8 +737,10 @@ export class TaskAuthority {
     if (
       input.repository &&
       (!result.repository ||
-        JSON.stringify(result.repository) !==
-          JSON.stringify(taskSnapshotFromRegistration(input.repository)))
+        !repositorySnapshotsEqual(
+          result.repository,
+          taskSnapshotFromRegistration(input.repository),
+        ))
     )
       throw new Error("task repository snapshot is immutable");
     return result;
@@ -1322,6 +1335,7 @@ function factEvent(
           cycle: Math.max(1, prior.evidence.reviewCycles + 1),
           outcome: fact.check.status,
           exitCode: fact.check.exitCode,
+          ...(fact.check.acceptanceChecks ? { acceptanceChecks: fact.check.acceptanceChecks } : {}),
         },
       };
     case "review":

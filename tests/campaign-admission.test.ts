@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -862,7 +862,7 @@ test("refuses retry while abandoned Campaign cleanup still owns its writer lease
     );
     await handoffCampaign(fixtureValue.server.url, published.campaignId);
     await waitFor(
-      () => taskStatus(fixtureValue.server.url, taskId),
+      () => (taskId ? taskStatus(fixtureValue.server.url, taskId) : Promise.resolve(null)),
       (task) => task?.state === "waiting",
     );
     fixtureValue.environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
@@ -3436,6 +3436,529 @@ describe("durable Ready frontier", () => {
       await server.close().catch(() => undefined);
     }
   }, 30_000);
+
+  test("carries real mandatory check evidence through correction and final assessment", async () => {
+    const criterion = {
+      id: "vite-plus",
+      criterion: "The actual Vite+ shipped entry executes.",
+      mandatory: true,
+      checkId: "vite-plus",
+    } as const;
+    const scaffoldCriterion = {
+      id: "scaffold",
+      criterion: "The implementation scaffold is prepared.",
+      mandatory: true,
+    } as const;
+    const goal = {
+      ...oneOutcomeFrontierGoal("campaign-repository"),
+      outcomes: [
+        {
+          ...oneOutcomeFrontierGoal("campaign-repository").outcomes[0],
+          acceptance: [
+            criterion,
+            {
+              id: "optional-preference",
+              criterion: "An optional enhancement",
+              mandatory: false,
+              checkId: "unregistered-optional",
+            },
+          ],
+        },
+      ],
+    };
+    const verifierRoot = await mkdtemp(join(tmpdir(), "usine-campaign-verifier-"));
+    const verifier = join(verifierRoot, "verify.mjs");
+    const vitePlusPackage = JSON.parse(
+      await readFile(join(process.cwd(), "node_modules/vite-plus/package.json"), "utf8"),
+    ) as { version: string };
+    const vitePlusPath = join(process.cwd(), "node_modules/vite-plus/bin/vp");
+    const entryText = 'process.stdout.write("vite-plus shipped entry\\n");\n';
+    await writeFile(join(verifierRoot, "expected-entry.txt"), entryText);
+    await writeFile(
+      verifier,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { createHash } from "node:crypto";',
+        'import { readFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        "const candidate = process.env.USINE_CANDIDATE_PATH;",
+        `const expectedVersion = ${JSON.stringify(vitePlusPackage.version)};`,
+        `const vp = ${JSON.stringify(vitePlusPath)};`,
+        'const packageJson = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8"));',
+        'if (packageJson.devDependencies?.["vite-plus"] !== expectedVersion) process.exit(17);',
+        'if (packageJson.scripts?.verify !== "node shipped-entry.mjs") process.exit(18);',
+        'const entry = readFileSync(join(candidate, "shipped-entry.mjs"));',
+        `const expectedEntry = readFileSync(${JSON.stringify(join(verifierRoot, "expected-entry.txt"))});`,
+        'if (createHash("sha256").update(entry).digest("hex") !== createHash("sha256").update(expectedEntry).digest("hex")) process.exit(19);',
+        'const output = execFileSync(vp, ["run", "verify"], { cwd: candidate, encoding: "utf8" });',
+        'if (!output.includes("vite-plus shipped entry")) process.exit(20);',
+        'process.stdout.write(JSON.stringify({ artifact: "vite-plus shipped entry", entry: "verify pipeline", observation: "executed real Vite+ run pipeline" }));',
+      ].join("\n"),
+    );
+    let assessmentCalls = 0;
+    let firstEvidence: readonly CampaignAssessmentFact[] = [];
+    let finalEvidence: readonly CampaignAssessmentFact[] = [];
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentCalls += 1;
+      if (assessmentCalls === 1) {
+        firstEvidence = request.evidence;
+        return {
+          verdict: "gaps",
+          summary: "the mandatory Vite+ verifier evidence is missing",
+          gaps: [criterion.criterion],
+          evidence: [],
+          usage: null,
+        };
+      }
+      finalEvidence = request.evidence;
+      const correctionFacts = request.evidence.filter(
+        (item) => item.proposalId === "campaign-correction",
+      );
+      return {
+        verdict: "satisfied",
+        summary: "the corrected shipped entry has exact check, review, and delivery evidence",
+        gaps: [],
+        evidence: correctionFacts.map((item) => ({ ...item, criterionIndex: 0 })),
+        usage: null,
+      };
+    };
+    const replacementGenerator: CampaignReplacementGenerator = async () => ({
+      proposal: {
+        ...frontierProposal("campaign-correction", "outcome-one"),
+        acceptance: [criterion],
+      },
+      usage: null,
+    });
+    const execute = async (context: CampaignExecutionContext) => {
+      if (!context.result.taskId.endsWith("-campaign-correction"))
+        return acceptCampaignTask(context);
+      const { authority, result, policy } = context;
+      const activation = await authority.reserveActivation(
+        result.taskId,
+        context.contract.budget.maxImplementerActivations,
+      );
+      if (!result.repository) throw new Error("Campaign fixture Task has no repository snapshot");
+      const sha = (
+        await execa("git", ["-C", result.repository.path, "rev-parse", "HEAD"], {
+          cwd: result.repository.path,
+        })
+      ).stdout.trim();
+      const candidate = await authority.recordCandidate(
+        { taskId: result.taskId, revision: activation.result.revision },
+        { sha, baseSha: context.contract.baseSha, fence: activation.activation },
+      );
+      const quality = new QualityGate({
+        workspace: new CandidateWorkspace({
+          repository: result.repository.path,
+          stateDirectory: policy.stateDirectory,
+          deadlineEpochMs: result.deadlineEpochMs,
+          credentialFreeGit: policy.credentialFreeGitEnvironment,
+          gitAuthor: result.repository.gitAuthor,
+          signal: context.signal,
+        }),
+        session: {
+          run: async () => {
+            throw new Error("fixture reviewer is authority-owned");
+          },
+        },
+        reviewer: policy.roles.reviewer,
+        environment: { ...policy.workerEnvironment, PATH: process.env.PATH ?? "" },
+        deadlineEpochMs: result.deadlineEpochMs,
+        signal: context.signal,
+      });
+      const checked = await quality.check(
+        resolveTaskContract(context.contract, result.repository),
+        sha,
+        1,
+      );
+      if ("kind" in checked) throw new Error("fixture QualityGate capability is unavailable");
+      await authority.recordCheck({ taskId: result.taskId, revision: candidate.revision }, checked);
+      const reviewAttempt = await authority.reserveReviewAttempt(
+        result.taskId,
+        context.contract.budget.maxReviewCycles,
+        "campaign-fixture-reviewer",
+      );
+      const reviewed = await authority.recordReview(
+        { taskId: result.taskId, revision: reviewAttempt.result.revision },
+        {
+          sha,
+          verdict: "approved",
+          summary: "fixture reviewer verified the bounded Vite+ evidence",
+          findings: [],
+        },
+        "campaign-fixture-reviewer",
+      );
+      return authority.recordDelivery(
+        { taskId: result.taskId, revision: reviewed.revision },
+        {
+          sha,
+          effect: "github",
+          prNumber: 2,
+          url: "https://example.invalid/pull/2",
+          attestationId: `fixture-${result.taskId}`,
+          merge: null,
+        },
+      );
+    };
+    const fixtureValue = await frontierFixture(
+      goal,
+      "user:campaign-366",
+      execute,
+      1,
+      false,
+      assessor,
+      replacementGenerator,
+    );
+    const { contractPath, server, root } = fixtureValue;
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        private: true,
+        devDependencies: { "vite-plus": vitePlusPackage.version },
+        scripts: { verify: "node shipped-entry.mjs" },
+      }),
+    );
+    await writeFile(join(root, "shipped-entry.mjs"), entryText);
+    await execa("git", ["add", "package.json", "shipped-entry.mjs"], { cwd: root });
+    await execa("git", ["commit", "-m", "add shipped Vite+ entry"], { cwd: root });
+    await registerRepository(server.url, {
+      id: "campaign-repository",
+      path: root,
+      owner: "example",
+      name: "campaign-repository",
+      baseBranch: "main",
+      implementerProfile: "writer-profile",
+      reviewerProfile: "reviewer-profile",
+      forgeProfile: "default",
+      projectCheck: { command: "true", timeoutMs: 10_000 },
+      acceptanceChecks: [
+        {
+          id: "vite-plus",
+          source: "host",
+          workingDirectory: process.cwd(),
+          command: `${JSON.stringify(process.execPath)} ${JSON.stringify(verifier)}`,
+          timeoutMs: 10_000,
+          publicObservation: "safe-json-v1",
+        },
+      ],
+      gitAuthor: { name: "Test", email: "test@example.invalid" },
+    });
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, {
+        ...frontierProposal("campaign-initial", "outcome-one"),
+        acceptance: [scaffoldCriterion],
+      });
+      await handoffCampaign(server.url, published.campaignId);
+      const accepted = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) => campaign?.status === "accepted",
+      );
+      expect(accepted).toMatchObject({ status: "accepted" });
+      expect(assessmentCalls).toBeGreaterThanOrEqual(2);
+      expect(firstEvidence).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ checkId: "vite-plus" })]),
+      );
+      expect(finalEvidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            proposalId: "campaign-correction",
+            fact: "check",
+            checkId: "vite-plus",
+            status: "passed",
+            checkOutputDigest: expect.any(String),
+            checkObservation: {
+              artifact: "vite-plus shipped entry",
+              entry: "verify pipeline",
+              observation: "executed real Vite+ run pipeline",
+            },
+          }),
+          expect.objectContaining({
+            proposalId: "campaign-correction",
+            fact: "review",
+            reviewSummary: expect.stringContaining("verified"),
+          }),
+          expect.objectContaining({
+            proposalId: "campaign-correction",
+            fact: "delivery",
+            deliveryAttestationId: expect.any(String),
+          }),
+        ]),
+      );
+    } finally {
+      await server.close();
+    }
+  }, 60_000);
+
+  test("rejects mixed exact-SHA evidence for one mandatory criterion", async () => {
+    const criterion = {
+      id: "current-artifact",
+      criterion: "The current artifact is reviewed and delivered.",
+      mandatory: true,
+    } as const;
+    const goal = {
+      ...oneOutcomeFrontierGoal("campaign-repository"),
+      outcomes: [
+        {
+          ...oneOutcomeFrontierGoal("campaign-repository").outcomes[0],
+          acceptance: [criterion],
+        },
+      ],
+    };
+    let oldSha!: string;
+    let newSha!: string;
+    let assessmentCalls = 0;
+    let observedEvidence: readonly CampaignAssessmentFact[] = [];
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentCalls += 1;
+      const oldFacts = request.evidence.filter((item) => item.proposalId === "old-evidence");
+      const newFacts = request.evidence.filter((item) => item.proposalId === "new-evidence");
+      if (oldFacts.length === 0 || newFacts.length === 0)
+        return {
+          verdict: "inconclusive",
+          summary: "both exact candidate bundles are not yet available",
+          gaps: [],
+          evidence: [],
+          usage: null,
+        };
+      observedEvidence = request.evidence;
+      const oldCandidate = oldFacts.find((item) => item.fact === "candidate");
+      const oldReview = oldFacts.find((item) => item.fact === "review");
+      const newDelivery = newFacts.find((item) => item.fact === "delivery");
+      if (!oldCandidate || !oldReview || !newDelivery)
+        throw new Error("mixed-bundle fixture facts are incomplete");
+      return {
+        verdict: "satisfied",
+        summary: "incorrectly mixed evidence from two candidate bundles",
+        gaps: [],
+        evidence: [oldCandidate, oldReview, newDelivery].map((item) => ({
+          ...item,
+          criterionIndex: 0,
+        })),
+        usage: null,
+      };
+    };
+    const fixtureValue = await frontierFixture(
+      goal,
+      "user:campaign-366",
+      async (context) =>
+        acceptCampaignTask(
+          context,
+          false,
+          context.result.taskId.endsWith("-old-evidence") ? oldSha : newSha,
+        ),
+      1,
+      true,
+      assessor,
+    );
+    const { contractPath, server, root } = fixtureValue;
+    try {
+      const baseSha = (
+        await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+      ).stdout.trim();
+      ({ candidateSha: oldSha } = await detachedCampaignCommits(root, baseSha));
+      await writeFile(join(root, "candidate-b.txt"), "candidate-b\n");
+      await execa("git", ["add", "candidate-b.txt"], { cwd: root });
+      await execa("git", ["commit", "-m", "candidate B changes the artifact"], { cwd: root });
+      newSha = (await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+      expect(newSha).not.toBe(oldSha);
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, {
+        ...frontierProposal("old-evidence", "outcome-one"),
+        acceptance: [criterion],
+      });
+      await proposeCampaign(server.url, published.campaignId, {
+        ...frontierProposal("new-evidence", "outcome-one"),
+        acceptance: [criterion],
+      });
+      await handoffCampaign(server.url, published.campaignId);
+      const result = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "gaps",
+      );
+      expect(result).toMatchObject({
+        status: expect.not.stringMatching("accepted"),
+        outcomes: [{ assessment: { verdict: "gaps" } }],
+      });
+      expect(assessmentCalls).toBeGreaterThanOrEqual(1);
+      expect(observedEvidence).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ proposalId: "old-evidence", sha: oldSha, fact: "candidate" }),
+          expect.objectContaining({ proposalId: "old-evidence", sha: oldSha, fact: "review" }),
+          expect.objectContaining({ proposalId: "new-evidence", sha: newSha, fact: "delivery" }),
+        ]),
+      );
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  test.each([true, false])(
+    "does not reuse a complete older bundle for a newer candidate (criterion retained: %s)",
+    async (retainsCriterion) => {
+      const criterion = {
+        id: "current-check",
+        criterion: "The current candidate has the required verified artifact.",
+        mandatory: true,
+        checkId: "current-check",
+      } as const;
+      const goal = {
+        ...oneOutcomeFrontierGoal("campaign-repository"),
+        outcomes: [
+          {
+            ...oneOutcomeFrontierGoal("campaign-repository").outcomes[0],
+            acceptance: [criterion],
+          },
+        ],
+      };
+      let oldSha!: string;
+      let newSha!: string;
+      let assessmentCalls = 0;
+      let observedEvidence: readonly CampaignAssessmentFact[] = [];
+      const assessor: CampaignOutcomeAssessor = async (request) => {
+        assessmentCalls += 1;
+        const oldFacts = request.evidence.filter((item) => item.proposalId === "candidate-a");
+        const newFacts = request.evidence.filter((item) => item.proposalId === "candidate-b");
+        if (oldFacts.length === 0 || newFacts.length === 0)
+          return {
+            verdict: "inconclusive",
+            summary: "the current candidate bundle is not yet available",
+            gaps: [],
+            evidence: [],
+            usage: null,
+          };
+        observedEvidence = request.evidence;
+        return {
+          verdict: "satisfied",
+          summary: "incorrectly cited the complete older candidate bundle",
+          gaps: [],
+          evidence: oldFacts.map((item) => ({ ...item, criterionIndex: 0 })),
+          usage: null,
+        };
+      };
+      const execute = async (context: CampaignExecutionContext) => {
+        const { authority, contract, result } = context;
+        const activation = await authority.reserveActivation(
+          result.taskId,
+          contract.budget.maxImplementerActivations,
+        );
+        if (!result.repository) throw new Error("Campaign fixture Task has no repository snapshot");
+        const isOld = result.taskId.endsWith("-candidate-a");
+        const sha = isOld ? oldSha : newSha;
+        const candidate = await authority.recordCandidate(
+          { taskId: result.taskId, revision: activation.result.revision },
+          { sha, baseSha: contract.baseSha, fence: activation.activation },
+        );
+        const checked = await authority.recordCheck(
+          { taskId: result.taskId, revision: candidate.revision },
+          {
+            sha,
+            status: isOld ? "passed" : "failed",
+            command: "frozen verifier",
+            exitCode: isOld ? 0 : 17,
+            stdout: "",
+            stderr: "",
+            acceptanceChecks: [
+              {
+                id: "current-check",
+                sha,
+                status: isOld ? "passed" : "failed",
+                exitCode: isOld ? 0 : 17,
+                outputDigest: createHash("sha256").update(sha, "utf8").digest("hex"),
+                observation: {
+                  artifact: "verified shipped artifact",
+                  entry: "frozen verifier",
+                  observation: "observed exact candidate artifact",
+                },
+              },
+            ],
+          },
+        );
+        if (!isOld)
+          return authority.block(
+            { taskId: result.taskId, revision: checked.revision },
+            "the current mandatory verifier failed",
+            "project_check_failure",
+          );
+        const reviewAttempt = await authority.reserveReviewAttempt(
+          result.taskId,
+          contract.budget.maxReviewCycles,
+          "campaign-fixture-reviewer",
+        );
+        const reviewed = await authority.recordReview(
+          { taskId: result.taskId, revision: reviewAttempt.result.revision },
+          {
+            sha,
+            verdict: "approved",
+            summary: "the older candidate was reviewed",
+            findings: [],
+          },
+          "campaign-fixture-reviewer",
+        );
+        return authority.recordDelivery(
+          { taskId: result.taskId, revision: reviewed.revision },
+          {
+            sha,
+            effect: "github",
+            prNumber: 2,
+            url: "https://example.invalid/pull/2",
+            attestationId: "fixture-" + result.taskId,
+            merge: null,
+          },
+        );
+      };
+      const fixtureValue = await frontierFixture(
+        goal,
+        "user:campaign-366",
+        execute,
+        1,
+        true,
+        assessor,
+      );
+      const { contractPath, server, root } = fixtureValue;
+      try {
+        const baseSha = (
+          await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+        ).stdout.trim();
+        ({ candidateSha: oldSha } = await detachedCampaignCommits(root, baseSha));
+        await writeFile(join(root, "candidate-b.txt"), "candidate-b\n");
+        await execa("git", ["add", "candidate-b.txt"], { cwd: root });
+        await execa("git", ["commit", "-m", "candidate B changes the artifact"], { cwd: root });
+        newSha = (
+          await execa("git", ["-C", root, "rev-parse", "HEAD"], { cwd: root })
+        ).stdout.trim();
+        expect(newSha).not.toBe(oldSha);
+        const published = await publishCampaign(server.url, { contractPath });
+        await proposeCampaign(server.url, published.campaignId, {
+          ...frontierProposal("candidate-a", "outcome-one"),
+          acceptance: [criterion],
+        });
+        await proposeCampaign(server.url, published.campaignId, {
+          ...frontierProposal("candidate-b", "outcome-one"),
+          acceptance: retainsCriterion ? [criterion] : ["A later change to the shipped artifact"],
+        });
+        await handoffCampaign(server.url, published.campaignId);
+        const result = await waitFor(
+          () => getCampaign(server.url, published.campaignId),
+          (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "gaps",
+        );
+        expect(result).toMatchObject({
+          status: expect.not.stringMatching("accepted"),
+          outcomes: [{ assessment: { verdict: "gaps" } }],
+        });
+        expect(assessmentCalls).toBeGreaterThanOrEqual(1);
+        expect(observedEvidence).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ proposalId: "candidate-a", sha: oldSha, fact: "delivery" }),
+            expect.objectContaining({ proposalId: "candidate-b", sha: newSha, fact: "candidate" }),
+          ]),
+        );
+      } finally {
+        await server.close();
+      }
+    },
+    30_000,
+  );
 
   test("runs the fixed handoff through every Outcome and accepts only accepted Task delivery", async () => {
     let executions = 0;
