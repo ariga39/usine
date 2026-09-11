@@ -1067,16 +1067,31 @@ async function reconcileWithRepositoryHeads(
   }
 }
 
+type CampaignTaskResult = TaskResult & { readonly candidateObservedAtEpochMs?: number };
+
 async function campaignTaskResults(
   database: CampaignDatabase,
   rows: readonly (typeof campaignProposals.$inferSelect)[],
   taskFacts: CampaignTaskFacts = new Map(),
-): Promise<Map<string, TaskResult>> {
-  const results = new Map<string, TaskResult>();
+): Promise<Map<string, CampaignTaskResult>> {
+  const results = new Map<string, CampaignTaskResult>();
   for (const row of rows) {
     if (!row.taskId) continue;
     const result = await campaignTaskLookup(database, row.taskId, taskFacts);
-    if (result) results.set(row.proposalId, result);
+    if (!result) continue;
+    const candidateEvent = result.candidateSha
+      ? await database.query.taskEvents.findFirst({
+          where: (events, { and, eq }) =>
+            and(
+              eq(events.taskId, result.taskId),
+              eq(events.eventId, `candidate:${result.candidateSha}`),
+            ),
+        })
+      : undefined;
+    results.set(row.proposalId, {
+      ...result,
+      ...(candidateEvent ? { candidateObservedAtEpochMs: candidateEvent.occurredAtEpochMs } : {}),
+    });
   }
   return results;
 }
@@ -1100,7 +1115,7 @@ async function campaignTaskLookup(
 
 function campaignAssessmentEvidence(
   rows: readonly (typeof campaignProposals.$inferSelect)[],
-  results: ReadonlyMap<string, TaskResult>,
+  results: ReadonlyMap<string, CampaignTaskResult>,
   outcome: GoalContract["outcomes"][number],
 ): CampaignAssessmentFact[] {
   const evidence: CampaignAssessmentFact[] = [];
@@ -1163,6 +1178,9 @@ function campaignAssessmentEvidence(
       taskId: result.taskId,
       sha: result.candidateSha,
       artifact: "exact_candidate_checkout" as const,
+      ...(result.candidateObservedAtEpochMs !== undefined
+        ? { candidateObservedAtEpochMs: result.candidateObservedAtEpochMs }
+        : {}),
     };
     const assignments = assignmentsFor(proposal);
     const add = (fact: CampaignAssessmentFact, assignment?: CriterionAssignment): void => {
@@ -1280,6 +1298,7 @@ function assessmentFactKey(item: CampaignAssessmentFact): string {
     item.fact,
     item.status,
     item.sha,
+    item.candidateObservedAtEpochMs ?? null,
     item.criterionId ?? null,
     item.criterion ?? null,
     item.mandatory ?? null,
@@ -1329,12 +1348,19 @@ function resolveAssessmentReferences(
       return criterionReferences
         .filter((item) => item.fact === "candidate")
         .some((candidate) => {
-          const latest = evidence
-            .filter(
-              (item) => item.fact === "candidate" && item.repositoryId === candidate.repositoryId,
+          const observedAt = candidate.candidateObservedAtEpochMs;
+          if (
+            observedAt === undefined ||
+            evidence.some(
+              (item) =>
+                item.fact === "candidate" &&
+                item.repositoryId === candidate.repositoryId &&
+                (item.candidateObservedAtEpochMs === undefined ||
+                  item.candidateObservedAtEpochMs > observedAt ||
+                  (item.candidateObservedAtEpochMs === observedAt &&
+                    item.taskId !== candidate.taskId)),
             )
-            .at(-1);
-          if (!latest || latest.sha !== candidate.sha || latest.taskId !== candidate.taskId)
+          )
             return false;
           const completeBundle = criterionReferences.filter(
             (item) =>

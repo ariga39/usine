@@ -240,6 +240,7 @@ const campaignAssessmentFactFields = {
   fact: Schema.Literals(["candidate", "check", "review", "delivery"]),
   status: Schema.String,
   sha: exactSha,
+  candidateObservedAtEpochMs: Schema.optional(Schema.Natural),
   criterionId: Schema.optional(Schema.String),
   criterion: Schema.optional(Schema.String),
   mandatory: Schema.optional(Schema.Boolean),

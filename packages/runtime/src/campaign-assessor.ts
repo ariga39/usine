@@ -72,6 +72,7 @@ const assessmentOutputSchema = z
           fact: z.enum(["candidate", "check", "review", "delivery"]),
           status: z.string().min(1),
           sha: z.string().regex(/^[0-9a-f]{40}$/),
+          candidateObservedAtEpochMs: z.number().int().nonnegative().optional(),
           criterionId: z.string().optional(),
           criterion: z.string().optional(),
           mandatory: z.boolean().optional(),

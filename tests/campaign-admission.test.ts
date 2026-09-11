@@ -3797,9 +3797,13 @@ describe("durable Ready frontier", () => {
     }
   }, 30_000);
 
-  test.each([true, false])(
-    "does not reuse a complete older bundle for a newer candidate (criterion retained: %s)",
-    async (retainsCriterion) => {
+  test.each([
+    { retainsCriterion: true, reversed: false },
+    { retainsCriterion: false, reversed: false },
+    { retainsCriterion: true, reversed: true },
+  ])(
+    "does not reuse a complete older bundle (criterion: $retainsCriterion, dependency-reordered: $reversed)",
+    async ({ retainsCriterion, reversed }) => {
       const criterion = {
         id: "current-check",
         criterion: "The current candidate has the required verified artifact.",
@@ -3808,6 +3812,10 @@ describe("durable Ready frontier", () => {
       } as const;
       const goal = {
         ...oneOutcomeFrontierGoal("campaign-repository"),
+        authority: {
+          ...oneOutcomeFrontierGoal("campaign-repository").authority,
+          repositories: ["campaign-repository", "release-repository"],
+        },
         outcomes: [
           {
             ...oneOutcomeFrontierGoal("campaign-repository").outcomes[0],
@@ -3841,6 +3849,7 @@ describe("durable Ready frontier", () => {
         };
       };
       const execute = async (context: CampaignExecutionContext) => {
+        if (context.result.taskId.endsWith("-release")) return acceptCampaignTask(context);
         const { authority, contract, result } = context;
         const activation = await authority.reserveActivation(
           result.taskId,
@@ -3933,18 +3942,48 @@ describe("durable Ready frontier", () => {
         ).stdout.trim();
         expect(newSha).not.toBe(oldSha);
         const published = await publishCampaign(server.url, { contractPath });
+        const newerProposal = {
+          ...frontierProposal("candidate-b", "outcome-one"),
+          acceptance: retainsCriterion ? [criterion] : ["A later change to the shipped artifact"],
+          dependsOn: reversed ? ["release"] : [],
+        };
+        if (reversed) {
+          const releaseRoot = await mkdtemp(join(tmpdir(), "usine-campaign-release-"));
+          await execa("git", ["clone", "--no-hardlinks", root, releaseRoot]);
+          fixtureValue.environment.USINE_FORGE_PROFILE_RELEASE_APP_SLUG = "test-app";
+          fixtureValue.environment.USINE_FORGE_PROFILE_RELEASE_TEST_TOKEN = "test-token";
+          fixtureValue.environment.USINE_FORGE_PROFILE_RELEASE_API_URL = "http://127.0.0.1:9";
+          fixtureValue.environment.USINE_FORGE_PROFILE_RELEASE_REPOSITORY =
+            "example/release-repository";
+          await registerRepository(server.url, {
+            id: "release-repository",
+            path: releaseRoot,
+            owner: "example",
+            name: "release-repository",
+            baseBranch: "main",
+            implementerProfile: "writer-profile",
+            reviewerProfile: "reviewer-profile",
+            forgeProfile: "release",
+            projectCheck: { command: "true", timeoutMs: 1_000 },
+            gitAuthor: { name: "Test", email: "test@example.invalid" },
+          });
+          await proposeCampaign(server.url, published.campaignId, newerProposal);
+        }
         await proposeCampaign(server.url, published.campaignId, {
           ...frontierProposal("candidate-a", "outcome-one"),
           acceptance: [criterion],
         });
-        await proposeCampaign(server.url, published.campaignId, {
-          ...frontierProposal("candidate-b", "outcome-one"),
-          acceptance: retainsCriterion ? [criterion] : ["A later change to the shipped artifact"],
-        });
+        if (reversed)
+          await proposeCampaign(server.url, published.campaignId, {
+            ...frontierProposal("release", "outcome-one"),
+            repositoryId: "release-repository",
+            acceptance: ["Release the dependent candidate"],
+          });
+        else await proposeCampaign(server.url, published.campaignId, newerProposal);
         await handoffCampaign(server.url, published.campaignId);
         const result = await waitFor(
           () => getCampaign(server.url, published.campaignId),
-          (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "gaps",
+          (campaign) => observedEvidence.length > 0 && campaign?.outcomes[0]?.assessment != null,
         );
         expect(result).toMatchObject({
           status: expect.not.stringMatching("accepted"),
