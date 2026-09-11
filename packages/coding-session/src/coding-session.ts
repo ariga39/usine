@@ -9,7 +9,6 @@ import {
   remainingUntil,
   safeEvidenceIdentity,
   type GoalContract,
-  type CountBudget,
   type TaskContract,
 } from "@usine/task-authority";
 import type { CampaignAssessmentEvidence, CampaignAssessmentFact } from "@usine/task-authority";

@@ -774,6 +774,10 @@ async function reconcile(
       .from(campaignModelRuns)
       .where(eq(campaignModelRuns.campaignId, campaignId));
     const modelRunStatus = new Map(modelRunRows.map((run) => [run.invocationId, run.status]));
+    const replacementRunRows = await database
+      .select()
+      .from(campaignReplacementRuns)
+      .where(eq(campaignReplacementRuns.campaignId, campaignId));
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
     const usefulWork = hasUsefulCampaignWork(rows, results);
@@ -829,11 +833,21 @@ async function reconcile(
       assessmentFailure &&
       !usefulWork
     ) {
-      const checkpointCorrectionAvailable =
-        !campaign.checkpointRequested ||
-        supersedableProposalIds(rows, results, assessmentFailure.outcome.id).length > 0;
+      const latestReplacementRun = replacementRunRows
+        .filter(
+          (run) =>
+            run.outcomeId === assessmentFailure.outcome.id &&
+            run.assessmentId === assessmentFailure.assessment?.assessmentId &&
+            run.evidenceHash === assessmentFailure.assessment?.evidenceHash,
+        )
+        .toSorted((left, right) => left.startedAtEpochMs - right.startedAtEpochMs)
+        .at(-1);
+      const noFeasibleReplacement =
+        latestReplacementRun?.status === "unavailable" &&
+        (modelRunStatus.get(latestReplacementRun.invocationId) === "completed" ||
+          !modelRunStatus.has(latestReplacementRun.invocationId));
       const assessmentRetryable =
-        (assessmentFailure.assessment?.verdict === "gaps" && checkpointCorrectionAvailable) ||
+        (assessmentFailure.assessment?.verdict === "gaps" && !noFeasibleReplacement) ||
         (assessmentFailure.assessment !== undefined &&
           (modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "failed" ||
             modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "cancelled"));
@@ -841,7 +855,11 @@ async function reconcile(
         campaignStatus = "blocked";
         const nextDecisionRequest: CampaignDecisionRequest = {
           requestId: `decision:${campaign.campaignId}`,
-          reason: authorityBlocked ? "branches_blocked" : "assessment_inconclusive",
+          reason: authorityBlocked
+            ? "branches_blocked"
+            : noFeasibleReplacement
+              ? "replacement_unavailable"
+              : "assessment_inconclusive",
           outcomeIds: liveOutcomes
             .filter((outcome) => {
               const item = currentAssessments.find(
@@ -1177,7 +1195,13 @@ function hasUsefulCampaignWork(
   return false;
 }
 
-type ReplacementRunStatus = "pending" | "admitted" | "invalid" | "duplicate" | "unavailable";
+type ReplacementRunStatus =
+  | "pending"
+  | "admitted"
+  | "invalid"
+  | "duplicate"
+  | "unavailable"
+  | "failed";
 
 interface ReplacementTarget {
   readonly campaign: typeof campaigns.$inferSelect;
@@ -1272,10 +1296,6 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           const revisionSources = checkpointRevision
             ? supersedableProposalIds(rows, results, outcome.id)
             : [];
-          // A checkpoint can revise one still-unowned proposal. If no such source
-          // exists, let reconciliation produce the stable decision request without
-          // spending a planner invocation.
-          if (checkpointRevision && revisionSources.length === 0) continue;
           if (
             !assessment ||
             assessment.verdict !== "gaps" ||
@@ -1462,7 +1482,6 @@ async function currentReplacementTarget(
   const allowedSupersedableProposalIds = campaign.checkpointRequested
     ? supersedableProposalIds(rows, results, outcome.id)
     : [];
-  if (campaign.checkpointRequested && allowedSupersedableProposalIds.length === 0) return null;
   return {
     ...target,
     campaign,
@@ -1835,53 +1854,12 @@ async function persistReplacementResult(
             eq(campaignReplacementRuns.invocationId, target.invocationId),
           ),
         );
-      // Completion of a replacement attempt is the narrow lifecycle event
-      // that lets an assessment-gaps Campaign receive one aggregate reducer
-      // pass for its durable result. currentTarget proves that this attempt
-      // still owns the current lineage and authority, so stale work cannot
-      // reopen a newer terminal fact.
       if (currentTarget) {
-        const retryable = recoverable || candidate !== null && candidate !== undefined;
-        let decisionRequest: CampaignDecisionRequest | null = null;
-        if (!retryable) {
-          const contract = decodePersistedGoalContract(target.campaign.contract);
-          const rows = await handle.database
-            .select()
-            .from(campaignProposals)
-            .where(eq(campaignProposals.campaignId, target.campaign.campaignId))
-            .orderBy(asc(campaignProposals.sequence));
-          const results = await campaignTaskResults(handle.database, rows);
-          const assessments = await campaignAssessmentRows(
-            handle.database,
-            target.campaign.campaignId,
-          );
-          const unresolvedOutcomeIds = contract.outcomes
-            .filter((outcome) => outcome.status === "live")
-            .filter((outcome) => {
-              const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-              const assessment = assessments.get(outcome.id);
-              return (
-                assessment?.evidenceHash !== assessmentEvidenceHash(outcome, evidence) ||
-                !assessmentReferencesResolve(outcome, evidence, assessment)
-              );
-            })
-            .map((outcome) => outcome.id);
-          decisionRequest = {
-            requestId: `decision:${target.campaign.campaignId}`,
-            reason:
-              result.status === "duplicate"
-                ? "replacement_duplicate"
-                : result.status === "invalid"
-                  ? "replacement_invalid"
-                  : "replacement_unavailable",
-            outcomeIds: unresolvedOutcomeIds.length > 0 ? unresolvedOutcomeIds : [target.outcome.id],
-          };
-        }
         await handle.database
           .update(campaigns)
           .set({
-            status: decisionRequest === null ? ("planning" as const) : ("blocked" as const),
-            decisionRequest,
+            status: "planning" as const,
+            decisionRequest: null,
             checkpointRequested: false,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
@@ -1911,7 +1889,7 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
       const completedAtEpochMs = Date.now();
       await handle.database
         .update(campaignReplacementRuns)
-        .set({ status: "unavailable", proposal: null, usage: null, completedAtEpochMs })
+        .set({ status: "failed", proposal: null, usage: null, completedAtEpochMs })
         .where(eq(campaignReplacementRuns.status, "pending"));
       const pendingOutcomes = new Map<string, Set<string>>();
       for (const { campaignId, outcomeId } of pending) {
@@ -1919,7 +1897,7 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
         outcomes.add(outcomeId);
         pendingOutcomes.set(campaignId, outcomes);
       }
-      for (const [campaignId, outcomeIds] of pendingOutcomes) {
+      for (const [campaignId] of pendingOutcomes) {
         const campaign = await handle.database.query.campaigns.findFirst({
           where: eq(campaigns.campaignId, campaignId),
         });

@@ -66,7 +66,7 @@ export class ForgeDelivery {
       throw new Error("delivery requires a passed exact-SHA project check");
     if (review.sha !== sha || review.verdict !== "approved")
       throw new Error("delivery requires exact-SHA semantic approval");
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    while (true) {
       try {
         return await this.reconcile(contract, sha, check, review);
       } catch (error) {
@@ -83,14 +83,12 @@ export class ForgeDelivery {
           status < 500
         )
           throw error;
-        if (attempt < 3)
-          await Effect.runPromise(
-            Effect.sleep(Duration.millis(remainingUntil(this.options.deadlineEpochMs, 100))),
-            { signal: this.options.signal },
-          );
+        await Effect.runPromise(
+          Effect.sleep(Duration.millis(remainingUntil(this.options.deadlineEpochMs, 100))),
+          { signal: this.options.signal },
+        );
       }
     }
-    throw new ForgeDeliveryReconciliationError();
   }
 
   private async reconcile(

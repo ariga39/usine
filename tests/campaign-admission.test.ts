@@ -40,7 +40,6 @@ import {
 } from "../apps/cli/src/server-client.js";
 import {
   lookupCampaign,
-  parseGoalContract,
   publishCampaign as publishCampaignToState,
   reconcileCampaigns,
 } from "../packages/runtime/src/campaign.js";
@@ -4038,7 +4037,7 @@ describe("durable Ready frontier", () => {
     }
   });
 
-  test("does not revise a proposal with historical Ready evidence at a checkpoint", async () => {
+  test("preserves historical Ready evidence while appending a checkpoint correction", async () => {
     let replacementCalls = 0;
     let releaseActive!: () => void;
     const activeGate = new Promise<void>((resolve) => {
@@ -4046,7 +4045,7 @@ describe("durable Ready frontier", () => {
     });
     const replacementGenerator: CampaignReplacementGenerator = async () => {
       replacementCalls += 1;
-      return { proposal: frontierProposal("must-not-run", "outcome-one"), usage: null };
+      return { proposal: frontierProposal("historical-correction", "outcome-one"), usage: null };
     };
     const { contractPath, server, stateDirectory } = await frontierFixture(
       oneOutcomeFrontierGoal("campaign-repository"),
@@ -4086,30 +4085,26 @@ describe("durable Ready frontier", () => {
       await handoffCampaign(server.url, published.campaignId);
 
       const checkpointed = await checkpointCampaign(server.url, published.campaignId);
-      expect(replacementCalls).toBe(0);
       releaseActive();
-      let exhausted = checkpointed;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        if (exhausted.status === "blocked") break;
+      let corrected = checkpointed;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (
+          corrected.proposals?.some((proposal) => proposal.proposalId === "historical-correction")
+        )
+          break;
         await new Promise((resolve) => setTimeout(resolve, 10));
         const current = await getCampaign(server.url, published.campaignId);
-        if (current) exhausted = current;
+        if (current) corrected = current;
       }
-      expect(exhausted).toMatchObject({
-        status: "blocked",
-        decisionRequest: {
-          requestId: `decision:${published.campaignId}`,
-          reason: "assessment_inconclusive",
-          outcomeIds: ["outcome-one"],
-        },
-      });
-      expect(exhausted.proposals).toEqual(
+      expect(replacementCalls).toBe(1);
+      expect(corrected.proposals).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             proposalId: initial.proposalId,
             ready: expect.objectContaining({ baseSha: readyBaseSha, repositoryRevision: 7 }),
           }),
           expect.objectContaining({ proposalId: active.proposalId }),
+          expect.objectContaining({ proposalId: "historical-correction" }),
         ]),
       );
       const unchanged = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
