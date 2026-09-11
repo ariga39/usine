@@ -4524,7 +4524,7 @@ describe("durable Ready frontier", () => {
           : delivery;
       const second =
         kind === "forged"
-          ? { ...delivery, criterionIndex: 1, sha: "0".repeat(40) }
+          ? { criterionIndex: 1, evidenceId: campaignAssessmentFactId(source) }
           : kind === "missing"
             ? calls === 1
               ? null
@@ -4534,7 +4534,15 @@ describe("durable Ready frontier", () => {
         verdict: "satisfied",
         summary: "both criteria reference the supplied delivery",
         gaps: [],
-        evidence: [{ ...source, criterionIndex: 0 }, ...(second ? [second] : [])],
+        evidence: [
+          ...(kind === "forged"
+            ? [
+                { criterionIndex: 0, evidenceId: campaignAssessmentFactId(source) },
+                { criterionIndex: 0, evidenceId: `fact-${"0".repeat(64)}` },
+              ]
+            : [{ ...source, criterionIndex: 0 }]),
+          ...(second ? [second] : []),
+        ],
         usage: null,
       };
     };
@@ -4574,7 +4582,10 @@ describe("durable Ready frontier", () => {
         expect(calls).toBeGreaterThanOrEqual(2);
         expect(replacementCalls).toBe(0);
       } else if (kind !== "accepted") {
-        const expectedEvidence = [{ criterionIndex: 0 }];
+        const expectedEvidence =
+          kind === "forged"
+            ? [{ criterionIndex: 0 }, { criterionIndex: 1 }]
+            : [{ criterionIndex: 0 }];
         expect(campaign).toMatchObject({
           status: "blocked",
           outcomes: [

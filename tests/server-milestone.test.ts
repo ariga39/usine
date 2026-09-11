@@ -39,7 +39,7 @@ if (assessor) {
   } catch {
     // The fixture below remains inconclusive until the server supplies evidence.
   }
-  const delivery = assessment?.evidence?.find((item) => item.fact === "delivery");
+  const delivery = assessment?.evidence?.find((item) => item.fact?.fact === "delivery");
   const output = JSON.stringify(
     delivery
       ? {
@@ -47,8 +47,8 @@ if (assessor) {
           summary: "Campaign delivery evidence satisfies the Outcome.",
           gaps: [],
           evidence: assessment.outcome.acceptance.map((_, criterionIndex) => ({
-            ...delivery,
             criterionIndex,
+            evidenceId: delivery.evidenceId,
           })),
         }
       : {

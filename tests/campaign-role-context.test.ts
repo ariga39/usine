@@ -301,6 +301,63 @@ test("fact references remain stable when nested observation keys are reordered",
   expect(campaignAssessmentFactId(left)).toBe(campaignAssessmentFactId(right));
 });
 
+test("compact report references reduce a deterministic representative payload", () => {
+  const factKinds = ["candidate", "check", "review", "delivery"] as const;
+  const representativeFacts: CampaignAssessmentFact[] = Array.from({ length: 132 }, (_, index) => ({
+    ...evidence[0]!,
+    fact: factKinds[index % factKinds.length]!,
+    status: "passed",
+    criterionId: `criterion-${Math.floor(index / 4)}`,
+    criterion: `Criterion ${Math.floor(index / 4)} is delivered.`,
+    mandatory: true,
+    ...(index % factKinds.length === 1 ? { checkId: `check-${Math.floor(index / 4)}` } : {}),
+    ...(index % factKinds.length === 2
+      ? { reviewSummary: "fixture approved", reviewFindings: [] }
+      : {}),
+    ...(index % factKinds.length === 3
+      ? { deliveryPrNumber: 1, deliveryAttestationId: "fixture-delivery" }
+      : {}),
+  }));
+  const legacyOutput = representativeFacts.map((fact, index) => ({
+    ...fact,
+    criterionIndex: Math.floor(index / 4),
+  }));
+  const compactOutput = representativeFacts.map((fact, index) => ({
+    criterionIndex: Math.floor(index / 4),
+    evidenceId: campaignAssessmentFactId(fact),
+  }));
+  const legacyInputBytes = Buffer.byteLength(
+    JSON.stringify({ evidence: representativeFacts }),
+    "utf8",
+  );
+  const compactInputBytes = Buffer.byteLength(
+    JSON.stringify({
+      evidence: representativeFacts.map((fact) => ({
+        evidenceId: campaignAssessmentFactId(fact),
+        fact,
+      })),
+    }),
+    "utf8",
+  );
+  const legacyOutputBytes = Buffer.byteLength(JSON.stringify(legacyOutput), "utf8");
+  const compactOutputBytes = Buffer.byteLength(JSON.stringify(compactOutput), "utf8");
+
+  expect({
+    legacyInputBytes,
+    compactInputBytes,
+    legacyOutputBytes,
+    compactOutputBytes,
+  }).toEqual({
+    legacyInputBytes: 40052,
+    compactInputBytes: 52460,
+    legacyOutputBytes: 42639,
+    compactOutputBytes: 14085,
+  });
+  expect(compactOutput).toHaveLength(132);
+  expect(compactInputBytes).toBeGreaterThan(legacyInputBytes);
+  expect(compactOutputBytes).toBeLessThan(legacyOutputBytes);
+});
+
 test("planner excludes accounting churn but retains requirements, authority and evidence lineage", async () => {
   const seam = captureSdkRequests();
   const plan = createCampaignReplacementGenerator();
