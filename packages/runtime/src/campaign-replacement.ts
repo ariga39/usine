@@ -1,5 +1,4 @@
 import type {
-  CountBudget,
   CampaignAssessment,
   CampaignAssessmentFact,
   CampaignAssessmentUsage,
@@ -46,13 +45,7 @@ export interface CampaignReplacementRequest {
   /** IDs of proposals that remain wholly unowned and may be revised at a checkpoint. */
   readonly supersedableProposalIds: readonly string[];
   readonly repositories: readonly CampaignReplacementRepository[];
-  readonly remainingBudget: {
-    readonly tasks: number;
-    readonly implementerActivations: CountBudget;
-    readonly reviewCycles: CountBudget;
-    readonly elapsedMs: number;
-  };
-  readonly deadlineEpochMs: number;
+  readonly deadlineEpochMs?: number;
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
 }
@@ -109,8 +102,8 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
     });
     const prompt = [
       "Propose at most one focused replacement Task Proposal for the persisted Outcome gaps.",
-      "Return null when no bounded proposal can address the gaps within the supplied remaining budget.",
-      "Use only the immutable Goal, Outcome, assessment, evidence, prior proposal ownership, Repository facts, and remaining budgets.",
+      "Return null when no bounded proposal can address the persisted gaps.",
+      "Use only the immutable Goal, Outcome, assessment, evidence, prior proposal ownership, and Repository facts.",
       "Do not propose a new Outcome, authority, effect, Repository, or budget.",
       "When revising a checkpoint proposal, include its exact supersedesProposalId in the returned proposal object.",
       JSON.stringify({
@@ -123,7 +116,6 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
         repositories: request.repositories.map(
           ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
         ),
-        remainingBudget: request.remainingBudget,
       }),
     ].join("\n");
     const plannerRequest: CampaignReplacementPlannerSessionRequest = {
@@ -140,7 +132,6 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           version: request.goal.version,
           objective: request.goal.objective,
           authority: request.goal.authority,
-          budget: request.goal.budget,
         },
         outcome: {
           id: request.outcome.id,
@@ -169,7 +160,6 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
         repositories: request.repositories.map(
           ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
         ),
-        remainingBudget: request.remainingBudget,
       },
       prompt,
       profile: repository.reviewerProfile,

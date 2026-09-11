@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Schema } from "effect";
-import { countBudgetSchema, positiveCountBudgetSchema } from "./contract.js";
+import { positiveCountBudgetSchema } from "./contract.js";
 
 const durableId = z
   .string()
@@ -39,14 +39,8 @@ export const goalContractSchema = z
         effects: z.array(durableId).default([]),
       })
       .strict(),
-    budget: z
-      .object({
-        maxElapsedMs: z.number().int().positive(),
-        maxTasks: z.number().int().positive(),
-        maxImplementerActivations: countBudgetSchema.default(0),
-        maxReviewCycles: countBudgetSchema.default(0),
-      })
-      .strict(),
+    /** Optional elapsed observation threshold; it never gates execution. */
+    warningThresholdMs: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((contract, context) => {
@@ -155,11 +149,22 @@ const persistedGoalContractSchema = z.preprocess((input) => {
     !legacyPlannerActivationsSchema.safeParse(legacyPlannerActivations).success
   )
     return input;
-  const { maxPlannerActivations: _legacy, ...currentBudget } = budget.data;
-  return { ...contract.data, budget: currentBudget };
+  const {
+    maxPlannerActivations: _legacyPlanner,
+    maxElapsedMs: _legacyElapsed,
+    maxTasks: _legacyTasks,
+    maxImplementerActivations: _legacyImplementer,
+    maxReviewCycles: _legacyReview,
+    ...currentBudget
+  } = budget.data;
+  const { budget: _legacyBudget, ...currentContract } = contract.data;
+  return {
+    ...currentContract,
+    ...(Object.keys(currentBudget).length === 0 ? {} : { warningThresholdMs: undefined }),
+  };
 }, goalContractSchema);
 
-/** Decode a durable Goal publication while removing the retired Planner budget field. */
+/** Decode durable Goal data while keeping retired process quotas out of active authority. */
 export function decodePersistedGoalContract(input: unknown): GoalContract {
   return persistedGoalContractSchema.parse(input);
 }
@@ -360,12 +365,7 @@ export const campaignResourceSchema = Schema.Struct({
     repositories: Schema.optional(Schema.Array(Schema.String)),
     effects: Schema.optional(Schema.Array(Schema.String)),
   }),
-  budget: Schema.Struct({
-    maxElapsedMs: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxTasks: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxImplementerActivations: Schema.optional(Schema.NullOr(Schema.Int)),
-    maxReviewCycles: Schema.optional(Schema.NullOr(Schema.Int)),
-  }),
+  warningThresholdMs: Schema.optional(Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))),
   status: campaignStatusSchema,
   planHandedOff: Schema.Boolean,
   decisionRequest: Schema.NullOr(campaignDecisionRequestSchema),
@@ -446,12 +446,9 @@ export function campaignResourceFromContract(
       repositories: contract.authority.repositories,
       effects: contract.authority.effects,
     },
-    budget: {
-      maxElapsedMs: contract.budget.maxElapsedMs,
-      maxTasks: contract.budget.maxTasks,
-      maxImplementerActivations: contract.budget.maxImplementerActivations,
-      maxReviewCycles: contract.budget.maxReviewCycles,
-    },
+    ...(contract.warningThresholdMs === undefined
+      ? {}
+      : { warningThresholdMs: contract.warningThresholdMs }),
     status,
     planHandedOff: projection?.planHandedOff ?? false,
     decisionRequest: projection?.decisionRequest ?? null,

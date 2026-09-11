@@ -418,6 +418,37 @@ type CampaignExecutionContext = Parameters<
   NonNullable<Parameters<typeof startUsineServer>[0]["execute"]>
 >[0];
 
+test("publishes a Campaign without process quota fields", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "usine-campaign-no-quotas-"));
+  const contract = {
+    schemaVersion: 1,
+    id: "campaign-no-quotas",
+    version: 1,
+    objective: "Continue the authorized outcome",
+    outcomes: [
+      {
+        id: "outcome-one",
+        title: "Complete the outcome",
+        acceptance: ["The outcome is complete."],
+        dependsOn: [],
+        parentId: null,
+      },
+    ],
+    authority: {
+      source: "user:campaign-no-quotas",
+      publish: true,
+      delivery: false,
+      merge: false,
+      repositories: [],
+      effects: [],
+    },
+  };
+
+  const published = await publishCampaignToState(stateDirectory, JSON.stringify(contract));
+  expect(Object.hasOwn(published, "budget")).toBe(false);
+  expect(Object.hasOwn(published, "warningThresholdMs")).toBe(false);
+});
+
 test("keeps the current Goal input and Campaign projection free of Planner budget", async () => {
   const current = goalContract();
   const legacy = {

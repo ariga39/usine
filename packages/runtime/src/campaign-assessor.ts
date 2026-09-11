@@ -37,7 +37,7 @@ export interface CampaignAssessmentRequest {
   readonly outcome: GoalContract["outcomes"][number];
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
-  readonly deadlineEpochMs: number;
+  readonly deadlineEpochMs?: number;
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
 }
@@ -158,7 +158,6 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
             version: request.goal.version,
             objective: request.goal.objective,
             authority: request.goal.authority,
-            budget: request.goal.budget,
           },
           outcome: {
             id: request.outcome.id,

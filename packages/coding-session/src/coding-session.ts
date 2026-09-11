@@ -122,7 +122,7 @@ interface SessionRequestBase<Output = unknown> {
   prompt: string;
   profile: string;
   sandbox: SandboxMode;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   outputSchema: z.ZodType<Output>;
   mcpServer?: CodingSessionMcpServer;
   environment?: NodeJS.ProcessEnv;
@@ -145,7 +145,7 @@ export interface CampaignAssessmentSessionContext {
     readonly version: GoalContract["version"];
     readonly objective: GoalContract["objective"];
     readonly authority: GoalContract["authority"];
-    readonly budget: GoalContract["budget"];
+    readonly warningThresholdMs?: GoalContract["warningThresholdMs"];
   };
   readonly outcome: {
     readonly id: string;
@@ -195,12 +195,6 @@ export interface CampaignReplacementPlannerSessionContext {
     readonly baseBranch: string;
     readonly headSha: string | null;
   }[];
-  readonly remainingBudget: {
-    readonly tasks: number;
-    readonly implementerActivations: CountBudget;
-    readonly reviewCycles: CountBudget;
-    readonly elapsedMs: number;
-  };
 }
 
 export interface CampaignReplacementPlannerSessionRequest<
@@ -520,27 +514,14 @@ export class CodexCodingSession {
     archive?: SessionArchiveWriter,
   ): Promise<CapturedSessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
-    let remaining: number;
-    try {
-      remaining = remainingUntil(request.deadlineEpochMs);
-    } catch {
-      return {
-        status: "failed",
-        sessionId: null,
-        output: null,
-        usage: null,
-        summary: "elapsed budget exhausted",
-        failure: "elapsed budget exhausted",
-        phase,
-        failureClass: "timeout",
-      };
-    }
-    const deadlineSignal = AbortSignal.timeout(remaining);
-    const abortSignal = request.signal
+    const deadlineSignal = request.deadlineEpochMs === undefined
+      ? undefined
+      : AbortSignal.timeout(remainingUntil(request.deadlineEpochMs));
+    const abortSignal = request.signal && deadlineSignal
       ? AbortSignal.any([request.signal, deadlineSignal])
-      : deadlineSignal;
+      : request.signal ?? deadlineSignal ?? new AbortController().signal;
     if (abortSignal.aborted) {
-      const failureClass = deadlineSignal.aborted ? "timeout" : "cancellation";
+      const failureClass = deadlineSignal?.aborted ? "timeout" : "cancellation";
       return {
         status: "cancelled",
         sessionId: null,
