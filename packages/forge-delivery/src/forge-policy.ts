@@ -91,7 +91,7 @@ export function forgeGitEnvironment(
 
 export interface ForgeDeliveryOptions {
   repository: string;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   forge: ForgePolicy;
   /** Optional host-configured external gate; omission preserves current merge behavior. */
   externalReview?: ExternalReviewPolicy;
@@ -106,7 +106,7 @@ export interface ForgeClient {
   installationId?: number;
   permissions?: Partial<Record<ForgeReadinessPermission, string>>;
   verifyAppIdentity: (request?: {
-    timeout: number;
+    timeout?: number;
     signal?: AbortSignal;
   }) => Promise<ForgeAppIdentity>;
 }
@@ -170,7 +170,7 @@ function providerStatusOf(error: unknown): number | undefined {
 export async function createGithubApiClient(
   policy: GithubApiPolicy,
   fetchImplementation?: typeof fetch,
-  requestOptions?: { timeout: number; retries: number; signal?: AbortSignal },
+  requestOptions?: { timeout?: number; retries: number; signal?: AbortSignal },
 ): Promise<ForgeClient> {
   const requestDefaults =
     requestOptions === undefined && fetchImplementation === undefined

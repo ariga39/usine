@@ -116,11 +116,13 @@ describe("Forge Delivery module", () => {
     ).rejects.toThrow("exact-SHA semantic approval");
   });
 
-  test("emits one typed reconciliation signal after bounded unresolved transport failures", async () => {
+  test("continues transient reconciliation until caller cancellation", async () => {
     const originalFetch = globalThis.fetch;
     let attempts = 0;
+    const controller = new AbortController();
     globalThis.fetch = async () => {
       attempts += 1;
+      if (attempts === 4) controller.abort();
       throw new TypeError("provider response details stay at the Forge boundary");
     };
     try {
@@ -136,14 +138,16 @@ describe("Forge Delivery module", () => {
             gitUrl: "http://127.0.0.1:1/owner/repo.git",
           },
           environment: process.env,
+          signal: controller.signal,
         }).deliver(
           simpleContract,
           sha,
           { sha, status: "passed", command: "check", exitCode: 0, stdout: "", stderr: "" },
           { sha, verdict: "approved", summary: "approved", findings: [] },
         ),
-      ).rejects.toBeInstanceOf(ForgeDeliveryReconciliationError);
-      expect(attempts).toBe(3);
+      ).rejects.toThrow();
+      expect(controller.signal.aborted).toBe(true);
+      expect(attempts).toBeGreaterThan(3);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -630,15 +634,26 @@ describe.sequential("Forge Delivery reconciliation", () => {
     const check = unsafeAttestationCheck(fixture.candidateSha);
     const review = unsafeAttestationReview(fixture.candidateSha);
 
-    await withControlledFetch(state, async (apiUrl) => {
-      const result = await forge(fixture.repository, apiUrl, fixture.remote).deliver(
-        task,
-        fixture.candidateSha,
-        check,
-        review,
-      );
+    const originalFetch = globalThis.fetch;
+    let transientFailures = 4;
+    globalThis.fetch = async (input, init) => {
+      if (transientFailures > 0) {
+        transientFailures -= 1;
+        throw new TypeError("transient transport failure before the Forge observation");
+      }
+      return controlledFetch(state)(input, init);
+    };
+    try {
+      const result = await forge(
+        fixture.repository,
+        "http://127.0.0.1:8787",
+        fixture.remote,
+      ).deliver(task, fixture.candidateSha, check, review);
       expect(result).toMatchObject({ sha: fixture.candidateSha, prNumber: 1, attestationId: "7" });
-    });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(transientFailures).toBe(0);
 
     expect(await git(fixture.remote, "rev-parse", "refs/heads/agent/forge-e2e")).toBe(
       fixture.candidateSha,

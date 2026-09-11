@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { Schema } from "effect";
-import { countBudgetSchema, positiveCountBudgetSchema } from "./contract.js";
 
 const durableId = z
   .string()
@@ -39,14 +38,8 @@ export const goalContractSchema = z
         effects: z.array(durableId).default([]),
       })
       .strict(),
-    budget: z
-      .object({
-        maxElapsedMs: z.number().int().positive(),
-        maxTasks: z.number().int().positive(),
-        maxImplementerActivations: countBudgetSchema.default(0),
-        maxReviewCycles: countBudgetSchema.default(0),
-      })
-      .strict(),
+    /** Optional elapsed observation threshold; it never gates execution. */
+    warningThresholdMs: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((contract, context) => {
@@ -141,25 +134,15 @@ export const goalContractSchema = z
 
 export type GoalContract = z.infer<typeof goalContractSchema>;
 
-const legacyPlannerActivationsSchema = z.number().int().positive();
-
 const persistedGoalContractSchema = z.preprocess((input) => {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
   const contract = z.record(z.string(), z.unknown()).safeParse(input);
   if (!contract.success) return input;
-  const budget = z.record(z.string(), z.unknown()).safeParse(contract.data.budget);
-  if (!budget.success) return input;
-  const legacyPlannerActivations = budget.data.maxPlannerActivations;
-  if (
-    legacyPlannerActivations !== undefined &&
-    !legacyPlannerActivationsSchema.safeParse(legacyPlannerActivations).success
-  )
-    return input;
-  const { maxPlannerActivations: _legacy, ...currentBudget } = budget.data;
-  return { ...contract.data, budget: currentBudget };
+  const { budget: _legacyBudget, ...currentContract } = contract.data;
+  return currentContract;
 }, goalContractSchema);
 
-/** Decode a durable Goal publication while removing the retired Planner budget field. */
+/** Decode durable Goal data while keeping retired process quotas out of active authority. */
 export function decodePersistedGoalContract(input: unknown): GoalContract {
   return persistedGoalContractSchema.parse(input);
 }
@@ -174,11 +157,6 @@ export const taskProposalSchema = z
     acceptance: z.array(z.string().min(1)).min(1),
     nonGoals: z.array(z.string().min(1)),
     effects: z.array(durableId).min(1),
-    budget: z.object({
-      maxImplementerActivations: positiveCountBudgetSchema,
-      maxReviewCycles: positiveCountBudgetSchema,
-      maxElapsedMs: z.number().int().positive(),
-    }),
     delivery: z
       .object({
         /** Optional same-Repository GitHub Task Issue used only for delivery metadata. */
@@ -191,6 +169,19 @@ export const taskProposalSchema = z
   .strict();
 
 export type TaskProposal = z.infer<typeof taskProposalSchema>;
+
+const persistedTaskProposalSchema = z.preprocess((input) => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const proposal = z.record(z.string(), z.unknown()).safeParse(input);
+  if (!proposal.success) return input;
+  const { budget: _legacyBudget, ...currentProposal } = proposal.data;
+  return currentProposal;
+}, taskProposalSchema);
+
+/** Decode durable Campaign proposals without restoring retired process quotas. */
+export function decodePersistedTaskProposal(input: unknown): TaskProposal {
+  return persistedTaskProposalSchema.parse(input);
+}
 
 export function parseTaskProposal(input: unknown): TaskProposal {
   const raw = z.record(z.string(), z.unknown()).safeParse(input);
@@ -283,8 +274,8 @@ const campaignDecisionRequestSchema = Schema.Struct({
     "replacement_invalid",
     "replacement_duplicate",
     "replacement_unavailable",
-    "replacement_budget_exhausted",
     "replacement_exhausted",
+    "replacement_budget_exhausted",
   ]),
   outcomeIds: Schema.Array(Schema.String),
 });
@@ -329,11 +320,6 @@ const campaignProposalSchema = Schema.Struct({
       acceptance: Schema.Array(Schema.String),
       nonGoals: Schema.Array(Schema.String),
       effects: Schema.Array(Schema.String),
-      budget: Schema.Struct({
-        maxImplementerActivations: Schema.NullOr(Schema.Int),
-        maxReviewCycles: Schema.NullOr(Schema.Int),
-        maxElapsedMs: Schema.Int,
-      }),
       delivery: Schema.optional(
         Schema.Struct({
           issue: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
@@ -360,12 +346,7 @@ export const campaignResourceSchema = Schema.Struct({
     repositories: Schema.optional(Schema.Array(Schema.String)),
     effects: Schema.optional(Schema.Array(Schema.String)),
   }),
-  budget: Schema.Struct({
-    maxElapsedMs: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxTasks: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
-    maxImplementerActivations: Schema.optional(Schema.NullOr(Schema.Int)),
-    maxReviewCycles: Schema.optional(Schema.NullOr(Schema.Int)),
-  }),
+  warningThresholdMs: Schema.optional(Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))),
   status: campaignStatusSchema,
   planHandedOff: Schema.Boolean,
   decisionRequest: Schema.NullOr(campaignDecisionRequestSchema),
@@ -446,12 +427,9 @@ export function campaignResourceFromContract(
       repositories: contract.authority.repositories,
       effects: contract.authority.effects,
     },
-    budget: {
-      maxElapsedMs: contract.budget.maxElapsedMs,
-      maxTasks: contract.budget.maxTasks,
-      maxImplementerActivations: contract.budget.maxImplementerActivations,
-      maxReviewCycles: contract.budget.maxReviewCycles,
-    },
+    ...(contract.warningThresholdMs === undefined
+      ? {}
+      : { warningThresholdMs: contract.warningThresholdMs }),
     status,
     planHandedOff: projection?.planHandedOff ?? false,
     decisionRequest: projection?.decisionRequest ?? null,

@@ -137,7 +137,8 @@ export class RepositoryWriterConflictError extends Error {
 export type TaskRetryConflictReason =
   | "task_not_waiting"
   | "deadline_exhausted"
-  | "activation_budget_exhausted";
+  | "activation_budget_exhausted"
+  | "campaign_abandoned";
 
 export class TaskRetryConflictError extends Error {
   readonly code = "task_retry_conflict";
@@ -791,7 +792,7 @@ export class TaskAuthority {
         taskId: input.contract.id,
         contractHash: input.contractHash,
         revision: 0,
-        deadlineEpochMs: input.deadlineEpochMs,
+        ...(input.deadlineEpochMs === undefined ? {} : { deadlineEpochMs: input.deadlineEpochMs }),
         state: "admitted",
         ...(input.contract.campaign ? { campaign: { ...input.contract.campaign } } : {}),
         mergeAuthorized: input.contract.authorization.merge === true,

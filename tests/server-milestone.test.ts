@@ -11,9 +11,10 @@ const fakeCodexExecutable = (
   hang: boolean,
   hangReviewer: boolean,
   usageBeforeHang: boolean,
+  cooperativeCleanup = false,
 ): string => String.raw`#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { access, appendFile, chmod, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const args = process.argv;
@@ -26,12 +27,31 @@ for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Usine role: fresh independent reviewer.");
 const assessor = prompt.includes("Usine role: fresh Campaign assessor.");
 if (assessor) {
-  const output = JSON.stringify({
-    verdict: "inconclusive",
-    summary: "Campaign assessor fixture is inconclusive.",
-    gaps: [],
-    evidence: [],
-  });
+  let assessment = null;
+  try {
+    assessment = JSON.parse(prompt.slice(prompt.indexOf("{")));
+  } catch {
+    // The fixture below remains inconclusive until the server supplies evidence.
+  }
+  const delivery = assessment?.evidence?.find((item) => item.fact === "delivery");
+  const output = JSON.stringify(
+    delivery
+      ? {
+          verdict: "satisfied",
+          summary: "Campaign delivery evidence satisfies the Outcome.",
+          gaps: [],
+          evidence: assessment.outcome.acceptance.map((_, criterionIndex) => ({
+            ...delivery,
+            criterionIndex,
+          })),
+        }
+      : {
+          verdict: "inconclusive",
+          summary: "Campaign assessor fixture is inconclusive.",
+          gaps: [],
+          evidence: [],
+        },
+  );
   await new Promise((resolve) =>
     process.stdout.write(
       JSON.stringify({
@@ -54,11 +74,16 @@ if (reviewer && ${String(hangReviewer)}) {
 }
 if (!reviewer) {
   await writeFile(join(stateDirectory, "codex.pid"), String(process.pid));
+  await appendFile(join(stateDirectory, "codex.invocations"), "implementer\n");
   if (${String(hang)} && activation === 1) {
     const stalePath = join(workspace, "stale-after-loss");
     const releasePath = join(stateDirectory, "release-stale-child");
     const readyPath = join(stateDirectory, "descendant.ready");
-    const childSource = 'import { access, writeFile } from "node:fs/promises";\nprocess.on("SIGTERM", () => undefined);\nconst [releasePath, stalePath, readyPath] = process.argv.slice(1);\nawait writeFile(readyPath, "ready\\n");\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }';
+    const childSource = ${JSON.stringify(
+      cooperativeCleanup
+        ? 'import { access, writeFile } from "node:fs/promises";\nprocess.on("SIGTERM", () => process.exit(0));\nconst [releasePath, stalePath, readyPath] = process.argv.slice(1);\nawait writeFile(readyPath, "ready\\n");\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }'
+        : 'import { access, writeFile } from "node:fs/promises";\nprocess.on("SIGTERM", () => undefined);\nconst [releasePath, stalePath, readyPath] = process.argv.slice(1);\nawait writeFile(readyPath, "ready\\n");\nfor (;;) { try { await access(releasePath); await writeFile(stalePath, "stale\\n"); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); }',
+    )};
     const descendant = spawn(
       process.execPath,
       ["--input-type=module", "--eval", childSource, releasePath, stalePath, readyPath],
@@ -79,7 +104,13 @@ if (!reviewer) {
       process.stdout.write(JSON.stringify({ type: "turn.started", turn_id: "turn-1" }) + "\n");
       process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 3 } }) + "\n");
     }
-    process.once("SIGTERM", () => process.exit(0));
+    if (${String(cooperativeCleanup)}) {
+      process.once("SIGTERM", async () => {
+        descendant.kill("SIGTERM");
+        await new Promise((resolve) => descendant.once("exit", () => resolve()));
+        process.exit(0);
+      });
+    } else process.once("SIGTERM", () => process.exit(0));
     await new Promise(() => {
       setInterval(() => undefined, 1_000);
     });
@@ -213,12 +244,6 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
         repositories: [taskId],
         effects: ["github"],
       },
-      budget: {
-        maxElapsedMs: 60_000,
-        maxTasks: 1,
-        maxImplementerActivations: 2,
-        maxReviewCycles: 1,
-      },
     }),
   );
   await execa("git", ["add", "goal.json"], { cwd: repository });
@@ -234,7 +259,6 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
       acceptance: ["The campaign outcome is delivered."],
       nonGoals: [],
       effects: ["github"],
-      budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 10_000 },
       merge: false,
     }),
   );
@@ -268,9 +292,13 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
   await writeFile(
     fakeCodexPath,
     fakeCodexExecutable(
-      name === "restart" || name === "graceful" || name === "campaign-restart",
+      name === "restart" ||
+        name === "graceful" ||
+        name === "campaign-restart" ||
+        name === "campaign-abandon",
       name === "reviewer-shutdown",
-      name === "campaign-restart",
+      name === "campaign-restart" || name === "campaign-abandon",
+      name === "campaign-abandon",
     ),
     {
       mode: 0o755,
@@ -306,160 +334,176 @@ async function forgeServer(
   let mergeCommitSha: string | null = null;
   let attestationBody: string | null = null;
   let captureStatus = 200;
+  let deliveryBranch = fixture.branch;
   const captureRequests: ForgeServer["captureRequests"] = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const method = request.method ?? "GET";
-    if (method === "POST" && url.pathname === "/batch/") {
-      let body = "";
-      for await (const chunk of request) body += chunk;
-      captureRequests.push(JSON.parse(body) as (typeof captureRequests)[number]);
-      response.statusCode = captureStatus;
-      response.end("ok");
-      return;
-    }
-    if (request.headers.authorization !== "token test-token") {
-      await jsonResponse(response, { message: "bad credentials" }, 401);
-      return;
-    }
-    if (method === "GET" && url.pathname.endsWith(`/git/ref/heads/${fixture.branch}`)) {
-      await jsonResponse(response, { message: "Not Found" }, 404);
-      return;
-    }
-    if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
-      await jsonResponse(
-        response,
-        pullRequests === 0
-          ? []
-          : [
-              {
-                number: 1,
-                state: merged ? "closed" : "open",
-                head: {
-                  sha:
-                    mergeCommitSha ??
-                    (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`)),
-                },
-                html_url: "http://example.invalid/pull/1",
-                merged,
-                merged_at: merged ? "2026-08-22T00:00:00Z" : null,
-                merge_commit_sha: mergeCommitSha,
-              },
-            ],
-      );
-      return;
-    }
-    if (method === "POST" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
-      pullRequests += 1;
-      const headSha = await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`);
-      mergeCommitSha = headSha;
-      await jsonResponse(
-        response,
-        {
-          number: 1,
-          state: "open",
-          head: { sha: headSha },
-          html_url: "http://example.invalid/pull/1",
-        },
-        201,
-      );
-      return;
-    }
-    if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls/1`) {
-      const headSha =
-        mergeCommitSha ?? (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`));
-      await jsonResponse(response, {
-        number: 1,
-        state: merged ? "closed" : "open",
-        head: { sha: headSha },
-        html_url: "http://example.invalid/pull/1",
-        merged,
-        merged_at: merged ? "2026-08-22T00:00:00Z" : null,
-        merge_commit_sha: merged ? mergeCommitSha : null,
-        mergeable: null,
-        mergeable_state: null,
-      });
-      return;
-    }
-    if (pipelineConfigured && method === "GET" && url.pathname.endsWith("/check-runs")) {
-      const observation = pipelineObservations;
-      pipelineObservations += 1;
-      await jsonResponse(response, {
-        total_count: 1,
-        check_runs: [
-          {
-            id: observation + 1,
-            name: "build",
-            status: observation === 0 ? "queued" : "completed",
-            conclusion: observation === 0 ? null : "success",
-            app: { slug: "usine-app" },
-          },
-        ],
-      });
-      return;
-    }
-    if (
-      mergeAuthorized &&
-      method === "PUT" &&
-      url.pathname === `/repos/example/${fixture.taskId}/pulls/1/merge`
-    ) {
-      mergeCalls += 1;
-      const headSha = mergeCommitSha;
-      if (!headSha) throw new Error("merge endpoint has no candidate head");
-      merged = true;
-      await execa("git", ["update-ref", "refs/heads/main", headSha], { cwd: fixture.remote });
-      await jsonResponse(response, {
-        merged: true,
-        sha: headSha,
-        message: "Pull Request successfully merged",
-      });
-      return;
-    }
-    if (url.pathname === `/repos/example/${fixture.taskId}/issues/1/comments`) {
-      if (method === "GET") {
+    try {
+      if (method === "POST" && url.pathname === "/batch/") {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        captureRequests.push(JSON.parse(body) as (typeof captureRequests)[number]);
+        response.statusCode = captureStatus;
+        response.end("ok");
+        return;
+      }
+      if (request.headers.authorization !== "token test-token") {
+        await jsonResponse(response, { message: "bad credentials" }, 401);
+        return;
+      }
+      const decodedPath = decodeURIComponent(url.pathname);
+      const refPrefix = `/repos/example/${fixture.taskId}/git/ref/heads/`;
+      if (method === "GET" && decodedPath.startsWith(refPrefix)) {
+        deliveryBranch = decodedPath.slice(refPrefix.length);
+        await jsonResponse(response, { message: "Not Found" }, 404);
+        return;
+      }
+      if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
+        const requestedHead = url.searchParams.get("head");
+        if (requestedHead) deliveryBranch = requestedHead.split(":").at(-1) ?? deliveryBranch;
         await jsonResponse(
           response,
-          attestationBody
-            ? [
+          pullRequests === 0
+            ? []
+            : [
                 {
-                  id: 7,
-                  body: attestationBody,
-                  performed_via_github_app: { slug: "usine-app" },
-                  user: { type: "Bot" },
+                  number: 1,
+                  state: merged ? "closed" : "open",
+                  head: {
+                    sha:
+                      mergeCommitSha ??
+                      (await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`)),
+                  },
+                  html_url: "http://example.invalid/pull/1",
+                  merged,
+                  merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+                  merge_commit_sha: mergeCommitSha,
                 },
-              ]
-            : [],
+              ],
         );
         return;
       }
-      if (method === "POST") {
+      if (method === "POST" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
         let body = "";
         for await (const chunk of request) body += chunk;
-        const parsed: unknown = JSON.parse(body);
-        if (
-          typeof parsed !== "object" ||
-          parsed === null ||
-          !("body" in parsed) ||
-          typeof parsed.body !== "string"
-        ) {
-          throw new Error("forge comment body is invalid");
-        }
-        attestations += 1;
-        attestationBody = parsed.body;
+        const pullRequest = JSON.parse(body) as { head?: string };
+        if (pullRequest.head) deliveryBranch = pullRequest.head;
+        pullRequests += 1;
+        const headSha = await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`);
+        mergeCommitSha = headSha;
         await jsonResponse(
           response,
           {
-            id: 7,
-            body: parsed.body,
-            performed_via_github_app: { slug: "usine-app" },
-            user: { type: "Bot" },
+            number: 1,
+            state: "open",
+            head: { sha: headSha },
+            html_url: "http://example.invalid/pull/1",
           },
           201,
         );
         return;
       }
+      if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls/1`) {
+        const headSha =
+          mergeCommitSha ??
+          (await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`));
+        await jsonResponse(response, {
+          number: 1,
+          state: merged ? "closed" : "open",
+          head: { sha: headSha },
+          html_url: "http://example.invalid/pull/1",
+          merged,
+          merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+          merge_commit_sha: merged ? mergeCommitSha : null,
+          mergeable: null,
+          mergeable_state: null,
+        });
+        return;
+      }
+      if (pipelineConfigured && method === "GET" && url.pathname.endsWith("/check-runs")) {
+        const observation = pipelineObservations;
+        pipelineObservations += 1;
+        await jsonResponse(response, {
+          total_count: 1,
+          check_runs: [
+            {
+              id: observation + 1,
+              name: "build",
+              status: observation === 0 ? "queued" : "completed",
+              conclusion: observation === 0 ? null : "success",
+              app: { slug: "usine-app" },
+            },
+          ],
+        });
+        return;
+      }
+      if (
+        mergeAuthorized &&
+        method === "PUT" &&
+        url.pathname === `/repos/example/${fixture.taskId}/pulls/1/merge`
+      ) {
+        mergeCalls += 1;
+        const headSha = mergeCommitSha;
+        if (!headSha) throw new Error("merge endpoint has no candidate head");
+        merged = true;
+        await execa("git", ["update-ref", "refs/heads/main", headSha], { cwd: fixture.remote });
+        await jsonResponse(response, {
+          merged: true,
+          sha: headSha,
+          message: "Pull Request successfully merged",
+        });
+        return;
+      }
+      if (url.pathname === `/repos/example/${fixture.taskId}/issues/1/comments`) {
+        if (method === "GET") {
+          await jsonResponse(
+            response,
+            attestationBody
+              ? [
+                  {
+                    id: 7,
+                    body: attestationBody,
+                    performed_via_github_app: { slug: "usine-app" },
+                    user: { type: "Bot" },
+                  },
+                ]
+              : [],
+          );
+          return;
+        }
+        if (method === "POST") {
+          let body = "";
+          for await (const chunk of request) body += chunk;
+          const parsed: unknown = JSON.parse(body);
+          if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            !("body" in parsed) ||
+            typeof parsed.body !== "string"
+          ) {
+            throw new Error("forge comment body is invalid");
+          }
+          attestations += 1;
+          attestationBody = parsed.body;
+          await jsonResponse(
+            response,
+            {
+              id: 7,
+              body: parsed.body,
+              performed_via_github_app: { slug: "usine-app" },
+              user: { type: "Bot" },
+            },
+            201,
+          );
+          return;
+        }
+      }
+      await jsonResponse(response, { message: `unhandled ${method} ${url.pathname}` }, 404);
+    } catch {
+      if (!response.writableEnded)
+        await jsonResponse(response, { message: "fixture handler failed" }, 500);
     }
-    await jsonResponse(response, { message: `unhandled ${method} ${url.pathname}` }, 404);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -496,7 +540,7 @@ async function forgeServer(
 function environment(
   fixture: Fixture,
   forge: ForgeServer,
-  _mode: "complete" | "kill",
+  mode: "complete" | "kill" | "campaign-abandon",
 ): NodeJS.ProcessEnv {
   return {
     USINE_STATE_DIR: fixture.stateDirectory,
@@ -509,6 +553,11 @@ function environment(
       ? { USINE_FORGE_PROFILE_DEFAULT_PIPELINE_CHECK_RUNS: JSON.stringify(["build"]) }
       : {}),
     USINE_GOAL_PUBLICATION_SOURCE: `https://github.com/example/${fixture.taskId}/issues/154`,
+    ...(mode === "campaign-abandon"
+      ? {
+          USINE_CAMPAIGN_ABANDONMENT_SOURCE: `https://github.com/example/${fixture.taskId}/issues/154`,
+        }
+      : {}),
     CODEX_HOME: join(fixture.root, "codex-home"),
     USINE_CODEX_PATH_OVERRIDE: fixture.fakeCodexPath,
     PATH: process.env.PATH ?? "",
@@ -521,7 +570,7 @@ async function startServer(
   cliPath: string,
   fixture: Fixture,
   forge: ForgeServer,
-  mode: "complete" | "kill",
+  mode: "complete" | "kill" | "campaign-abandon",
 ): Promise<UsineProcess> {
   const child = execa("node", ["--no-warnings", cliPath, "server"], {
     env: environment(fixture, forge, mode),
@@ -583,7 +632,7 @@ async function runCli(
   serverUrl: string,
   command: "register" | "submit" | "status" | "follow",
   argument: string,
-  mode: "complete" | "kill" = "complete",
+  mode: "complete" | "kill" | "campaign-abandon" = "complete",
 ) {
   return runCliArgs(cliPath, fixture, forge, serverUrl, [command, argument], mode);
 }
@@ -594,7 +643,7 @@ async function runCliArgs(
   forge: ForgeServer,
   serverUrl: string,
   args: string[],
-  mode: "complete" | "kill" = "complete",
+  mode: "complete" | "kill" | "campaign-abandon" = "complete",
 ) {
   return execa("node", ["--no-warnings", cliPath, ...args], {
     cwd: fixture.repository,
@@ -1313,7 +1362,7 @@ describe("server-owned delivery milestone", () => {
     }
   }, 60_000);
 
-  test("recovers an interrupted Campaign invocation without relaunch after deadline expiry", async () => {
+  test("recovers an interrupted quota-free Campaign invocation after SIGKILL", async () => {
     const fixtureValue = await fixture("campaign-restart");
     const forge = await forgeServer(fixtureValue);
     const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
@@ -1397,9 +1446,8 @@ describe("server-owned delivery milestone", () => {
         "--json",
       ]);
       expect(startedResult.exitCode, startedResult.stderr).toBe(0);
-      const started = JSON.parse(startedResult.stdout) as { deadlineEpochMs: number };
-      const originalDeadline = started.deadlineEpochMs;
-      expect(originalDeadline).toBeGreaterThan(Date.now());
+      const started = JSON.parse(startedResult.stdout) as { deadlineEpochMs?: number };
+      expect(started.deadlineEpochMs).toBeUndefined();
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -1408,19 +1456,36 @@ describe("server-owned delivery milestone", () => {
 
       await stopServer(first, "SIGKILL");
       firstStopped = true;
-      while (Date.now() < originalDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
 
       const second = await startServer(cliPath, fixtureValue, forge, "complete");
       try {
-        const expired = await waitForStatus(
+        const recoveredTask = await waitForStatus(
           cliPath,
           fixtureValue,
           forge,
           second.url,
-          (result) => result.taskId === campaignTaskId && result.state === "blocked",
+          (result) => result.taskId === campaignTaskId && result.state === "reviewed_pr",
           campaignTaskId,
         );
-        expect(expired).toMatchObject({ state: "blocked", deadlineEpochMs: originalDeadline });
+        expect(recoveredTask).toMatchObject({ state: "reviewed_pr" });
+        let recoveredCampaign: { status?: string } | null = null;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const campaignResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+            "campaign",
+            "get",
+            published.campaignId,
+            "--json",
+          ]);
+          if (campaignResult.exitCode === 0) {
+            const campaign = JSON.parse(campaignResult.stdout) as { status?: string };
+            if (campaign.status === "accepted") {
+              recoveredCampaign = campaign;
+              break;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(recoveredCampaign).toMatchObject({ status: "accepted" });
         const recoveredHistoryResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
           "task",
           "history",
@@ -1431,7 +1496,7 @@ describe("server-owned delivery milestone", () => {
         const recoveredHistory = JSON.parse(recoveredHistoryResult.stdout) as PublicHistory;
         expect(
           recoveredHistory.events.filter((event) => event.data.type === "coding_session_started"),
-        ).toHaveLength(1);
+        ).toHaveLength(3);
         expect(
           recoveredHistory.events.filter(
             (event) => event.data.type === "coding_session_interrupted",
@@ -1488,7 +1553,7 @@ describe("server-owned delivery milestone", () => {
           }>;
         };
         expect(taskUsage).toMatchObject({ coverage: "partial" });
-        expect(taskUsage.invocations).toHaveLength(1);
+        expect(taskUsage.invocations).toHaveLength(3);
         expect(taskUsage.invocations[0]).toMatchObject({
           invocationId: recoveredRun.invocationId,
           outcome: recoveredRun.outcome,
@@ -1545,6 +1610,168 @@ describe("server-owned delivery milestone", () => {
       }
     } finally {
       if (!firstStopped) await stopServer(first, "SIGKILL").catch(() => undefined);
+      if (descendantPid) reapFixtureProcess(descendantPid);
+      if (codexPid) reapFixtureProcess(codexPid);
+      await forge.close();
+    }
+  }, 60_000);
+
+  test("abandons a live Campaign through the CLI before delivery and stays abandoned after restart", async () => {
+    const fixtureValue = await fixture("campaign-abandon");
+    const forge = await forgeServer(fixtureValue);
+    const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
+    const first = await startServer(cliPath, fixtureValue, forge, "campaign-abandon");
+    let firstStopped = false;
+    let codexPid: number | null = null;
+    let descendantPid: number | null = null;
+    const campaignTaskId = `campaign-${fixtureValue.taskId}-goal-v1-campaign-interruption`;
+    try {
+      for (const [command, argument] of [["register", fixtureValue.registrationPath]] as const) {
+        const result = await runCli(cliPath, fixtureValue, forge, first.url, command, argument);
+        expect(result.exitCode, result.stderr).toBe(0);
+      }
+      const publishedResult = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "publish",
+        fixtureValue.campaignContractPath,
+        "--json",
+      ]);
+      expect(publishedResult.exitCode, publishedResult.stderr).toBe(0);
+      const published = JSON.parse(publishedResult.stdout) as { campaignId: string };
+      const proposedResult = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "propose",
+        published.campaignId,
+        fixtureValue.campaignProposalPath,
+        "--json",
+      ]);
+      expect(proposedResult.exitCode, proposedResult.stderr).toBe(0);
+      const handedOff = await runCliArgs(cliPath, fixtureValue, forge, first.url, [
+        "campaign",
+        "handoff",
+        published.campaignId,
+        "--json",
+      ]);
+      expect(handedOff.exitCode, handedOff.stderr).toBe(0);
+
+      await waitForStatus(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        (result) => result.activeActivation === 1,
+        campaignTaskId,
+      );
+      await waitForMarker(join(fixtureValue.stateDirectory, "activation.marker"));
+      await waitForCodingThread(fixtureValue.stateDirectory, campaignTaskId);
+      codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
+      descendantPid = Number(
+        await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
+      );
+      expect(processAlive(descendantPid)).toBe(true);
+
+      expect(processAlive(codexPid)).toBe(true);
+      await expect
+        .poll(async () => {
+          const events = await lookupTaskEvents(fixtureValue.stateDirectory, campaignTaskId);
+          return events?.events.some((event) => event.data.type === "coding_usage_observed");
+        })
+        .toBe(true);
+
+      const abandonedResult = await runCliArgs(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        ["campaign", "abandon", published.campaignId, "--json"],
+        "campaign-abandon",
+      );
+      expect(abandonedResult.exitCode, abandonedResult.stderr).toBe(0);
+      expect(JSON.parse(abandonedResult.stdout)).toMatchObject({ status: "abandoned" });
+      // The public abandon response is the cleanup barrier for the cooperative fixture.
+      expect(processAlive(codexPid)).toBe(false);
+      expect(processAlive(descendantPid)).toBe(false);
+      expect(forge.pullRequests).toBe(0);
+      expect(forge.attestations).toBe(0);
+      expect(forge.mergeCalls).toBe(0);
+      expect(await readFile(join(fixtureValue.stateDirectory, "codex.invocations"), "utf8")).toBe(
+        "implementer\n",
+      );
+      const usageResult = await runCliArgs(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        ["usage", "--task-id", campaignTaskId, "--json"],
+        "campaign-abandon",
+      );
+      expect(usageResult.exitCode, usageResult.stderr).toBe(0);
+      const usage = JSON.parse(usageResult.stdout) as {
+        invocations: Array<{
+          role: string;
+          activation: number | null;
+          outcome: string;
+          usage: { inputTokens: number | null; outputTokens: number | null; coverage: string };
+        }>;
+      };
+      expect(usage.invocations).toHaveLength(1);
+      expect(usage.invocations).toMatchObject([
+        {
+          role: "implementer",
+          activation: 1,
+          outcome: "cancelled",
+          usage: { inputTokens: 12, outputTokens: 3, coverage: "partial" },
+        },
+      ]);
+
+      const taskAfterAbandon = await runCli(
+        cliPath,
+        fixtureValue,
+        forge,
+        first.url,
+        "status",
+        campaignTaskId,
+        "campaign-abandon",
+      );
+      expect(taskAfterAbandon.exitCode, taskAfterAbandon.stderr).toBe(0);
+      expect(JSON.parse(taskAfterAbandon.stdout)).toMatchObject({ state: "blocked" });
+      await stopServer(first);
+      firstStopped = true;
+
+      const restarted = await startServer(cliPath, fixtureValue, forge, "campaign-abandon");
+      try {
+        const campaignAfterRestart = await runCliArgs(
+          cliPath,
+          fixtureValue,
+          forge,
+          restarted.url,
+          ["campaign", "get", published.campaignId, "--json"],
+          "campaign-abandon",
+        );
+        expect(campaignAfterRestart.exitCode, campaignAfterRestart.stderr).toBe(0);
+        expect(JSON.parse(campaignAfterRestart.stdout)).toMatchObject({ status: "abandoned" });
+        const taskAfterRestart = await runCli(
+          cliPath,
+          fixtureValue,
+          forge,
+          restarted.url,
+          "status",
+          campaignTaskId,
+          "campaign-abandon",
+        );
+        expect(taskAfterRestart.exitCode, taskAfterRestart.stderr).toBe(0);
+        expect(await readFile(join(fixtureValue.stateDirectory, "codex.invocations"), "utf8")).toBe(
+          "implementer\n",
+        );
+        expect(JSON.parse(taskAfterRestart.stdout)).toEqual(JSON.parse(taskAfterAbandon.stdout));
+        expect(forge.pullRequests).toBe(0);
+        expect(forge.attestations).toBe(0);
+        expect(forge.mergeCalls).toBe(0);
+      } finally {
+        await stopServer(restarted);
+      }
+    } finally {
+      if (!firstStopped) await stopServer(first).catch(() => undefined);
       if (descendantPid) reapFixtureProcess(descendantPid);
       if (codexPid) reapFixtureProcess(codexPid);
       await forge.close();

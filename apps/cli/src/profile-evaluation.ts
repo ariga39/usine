@@ -293,6 +293,10 @@ export async function readProfileEvaluationPlan(
     deliveryBranches.add(candidate.delivery.branch);
     if (baselineIssue !== undefined) deliveryIssues.add(baselineIssue);
     if (candidateIssue !== undefined) deliveryIssues.add(candidateIssue);
+    if (baseline.budget.maxElapsedMs === null || candidate.budget.maxElapsedMs === null)
+      throw new ProfileEvaluationValidationError(
+        `${pair.id}:${pair.repetition}: standalone evaluation Tasks require a finite elapsed budget`,
+      );
     contracts.push(baseline, candidate);
   }
 
@@ -491,19 +495,25 @@ export async function executeProfileEvaluation(
               if (!isTerminalState(observed.state))
                 inFlightTask = {
                   taskId: observed.taskId,
-                  deadlineEpochMs: observed.deadlineEpochMs,
+                  deadlineEpochMs: finiteTaskDeadline(observed),
                 };
             }
             throw error;
           }
         }
         if (!isTerminalState(task.state))
-          inFlightTask = { taskId: task.taskId, deadlineEpochMs: task.deadlineEpochMs };
-        if (!isTerminalState(task.state) && !isWaitingState(task.state))
+          inFlightTask = { taskId: task.taskId, deadlineEpochMs: finiteTaskDeadline(task) };
+        if (!isTerminalState(task.state) && !isWaitingState(task.state)) {
+          const maxElapsedMs = contract.budget.maxElapsedMs;
+          if (maxElapsedMs === null)
+            throw new ProfileEvaluationValidationError(
+              "standalone evaluation Tasks require a finite elapsed budget",
+            );
           task = await services.followTask(serverUrl, task.taskId, {
-            timeoutMs: contract.budget.maxElapsedMs,
+            timeoutMs: maxElapsedMs,
             signal,
           });
+        }
         if (!isTerminalState(task.state) && !isWaitingState(task.state))
           throw new Error(`Task ${task.taskId} did not reach a durable stopping state`);
         if (task.state === "waiting")
@@ -584,7 +594,7 @@ async function waitForTerminalTask(
       return await rereadAtCleanupDeadline(task, serverUrl, services, undefined);
     try {
       current = await services.followTask(serverUrl, task.taskId, {
-        timeoutMs: Math.min(remainingMs, Math.max(0, current.deadlineEpochMs - Date.now())),
+        timeoutMs: Math.min(remainingMs, Math.max(0, finiteTaskDeadline(current) - Date.now())),
       });
     } catch (error) {
       let reread: import("@usine/task-authority").TaskResource;
@@ -617,6 +627,14 @@ async function waitForTerminalTask(
       return await rereadAtCleanupDeadline(task, serverUrl, services, undefined);
     await waitForCleanupInterval(task.deadlineEpochMs);
   }
+}
+
+function finiteTaskDeadline(task: { deadlineEpochMs?: number }): number {
+  if (task.deadlineEpochMs === undefined)
+    throw new ProfileEvaluationValidationError(
+      "standalone evaluation Task did not receive a finite elapsed deadline",
+    );
+  return task.deadlineEpochMs;
 }
 
 async function rereadAtCleanupDeadline(

@@ -52,7 +52,7 @@ export interface DeliveryRunInput {
   contract: ResolvedTaskContract;
   contractHash: string;
   repositoryIdentity: string;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   implementer: RolePolicy;
   reviewer?: RolePolicy;
   signal?: AbortSignal;

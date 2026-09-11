@@ -472,7 +472,10 @@ export async function followTask(
     }
     if (isTerminalState(result.state) || isWaitingState(result.state)) return result;
     const now = Date.now();
-    const durableRemainingMs = result.deadlineEpochMs - now;
+    const durableRemainingMs =
+      result.deadlineEpochMs === undefined
+        ? Number.POSITIVE_INFINITY
+        : result.deadlineEpochMs - now;
     const timeoutRemainingMs =
       options.timeoutMs === undefined
         ? Number.POSITIVE_INFINITY

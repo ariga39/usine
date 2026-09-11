@@ -12,14 +12,12 @@ import {
   campaignReplacementRuns,
   campaignAssessmentUsageSchema,
   campaignIdFor,
-  countBudgetAllows,
-  countBudgetExhausted,
-  countBudgetRemaining,
   campaignProposals,
   campaignTouches,
   campaigns,
   campaignResourceFromContract,
   decodeCampaignDecisionRequest,
+  decodePersistedTaskProposal,
   decodePersistedGoalContract,
   decodeCampaignProposalStatus,
   decodeCampaignStatus,
@@ -32,7 +30,6 @@ import {
   TaskCapacityError,
   RepositoryWriterConflictError,
   repositories,
-  taskProposalSchema,
   isTaskStateQuarantinedError,
   type CampaignProposalResource,
   type CampaignDecisionRequest,
@@ -48,6 +45,7 @@ import {
   type TaskResult,
   type TaskContract,
   type TaskProposal,
+  taskProposalSchema,
   isTerminalState,
 } from "@usine/task-authority";
 import type {
@@ -304,7 +302,7 @@ function proposalResource(
   replacementRun: typeof campaignReplacementRuns.$inferSelect | undefined,
   modelRun: typeof campaignModelRuns.$inferSelect | undefined,
 ): CampaignProposalResource {
-  const proposal = taskProposalSchema.parse(row.proposal);
+  const proposal = decodePersistedTaskProposal(row.proposal);
   const replacement =
     row.replacementAssessmentId && row.replacementEvidenceHash
       ? {
@@ -341,7 +339,6 @@ function proposalResource(
             acceptance: proposal.acceptance,
             nonGoals: proposal.nonGoals,
             effects: proposal.effects,
-            budget: proposal.budget,
             ...(proposal.delivery ? { delivery: proposal.delivery } : {}),
             merge: proposal.merge,
           },
@@ -354,7 +351,10 @@ export interface CampaignTaskAdmission {
   readonly contract: TaskContract;
 }
 
-export type CampaignModelWork = (signal: AbortSignal) => Promise<boolean>;
+export interface CampaignModelWork {
+  readonly campaignIds: ReadonlySet<string>;
+  readonly run: (signal: AbortSignal) => Promise<boolean>;
+}
 
 export interface CampaignReconciliationOptions {
   /** Run Campaign-only model work in the server-owned lifecycle. */
@@ -393,7 +393,11 @@ function campaignTaskContract(
     instructions: proposal.instructions,
     acceptance: [...proposal.acceptance],
     nonGoals: [...proposal.nonGoals],
-    budget: { ...proposal.budget },
+    budget: {
+      maxImplementerActivations: null,
+      maxReviewCycles: null,
+      maxElapsedMs: null,
+    },
     authorization: {
       source: contract.authority.source,
       delivery: true,
@@ -453,6 +457,26 @@ function canonicalGitHubIssueSource(source: string): string | null {
   return source;
 }
 
+function proposalAuthorityBlockerFor(
+  proposal: TaskProposal,
+  contract: GoalContract,
+  publicationAuthorized: boolean,
+  superseded: boolean,
+): string | null {
+  const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
+  if (!publicationAuthorized) return "goal publication is not host-authorized";
+  if (superseded) return "goal publication is superseded";
+  if (!outcome || outcome.status === "superseded") return "proposal outcome is not live";
+  if (!contract.authority.repositories.includes(proposal.repositoryId))
+    return "proposal repository is outside the Goal authority envelope";
+  if (!contract.authority.delivery) return "Goal delivery authority is not granted";
+  if (proposal.effects.some((effect) => !contract.authority.effects.includes(effect)))
+    return "proposal effect is outside the Goal authority envelope";
+  if (proposal.merge && !contract.authority.merge)
+    return "proposal merge authority is outside the Goal authority envelope";
+  return null;
+}
+
 function blockerFor(
   row: typeof campaignProposals.$inferSelect,
   proposal: TaskProposal,
@@ -462,27 +486,13 @@ function blockerFor(
   repository: typeof repositories.$inferSelect | undefined,
   observedRepositoryIds: ReadonlySet<string>,
 ): string | null {
-  const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
-  if (!publicationAuthorized) return "goal publication is not host-authorized";
-  if (superseded) return "goal publication is superseded";
-  if (!outcome || outcome.status === "superseded") return "proposal outcome is not live";
-  if (row.sequence > contract.budget.maxTasks) return "campaign task budget is exhausted";
-  if (!contract.authority.repositories.includes(proposal.repositoryId))
-    return "proposal repository is outside the Goal authority envelope";
-  if (!contract.authority.delivery) return "Goal delivery authority is not granted";
-  if (proposal.effects.some((effect) => !contract.authority.effects.includes(effect)))
-    return "proposal effect is outside the Goal authority envelope";
-  if (proposal.merge && !contract.authority.merge)
-    return "proposal merge authority is outside the Goal authority envelope";
-  if (
-    !countBudgetAllows(
-      contract.budget.maxImplementerActivations,
-      proposal.budget.maxImplementerActivations,
-    ) ||
-    !countBudgetAllows(contract.budget.maxReviewCycles, proposal.budget.maxReviewCycles) ||
-    proposal.budget.maxElapsedMs > contract.budget.maxElapsedMs
-  )
-    return "proposal budget is outside the Goal budget envelope";
+  const authorityBlocker = proposalAuthorityBlockerFor(
+    proposal,
+    contract,
+    publicationAuthorized,
+    superseded,
+  );
+  if (authorityBlocker) return authorityBlocker;
   const hasDurableReadyBase = row.readyBaseSha !== null && row.readyRepositoryRevision !== null;
   if (!repository && !hasDurableReadyBase) return "proposal repository is not registered";
   if (
@@ -494,6 +504,55 @@ function blockerFor(
   )
     return "registered repository has no exact head";
   return null;
+}
+
+async function recordWarningTouch(
+  database: CampaignDatabase,
+  campaign: typeof campaigns.$inferSelect,
+): Promise<void> {
+  if (campaign.superseded || campaign.status !== "planning") return;
+  let contract: GoalContract;
+  try {
+    contract = decodePersistedGoalContract(campaign.contract);
+  } catch {
+    return;
+  }
+  if (
+    contract.warningThresholdMs === undefined ||
+    Date.now() - campaign.createdAt.getTime() < contract.warningThresholdMs
+  )
+    return;
+  await database
+    .insert(campaignTouches)
+    .values({
+      campaignId: campaign.campaignId,
+      touchId: `warning:${campaign.campaignId}`,
+      goalVersion: campaign.goalVersion,
+      type: "warning",
+      occurredAtEpochMs: Date.now(),
+    })
+    .onConflictDoNothing();
+}
+
+export async function observeCampaignWarning(
+  stateDirectory: string,
+  campaignId: string,
+): Promise<void> {
+  let handle: ReturnType<typeof openSqliteDatabase>;
+  try {
+    handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  try {
+    const campaign = await handle.database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (campaign) await recordWarningTouch(handle.database, campaign);
+  } finally {
+    handle.close();
+  }
 }
 
 interface AcceptedCampaignDelivery {
@@ -557,7 +616,7 @@ async function dependencyResolution(
     for (const row of rows) {
       if (
         row.status !== "superseded" &&
-        taskProposalSchema.parse(row.proposal).outcomeId === dependency
+        decodePersistedTaskProposal(row.proposal).outcomeId === dependency
       ) {
         dependencies.set(row.proposalId, row);
         found = true;
@@ -569,7 +628,7 @@ async function dependencyResolution(
   let mergedHeadSha: string | null = null;
   let latestMergedSequence = -1;
   for (const row of dependencies.values()) {
-    const predecessor = taskProposalSchema.parse(row.proposal);
+    const predecessor = decodePersistedTaskProposal(row.proposal);
     const task = row.taskId ? await campaignTaskLookup(database, row.taskId, taskFacts) : null;
     const accepted = acceptedCampaignDelivery(task, campaign, contract, predecessor);
     if (!accepted)
@@ -698,6 +757,7 @@ async function reconcile(
   let campaignStatus = campaignState.status;
   let decisionRequest = campaignState.decisionRequest;
   const contract = decodePersistedGoalContract(campaign.contract);
+  await recordWarningTouch(database, campaign);
   const newerCampaign = await database
     .select({ goalVersion: max(campaigns.goalVersion) })
     .from(campaigns)
@@ -718,7 +778,7 @@ async function reconcile(
   let changed = false;
   for (const row of rows) {
     if (row.status === "superseded") continue;
-    const proposal = taskProposalSchema.parse(row.proposal);
+    const proposal = decodePersistedTaskProposal(row.proposal);
     const blocker = blockerFor(
       row,
       proposal,
@@ -778,14 +838,19 @@ async function reconcile(
   if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
     const results = await campaignTaskResults(database, rows, taskFacts);
     const assessments = await campaignAssessmentRows(database, campaignId);
+    const modelRunRows = await database
+      .select({ invocationId: campaignModelRuns.invocationId, status: campaignModelRuns.status })
+      .from(campaignModelRuns)
+      .where(eq(campaignModelRuns.campaignId, campaignId));
+    const modelRunStatus = new Map(modelRunRows.map((run) => [run.invocationId, run.status]));
+    const replacementRunRows = await database
+      .select()
+      .from(campaignReplacementRuns)
+      .where(eq(campaignReplacementRuns.campaignId, campaignId));
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
     const usefulWork = hasUsefulCampaignWork(rows, results);
     const authorityBlocked = rows.some((row) => row.status === "blocked" && row.blocker !== null);
-    const replacementRuns = await database
-      .select()
-      .from(campaignReplacementRuns)
-      .where(eq(campaignReplacementRuns.campaignId, campaignId));
     if (!campaign.publicationAuthorized) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -795,13 +860,14 @@ async function reconcile(
       };
     }
     const currentAssessments = liveOutcomes.map((outcome) => {
+      const currentOutcome = currentCampaignOutcome(outcome, rows);
       const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
       const assessment = assessments.get(outcome.id);
       return {
-        outcome,
+        outcome: currentOutcome,
         evidence,
         assessment,
-        current: assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence),
+        current: assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence),
       };
     });
     const allSatisfied =
@@ -821,34 +887,6 @@ async function reconcile(
           !outcomeEvidence.has(outcome.id) ||
           !assessmentReferencesResolve(outcome, evidence, assessment)),
     );
-    const unattemptedGaps = currentAssessments.find(
-      ({ assessment, current, outcome }) =>
-        current &&
-        assessment?.verdict === "gaps" &&
-        !replacementRuns.some((run) => run.outcomeId === outcome.id),
-    );
-    const checkpointGap =
-      currentAssessments.find(
-        ({ assessment, current, outcome }) =>
-          campaign.checkpointRequested &&
-          current &&
-          assessment?.verdict === "gaps" &&
-          supersedableProposalIds(rows, results, outcome.id).length > 0,
-      ) ??
-      currentAssessments.find(
-        ({ assessment, current }) =>
-          campaign.checkpointRequested && current && assessment?.verdict === "gaps",
-      );
-    const checkpointHasSafeSource = checkpointGap
-      ? supersedableProposalIds(rows, results, checkpointGap.outcome.id).length > 0
-      : false;
-    const replacementFailure = currentAssessments
-      .filter(({ current, assessment }) => current && assessment)
-      .map(({ outcome }) => replacementRuns.find((run) => run.outcomeId === outcome.id))
-      .find((run) => run?.status !== "admitted");
-    const admittedReplacementFailure = assessmentFailure?.assessment
-      ? replacementRuns.find((run) => run.outcomeId === assessmentFailure.outcome.id)
-      : undefined;
     if (campaign.publicationAuthorized && liveOutcomes.length === 0 && !usefulWork) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -865,44 +903,55 @@ async function reconcile(
       assessmentFailure &&
       !usefulWork
     ) {
-      campaignStatus = "blocked";
-      const nextDecisionRequest: CampaignDecisionRequest = {
-        requestId: `decision:${campaign.campaignId}`,
-        reason: authorityBlocked
-          ? "branches_blocked"
-          : checkpointGap && !checkpointHasSafeSource
-            ? "replacement_exhausted"
-            : unattemptedGaps
-              ? "assessment_gaps"
-              : replacementFailure?.status === "invalid"
-                ? "replacement_invalid"
-                : replacementFailure?.status === "duplicate"
-                  ? "replacement_duplicate"
-                  : replacementFailure?.status === "budget_exhausted"
-                    ? "replacement_budget_exhausted"
-                    : replacementFailure?.status === "unavailable"
-                      ? "replacement_unavailable"
-                      : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
-                          assessmentFailure.assessment?.verdict === "gaps"
-                        ? "replacement_exhausted"
-                        : assessmentFailure.assessment?.verdict === "gaps"
-                          ? "assessment_gaps"
-                          : "assessment_inconclusive",
-        outcomeIds: liveOutcomes
-          .filter((outcome) => {
-            const item = currentAssessments.find(
-              (candidate) => candidate.outcome.id === outcome.id,
-            );
-            return (
-              !item?.current ||
-              !outcomeEvidence.has(outcome.id) ||
-              !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
-            );
-          })
-          .map((outcome) => outcome.id),
-      };
-      if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
-        decisionRequest = nextDecisionRequest;
+      const latestReplacementRun = replacementRunRows
+        .filter(
+          (run) =>
+            run.outcomeId === assessmentFailure.outcome.id &&
+            run.assessmentId === assessmentFailure.assessment?.assessmentId &&
+            run.evidenceHash === assessmentFailure.assessment?.evidenceHash,
+        )
+        .toSorted((left, right) => left.startedAtEpochMs - right.startedAtEpochMs)
+        .at(-1);
+      const noFeasibleReplacement =
+        latestReplacementRun?.status === "unavailable" &&
+        (modelRunStatus.get(latestReplacementRun.invocationId) === "completed" ||
+          !modelRunStatus.has(latestReplacementRun.invocationId));
+      const assessmentRetryable =
+        (assessmentFailure.assessment?.verdict === "gaps" && !noFeasibleReplacement) ||
+        (assessmentFailure.assessment !== undefined &&
+          (modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "failed" ||
+            modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "cancelled"));
+      if (authorityBlocked || !assessmentRetryable) {
+        campaignStatus = "blocked";
+        const nextDecisionRequest: CampaignDecisionRequest = {
+          requestId: `decision:${campaign.campaignId}`,
+          reason: authorityBlocked
+            ? "branches_blocked"
+            : noFeasibleReplacement
+              ? "replacement_unavailable"
+              : "assessment_inconclusive",
+          outcomeIds: liveOutcomes
+            .filter((outcome) => {
+              const item = currentAssessments.find(
+                (candidate) => candidate.outcome.id === outcome.id,
+              );
+              return (
+                !item?.current ||
+                !outcomeEvidence.has(outcome.id) ||
+                !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
+              );
+            })
+            .map((outcome) => outcome.id),
+        };
+        if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
+          decisionRequest = nextDecisionRequest;
+      } else {
+        // Assessment gaps, malformed model attempts, and planner failures are
+        // recoverable frontier work. Keep the Campaign nonterminal so a later
+        // fresh attempt can continue from the same exact evidence identity.
+        campaignStatus = "planning";
+        decisionRequest = null;
+      }
     } else if (campaign.publicationAuthorized && !usefulWork && liveOutcomes.length > 0) {
       // The assessor must run before the exhausted frontier becomes terminal.
       campaignStatus = "planning";
@@ -1028,7 +1077,7 @@ function campaignAssessmentEvidence(
   const evidence: CampaignAssessmentFact[] = [];
   for (const row of rows) {
     if (row.status === "superseded") continue;
-    const proposal = taskProposalSchema.parse(row.proposal);
+    const proposal = decodePersistedTaskProposal(row.proposal);
     if (proposal.outcomeId !== outcomeId) continue;
     const result = results.get(row.proposalId);
     if (!result?.candidateSha || !EXACT_SHA.test(result.candidateSha)) continue;
@@ -1070,6 +1119,23 @@ function campaignAssessmentEvidence(
       });
   }
   return evidence;
+}
+
+function currentCampaignOutcome(
+  outcome: GoalContract["outcomes"][number],
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+): GoalContract["outcomes"][number] {
+  const additions = rows
+    .filter((row) => row.requirementAddition)
+    .map((row) => decodePersistedTaskProposal(row.proposal))
+    .filter((proposal) => proposal.outcomeId === outcome.id)
+    .flatMap((proposal) => proposal.acceptance);
+  return additions.length === 0
+    ? outcome
+    : {
+        ...outcome,
+        acceptance: [...new Set([...outcome.acceptance, ...additions])],
+      };
 }
 
 function assessmentEvidenceHash(
@@ -1163,7 +1229,7 @@ function campaignOutcomeEvidence(
   const proposalsByOutcome = new Map<string, Array<(typeof rows)[number]>>();
   for (const row of rows) {
     if (row.status === "superseded") continue;
-    const proposal = taskProposalSchema.parse(row.proposal);
+    const proposal = decodePersistedTaskProposal(row.proposal);
     const outcomeRows = proposalsByOutcome.get(proposal.outcomeId) ?? [];
     outcomeRows.push(row);
     proposalsByOutcome.set(proposal.outcomeId, outcomeRows);
@@ -1172,7 +1238,7 @@ function campaignOutcomeEvidence(
     let firstAccepted: AcceptedCampaignDelivery | null = null;
     let allAccepted = true;
     for (const row of outcomeRows) {
-      const proposal = taskProposalSchema.parse(row.proposal);
+      const proposal = decodePersistedTaskProposal(row.proposal);
       const accepted = acceptedCampaignDelivery(
         results.get(row.proposalId) ?? null,
         campaign,
@@ -1222,7 +1288,7 @@ type ReplacementRunStatus =
   | "invalid"
   | "duplicate"
   | "unavailable"
-  | "budget_exhausted";
+  | "failed";
 
 interface ReplacementTarget {
   readonly campaign: typeof campaigns.$inferSelect;
@@ -1233,24 +1299,14 @@ interface ReplacementTarget {
   readonly priorProposals: readonly TaskProposal[];
   readonly supersededProposalIds: readonly string[];
   readonly repositories: CampaignReplacementRequest["repositories"];
-  readonly remainingBudget: CampaignReplacementRequest["remainingBudget"];
   readonly evidenceHash: string;
   readonly invocationId: string;
-  readonly deadlineEpochMs: number;
   /** A checkpoint may revise one proposal from this still-unowned set. */
   readonly supersedableProposalIds: readonly string[];
 }
 
-function replacementRunKey(campaignId: string, outcomeId: string): string {
-  return `${campaignId}\u0000${outcomeId}`;
-}
-
 function replacementCampaignEligible(campaignState: DecodedCampaignState): boolean {
-  return (
-    campaignState.status === "planning" ||
-    (campaignState.status === "blocked" &&
-      campaignState.decisionRequest?.reason === "assessment_gaps")
-  );
+  return campaignState.status === "planning";
 }
 
 function canSupersedeProposal(
@@ -1278,49 +1334,15 @@ function supersedableProposalIds(
   return rows
     .filter((row) => {
       if (!canSupersedeProposal(row, results.get(row.proposalId))) return false;
-      if (taskProposalSchema.parse(row.proposal).outcomeId !== outcomeId) return false;
+      if (decodePersistedTaskProposal(row.proposal).outcomeId !== outcomeId) return false;
       return !rows.some(
         (successor) =>
           successor.status !== "superseded" &&
           successor.proposalId !== row.proposalId &&
-          taskProposalSchema.parse(successor.proposal).dependsOn.includes(row.proposalId),
+          decodePersistedTaskProposal(successor.proposal).dependsOn.includes(row.proposalId),
       );
     })
     .map((row) => row.proposalId);
-}
-
-function remainingCampaignBudget(
-  campaign: typeof campaigns.$inferSelect,
-  rows: readonly (typeof campaignProposals.$inferSelect)[],
-  results: ReadonlyMap<string, TaskResult>,
-): CampaignReplacementRequest["remainingBudget"] {
-  const usedImplementerActivations = [...results.values()].reduce(
-    (total, result) => total + result.evidence.implementerActivations,
-    0,
-  );
-  const usedReviewCycles = [...results.values()].reduce(
-    (total, result) => total + result.evidence.reviewCycles,
-    0,
-  );
-  return {
-    tasks: Math.max(
-      0,
-      decodePersistedGoalContract(campaign.contract).budget.maxTasks - rows.length,
-    ),
-    implementerActivations: countBudgetRemaining(
-      decodePersistedGoalContract(campaign.contract).budget.maxImplementerActivations,
-      usedImplementerActivations,
-    ),
-    reviewCycles: countBudgetRemaining(
-      decodePersistedGoalContract(campaign.contract).budget.maxReviewCycles,
-      usedReviewCycles,
-    ),
-    elapsedMs: Math.max(
-      0,
-      decodePersistedGoalContract(campaign.contract).budget.maxElapsedMs -
-        Math.max(0, Date.now() - campaign.createdAt.getTime()),
-    ),
-  };
 }
 
 async function replacementTargets(stateDirectory: string): Promise<readonly ReplacementTarget[]> {
@@ -1331,9 +1353,6 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
       const campaignRows = await database.select().from(campaigns);
       const repositoryRows = await database.select().from(repositories);
       const replacementRows = await database.select().from(campaignReplacementRuns);
-      const replacementRuns = new Set(
-        replacementRows.map((row) => replacementRunKey(row.campaignId, row.outcomeId)),
-      );
       const targets: ReplacementTarget[] = [];
       for (const campaign of campaignRows) {
         if (!campaign.planHandedOff || campaign.superseded || !campaign.publicationAuthorized)
@@ -1354,41 +1373,62 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
         const results = await campaignTaskResults(database, rows);
         if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) continue;
         const assessments = await campaignAssessmentRows(database, campaign.campaignId);
-        const remainingBudget = remainingCampaignBudget(campaign, rows, results);
         for (const outcome of contract.outcomes.filter(
           (candidate) => candidate.status === "live",
         )) {
-          const assessment = assessments.get(outcome.id);
-          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-          const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+          const currentOutcome = currentCampaignOutcome(outcome, rows);
+          const outcomeRows = rows.filter(
+            (row) => decodePersistedTaskProposal(row.proposal).outcomeId === outcome.id,
+          );
+          const outcomeResults = new Map(
+            outcomeRows.flatMap((row) => {
+              const result = results.get(row.proposalId);
+              return result ? [[row.proposalId, result] as const] : [];
+            }),
+          );
           const checkpointRevision = campaign.checkpointRequested;
           const revisionSources = checkpointRevision
             ? supersedableProposalIds(rows, results, outcome.id)
             : [];
-          // A checkpoint can revise one still-unowned proposal. If no such source
-          // exists, let reconciliation produce the stable decision request without
-          // spending a planner invocation.
-          if (checkpointRevision && revisionSources.length === 0) continue;
+          if (hasUsefulCampaignWork(outcomeRows, outcomeResults) && revisionSources.length === 0)
+            continue;
+          const assessment = assessments.get(outcome.id);
+          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           if (
             !assessment ||
             assessment.verdict !== "gaps" ||
-            assessment.evidenceHash !== evidenceHash ||
-            replacementRuns.has(replacementRunKey(campaign.campaignId, outcome.id))
+            assessment.evidenceHash !== evidenceHash
           )
             continue;
-          const invocationId = `replacement-${createHash("sha256")
+          const baseInvocationId = `replacement-${createHash("sha256")
             .update(
               `${campaign.campaignId}\u0000${outcome.id}\u0000${assessment.assessmentId}\u0000${evidenceHash}`,
               "utf8",
             )
             .digest("hex")}`;
+          const priorRuns = replacementRows
+            .filter(
+              (run) =>
+                run.campaignId === campaign.campaignId &&
+                run.outcomeId === outcome.id &&
+                run.assessmentId === assessment.assessmentId &&
+                run.evidenceHash === evidenceHash,
+            )
+            .toSorted((left, right) => left.startedAtEpochMs - right.startedAtEpochMs);
+          const latestRun = priorRuns.at(-1);
+          if (latestRun?.status === "pending" || latestRun?.status === "admitted") continue;
+          const invocationId =
+            priorRuns.length === 0
+              ? baseInvocationId
+              : `${baseInvocationId}:attempt-${priorRuns.length + 1}`;
           targets.push({
             campaign,
             contract,
-            outcome,
+            outcome: currentOutcome,
             assessment,
             evidence,
-            priorProposals: rows.map((row) => taskProposalSchema.parse(row.proposal)),
+            priorProposals: rows.map((row) => decodePersistedTaskProposal(row.proposal)),
             supersededProposalIds: rows
               .filter((row) => row.status === "superseded")
               .map((row) => row.proposalId),
@@ -1403,10 +1443,8 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
                 headSha: repository.headSha,
                 reviewerProfile: repository.reviewerProfile,
               })),
-            remainingBudget,
             evidenceHash,
             invocationId,
-            deadlineEpochMs: campaign.createdAt.getTime() + contract.budget.maxElapsedMs,
             supersedableProposalIds: revisionSources,
           });
         }
@@ -1421,17 +1459,6 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
 function proposalFingerprint(proposal: TaskProposal): string {
   const { proposalId: _proposalId, ...ownedWork } = proposal;
   return JSON.stringify(ownedWork);
-}
-
-function replacementBudgetAvailable(
-  remainingBudget: CampaignReplacementRequest["remainingBudget"],
-): boolean {
-  return (
-    remainingBudget.tasks >= 1 &&
-    !countBudgetExhausted(remainingBudget.implementerActivations, 0) &&
-    !countBudgetExhausted(remainingBudget.reviewCycles, 0) &&
-    remainingBudget.elapsedMs >= 1
-  );
 }
 
 interface ReplacementValidation {
@@ -1499,16 +1526,6 @@ function replacementValidation(
     )
   )
     return { status: "duplicate", proposal: null, supersedesProposalId: null };
-  if (
-    !replacementBudgetAvailable(target.remainingBudget) ||
-    !countBudgetAllows(
-      target.remainingBudget.implementerActivations,
-      proposal.budget.maxImplementerActivations,
-    ) ||
-    !countBudgetAllows(target.remainingBudget.reviewCycles, proposal.budget.maxReviewCycles) ||
-    proposal.budget.maxElapsedMs > target.remainingBudget.elapsedMs
-  )
-    return { status: "budget_exhausted", proposal: null, supersedesProposalId: null };
   if (!target.repositories.some((repository) => repository.id === proposal.repositoryId))
     return { status: "invalid", proposal: null, supersedesProposalId: null };
   return { status: "admitted", proposal, supersedesProposalId };
@@ -1540,8 +1557,8 @@ async function currentReplacementTarget(
   }
   if (!replacementCampaignEligible(campaignState)) return null;
   const contract = decodePersistedGoalContract(campaign.contract);
-  const outcome = contract.outcomes.find((candidate) => candidate.id === target.outcome.id);
-  if (!outcome || outcome.status !== "live") return null;
+  const baseOutcome = contract.outcomes.find((candidate) => candidate.id === target.outcome.id);
+  if (!baseOutcome || baseOutcome.status !== "live") return null;
   const rows = await database
     .select()
     .from(campaignProposals)
@@ -1549,6 +1566,7 @@ async function currentReplacementTarget(
     .orderBy(asc(campaignProposals.sequence));
   const results = await campaignTaskResults(database, rows);
   if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) return null;
+  const outcome = currentCampaignOutcome(baseOutcome, rows);
   const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
   if (assessmentEvidenceHash(outcome, evidence) !== target.evidenceHash) return null;
   const assessment = (await campaignAssessmentRows(database, campaign.campaignId)).get(outcome.id);
@@ -1563,7 +1581,6 @@ async function currentReplacementTarget(
   const allowedSupersedableProposalIds = campaign.checkpointRequested
     ? supersedableProposalIds(rows, results, outcome.id)
     : [];
-  if (campaign.checkpointRequested && allowedSupersedableProposalIds.length === 0) return null;
   return {
     ...target,
     campaign,
@@ -1571,7 +1588,7 @@ async function currentReplacementTarget(
     outcome,
     assessment,
     evidence,
-    priorProposals: rows.map((row) => taskProposalSchema.parse(row.proposal)),
+    priorProposals: rows.map((row) => decodePersistedTaskProposal(row.proposal)),
     supersededProposalIds: rows
       .filter((row) => row.status === "superseded")
       .map((row) => row.proposalId),
@@ -1586,7 +1603,6 @@ async function currentReplacementTarget(
         headSha: repository.headSha,
         reviewerProfile: repository.reviewerProfile,
       })),
-    remainingBudget: remainingCampaignBudget(campaign, rows, results),
     supersedableProposalIds: allowedSupersedableProposalIds,
   };
 }
@@ -1599,6 +1615,10 @@ async function reserveReplacementRun(
   try {
     let reserved = false;
     await handle.exclusiveTransaction(async () => {
+      const campaign = await handle.database.query.campaigns.findFirst({
+        where: eq(campaigns.campaignId, target.campaign.campaignId),
+      });
+      if (!campaign || !campaignIsLiveForModelWork(campaign)) return;
       const existing = await handle.database
         .select({ invocationId: campaignReplacementRuns.invocationId })
         .from(campaignReplacementRuns)
@@ -1606,6 +1626,7 @@ async function reserveReplacementRun(
           and(
             eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
             eq(campaignReplacementRuns.outcomeId, target.outcome.id),
+            eq(campaignReplacementRuns.invocationId, target.invocationId),
           ),
         );
       if (existing.length > 0) return;
@@ -1648,6 +1669,10 @@ async function reserveCampaignModelRun(
   try {
     let reserved: string | null = null;
     await handle.exclusiveTransaction(async () => {
+      const campaign = await handle.database.query.campaigns.findFirst({
+        where: eq(campaigns.campaignId, target.campaign.campaignId),
+      });
+      if (!campaign || !campaignIsLiveForModelWork(campaign)) return;
       const existing = await handle.database
         .select({
           invocationId: campaignModelRuns.invocationId,
@@ -1663,7 +1688,6 @@ async function reserveCampaignModelRun(
           ),
         );
       if (existing.some((run) => run.status === "pending")) return;
-      if (target.role !== "assessor" && existing.length > 0) return;
       let invocationId = target.invocationId;
       if (target.role === "assessor" && existing.length > 0) {
         const attemptPrefix = `${target.invocationId}:attempt-`;
@@ -1709,6 +1733,31 @@ async function reserveCampaignModelRun(
   }
 }
 
+function campaignIsLiveForModelWork(campaign: typeof campaigns.$inferSelect): boolean {
+  if (campaign.superseded || !campaign.planHandedOff || !campaign.publicationAuthorized)
+    return false;
+  try {
+    return decodeCampaignState(campaign).status === "planning";
+  } catch {
+    return false;
+  }
+}
+
+async function campaignAllowsModelInvocation(
+  stateDirectory: string,
+  campaignId: string,
+): Promise<boolean> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"), { readOnly: true });
+  try {
+    const campaign = await handle.database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    return campaign !== undefined && campaignIsLiveForModelWork(campaign);
+  } finally {
+    handle.close();
+  }
+}
+
 async function persistCampaignModelRun(
   database: CampaignDatabase,
   target: {
@@ -1730,7 +1779,7 @@ async function persistCampaignModelRun(
 ): Promise<void> {
   const canonicalRuns =
     fallback &&
-    (fallback.status === "cancelled" ||
+    (fallback.status !== undefined ||
       (fallback.usage !== null &&
         Object.values(fallback.usage).some((value) => typeof value === "number"))) &&
     !(modelRuns ?? []).some((run) => run.invocationId === target.invocationId)
@@ -1830,10 +1879,11 @@ async function persistReplacementResult(
   candidate: unknown,
   usage: CampaignReplacementDraft["usage"],
   modelRuns: readonly CampaignModelRunDraft[] | undefined,
-  mechanicalStatus?: "budget_exhausted",
   acceptAuthority = true,
-): Promise<void> {
+  recoverable = false,
+): Promise<ReplacementRunStatus | null> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  let persistedStatus: ReplacementRunStatus | null = null;
   try {
     await handle.exclusiveTransaction(async () => {
       const current = await handle.database.query.campaignReplacementRuns.findFirst({
@@ -1841,6 +1891,7 @@ async function persistReplacementResult(
           eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
           eq(campaignReplacementRuns.outcomeId, target.outcome.id),
           eq(campaignReplacementRuns.assessmentId, target.assessment.assessmentId),
+          eq(campaignReplacementRuns.invocationId, target.invocationId),
         ),
       });
       if (!current || current.status !== "pending") return;
@@ -1857,6 +1908,7 @@ async function persistReplacementResult(
         usage,
         startedAtEpochMs: current.startedAtEpochMs,
         completedAtEpochMs: Date.now(),
+        ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
       };
       if (!acceptAuthority) {
         await persistCancelledCampaignModelRun(
@@ -1865,19 +1917,33 @@ async function persistReplacementResult(
           modelRuns,
           observationFallback,
         );
+        await handle.database
+          .update(campaignReplacementRuns)
+          .set({
+            status: "failed",
+            proposal: null,
+            usage: null,
+            completedAtEpochMs: Date.now(),
+          })
+          .where(
+            and(
+              eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
+              eq(campaignReplacementRuns.outcomeId, target.outcome.id),
+              eq(campaignReplacementRuns.assessmentId, target.assessment.assessmentId),
+              eq(campaignReplacementRuns.invocationId, target.invocationId),
+            ),
+          );
+        persistedStatus = "failed";
         return;
       }
       await persistCampaignModelRun(handle.database, observation, modelRuns, observationFallback);
       let result: ReplacementValidation =
-        mechanicalStatus &&
-        currentTarget &&
-        !replacementBudgetAvailable(currentTarget.remainingBudget)
-          ? { status: mechanicalStatus, proposal: null, supersedesProposalId: null }
-          : candidate === null || candidate === undefined
-            ? { status: "unavailable", proposal: null, supersedesProposalId: null }
-            : { status: "invalid", proposal: null, supersedesProposalId: null };
-      if (!mechanicalStatus && candidate !== null && candidate !== undefined && currentTarget)
+        candidate === null || candidate === undefined
+          ? { status: "unavailable", proposal: null, supersedesProposalId: null }
+          : { status: "invalid", proposal: null, supersedesProposalId: null };
+      if (candidate !== null && candidate !== undefined && currentTarget)
         result = replacementValidation(currentTarget, candidate);
+      persistedStatus = result.status;
       if (result.status === "admitted" && result.proposal) {
         const sequenceRow = await handle.database
           .select({ sequence: max(campaignProposals.sequence) })
@@ -1890,6 +1956,7 @@ async function persistReplacementResult(
           sequence,
           outcomeId: result.proposal.outcomeId,
           proposal: result.proposal,
+          requirementAddition: false,
           status: "planned",
           blocker: null,
           supersededByProposalId: null,
@@ -1934,31 +2001,46 @@ async function persistReplacementResult(
             eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
             eq(campaignReplacementRuns.outcomeId, target.outcome.id),
             eq(campaignReplacementRuns.assessmentId, target.assessment.assessmentId),
+            eq(campaignReplacementRuns.invocationId, target.invocationId),
           ),
         );
-      // Completion of a replacement attempt is the narrow lifecycle event
-      // that lets an assessment-gaps Campaign receive one aggregate reducer
-      // pass for its durable result. currentTarget proves that this attempt
-      // still owns the current lineage and authority, so stale work cannot
-      // reopen a newer terminal fact.
-      if (currentTarget)
+      if (currentTarget) {
+        let retainCheckpointSource =
+          target.campaign.checkpointRequested &&
+          (recoverable || result.status === "invalid" || result.status === "duplicate");
+        if (target.campaign.checkpointRequested && result.status === "admitted") {
+          const rows = await handle.database
+            .select()
+            .from(campaignProposals)
+            .where(eq(campaignProposals.campaignId, target.campaign.campaignId))
+            .orderBy(asc(campaignProposals.sequence));
+          const results = await campaignTaskResults(handle.database, rows);
+          const contract = decodePersistedGoalContract(target.campaign.contract);
+          retainCheckpointSource = contract.outcomes.some(
+            (outcome) =>
+              outcome.status === "live" &&
+              supersedableProposalIds(rows, results, outcome.id).length > 0,
+          );
+        }
         await handle.database
           .update(campaigns)
           .set({
             status: "planning" as const,
             decisionRequest: null,
-            checkpointRequested: false,
+            checkpointRequested: retainCheckpointSource,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
           })
           .where(eq(campaigns.campaignId, target.campaign.campaignId));
+      }
     });
   } finally {
     handle.close();
   }
+  return persistedStatus;
 }
 
-/** A pending reservation has already consumed the one replacement opportunity. */
+/** Recover an interrupted replacement reservation without making the gap terminal. */
 async function recoverPendingReplacementRuns(stateDirectory: string): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
@@ -1974,7 +2056,7 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
       const completedAtEpochMs = Date.now();
       await handle.database
         .update(campaignReplacementRuns)
-        .set({ status: "unavailable", proposal: null, usage: null, completedAtEpochMs })
+        .set({ status: "failed", proposal: null, usage: null, completedAtEpochMs })
         .where(eq(campaignReplacementRuns.status, "pending"));
       const pendingOutcomes = new Map<string, Set<string>>();
       for (const { campaignId, outcomeId } of pending) {
@@ -1982,7 +2064,7 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
         outcomes.add(outcomeId);
         pendingOutcomes.set(campaignId, outcomes);
       }
-      for (const [campaignId, outcomeIds] of pendingOutcomes) {
+      for (const [campaignId] of pendingOutcomes) {
         const campaign = await handle.database.query.campaigns.findFirst({
           where: eq(campaigns.campaignId, campaignId),
         });
@@ -1993,16 +2075,12 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
         } catch {
           continue;
         }
-        if (campaign.superseded || !replacementCampaignEligible(campaignState)) continue;
+        if (campaign.superseded || isTerminalCampaignStatus(campaignState.status)) continue;
         await handle.database
           .update(campaigns)
           .set({
-            status: "blocked",
-            decisionRequest: {
-              requestId: `decision:${campaignId}`,
-              reason: "replacement_unavailable",
-              outcomeIds: [...outcomeIds].toSorted(),
-            },
+            status: "planning",
+            decisionRequest: null,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: new Date(completedAtEpochMs),
           })
@@ -2037,34 +2115,19 @@ async function generateCampaignReplacements(
   generator: CampaignReplacementGenerator,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  ownedCampaignIds?: Set<string>,
 ): Promise<boolean> {
   let ran = false;
   while (true) {
     if (signal?.aborted) return ran;
     const target = (await replacementTargets(stateDirectory))[0];
     if (!target) return ran;
+    ownedCampaignIds?.clear();
+    ownedCampaignIds?.add(target.campaign.campaignId);
     if (signal?.aborted) return ran;
     if (!(await reserveReplacementRun(stateDirectory, target))) continue;
     ran = true;
     if (signal?.aborted) return ran;
-    if (!replacementBudgetAvailable(target.remainingBudget)) {
-      await persistReplacementResult(
-        stateDirectory,
-        target,
-        null,
-        null,
-        undefined,
-        "budget_exhausted",
-      );
-      await reconcileWithRepositoryHeads(
-        stateDirectory,
-        environment,
-        async (database, observed) => {
-          await reconcileAll(database, observed);
-        },
-      );
-      continue;
-    }
     if (
       !(await reserveCampaignModelRun(stateDirectory, {
         campaign: target.campaign,
@@ -2075,9 +2138,12 @@ async function generateCampaignReplacements(
         evidenceHash: target.evidenceHash,
       }))
     ) {
-      return ran;
+      continue;
     }
+    if (!(await campaignAllowsModelInvocation(stateDirectory, target.campaign.campaignId)))
+      return ran;
     let draft: CampaignReplacementDraft;
+    let recoverable = false;
     try {
       draft = await generator({
         invocationId: target.invocationId,
@@ -2092,12 +2158,11 @@ async function generateCampaignReplacements(
         priorProposals: target.priorProposals,
         supersedableProposalIds: target.supersedableProposalIds,
         repositories: target.repositories,
-        remainingBudget: target.remainingBudget,
-        deadlineEpochMs: target.deadlineEpochMs,
         environment,
         signal,
       });
     } catch {
+      recoverable = true;
       draft = { proposal: null, usage: null };
     }
     let usage: CampaignReplacementDraft["usage"] = null;
@@ -2106,16 +2171,18 @@ async function generateCampaignReplacements(
     } catch {
       usage = null;
     }
-    await persistReplacementResult(
+    recoverable ||= draft.recoverable === true;
+    const status = await persistReplacementResult(
       stateDirectory,
       target,
       draft.proposal,
       usage,
       draft.modelRuns,
-      undefined,
       !signal?.aborted,
+      recoverable,
     );
     if (signal?.aborted) return ran;
+    if (status !== "admitted") return ran;
     await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
       await reconcileAll(database, observed);
     });
@@ -2148,6 +2215,10 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
     return await campaignReadTransaction(handle.database, async (database) => {
       const campaignRows = await database.select().from(campaigns);
       const repositoryRows = await database.select().from(repositories);
+      const modelRunRows = await database
+        .select()
+        .from(campaignModelRuns)
+        .where(eq(campaignModelRuns.role, "assessor"));
       const repositoryById = new Map(repositoryRows.map((row) => [row.id, row]));
       const targets: AssessmentTarget[] = [];
       for (const campaign of campaignRows) {
@@ -2177,16 +2248,25 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
         for (const outcome of contract.outcomes.filter(
           (candidate) => candidate.status === "live",
         )) {
+          const currentOutcome = currentCampaignOutcome(outcome, rows);
           const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-          const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           const current = assessments.get(outcome.id);
-          if (current?.evidenceHash === evidenceHash) continue;
+          const currentRun = current
+            ? modelRunRows.find((run) => run.invocationId === current.assessmentId)
+            : undefined;
+          if (
+            current?.evidenceHash === evidenceHash &&
+            currentRun?.status !== "failed" &&
+            currentRun?.status !== "cancelled"
+          )
+            continue;
           const repositoriesForOutcome = new Map<
             string,
             CampaignAssessmentRequest["repositories"][number]
           >();
           for (const row of rows) {
-            const proposal = taskProposalSchema.parse(row.proposal);
+            const proposal = decodePersistedTaskProposal(row.proposal);
             if (proposal.outcomeId !== outcome.id) continue;
             const result = results.get(row.proposalId);
             const repository = repositoryById.get(proposal.repositoryId);
@@ -2208,7 +2288,7 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
           targets.push({
             campaign,
             contract,
-            outcome,
+            outcome: currentOutcome,
             evidence,
             repositories: [...repositoriesForOutcome.values()],
             evidenceHash,
@@ -2271,6 +2351,7 @@ async function persistCampaignAssessment(
   assessment: CampaignAssessment,
   usage: CampaignAssessmentDraft["usage"],
   modelRuns: readonly CampaignModelRunDraft[] | undefined,
+  recoverable = false,
   acceptAuthority = true,
 ): Promise<void> {
   const databasePath = resolve(stateDirectory, "usine.sqlite");
@@ -2297,30 +2378,17 @@ async function persistCampaignAssessment(
             .orderBy(asc(campaignProposals.sequence))
         : [];
       const results = campaign ? await campaignTaskResults(handle.database, rows) : new Map();
-      const outcome = campaign
+      const baseOutcome = campaign
         ? decodePersistedGoalContract(campaign.contract).outcomes.find(
             (candidate) => candidate.id === target.outcome.id,
           )
         : undefined;
+      const outcome =
+        campaign && baseOutcome ? currentCampaignOutcome(baseOutcome, rows) : undefined;
       const evidence = outcome ? campaignAssessmentEvidence(rows, results, outcome.id) : [];
       const lineageCurrent =
         current && outcome && assessmentEvidenceHash(outcome, evidence) === target.evidenceHash;
-      const goalDeadlineEpochMs = campaign
-        ? campaign.createdAt.getTime() +
-          decodePersistedGoalContract(campaign.contract).budget.maxElapsedMs
-        : null;
-      const persistedAssessment =
-        assessment.verdict === "satisfied" &&
-        goalDeadlineEpochMs !== null &&
-        assessment.completedAtEpochMs >= goalDeadlineEpochMs
-          ? {
-              ...assessment,
-              verdict: "inconclusive" as const,
-              summary: "Campaign assessor completed after the Goal deadline",
-              gaps: [],
-              evidence: [],
-            }
-          : assessment;
+      const persistedAssessment = assessment;
       if (!acceptAuthority) {
         await persistCancelledCampaignModelRun(
           handle.database,
@@ -2337,6 +2405,7 @@ async function persistCampaignAssessment(
             usage,
             startedAtEpochMs: assessment.startedAtEpochMs,
             completedAtEpochMs: Date.now(),
+            ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
           },
         );
         return;
@@ -2356,6 +2425,7 @@ async function persistCampaignAssessment(
           usage,
           startedAtEpochMs: assessment.startedAtEpochMs,
           completedAtEpochMs: assessment.completedAtEpochMs,
+          ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
         },
       );
       if (!lineageCurrent) return;
@@ -2391,10 +2461,13 @@ async function assessCampaignTargets(
   assessor: CampaignOutcomeAssessor,
   replacementGenerator: CampaignReplacementGenerator,
   signal?: AbortSignal,
+  ownedCampaignIds?: Set<string>,
 ): Promise<boolean> {
   let ran = false;
   for (const target of await assessmentTargets(stateDirectory)) {
     if (signal?.aborted) return ran;
+    ownedCampaignIds?.clear();
+    ownedCampaignIds?.add(target.campaign.campaignId);
     const startedAtEpochMs = Date.now();
     const invocationId = await reserveCampaignModelRun(stateDirectory, {
       campaign: target.campaign,
@@ -2404,9 +2477,12 @@ async function assessCampaignTargets(
       evidenceHash: target.evidenceHash,
     });
     if (!invocationId) continue;
+    if (!(await campaignAllowsModelInvocation(stateDirectory, target.campaign.campaignId)))
+      return ran;
     const invocationTarget = { ...target, invocationId };
     ran = true;
     let draft: CampaignAssessmentDraft;
+    let recoverable = false;
     try {
       draft = await assessor({
         invocationId,
@@ -2417,11 +2493,11 @@ async function assessCampaignTargets(
         outcome: target.outcome,
         evidence: target.evidence,
         repositories: target.repositories,
-        deadlineEpochMs: target.campaign.createdAt.getTime() + target.contract.budget.maxElapsedMs,
         environment,
         signal,
       });
     } catch {
+      recoverable = true;
       draft = {
         verdict: "inconclusive",
         summary: "Campaign assessor failed before producing a result",
@@ -2435,6 +2511,7 @@ async function assessCampaignTargets(
     try {
       assessment = validateAssessment(invocationTarget, draft, startedAtEpochMs, Date.now());
     } catch {
+      recoverable = true;
       assessment = validateAssessment(
         invocationTarget,
         {
@@ -2454,12 +2531,14 @@ async function assessCampaignTargets(
     } catch {
       usage = null;
     }
+    recoverable ||= draft.recoverable === true;
     await persistCampaignAssessment(
       stateDirectory,
       invocationTarget,
       assessment,
       usage,
       draft.modelRuns,
+      recoverable,
       !signal?.aborted,
     );
     if (signal?.aborted) return ran;
@@ -2470,6 +2549,7 @@ async function assessCampaignTargets(
       replacementGenerator,
       environment,
       signal,
+      ownedCampaignIds,
     )) || ran;
   if (signal?.aborted) return ran;
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
@@ -2502,22 +2582,36 @@ export async function reconcileCampaigns(
     await reconcileAll(database, observed);
   });
   const admissions = await admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
-  const modelWork = assessor
-    ? (signal: AbortSignal) =>
-        assessCampaignTargets(
-          stateDirectory,
-          environment,
-          assessor,
-          replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
-          signal,
-        )
+  const campaignIds = new Set<string>();
+  const modelWork: CampaignModelWork | undefined = assessor
+    ? {
+        campaignIds,
+        run: (signal) =>
+          assessCampaignTargets(
+            stateDirectory,
+            environment,
+            assessor,
+            replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
+            signal,
+            campaignIds,
+          ),
+      }
     : replacementGenerator
-      ? (signal: AbortSignal) =>
-          generateCampaignReplacements(stateDirectory, replacementGenerator, environment, signal)
+      ? {
+          campaignIds,
+          run: (signal) =>
+            generateCampaignReplacements(
+              stateDirectory,
+              replacementGenerator,
+              environment,
+              signal,
+              campaignIds,
+            ),
+        }
       : undefined;
   if (modelWork) {
     if (options.launchModelWork) options.launchModelWork(modelWork);
-    else await modelWork(new AbortController().signal);
+    else await modelWork.run(new AbortController().signal);
   }
   return admissions;
 }
@@ -2552,7 +2646,7 @@ async function admitReadyCampaignTasks(
         .orderBy(asc(campaignProposals.sequence));
       for (const row of proposalRows) {
         if (row.status !== "ready" || row.taskId !== null || !row.readyBaseSha) continue;
-        const proposal = taskProposalSchema.parse(row.proposal);
+        const proposal = decodePersistedTaskProposal(row.proposal);
         const taskId = campaignTaskId(contract, proposal);
         const task = campaignTaskContract(contract, proposal, taskId, row.readyBaseSha);
         const rawContract = JSON.stringify(task);
@@ -2583,7 +2677,7 @@ async function admitReadyCampaignTasks(
                 gitAuthor: { name: repository.gitAuthorName, email: repository.gitAuthorEmail },
                 ...(repository.headSha ? { headSha: repository.headSha } : {}),
               },
-              deadlineEpochMs: Date.now() + task.budget.maxElapsedMs,
+              deadlineEpochMs: undefined,
             },
             { contractPath: null, rawContract },
             activeTaskCapacity,
@@ -2641,22 +2735,27 @@ async function resourceFromDatabase(
     modelRunRows.filter((row) => row.status !== "pending").map((row) => [row.invocationId, row]),
   );
   const replacementRunsByOutcome = new Map(replacementRuns.map((run) => [run.outcomeId, run]));
+  const currentContract = {
+    ...contract,
+    outcomes: contract.outcomes.map((outcome) => currentCampaignOutcome(outcome, rows)),
+  };
   const satisfiedOutcomes = new Set(
     contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .filter((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const assessment = assessments.get(outcome.id);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         return (
           outcomeEvidence.has(outcome.id) &&
-          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
-          assessmentReferencesResolve(outcome, evidence, assessment)
+          assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&
+          assessmentReferencesResolve(currentOutcome, evidence, assessment)
         );
       })
       .map((outcome) => outcome.id),
   );
   return campaignResourceFromContract(
-    contract,
+    currentContract,
     campaign.contractHash,
     campaignState.status,
     campaign.revision,
@@ -2740,7 +2839,7 @@ export async function proposeCampaign(
     });
     if (!campaign) throw new CampaignNotFoundError();
     const campaignState = decodeCampaignState(campaign);
-    if (campaign.planHandedOff || isTerminalCampaignStatus(campaignState.status))
+    if (campaign.superseded || isTerminalCampaignStatus(campaignState.status))
       throw new CampaignHandoffError(campaignId);
     const existing = await database.query.campaignProposals.findFirst({
       where: and(
@@ -2757,17 +2856,38 @@ export async function proposeCampaign(
         .from(campaignProposals)
         .where(eq(campaignProposals.campaignId, campaignId));
       const sequence = (sequenceRow[0]?.sequence ?? 0) + 1;
+      const contract = decodePersistedGoalContract(campaign.contract);
       await database.insert(campaignProposals).values({
         campaignId,
         proposalId: proposal.proposalId,
         sequence,
         outcomeId: proposal.outcomeId,
         proposal,
+        requirementAddition:
+          campaign.planHandedOff &&
+          proposalAuthorityBlockerFor(
+            proposal,
+            contract,
+            campaign.publicationAuthorized,
+            campaign.superseded,
+          ) === null,
         status: "planned",
         blocker: null,
         readyBaseSha: null,
         readyRepositoryRevision: null,
       });
+      if (campaign.planHandedOff) {
+        await database
+          .update(campaigns)
+          .set({
+            status: "planning",
+            decisionRequest: null,
+            checkpointRequested: campaign.checkpointRequested,
+            revision: sql`${campaigns.revision} + 1`,
+            updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
+          })
+          .where(eq(campaigns.campaignId, campaignId));
+      }
     }
     await reconcileAll(database, observed);
     resource = await resourceFromDatabase(database, campaignId);
@@ -2833,18 +2953,21 @@ export async function checkpointCampaign(
     const assessmentNeeded = contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         return (
-          assessments.get(outcome.id)?.evidenceHash !== assessmentEvidenceHash(outcome, evidence)
+          assessments.get(outcome.id)?.evidenceHash !==
+          assessmentEvidenceHash(currentOutcome, evidence)
         );
       });
     const currentGaps = contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         const assessment = assessments.get(outcome.id);
         return (
-          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
+          assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&
           assessment.verdict === "gaps"
         );
       });
@@ -2869,6 +2992,8 @@ export async function abandonCampaign(
   stateDirectory: string,
   campaignId: string,
   environment: NodeJS.ProcessEnv = {},
+  onEvent?: (event: import("@usine/task-authority").TaskEvent) => void,
+  waitForActiveCleanup?: () => Promise<void>,
 ): Promise<CampaignResource> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
@@ -2896,13 +3021,43 @@ export async function abandonCampaign(
     }
     resource = await resourceFromDatabase(database, campaignId);
   });
+  await waitForActiveCleanup?.();
+  await abandonCampaignTasks(stateDirectory, campaignId, onEvent);
   return resource!;
+}
+
+/** Block admitted Campaign Tasks after explicit abandonment and release their leases. */
+async function abandonCampaignTasks(
+  stateDirectory: string,
+  campaignId: string,
+  onEvent?: (event: import("@usine/task-authority").TaskEvent) => void,
+): Promise<void> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    const rows = await handle.database
+      .select({ taskId: campaignProposals.taskId })
+      .from(campaignProposals)
+      .where(eq(campaignProposals.campaignId, campaignId));
+    const authority = new TaskAuthority(handle.database, { onEvent });
+    for (const row of rows) {
+      if (!row.taskId) continue;
+      const current = await authority.lookup(row.taskId);
+      if (!current || isTerminalState(current.state)) continue;
+      await authority.block(
+        { taskId: current.taskId, revision: current.revision },
+        "Campaign abandoned",
+      );
+    }
+  } finally {
+    handle.close();
+  }
 }
 
 export async function lookupCampaign(
   stateDirectory: string,
   campaignId: string,
 ): Promise<CampaignResource | null> {
+  await observeCampaignWarning(stateDirectory, campaignId);
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {

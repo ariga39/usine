@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
-import { startUsineServer } from "@usine/runtime";
+import { startUsineServer } from "../packages/runtime/src/server.js";
 import {
   captureCampaignEvidence,
   campaignEvidenceToPostHogEvents,
@@ -71,12 +71,6 @@ function campaign(): CampaignResource {
       },
     ],
     authority: { source: "private source", publish: true, delivery: true, merge: true },
-    budget: {
-      maxElapsedMs: 10_000,
-      maxTasks: 1,
-      maxImplementerActivations: 1,
-      maxReviewCycles: 1,
-    },
     status: "accepted",
     planHandedOff: true,
     decisionRequest: null,
@@ -563,7 +557,7 @@ test("continuation Campaign evidence maps only Role Runs and deliveries", () => 
 });
 
 test("captures persisted evidence from Task events using the Batch protocol", async () => {
-  const fixture = await campaignFixture(200);
+  const fixture = await campaignFixture(200, false, undefined, 100);
   const request = await waitForRequest(
     fixture.posthog,
     (value) => value.batch?.some((event) => event.event === "$ai_generation") === true,
@@ -810,6 +804,7 @@ async function campaignFixture(
   postHogStatus: number,
   deliver = false,
   assessOutcome?: CampaignOutcomeAssessor,
+  acknowledgementDelayMs = 0,
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-posthog-campaign-"));
   const stateDirectory = join(root, "state");
@@ -832,17 +827,11 @@ async function campaignFixture(
       repositories: ["repo-1"],
       effects: ["github"],
     },
-    budget: {
-      maxElapsedMs: 60_000,
-      maxTasks: 1,
-      maxImplementerActivations: 1,
-      maxReviewCycles: 1,
-    },
   };
   await writeFile(contractPath, JSON.stringify(contract));
   await execa("git", ["add", "goal.json"], { cwd: root });
   await execa("git", ["commit", "-m", "authorize campaign"], { cwd: root });
-  const posthog = await fakePostHog(postHogStatus);
+  const posthog = await fakePostHog(postHogStatus, acknowledgementDelayMs);
   const environment: NodeJS.ProcessEnv = {
     USINE_STATE_DIR: stateDirectory,
     USINE_GOAL_PUBLICATION_SOURCE: "user:posthog-campaign",
@@ -960,14 +949,16 @@ async function campaignFixture(
     acceptance: ["done"],
     nonGoals: [],
     effects: ["github"],
-    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
     merge: false,
   });
   await handoffCampaign(usine.url, published.campaignId);
   return { published, posthog, usine, environment };
 }
 
-async function fakePostHog(status: number): Promise<FakePostHog & { url: string }> {
+async function fakePostHog(
+  status: number,
+  acknowledgementDelayMs = 0,
+): Promise<FakePostHog & { url: string }> {
   const requests: Array<{ url?: string; batch?: CapturedBatchEvent[] }> = [];
   const fake: FakePostHog = {
     server: createServer((request, response) => {
@@ -978,7 +969,7 @@ async function fakePostHog(status: number): Promise<FakePostHog & { url: string 
           url: request.url,
           ...(JSON.parse(body) as { batch?: CapturedBatchEvent[] }),
         });
-        response.writeHead(fake.status).end("ok");
+        setTimeout(() => response.writeHead(fake.status).end("ok"), acknowledgementDelayMs);
       });
     }),
     requests,

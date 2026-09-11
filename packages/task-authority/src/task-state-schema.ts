@@ -110,7 +110,7 @@ const taskResultFields = {
   taskId: Schema.String,
   contractHash: Schema.String,
   revision: Schema.Natural,
-  deadlineEpochMs: Schema.Int,
+  deadlineEpochMs: Schema.optional(Schema.Int),
   state: persistedTaskState,
   campaign: Schema.optional(
     Schema.Struct({
@@ -150,6 +150,7 @@ const currentTaskResult = Schema.Struct({
 const previousTaskResult = Schema.Struct({
   schemaVersion: Schema.Literal(3),
   ...taskResultFields,
+  deadlineEpochMs: Schema.Int,
   blocker: Schema.NullOr(Schema.String),
   blockerClassification: Schema.optional(Schema.NullOr(taskBlockerClassification)),
 });
@@ -190,7 +191,7 @@ const priorVersionTwoTaskResult = Schema.Struct({
 export const taskListItemSchema = Schema.Struct({
   taskId: Schema.String,
   revision: Schema.Natural,
-  deadlineEpochMs: Schema.Int,
+  deadlineEpochMs: Schema.optional(Schema.Int),
   state: publicTaskState,
   candidateSha: Schema.NullOr(exactSha),
   activeActivation: Schema.NullOr(Schema.Natural),
@@ -240,7 +241,7 @@ export const taskResourceSchema = Schema.Struct({
   taskId: Schema.String,
   contractHash: Schema.String,
   revision: Schema.Natural,
-  deadlineEpochMs: Schema.Int,
+  deadlineEpochMs: Schema.optional(Schema.Int),
   state: publicTaskState,
   campaign: Schema.optional(
     Schema.Struct({
@@ -332,6 +333,9 @@ function projectBlockerClassification(
 }
 
 function projectDecodedResult(decoded: DecodedPersistedTaskResult): TaskResult {
+  const campaign = "campaign" in decoded ? decoded.campaign : undefined;
+  if (campaign === undefined && decoded.deadlineEpochMs === undefined)
+    throw new Error("standalone Task state requires a finite elapsed deadline");
   if (decoded.review?.failureClass !== undefined && decoded.review.verdict !== "inconclusive")
     throw new Error("review failure class requires an inconclusive verdict");
   return {
@@ -420,7 +424,7 @@ export function taskListItemFromResult(result: TaskResult): TaskListItem {
   return {
     taskId: result.taskId,
     revision: result.revision,
-    deadlineEpochMs: result.deadlineEpochMs,
+    ...(result.deadlineEpochMs === undefined ? {} : { deadlineEpochMs: result.deadlineEpochMs }),
     state: publicTaskStateFromResult(result),
     candidateSha: result.candidateSha,
     activeActivation: result.activeActivation,

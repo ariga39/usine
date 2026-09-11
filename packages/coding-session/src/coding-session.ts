@@ -5,10 +5,10 @@ import { generateText, Output } from "ai";
 import { Effect } from "effect";
 import {
   mergeProviderNeutralUsage,
+  ElapsedBudgetError,
   remainingUntil,
   safeEvidenceIdentity,
   type GoalContract,
-  type CountBudget,
   type TaskContract,
 } from "@usine/task-authority";
 import type { CampaignAssessmentEvidence, CampaignAssessmentFact } from "@usine/task-authority";
@@ -122,7 +122,7 @@ interface SessionRequestBase<Output = unknown> {
   prompt: string;
   profile: string;
   sandbox: SandboxMode;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   outputSchema: z.ZodType<Output>;
   mcpServer?: CodingSessionMcpServer;
   environment?: NodeJS.ProcessEnv;
@@ -145,7 +145,7 @@ export interface CampaignAssessmentSessionContext {
     readonly version: GoalContract["version"];
     readonly objective: GoalContract["objective"];
     readonly authority: GoalContract["authority"];
-    readonly budget: GoalContract["budget"];
+    readonly warningThresholdMs?: GoalContract["warningThresholdMs"];
   };
   readonly outcome: {
     readonly id: string;
@@ -195,12 +195,6 @@ export interface CampaignReplacementPlannerSessionContext {
     readonly baseBranch: string;
     readonly headSha: string | null;
   }[];
-  readonly remainingBudget: {
-    readonly tasks: number;
-    readonly implementerActivations: CountBudget;
-    readonly reviewCycles: CountBudget;
-    readonly elapsedMs: number;
-  };
 }
 
 export interface CampaignReplacementPlannerSessionRequest<
@@ -520,10 +514,15 @@ export class CodexCodingSession {
     archive?: SessionArchiveWriter,
   ): Promise<CapturedSessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
-    let remaining: number;
+    const deadlineEpochMs = request.deadlineEpochMs;
+    let deadlineSignal: AbortSignal | undefined;
     try {
-      remaining = remainingUntil(request.deadlineEpochMs);
-    } catch {
+      deadlineSignal =
+        deadlineEpochMs === undefined
+          ? undefined
+          : AbortSignal.timeout(remainingUntil(deadlineEpochMs));
+    } catch (error) {
+      if (!(error instanceof ElapsedBudgetError)) throw error;
       return {
         status: "failed",
         sessionId: null,
@@ -535,12 +534,12 @@ export class CodexCodingSession {
         failureClass: "timeout",
       };
     }
-    const deadlineSignal = AbortSignal.timeout(remaining);
-    const abortSignal = request.signal
-      ? AbortSignal.any([request.signal, deadlineSignal])
-      : deadlineSignal;
+    const abortSignal =
+      request.signal && deadlineSignal
+        ? AbortSignal.any([request.signal, deadlineSignal])
+        : (request.signal ?? deadlineSignal ?? new AbortController().signal);
     if (abortSignal.aborted) {
-      const failureClass = deadlineSignal.aborted ? "timeout" : "cancellation";
+      const failureClass = deadlineSignal?.aborted ? "timeout" : "cancellation";
       return {
         status: "cancelled",
         sessionId: null,
@@ -763,7 +762,7 @@ export class CodexCodingSession {
               summary: "coding session cancelled",
               failure: "coding session cancelled",
               phase,
-              failureClass: deadlineSignal.aborted ? "timeout" : "cancellation",
+              failureClass: deadlineSignal?.aborted ? "timeout" : "cancellation",
             };
           return {
             requestedProfile: request.profile,
@@ -839,7 +838,7 @@ export class CodexCodingSession {
           : {}),
       };
     } catch (error) {
-      const deadlineExpired = deadlineSignal.aborted;
+      const deadlineExpired = deadlineSignal?.aborted === true;
       const cancelled = request.signal?.aborted;
       const typedInterruption = error instanceof CodingSessionInterruption ? error : undefined;
       const interruption = deadlineExpired

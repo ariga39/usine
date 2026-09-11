@@ -71,7 +71,7 @@ export interface TaskResult {
   /** Durable compare-and-set identity for this observation. */
   revision: number;
   /** The first admission deadline, reused for every recovery. */
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   state: TaskState;
   /** Immutable Campaign projection when the coordinator admitted this leaf. */
   campaign?: TaskCampaignAssociation;
@@ -229,7 +229,7 @@ export interface TaskResource {
   taskId: string;
   contractHash: string;
   revision: number;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   state: PublicTaskState;
   campaign?: TaskCampaignAssociation;
   mergeAuthorized: boolean;
@@ -407,7 +407,7 @@ export interface AuthorityInput {
   contractHash: string;
   repositoryIdentity: string;
   repository?: RepositorySnapshot;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
 }
 
 /** Local input needed to re-enter an admitted task after a server restart. */

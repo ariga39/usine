@@ -23,7 +23,7 @@ import { Schema } from "effect";
 import { eq } from "drizzle-orm";
 import { resolve } from "node:path";
 import { campaigns } from "@usine/task-authority";
-import { decodeCampaignState } from "./campaign.js";
+import { decodeCampaignState, observeCampaignWarning } from "./campaign.js";
 
 export {
   CampaignEvidenceCursorError,
@@ -46,6 +46,7 @@ export async function lookupCampaignEvidence(
     limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
   },
 ): Promise<CampaignEvidencePage | null> {
+  await observeCampaignWarning(stateDirectory, campaignId);
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {
@@ -292,7 +293,7 @@ function totals(
     blockedProposals: sourceSet.firstPage.proposals.filter(
       (proposal) => proposal.status === "blocked",
     ).length,
-    guardianTouches: allTouches.length,
+    guardianTouches: allTouches.filter((touch) => touch.type !== "warning").length,
     acceptedDeliveries: deliveries.length,
     terminalTaskCounts: terminalTaskCounts(sourceSet.sources),
     usage: sumUsage(runs.map((run) => run.usage)),

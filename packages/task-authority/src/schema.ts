@@ -47,6 +47,9 @@ export const campaignProposals = sqliteTable(
     sequence: integer("sequence").notNull(),
     outcomeId: text("outcome_id").notNull(),
     proposal: text("proposal", { mode: "json" }).notNull(),
+    requirementAddition: integer("requirement_addition", { mode: "boolean" })
+      .notNull()
+      .default(false),
     status: text("status").notNull(),
     blocker: text("blocker"),
     supersededByProposalId: text("superseded_by_proposal_id"),
@@ -184,7 +187,7 @@ export const campaignAssessments = sqliteTable(
   }),
 );
 
-/** Append-only replacement-planner attempt and result for one Campaign/Outcome opportunity. */
+/** Append-only replacement-planner attempt and result for one Campaign/Outcome assessment. */
 export const campaignReplacementRuns = sqliteTable(
   "campaign_replacement_runs",
   {
@@ -202,7 +205,7 @@ export const campaignReplacementRuns = sqliteTable(
   },
   (table) => ({
     campaignReplacementRunIdentity: primaryKey({
-      columns: [table.campaignId, table.outcomeId],
+      columns: [table.campaignId, table.outcomeId, table.invocationId],
     }),
     campaignReplacementRunInvocation: uniqueIndex("campaign_replacement_runs_invocation_index").on(
       table.invocationId,

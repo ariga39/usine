@@ -10,6 +10,7 @@ import {
   resolveTaskContract,
   repositoryIdentity,
   TaskAuthority,
+  TaskRetryConflictError,
   TaskIdCursorError,
   type TaskContract,
   type TaskExecutionInput,
@@ -60,6 +61,7 @@ import {
 } from "./runtime-policy.js";
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./private-state.js";
+import { lookupCampaign } from "./campaign.js";
 
 export {
   lookupCampaignEvidence,
@@ -220,7 +222,7 @@ export interface ReviewerQualityGateInput {
   readonly profile: string;
   readonly repository: RepositorySnapshot;
   readonly environment: NodeJS.ProcessEnv;
-  readonly deadlineEpochMs: number;
+  readonly deadlineEpochMs?: number;
   readonly cycle: number;
   readonly signal?: AbortSignal;
   readonly onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
@@ -529,7 +531,36 @@ export async function retryTask(
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath);
   try {
+    const current = await new TaskAuthority(handle.database, { onEvent }).lookup(taskId);
+    if (
+      current &&
+      !isTerminalState(current.state) &&
+      current.campaign &&
+      (await lookupCampaign(stateDirectory, current.campaign.campaignId))?.status === "abandoned"
+    )
+      throw new TaskRetryConflictError("campaign_abandoned", current.state);
     return await new TaskAuthority(handle.database, { onEvent }).retryTask(taskId, budget);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function abandonTaskIfCampaignAbandoned(
+  stateDirectory: string,
+  taskId: string,
+  onEvent?: (event: TaskEvent) => void,
+): Promise<TaskResult | null> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    const authority = new TaskAuthority(handle.database, { onEvent });
+    const current = await authority.lookup(taskId);
+    if (!current || isTerminalState(current.state) || !current.campaign) return null;
+    const campaign = await lookupCampaign(stateDirectory, current.campaign.campaignId);
+    if (!campaign || campaign.status !== "abandoned") return null;
+    return await authority.block(
+      { taskId: current.taskId, revision: current.revision },
+      "Campaign abandoned",
+    );
   } finally {
     handle.close();
   }
@@ -614,7 +645,11 @@ export async function admitTask(
     const repository = existing?.repository ?? registeredRepository;
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
-    const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
+    const deadlineEpochMs =
+      existing?.deadlineEpochMs ??
+      (contract.budget.maxElapsedMs === null
+        ? undefined
+        : Date.now() + contract.budget.maxElapsedMs);
     const input = { contractPath, rawContract: committed.rawContract };
     if (existing && isTerminalState(existing.state)) return { result: existing, input, contract };
     const blockExpiredExisting = async (): Promise<TaskResult> => {
@@ -755,7 +790,7 @@ async function executeWithServices(options: {
   policy: RuntimePolicy;
   forgePolicy: ForgePolicy;
   authority: TaskAuthority;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   signal?: AbortSignal;
   executionOwnerId?: string;
 }): Promise<TaskResult> {
@@ -813,7 +848,7 @@ async function executeWithServices(options: {
           policy: readPolicy.policy,
           deadlineEpochMs,
           signal: options.signal,
-          requestTimeoutMs: Math.min(10_000, remainingUntil(deadlineEpochMs)),
+          requestTimeoutMs: remainingUntil(deadlineEpochMs, 10_000),
         });
         githubReadHandles.set(role, handle);
         return {
@@ -870,15 +905,14 @@ function githubReadServerConfig(
   name: string,
   url: string,
   enabledTools: readonly string[],
-  deadlineEpochMs: number,
+  deadlineEpochMs: number | undefined,
 ) {
-  const remaining = remainingUntil(deadlineEpochMs);
   return {
     name,
     url,
     enabledTools,
-    startupTimeoutMs: Math.min(5_000, remaining),
-    toolTimeoutMs: Math.min(10_000, remaining),
+    startupTimeoutMs: remainingUntil(deadlineEpochMs, 5_000),
+    toolTimeoutMs: remainingUntil(deadlineEpochMs, 10_000),
     required: false,
   };
 }

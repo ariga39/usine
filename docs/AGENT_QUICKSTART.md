@@ -10,14 +10,14 @@ This guide operates the Task delivery leaf and guardian-authored Campaign entry 
 
 Use one continuous route for an authorized Campaign: configure the host, start the local server, register the Repository, publish the committed Goal Contract, submit its complete proposal set, inspect the durable Campaign, and hand it off exactly once. Leave the suitable default adapter selected unless the host has deliberately qualified one of the bounded alternatives; model/profile selection and adapter selection are separate host concerns. For a standalone Task, use the standalone contract and `submit` route in section 5; do not use repeated standalone submissions to advance a Campaign.
 
-After handoff, keep the server running and observe `campaign get`, `task get`, `task history`, `task watch`, and `campaign evidence` as applicable. The server admits eligible proposals and advances dependent Tasks; routine progress, an empty frontier, a process exit, or a status message is not completion. Use only the explicit limits in the applicable committed Goal, Proposal, or Task Contract: a finite count limits that dimension, `null` leaves a count unbounded, and `maxElapsedMs` is the applicable duration budget from which the admitted deadline is derived. A restart or retry does not create a new deadline or an invented per-step limit.
+After handoff, keep the server running and observe `campaign get`, `task get`, `task history`, `task watch`, and `campaign evidence`. Initial decomposition is not a Task quota: the coordinator continues authorized corrections and final reassessment without Campaign count or elapsed ceilings. A warning never requires acknowledgement. Standalone Tasks and older admitted finite contracts retain their explicit limits; retry or restart never extends an existing deadline.
 
 Local build, health, and configuration checks establish local readiness and resource shape; they do not prove live model execution. Optional profile evaluations are controlled external calls and require the applicable authority. Forge readiness is an authenticated read-only check, not proof of delivery.
 
 Use this state-to-action guide while observing:
 
 - A running Campaign or Task: reread its current resource and durable history, then continue observing. Do not hand off again or create a replacement standalone Task.
-- A typed transient reviewer interruption: Delivery Run automatically claims a fresh reviewer attempt while the Candidate, passing Check Result, review budget, and original deadline remain valid. The public Task may project `checked` while history shows the interrupted and fresh review attempts; do not invoke `task retry`.
+- A typed transient reviewer interruption: Delivery Run automatically claims a fresh reviewer attempt for the same Candidate and passing check, subject to any admitted finite limits. New Campaign Tasks have no such ceiling. Do not invoke `task retry` for automatic reviewer recovery.
 - A `waiting` Task with `retryable: true`: inspect the current resource and history, then use the explicit same-Task retry only for the supported waiting reasons in [Bounded retry](#6-bounded-retry). It preserves the contract, authority, Candidate bundle where applicable, and original deadline.
 - A user-authorized observation that is record-for-later: retain the finding and evidence in the authorized Issue or a private handoff, verify that record exists before claiming it is retained, and record only its bounded intervention ID/count through the Campaign touch. A touch ID does not store the finding text. Keep the work running and do not waive a product gate.
 - An explicit user stop, missing authority, or genuine terminal blocker: stop the scoped work and report the actual last observed state. Stopping the service is not a pause and does not freeze deadlines; do not abandon work without the contract's explicit abandonment authority.
@@ -250,33 +250,30 @@ export USINE_POSTHOG_DEPLOYMENT="<DEPLOYMENT_LABEL>"
 
 ## 3. Publish a guardian-authored Campaign plan
 
-Assessments and replacement planning use the original Goal deadline, including time elapsed before a restart; there is no separate one-minute limit. They retain the selected profile's model/authentication settings but use their own role instructions, so a reviewer-specific profile instruction does not require a local workaround. A late satisfied result cannot make the Campaign accepted, and existing terminal Campaigns are not reopened. See [the Campaign policy](DESIGN.md#41-campaign-facts).
+Campaign Goals and Proposals have no budget or deadline fields. Assessment and correction operations remain cancellable, use the selected profile with their own role instructions, and are fenced to the current Goal, Outcome, requirements, and exact evidence. A fresh satisfied result may complete the current Campaign when its requirements and evidence are attributable; stale evidence or an abandoned or terminal result cannot authorize acceptance. See [the Campaign policy](DESIGN.md#41-campaign-facts).
 
 Before handoff, the guardian uses the complete user and Repository context to prepare one bounded Goal Contract, Outcome Tree, and complete initial set of Task Proposals. The Campaign entry path reads the committed Goal Contract from the Git repository, rejects working-tree changes, and persists one immutable Campaign for each Goal ID and version. That publication can authorize Ready work only when its `authority.publish` field is explicitly `true` and the local server's host-owned `USINE_GOAL_PUBLICATION_SOURCE` matches the contract's authority source. A mismatched host anchor leaves the publication observable but blocks its proposals. Re-publishing the same bytes cannot repair that immutable fact; after correcting the anchor, publish a new Goal version. The source string, guardian prose, and `publish` flag are contract claims; none can authorize Ready work without the host anchor.
 
-### Select elapsed budgets before publication
+### Select standalone Task budgets before publication
 
-Goal Contracts, Task Proposals and standalone Task Contracts require a positive finite integer
-`maxElapsedMs`. This schema requirement does not supply a default duration. Preserve the current
-user's explicit limits and any applicable host policy; an unrelated trial or an executable example
-is not authority for the current work.
+Standalone Task Contracts require a positive finite integer `maxElapsedMs`. Campaign Goal Contracts
+and Task Proposals intentionally have no budget fields; Campaign-derived Tasks receive all-null
+Task budgets and no deadline internally. The standalone schema supplies no default duration. Preserve the
+current user's explicit limits and any applicable host policy; an unrelated trial or an executable
+example is not authority for the current work.
 
-When no applicable duration is specified, choose a task-specific planning estimate within the
+When no standalone Task duration is specified, choose a task-specific planning estimate within the
 authorized scope. Account for the actual implementation, dependency/check work, review and repair,
-delivery, and Campaign assessment involved. Record each selected value, its source, and the relevant
-scope assumptions with the versioned plan before publication and handoff. Label an operator estimate
-as an operator choice, not a user requirement. A reversible estimate does not need routine user
-confirmation; conflicting constraints or a genuinely missing product/authority decision do.
+and delivery involved. Record each selected value, its source, and the relevant scope assumptions
+with the versioned contract. Label an operator estimate as an operator choice, not a user requirement.
+A reversible estimate does not need routine user confirmation; conflicting constraints or a
+genuinely missing product/authority decision do.
 
-Choose elapsed time separately from implementation/review counts: `null` makes those counts
-unbounded, not time. Each Proposal's duration must fit the Goal envelope. The Goal's deadline begins
-at Campaign creation and each Task retains its first admitted deadline; restart and retry never
-renew either deadline, and terminal Tasks remain terminal. See the [budget and lifecycle
-contract](DESIGN.md#42-task-facts).
+For standalone Tasks, choose elapsed time separately from implementation/review counts: `null` makes
+those counts unbounded, not time. The admitted Task retains its first deadline; restart and retry
+never renew it, and terminal Tasks remain terminal. See the [budget and lifecycle contract](DESIGN.md#42-task-facts).
 
-The current contract shape is shown below. Its numeric budgets are illustrative, not selected limits
-for a new task. Set `delivery` or `merge` to `true` only when the authority source explicitly grants
-that effect.
+The current Goal shape is shown below. Set `delivery` or `merge` to `true` only when the authority source explicitly grants that effect. An optional positive `warningThresholdMs` emits one warning after that elapsed duration; omit it when no warning is needed. It never stops execution or requires acknowledgement.
 
 ```json
 {
@@ -300,12 +297,6 @@ that effect.
     "merge": true,
     "repositories": ["<REPOSITORY_ID>"],
     "effects": ["<EFFECT_ID>"]
-  },
-  "budget": {
-    "maxElapsedMs": 3600000,
-    "maxTasks": 10,
-    "maxImplementerActivations": null,
-    "maxReviewCycles": null
   }
 }
 ```
@@ -337,11 +328,6 @@ Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current 
   "acceptance": ["<TASK_ACCEPTANCE_EVIDENCE>"],
   "nonGoals": [],
   "effects": ["<EFFECT_ID>"],
-  "budget": {
-    "maxImplementerActivations": null,
-    "maxReviewCycles": null,
-    "maxElapsedMs": 3600000
-  },
   "delivery": {
     "issue": 123
   },
@@ -349,7 +335,7 @@ Each guardian-authored Task Proposal is bounded and Outcome-traced. Its current 
 }
 ```
 
-The optional `delivery.issue` is a positive GitHub Task Issue number in the proposal's Repository. It is delivery metadata, does not authorize the Campaign or Task, is not inferred from `instructions`, and may be omitted for issue-less Campaign Tasks. The proposal cannot include `baseSha` or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, each proposal budget must fit the corresponding Goal budget, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute, and the complete set must not exceed the Goal's `maxTasks`; later admission sequence entries are durably blocked when that limit is exhausted. Keep the complete proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once as the initial handoff, then inspect the durable projection:
+The optional `delivery.issue` is a positive GitHub Task Issue number in the proposal's Repository. It is delivery metadata, does not authorize the Campaign or Task, is not inferred from `instructions`, and may be omitted for issue-less Campaign Tasks. The proposal cannot include `baseSha`, budget fields, or extra fields. Its Outcome must be live, its Repository and effects must be included in the Goal authority envelope, and `merge: true` requires Goal merge authority. Goal delivery authority must be `true` for any proposal to execute. Keep the complete initial proposal set in version control as guardian-owned recovery evidence; Git tracking is not proposal authority. Submit each proposal once before the initial handoff, then inspect the durable projection:
 
 ```sh
 node apps/cli/dist/cli.mjs campaign propose "<GOAL_ID>:v1" "<PROPOSAL_FILE>" --json
@@ -364,9 +350,19 @@ After every initial proposal has been submitted and checked, hand the fixed plan
 node apps/cli/dist/cli.mjs campaign handoff "<GOAL_ID>:v1" --json
 ```
 
-Handoff freezes proposal supply and is the durable gate for Campaign Task admission. Before handoff, `planning` is an active, incomplete Campaign and an empty or partial frontier remains open for guardian proposals. After handoff, the server alone admits and advances eligible Tasks. It continues independent useful branches, and only accepted exact-SHA Task delivery associated with this Campaign, Goal version, and Outcome supplies Outcome evidence. Same-Repository dependencies additionally require an accepted merged effect; cross-Repository reviewed delivery keeps the existing rule. Passing checks, creating a PR, model assertions, and an empty frontier do not satisfy an Outcome.
+Handoff freezes the initial proposal supply and is the durable gate for Campaign Task admission. Before handoff, `planning` is an active, incomplete Campaign and an empty or partial frontier remains open for guardian proposals. After handoff, the server admits and advances eligible Tasks and accepts only attributable additions inside the live Goal authority envelope. It continues independent useful branches, and only accepted exact-SHA Task delivery associated with this Campaign, Goal version, and Outcome supplies Outcome evidence. Same-Repository dependencies additionally require an accepted merged effect; cross-Repository reviewed delivery keeps the existing rule. Passing checks, creating a PR, model assertions, and an empty frontier do not satisfy an Outcome.
 
-The public projection remains `planning` while executable work can proceed, `accepted` only when every required live Outcome has owning accepted exact-SHA evidence and a current satisfied assessment bound to those facts, and `blocked` when no eligible useful branch remains. An exhausted or blocked fixed plan with live Outcomes carries one stable `decisionRequest`; it does not accept proposals after handoff or authorize ad hoc standalone Tasks. A host with the contract's explicit abandonment authority may terminate an unresolved Campaign:
+The public projection remains `planning` during useful work and recoverable assessment/planning failures. Current gaps trigger correction and reassessment, including at apparent completion; `accepted` requires current satisfied evidence for all requirements. Missing authority, genuine product blockers, completed no-feasible-work or inconclusive assessment can produce `blocked` with a stable decision request. None authorizes ad hoc standalone Tasks.
+
+To add a discovered requirement after handoff, create a new proposal with a new `proposalId`, the existing live Outcome and only already-authorized effects, then use the same `campaign propose` command. Record the finding and its concrete acceptance requirement in that proposal; a handoff note or touch ID alone does not add executable work. Do not rewrite admitted Task contracts or repeat handoff. Authorized additions remain requirements even if their execution proposal is later superseded; broader authority needs a new authorized Goal revision. To assess and correct still-unowned planned work while independent delivery continues, request a checkpoint:
+
+```sh
+node apps/cli/dist/cli.mjs campaign checkpoint "<GOAL_ID>:v1" --json
+```
+
+The coordinator selects eligible unowned sources and preserves exact historical ownership. It does not revoke requirements or treat checkpoint creation as completion.
+
+A host with explicit abandonment authority may stop an unresolved Campaign:
 
 ```sh
 export USINE_CAMPAIGN_ABANDONMENT_SOURCE="<AUTHORITY_SOURCE>"
@@ -378,7 +374,7 @@ export USINE_CAMPAIGN_ABANDONMENT_SOURCE="<AUTHORITY_SOURCE>"
 node apps/cli/dist/cli.mjs campaign abandon "<GOAL_ID>:v1" --json
 ```
 
-The abandon command sends an empty request body; the separate host anchor is the authority. `abandoned` is terminal and cannot be replaced by handoff, new proposals, or later reconciliation. Campaign GET and restart preserve these durable statuses and decision-request identities.
+The abandon command sends an empty request body; the separate host anchor grants authority. It records `abandoned`, cancels owned Task/model work and pipeline recovery, awaits cleanup, and releases remaining leases/capacity. Already observed delivery effects and usage remain. Retry, handoff, new proposals and restart cannot resume an abandoned Campaign; stopping the server alone is not this public cancellation path.
 
 Read one Campaign evidence report after the plan handoff:
 
@@ -386,7 +382,7 @@ Read one Campaign evidence report after the plan handoff:
 node apps/cli/dist/cli.mjs campaign evidence "<GOAL_ID>:v1" --json
 ```
 
-The report groups provider-neutral implementer and reviewer runs by Goal version, Outcome, Task, role, observed model/provider, and adapter. It keeps uncached input, cached input, and output token dimensions separate; an unavailable dimension remains `null`. It also reports review and repair cycles, blocked proposals, guardian plan and decision touches, and accepted exact-SHA deliveries. Plan touches are projected from the durable Campaign publication and admitted proposal facts, while decision touches are recorded through the Campaign touch path.
+The report groups provider-neutral Task and Campaign role runs by Goal version, Outcome, Task, role and observed identity. Token dimensions remain separate and unavailable usage remains `null`. It reports review/repair cycles, blocked proposals, accepted deliveries, guardian touches and automatic warning touches. Warnings appear once across observation/restart, are excluded from guardian-touch totals, and map to `usine_campaign_warning` when PostHog is enabled. No warning acknowledgement is needed.
 
 Evidence pages use a bounded Campaign Task cursor. Totals and plan/decision touch facts are Campaign-global and are returned on the first page; runs, aggregates, accepted deliveries, and coverage are page-scoped. The CLI drains all pages and recomputes the complete report. Record a bounded guardian decision through the public touch path:
 
@@ -457,7 +453,7 @@ node apps/cli/dist/cli.mjs repository get "<REPOSITORY_ID>" --json
 
 The Task Contract is the immutable authorization input. Create it in the registered Repository, use a full lowercase 40-character `baseSha` that is an ancestor of the current checkout, and commit the file before submitting it. For a standalone Task, the authorization URL must be the canonical HTTPS GitHub Issue URL for the registered owner/name and must use the same positive issue number as `delivery.issue`. Campaign-derived Task Contracts are admitted only by Campaign coordination: they retain the Goal source and may carry the proposal's optional same-Repository Task Issue without requiring it to match that source.
 
-Apply the [elapsed-budget selection rule](#select-elapsed-budgets-before-publication) before
+Apply the [standalone budget selection rule](#select-standalone-task-budgets-before-publication) before
 committing a standalone Task too; the sample `maxElapsedMs` below is not a runtime default.
 
 Current contract shape:
@@ -492,7 +488,7 @@ Current contract shape:
 }
 ```
 
-Replace the all-zero example SHA, owner, repository, Task ID, and Issue number. `maxImplementerActivations` and `maxReviewCycles` accept positive integers or explicit `null` for no count limit. Use a finite count only when that limit is intended; do not infer it from the task's expected difficulty. Goal count fields also accept zero to authorize no attempts, and omitted Goal count fields retain that meaning. A finite Goal cannot authorize an unbounded proposal. Deadlines and all acceptance and authority gates still apply. Set `authorization.merge` to `true` only when the authorization explicitly grants merge authority:
+Replace the all-zero example SHA, owner, repository, Task ID, and Issue number. Standalone `maxImplementerActivations` and `maxReviewCycles` accept positive integers or explicit `null`; use a finite count only when intended, not as an inferred task-difficulty estimate. Standalone elapsed deadlines and all acceptance/authority gates still apply. Set `authorization.merge` to `true` only when explicitly authorized:
 
 ```json
 "authorization": {
@@ -696,7 +692,7 @@ Retry it explicitly:
 node apps/cli/dist/cli.mjs task retry "<TASK_ID>" --json
 ```
 
-The retry resumes the recorded Task phase with the original contract, deadline, and Repository authority. Delivery reconciliation and external-review recovery reuse the approved bundle and require the original deadline; implementer recovery reserves the next implementer activation and also requires its applicable count budget. Reviewer interruption recovery is automatic and is not this mutation. Restart alone, re-submission, project-check failures, provider configuration failures, deterministic reviewer failures, and other non-retryable classes do not enter this explicit path. A retry against a non-waiting Task returns a retry conflict.
+The retry preserves the original contract, Repository authority and any admitted finite deadline. Delivery and external-review recovery reuse the approved bundle; implementer recovery reserves the next activation subject to any finite count. New Campaign Tasks have unbounded counts and no deadline, but abandoned Campaign work cannot retry. Reviewer interruption recovery is automatic, not this mutation. Non-waiting Tasks and unsupported failure classes remain retry conflicts.
 
 The server's default active-Task capacity is 1. A full capacity returns a retryable API error; wait for an active Task to become terminal before submitting another Task or adjust `USINE_ACTIVE_TASK_CAPACITY` to a positive finite value appropriate for the host. Capacity is a bounded admission setting, not a queue.
 

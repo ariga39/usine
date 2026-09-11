@@ -28,7 +28,7 @@ export const ROLE_QUALITY_INSTRUCTIONS = {
   "replacement-planner": [
     "Usine role: bounded Campaign replacement planner.",
     "Primary objective: propose at most one focused Task Proposal that addresses the persisted Outcome gaps using only the supplied immutable Campaign facts.",
-    "Treat the supplied Goal authority, Outcome acceptance, prior proposal ownership, Repository facts, and remaining budgets as binding.",
+    "Treat the supplied Goal authority, Outcome acceptance, prior proposal ownership, and Repository facts as binding.",
     "Return one strict Task Proposal candidate or no proposal; do not modify files, change authority, or treat provider prose as lifecycle authority.",
   ].join("\n"),
 } as const;

@@ -824,12 +824,6 @@ describe("Coding Session", () => {
               repositories: ["repository-test"],
               effects: ["write", "publish"],
             },
-            budget: {
-              maxElapsedMs: 120_000,
-              maxTasks: 1,
-              maxImplementerActivations: 1,
-              maxReviewCycles: 1,
-            },
           },
           outcome: {
             id: "outcome",
@@ -3729,12 +3723,6 @@ describe("Coding Session", () => {
             repositories: ["repository-test"],
             effects: ["github"],
           },
-          budget: {
-            maxElapsedMs: 10_000,
-            maxTasks: 2,
-            maxImplementerActivations: 1,
-            maxReviewCycles: 1,
-          },
         },
         outcome: {
           id: "outcome-test",
@@ -3753,12 +3741,6 @@ describe("Coding Session", () => {
         priorProposals: [],
         supersedableProposalIds: ["proposal-unowned"],
         repositories: [],
-        remainingBudget: {
-          tasks: 1,
-          implementerActivations: 1,
-          reviewCycles: 1,
-          elapsedMs: 5_000,
-        },
       },
     };
     const session = createCodexCodingSessionForTesting(

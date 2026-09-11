@@ -12,29 +12,30 @@ export interface CommittedContract {
 export async function verifyCommittedContract(
   committed: CommittedContract,
   contract: Pick<ResolvedTaskContract, "baseSha">,
-  deadlineEpochMs: number,
+  deadlineEpochMs: number | undefined,
   environment: NodeJS.ProcessEnv,
 ): Promise<void> {
+  const timeout = remainingUntil(deadlineEpochMs);
   await execa(
     "git",
     ["-C", committed.repository, "cat-file", "-e", `${contract.baseSha}^{commit}`],
     {
       env: environment,
       extendEnv: false,
-      timeout: remainingUntil(deadlineEpochMs),
+      ...(timeout === undefined ? {} : { timeout }),
     },
   );
   await execa(
     "git",
     ["-C", committed.repository, "merge-base", "--is-ancestor", contract.baseSha, "HEAD"],
-    { env: environment, extendEnv: false, timeout: remainingUntil(deadlineEpochMs) },
+    { env: environment, extendEnv: false, ...(timeout === undefined ? {} : { timeout }) },
   );
 }
 
 export async function readCommittedContract(
   contractPath: string,
   repositoryPath: string,
-  deadlineEpochMs: number,
+  deadlineEpochMs: number | undefined,
   environment: NodeJS.ProcessEnv,
   maxBytes: number,
 ): Promise<CommittedContract> {
@@ -46,10 +47,11 @@ export async function readCommittedContract(
     throw new Error("task contract must be a committed file in the authorized repository");
   }
 
+  const timeout = remainingUntil(deadlineEpochMs);
   const gitOptions = {
     env: environment,
     extendEnv: false,
-    timeout: remainingUntil(deadlineEpochMs),
+    ...(timeout === undefined ? {} : { timeout }),
   } as const;
   await execa(
     "git",

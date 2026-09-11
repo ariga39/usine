@@ -53,7 +53,7 @@ export interface GithubReadMcpOptions {
   tools: readonly GithubReadToolName[];
   policy: GithubApiPolicy;
   fetch?: typeof fetch;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   signal?: AbortSignal;
   requestTimeoutMs?: number;
 }
@@ -677,10 +677,7 @@ async function withRequestOptions<T>(
   options: GithubReadMcpOptions,
   operation: (request: RequestOptions) => Promise<T>,
 ): Promise<T> {
-  const timeout = Math.max(
-    1,
-    Math.min(options.requestTimeoutMs ?? 10_000, remainingUntil(options.deadlineEpochMs)),
-  );
+  const timeout = remainingUntil(options.deadlineEpochMs, options.requestTimeoutMs ?? 10_000);
   return Effect.runPromise(
     Effect.tryPromise({
       try: (signal) =>
@@ -696,7 +693,7 @@ async function withRequestOptions<T>(
 }
 
 type RequestOptions = {
-  timeout: number;
+  timeout?: number;
   retries: 0;
   signal: AbortSignal;
 };

@@ -192,7 +192,6 @@ test("does not display an assessed Outcome as accepted without verified evidence
       repositories: [],
       effects: [],
     },
-    budget: { maxElapsedMs: 60_000, maxTasks: 1, maxImplementerActivations: 1, maxReviewCycles: 1 },
   } satisfies GoalContract;
   const assessment = {
     role: "assessor",
