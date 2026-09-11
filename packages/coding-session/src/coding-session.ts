@@ -331,8 +331,8 @@ function roleNormalizerUsage(body: unknown): ProviderNeutralUsage {
   const uncached =
     miss !== undefined
       ? miss - (write ?? 0)
-      : inputTokens !== undefined && read !== undefined
-        ? inputTokens - read - (write ?? 0)
+      : inputTokens !== undefined && read !== undefined && write !== undefined
+        ? inputTokens - read - write
         : undefined;
   const reasoning = raw.completion_tokens_details?.reasoning_tokens ?? undefined;
   return {

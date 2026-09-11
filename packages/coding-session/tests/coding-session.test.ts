@@ -2758,6 +2758,15 @@ describe("Coding Session", () => {
       },
       expected: { inputTokens: 1000, outputTokens: 7 },
     },
+    {
+      name: "unknown writes do not imply ordinary input",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 800 },
+      },
+      expected: { inputTokens: 1000, outputTokens: 7, cachedInputTokens: 800 },
+    },
     { name: "absent usage", usage: undefined, expected: {} },
     {
       name: "null dimensions",
@@ -2843,12 +2852,12 @@ describe("Coding Session", () => {
       const session = new CodexCodingSession(
         async () =>
           testClient(async () =>
-              sdkTurn("unstructured provider prose", {
-                input_tokens: 10,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 2,
-                reasoning_output_tokens: 0,
+            sdkTurn("unstructured provider prose", {
+              input_tokens: 10,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 2,
+              reasoning_output_tokens: 0,
             }),
           ),
         {
