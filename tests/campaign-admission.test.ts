@@ -9,6 +9,7 @@ import {
   registerRepositoryResource,
   startUsineServer,
   type CampaignOutcomeAssessor,
+  type CampaignReplacementRequest,
   type CampaignReplacementGenerator,
 } from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
@@ -4945,8 +4946,11 @@ describe("durable Ready frontier", () => {
       }
       return checkpointDirectionGapAssessor(request);
     };
-    const replacementGenerator: CampaignReplacementGenerator = async () => {
+    const observedReplacementFeedback: CampaignReplacementRequest["rejectionFeedback"][] = [];
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
       replacementCalls += 1;
+      observedReplacementFeedback.push(request.rejectionFeedback);
+      expect(request.supersedableProposalIds).toEqual([initial.proposalId]);
       if (replacementCalls === 1) {
         replacementEntered();
         return {
@@ -5006,6 +5010,12 @@ describe("durable Ready frontier", () => {
         throw new Error(`correction did not accept: ${JSON.stringify(accepted)}`);
       expect(accepted).toMatchObject({ status: "accepted" });
       expect(replacementCalls).toBeGreaterThanOrEqual(2);
+      expect(observedReplacementFeedback[0]).toBeNull();
+      expect(observedReplacementFeedback[1]).toMatchObject({
+        status: "invalid",
+        reason: expect.stringContaining("checkpoint source"),
+      });
+      expect(observedReplacementFeedback[1]?.reason).not.toContain("missing-checkpoint-source");
       expect(executedTaskIds).not.toContain("campaign-campaign-366-v1-unauthorized-replacement");
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
@@ -6825,6 +6835,7 @@ describe("durable Ready frontier", () => {
   test("continues successive corrections after final assessment and recovers malformed attempts", async () => {
     let assessmentCalls = 0;
     let replacementCalls = 0;
+    const replacementRequests: CampaignReplacementRequest[] = [];
     const assessor: CampaignOutcomeAssessor = async (request) => {
       assessmentCalls += 1;
       if (assessmentCalls === 1) throw new Error("interrupted assessment");
@@ -6846,8 +6857,9 @@ describe("durable Ready frontier", () => {
         };
       return satisfiesDeliveredOutcome(request);
     };
-    const replacementGenerator: CampaignReplacementGenerator = async () => {
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
       replacementCalls += 1;
+      replacementRequests.push(request);
       if (replacementCalls === 1) throw new Error("interrupted planner");
       if (replacementCalls === 2)
         return { proposal: { malformed: true }, usage: null } as unknown as Awaited<
@@ -6900,6 +6912,18 @@ describe("durable Ready frontier", () => {
       });
       expect(assessmentCalls).toBeGreaterThanOrEqual(5);
       expect(replacementCalls).toBeGreaterThanOrEqual(4);
+      expect(replacementRequests[2]?.rejectionFeedback).toMatchObject({
+        status: "invalid",
+        reason: expect.any(String),
+      });
+      expect(replacementRequests[3]?.rejectionFeedback).toBeNull();
+      expect(replacementRequests[3]?.assessment.assessmentId).not.toBe(
+        replacementRequests[2]?.assessment.assessmentId,
+      );
+      expect(replacementRequests[3]?.assessment.evidenceHash).not.toBe(
+        replacementRequests[2]?.assessment.evidenceHash,
+      );
+      expect(replacementRequests[3]?.evidence).not.toEqual(replacementRequests[2]?.evidence);
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
         expect(
@@ -7601,6 +7625,7 @@ describe("durable Ready frontier", () => {
     "records $name without a hidden replacement cutoff",
     async ({ proposal, reason, storedStatus }) => {
       let replacementCalls = 0;
+      const observedFeedback: CampaignReplacementRequest["rejectionFeedback"][] = [];
       const validProposal = frontierProposal("valid-replacement", "outcome-one");
       let firstAttemptEntered!: () => void;
       const firstAttemptStarted = new Promise<void>((resolve) => {
@@ -7641,8 +7666,9 @@ describe("durable Ready frontier", () => {
           usage: null,
         };
       };
-      const replacementGenerator: CampaignReplacementGenerator = async () => {
+      const replacementGenerator: CampaignReplacementGenerator = async (request) => {
         replacementCalls += 1;
+        observedFeedback.push(request.rejectionFeedback);
         if (proposal === null) return { proposal: null, usage: null };
         if (replacementCalls === 1) {
           firstAttemptEntered();
@@ -7736,7 +7762,7 @@ describe("durable Ready frontier", () => {
           try {
             const runs = database
               .prepare(
-                "SELECT status, role, usage FROM campaign_replacement_runs WHERE campaign_id = ? ORDER BY started_at_epoch_ms",
+                "SELECT status, role, usage, rejection_reason FROM campaign_replacement_runs WHERE campaign_id = ? ORDER BY started_at_epoch_ms",
               )
               .all(published.campaignId);
             expect(runs[0]).toMatchObject({
@@ -7750,6 +7776,21 @@ describe("durable Ready frontier", () => {
                 role: "replacement-planner",
                 usage: null,
               });
+            if (storedStatus === "invalid" || storedStatus === "duplicate") {
+              expect(observedFeedback[1]).toMatchObject({
+                status: storedStatus,
+                reason: expect.any(String),
+              });
+              expect(runs[0]).toMatchObject({ rejection_reason: expect.any(String) });
+              if (storedStatus === "duplicate") {
+                expect(observedFeedback[1]?.reason).toContain("deduplication");
+                expect(observedFeedback[1]?.reason).toContain("Do not invent a new proposal ID");
+                expect(observedFeedback[1]?.reason).not.toMatch(/rename|choose a new ID/i);
+              }
+            } else {
+              expect(observedFeedback[1] ?? null).toBeNull();
+              expect(runs[0]).toMatchObject({ rejection_reason: null });
+            }
           } finally {
             database.close();
           }
