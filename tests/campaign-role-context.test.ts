@@ -187,6 +187,7 @@ function plannerRequest(): CampaignReplacementRequest {
       merge: false,
     })),
     supersedableProposalIds: ["proposal-b", "proposal-a"],
+    rejectionFeedback: null,
     repositories,
   };
 }
@@ -453,5 +454,29 @@ test("planner excludes accounting churn but retains requirements, authority and 
     priorProposals: [...request.priorProposals].reverse(),
   });
   expect(seam.calls[4]!.prompt).not.toBe(seam.calls[0]!.prompt);
-  expect(seam.threads()).toBe(5);
+  const feedback = {
+    status: "invalid" as const,
+    reason: "The replacement proposal was rejected because its Repository is not authorized.",
+  };
+  await plan({ ...request, invocationId: "feedback", rejectionFeedback: feedback });
+  expect(section(seam.calls[5]!.prompt, "Planning context")).toEqual(planning);
+  expect(section(seam.calls[5]!.prompt, "Current assessment and evidence")).toEqual(dynamic);
+  expect(seam.calls[5]!.prompt).toContain("Previous replacement admission feedback:");
+  expect(seam.calls[5]!.prompt).toContain(feedback.reason);
+
+  await plan({
+    ...request,
+    invocationId: "new-evidence",
+    assessment: {
+      ...request.assessment,
+      assessmentId: "newer-assessment",
+      evidenceHash: "newer-hash",
+    },
+    evidence: evidence.map((fact) => ({ ...fact, sha: "d".repeat(40) })),
+    rejectionFeedback: null,
+  });
+  expect(section(seam.calls[6]!.prompt, "Planning context")).toEqual(planning);
+  expect(seam.calls[6]!.prompt).not.toContain("Previous replacement admission feedback:");
+  expect(seam.calls[6]!.prompt).toContain("newer-hash");
+  expect(seam.threads()).toBe(7);
 });

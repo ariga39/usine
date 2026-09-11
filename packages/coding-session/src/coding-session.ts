@@ -180,6 +180,10 @@ export interface CampaignReplacementPlannerSessionContext {
     readonly evidence: readonly CampaignAssessmentEvidence[];
   };
   readonly evidence: readonly CampaignAssessmentFact[];
+  readonly rejectionFeedback?: {
+    readonly status: "invalid" | "duplicate";
+    readonly reason: string;
+  };
   readonly priorProposals: readonly {
     readonly proposalId: string;
     readonly outcomeId: string;
