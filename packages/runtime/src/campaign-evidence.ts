@@ -57,16 +57,17 @@ export async function lookupCampaignEvidence(
     const authority = new TaskAuthority(handle.database);
     const requested = await authority.listCampaignEvidenceSources(campaignId, request);
     if (!requested) return null;
-    const sourceSet = await loadAllSources(authority, campaignId, requested, request);
+    const sourceSet =
+      request.cursor === null ? await loadAllSources(authority, campaignId, requested) : null;
     const pageRuns = [
       ...requested.campaignRuns,
       ...requested.sources.flatMap((source) => usageRuns(source)),
     ];
-    const allRuns = [
-      ...sourceSet.campaignRuns,
-      ...sourceSet.sources.flatMap((source) => usageRuns(source)),
-    ];
-    const allTouches = touches(sourceSet.firstPage);
+    const allRuns =
+      sourceSet === null
+        ? []
+        : [...sourceSet.campaignRuns, ...sourceSet.sources.flatMap((source) => usageRuns(source))];
+    const allTouches = sourceSet === null ? [] : touches(sourceSet.firstPage);
     const deliveries = requested.sources.flatMap((source) => acceptedDelivery(source));
     const report: CampaignEvidencePage = {
       schemaVersion: 1,
@@ -82,7 +83,7 @@ export async function lookupCampaignEvidence(
       coverage: coverageForRuns(pageRuns),
       runs: pageRuns,
       aggregates: aggregateRuns(pageRuns),
-      totals: totals(sourceSet, allRuns, allTouches),
+      totals: sourceSet === null ? null : totals(sourceSet, allRuns, allTouches),
       touches: request.cursor === null ? allTouches : [],
       deliveries,
     };
@@ -96,15 +97,8 @@ async function loadAllSources(
   authority: TaskAuthority,
   campaignId: string,
   requested: CampaignEvidenceSourcesPage,
-  request: CampaignEvidenceRequest,
 ): Promise<CampaignEvidenceSourceSet> {
-  const firstPage =
-    request.cursor === null
-      ? requested
-      : ((await authority.listCampaignEvidenceSources(campaignId, {
-          cursor: null,
-          limit: MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
-        })) ?? requested);
+  const firstPage = requested;
   const sources = [...firstPage.sources];
   let cursor = firstPage.nextCursor;
   while (cursor !== null) {

@@ -121,17 +121,19 @@ export const campaignEvidencePageSchema = Schema.Struct({
   coverage: Schema.Literals(["complete", "partial", "unavailable"]),
   runs: Schema.Array(evidenceRun),
   aggregates: Schema.Array(evidenceAggregate),
-  totals: Schema.Struct({
-    invocations: Schema.Natural,
-    elapsedMs: Schema.NullOr(Schema.Natural),
-    reviewCycles: Schema.Natural,
-    repairBatches: Schema.Natural,
-    blockedProposals: Schema.Natural,
-    guardianTouches: Schema.Natural,
-    acceptedDeliveries: Schema.Natural,
-    terminalTaskCounts: terminalTaskCounts,
-    usage: usageAmounts,
-  }),
+  totals: Schema.NullOr(
+    Schema.Struct({
+      invocations: Schema.Natural,
+      elapsedMs: Schema.NullOr(Schema.Natural),
+      reviewCycles: Schema.Natural,
+      repairBatches: Schema.Natural,
+      blockedProposals: Schema.Natural,
+      guardianTouches: Schema.Natural,
+      acceptedDeliveries: Schema.Natural,
+      terminalTaskCounts: terminalTaskCounts,
+      usage: usageAmounts,
+    }),
+  ),
   touches: Schema.Array(campaignTouch),
   deliveries: Schema.Array(acceptedDelivery),
 });
@@ -139,7 +141,7 @@ export const campaignEvidencePageSchema = Schema.Struct({
 export type CampaignEvidencePage = Schema.Schema.Type<typeof campaignEvidencePageSchema>;
 export type CampaignEvidenceRun = CampaignEvidencePage["runs"][number];
 export type CampaignEvidenceAggregate = CampaignEvidencePage["aggregates"][number];
-export type CampaignEvidenceTotals = CampaignEvidencePage["totals"];
+export type CampaignEvidenceTotals = NonNullable<CampaignEvidencePage["totals"]>;
 export type CampaignEvidenceTouch = CampaignEvidencePage["touches"][number];
 export type CampaignAcceptedDelivery = CampaignEvidencePage["deliveries"][number];
 

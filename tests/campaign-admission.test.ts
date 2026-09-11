@@ -5896,7 +5896,7 @@ describe("durable Ready frontier", () => {
       expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(
         campaignRuns.length,
       );
-      expect(publicReport!.totals.invocations).toBe(evidence!.totals.invocations);
+      expect(publicReport!.totals.invocations).toBe(evidence!.totals!.invocations);
       expect(accepted?.outcomes[0]?.assessment).toMatchObject({
         usage: { inputTokens: 9, outputTokens: 5 },
         usageSource: "model_run",

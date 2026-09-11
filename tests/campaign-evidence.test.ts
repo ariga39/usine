@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execa } from "execa";
 import { afterEach, expect, test } from "vite-plus/test";
 import {
@@ -14,7 +14,10 @@ import {
   implementerOutputSchema,
   type SessionObservation,
 } from "@usine/coding-session";
-import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
+import {
+  campaignEvidenceToPostHogEvents,
+  captureCampaignEvidence,
+} from "../packages/runtime/src/posthog.js";
 import { campaignModelRunFromObservation } from "../packages/runtime/src/campaign-model-run.js";
 import {
   campaignEvidence,
@@ -36,10 +39,10 @@ afterEach(async () => {
   while (servers.length > 0) await servers.pop()?.close();
 });
 
-function goalContract() {
+function goalContract(id = "evidence-goal") {
   return {
     schemaVersion: 1,
-    id: "evidence-goal",
+    id,
     version: 1,
     objective: "Measure the campaign",
     outcomes: [
@@ -86,6 +89,7 @@ type ReviewerInterruptionFixture = {
 async function fixture(
   mode: "successful" | "interrupted" | ReviewerInterruptionFixture = "successful",
   normalizer?: SessionObservation["normalizer"],
+  expectedExecutions = 2,
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
   const stateDirectory = join(root, "state");
@@ -404,7 +408,7 @@ async function fixture(
           merge: null,
         },
       );
-      if (executions === 2) finish();
+      if (executions === expectedExecutions) finish();
       return delivered;
     },
   });
@@ -423,6 +427,416 @@ async function fixture(
   });
   return { stateDirectory, contractPath, server, finished };
 }
+
+test("measures baseline Campaign evidence reads across Campaigns and pages", async () => {
+  const persistedResults = new Set<string>();
+  const unrelatedResults = new Set<string>();
+  let campaignEventCount = 0;
+  let maxTaskEventCount = 0;
+  const { stateDirectory, contractPath, server, finished } = await fixture(
+    "successful",
+    undefined,
+    4,
+  );
+  const first = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, first.campaignId, proposal("first-one", "outcome-one"));
+  await proposeCampaign(server.url, first.campaignId, proposal("first-two", "outcome-two"));
+
+  const secondContractPath = join(dirname(contractPath), "goal-two.json");
+  await writeFile(secondContractPath, JSON.stringify(goalContract("evidence-goal-two")));
+  await execa("git", ["add", "goal-two.json"], { cwd: dirname(contractPath) });
+  await execa("git", ["commit", "-m", "authorize second campaign"], {
+    cwd: dirname(contractPath),
+  });
+  const second = await publishCampaign(server.url, { contractPath: secondContractPath });
+  await proposeCampaign(server.url, second.campaignId, proposal("second-one", "outcome-one"));
+  await proposeCampaign(server.url, second.campaignId, proposal("second-two", "outcome-two"));
+  await handoffCampaign(server.url, first.campaignId);
+  await handoffCampaign(server.url, second.campaignId);
+  await finished;
+  await expect
+    .poll(async () => (await getCampaign(server.url, first.campaignId))?.status)
+    .toBe("blocked");
+  await expect
+    .poll(async () => (await getCampaign(server.url, second.campaignId))?.status)
+    .toBe("blocked");
+
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    const rows = database
+      .prepare("SELECT task_id, result FROM task_runs ORDER BY task_id")
+      .all() as Array<{ task_id: string; result: string }>;
+    const firstTask = rows.find((row) => {
+      const result = JSON.parse(row.result) as { campaign?: { campaignId?: string } };
+      return result.campaign?.campaignId === first.campaignId;
+    });
+    if (!firstTask) throw new Error("first Campaign task was not persisted");
+    for (const source of rows) {
+      for (let index = 0; index < 100; index += 1) {
+        const taskId = `seed-${source.task_id}-${String(index).padStart(3, "0")}`;
+        database
+          .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+          .run(taskId, source.result.replaceAll(source.task_id, taskId));
+        database
+          .prepare(`INSERT INTO task_events
+          (task_id, sequence, event_id, occurred_at_epoch_ms, data)
+          SELECT ?, sequence, event_id, occurred_at_epoch_ms, replace(data, ?, ?)
+          FROM task_events WHERE task_id = ?`)
+          .run(taskId, source.task_id, taskId, source.task_id);
+      }
+    }
+    database
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(firstTask.result.replace('"goalVersion":1,', '"goalVersion":1.0,'), firstTask.task_id);
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run("malformed-unrelated-task", "{ invalid");
+    for (const row of database.prepare("SELECT result FROM task_runs").all()) {
+      const raw = row.result as string;
+      persistedResults.add(raw);
+      if (raw.includes(second.campaignId) || raw === "{ invalid") unrelatedResults.add(raw);
+    }
+    campaignEventCount = Number(
+      database
+        .prepare(`SELECT count(*) AS count FROM task_events
+      WHERE task_id IN (SELECT task_id FROM task_runs WHERE
+        json_extract(CASE WHEN json_valid(result) THEN result ELSE '{}' END, '$.campaign.campaignId') = ?)`)
+        .get(first.campaignId)!.count,
+    );
+    maxTaskEventCount = Number(
+      database
+        .prepare(`SELECT max(event_count) AS count FROM
+      (SELECT count(*) AS event_count FROM task_events GROUP BY task_id)`)
+        .get()!.count,
+    );
+  } finally {
+    database.close();
+  }
+
+  type ReadStats = {
+    readonly prepareCount: number;
+    readonly taskResultRows: number;
+    readonly taskEventRows: number;
+    readonly taskDecodes: number;
+    readonly unrelatedDecodes: number;
+    readonly elapsedMs: number;
+  };
+
+  const measure = async <T>(
+    label: string,
+    operation: () => Promise<T>,
+  ): Promise<{ readonly value: T; readonly stats: ReadStats }> => {
+    const databasePrototype = DatabaseSync.prototype as unknown as {
+      prepare: (query: string) => unknown;
+    };
+    const originalPrepare = databasePrototype.prepare;
+    let prepareCount = 0;
+    let taskResultRows = 0;
+    let taskEventRows = 0;
+    let taskDecodes = 0;
+    let unrelatedDecodes = 0;
+    const originalParse = JSON.parse;
+    JSON.parse = (...args: Parameters<typeof JSON.parse>) => {
+      if (persistedResults.has(args[0])) taskDecodes += 1;
+      if (unrelatedResults.has(args[0])) unrelatedDecodes += 1;
+      return originalParse(...args);
+    };
+    const countRows = (query: string, result: unknown): void => {
+      const rows = Array.isArray(result) ? result.length : result === undefined ? 0 : 1;
+      if (/\btask_runs\b/i.test(query) && /\bresult\b/i.test(query)) taskResultRows += rows;
+      if (/\btask_events\b/i.test(query)) taskEventRows += rows;
+    };
+    databasePrototype.prepare = function (this: unknown, query: string): unknown {
+      prepareCount += 1;
+      const statement = originalPrepare.call(this, query) as object;
+      return new Proxy(statement, {
+        get(target, property, receiver) {
+          if (property === "all" || property === "get") {
+            return (...parameters: unknown[]) => {
+              const result = (target as Record<string, (...args: unknown[]) => unknown>)[property]!(
+                ...parameters,
+              );
+              countRows(query, result);
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    };
+    const startedAt = performance.now();
+    try {
+      const value = await operation();
+      return {
+        value,
+        stats: {
+          prepareCount,
+          taskResultRows,
+          taskEventRows,
+          taskDecodes,
+          unrelatedDecodes,
+          elapsedMs: performance.now() - startedAt,
+        },
+      };
+    } finally {
+      JSON.parse = originalParse;
+      databasePrototype.prepare = originalPrepare;
+      console.info(
+        `Issue489 baseline ${label}: ${JSON.stringify({
+          prepareCount,
+          taskResultRows,
+          taskEventRows,
+          taskDecodes,
+          unrelatedDecodes,
+          elapsedMs: performance.now() - startedAt,
+        })}`,
+      );
+    }
+  };
+
+  const cli = await measure("cli", () => campaignEvidence(server.url, first.campaignId, 50));
+  expect(cli.value?.runs).toHaveLength(404);
+  expect(cli.value?.runs.every((run) => run.taskId !== null)).toBe(true);
+  expect(cli.value?.totals!.invocations).toBe(404);
+  expect(cli.stats.taskResultRows).toBeGreaterThan(0);
+  expect(cli.stats.taskEventRows).toBeGreaterThan(0);
+  expect(cli.stats.taskDecodes).toBeLessThanOrEqual(2 * 202 + 30);
+  expect(cli.stats.unrelatedDecodes).toBe(0);
+  expect(cli.stats.taskEventRows).toBeLessThanOrEqual(2 * campaignEventCount);
+
+  const posthog = await measure("posthog", () =>
+    captureCampaignEvidence(
+      stateDirectory,
+      first.campaignId,
+      {
+        USINE_POSTHOG_API_KEY: "test-key",
+        USINE_POSTHOG_DEPLOYMENT: "issue489-baseline",
+      },
+      async () => new Response(null, { status: 200 }),
+    ),
+  );
+  expect(posthog.stats.taskResultRows).toBeGreaterThan(0);
+  expect(posthog.stats.taskEventRows).toBeGreaterThan(0);
+  expect(posthog.stats.taskDecodes).toBeLessThanOrEqual(2 * 202 + 30);
+  expect(posthog.stats.unrelatedDecodes).toBe(0);
+  expect(posthog.stats.taskEventRows).toBeLessThanOrEqual(2 * campaignEventCount);
+
+  const firstPage = await measure("first-page", () =>
+    lookupCampaignEvidence(stateDirectory, first.campaignId, { cursor: null, limit: 50 }),
+  );
+  expect(firstPage.value?.totals?.invocations).toBe(404);
+  expect(firstPage.stats.unrelatedDecodes).toBe(0);
+  expect(firstPage.stats.taskDecodes).toBeLessThanOrEqual(202 + 10);
+  const continuation = await measure("continuation", () =>
+    lookupCampaignEvidence(stateDirectory, first.campaignId, {
+      cursor: firstPage.value!.nextCursor,
+      limit: 50,
+    }),
+  );
+  expect(continuation.value?.totals).toBeNull();
+  expect(continuation.stats.unrelatedDecodes).toBe(0);
+  expect(continuation.stats.taskDecodes).toBeLessThanOrEqual(50 + 10);
+  expect(continuation.stats.taskEventRows).toBeLessThanOrEqual(50 * maxTaskEventCount);
+});
+
+function campaignEvidenceCursor(
+  campaignId: string,
+  upperTaskId: string,
+  afterTaskId: string,
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      scope: `campaign-evidence:${campaignId}`,
+      upperTaskId,
+      afterTaskId,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+test("skips quarantined Campaign rows and preserves historical cursor membership", async () => {
+  const { stateDirectory, contractPath, server, finished } = await fixture();
+  const published = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, published.campaignId, proposal("first-one", "outcome-one"));
+  await proposeCampaign(server.url, published.campaignId, proposal("first-two", "outcome-two"));
+  await handoffCampaign(server.url, published.campaignId);
+  await finished;
+
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  let validTaskIds: string[] = [];
+  try {
+    const rows = database
+      .prepare("SELECT task_id, result FROM task_runs ORDER BY task_id")
+      .all() as Array<{ task_id: string; result: string }>;
+    const targetRows = rows.filter((row) => {
+      const result = JSON.parse(row.result) as { campaign?: { campaignId?: string } };
+      return result.campaign?.campaignId === published.campaignId;
+    });
+    validTaskIds = targetRows.map((row) => row.task_id);
+    expect(validTaskIds).toHaveLength(2);
+
+    const historical = JSON.parse(targetRows[0]!.result) as Record<string, unknown>;
+    historical.schemaVersion = 3;
+    delete historical.blockerClassification;
+    if (historical.deadlineEpochMs === undefined) historical.deadlineEpochMs = Date.now() + 30_000;
+    database
+      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+      .run(
+        JSON.stringify(historical).replace('"goalVersion":1', '"goalVersion":1.0'),
+        targetRows[0]!.task_id,
+      );
+
+    const interleavedTaskId = `${validTaskIds[0]}:quarantined`;
+    expect(validTaskIds[0]! < interleavedTaskId && interleavedTaskId < validTaskIds[1]!).toBe(true);
+    const quarantineResult = JSON.stringify({
+      schemaVersion: 4,
+      taskId: interleavedTaskId,
+      campaign: {
+        campaignId: published.campaignId,
+        goalId: "evidence-goal",
+        goalVersion: 1,
+        outcomeId: "outcome-one",
+      },
+    });
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(interleavedTaskId, quarantineResult);
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run("zzzz-quarantined", quarantineResult.replaceAll(interleavedTaskId, "zzzz-quarantined"));
+  } finally {
+    database.close();
+  }
+
+  const pages = [
+    await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+      cursor: null,
+      limit: 1,
+    }),
+  ];
+  while (pages.at(-1)?.nextCursor !== null)
+    pages.push(
+      await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+        cursor: pages.at(-1)!.nextCursor,
+        limit: 1,
+      }),
+    );
+  const observedTaskIds = [
+    ...new Set(
+      pages
+        .flatMap((page) => page?.runs.map((run) => run.taskId) ?? [])
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  expect(observedTaskIds).toEqual(validTaskIds);
+  expect(pages).toHaveLength(2);
+  expect(pages.flatMap((page) => page?.runs ?? [])).toHaveLength(4);
+
+  await expect(
+    lookupCampaignEvidence(stateDirectory, published.campaignId, {
+      cursor: campaignEvidenceCursor(published.campaignId, "zzzz-quarantined", validTaskIds[0]!),
+      limit: 1,
+    }),
+  ).rejects.toBeInstanceOf(CampaignEvidenceCursorError);
+  await expect(
+    lookupCampaignEvidence(stateDirectory, published.campaignId, {
+      cursor: campaignEvidenceCursor(
+        published.campaignId,
+        validTaskIds[1]!,
+        `${validTaskIds[0]}:quarantined`,
+      ),
+      limit: 1,
+    }),
+  ).rejects.toBeInstanceOf(CampaignEvidenceCursorError);
+});
+
+test("retains Campaign model runs when no Task is associated", async () => {
+  const { stateDirectory, contractPath, server } = await fixture();
+  const published = await publishCampaign(server.url, { contractPath });
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    database
+      .prepare(
+        `INSERT INTO campaign_model_runs
+          (invocation_id, campaign_id, outcome_id, role, status, started_at_epoch_ms)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "empty-campaign-assessor",
+        published.campaignId,
+        "outcome-one",
+        "assessor",
+        "succeeded",
+        100,
+      );
+  } finally {
+    database.close();
+  }
+
+  const report = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+  expect(report?.runs).toEqual([
+    expect.objectContaining({
+      invocationId: "empty-campaign-assessor",
+      taskId: null,
+      role: "assessor",
+    }),
+  ]);
+  expect(report?.totals?.invocations).toBe(1);
+});
+
+test("advances continuation progress without leaking Tasks beyond the cursor upper bound", async () => {
+  const { stateDirectory, contractPath, server, finished } = await fixture();
+  const published = await publishCampaign(server.url, { contractPath });
+  await proposeCampaign(server.url, published.campaignId, proposal("first-one", "outcome-one"));
+  await proposeCampaign(server.url, published.campaignId, proposal("first-two", "outcome-two"));
+  await handoffCampaign(server.url, published.campaignId);
+  await finished;
+
+  const first = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+    cursor: null,
+    limit: 1,
+  });
+  if (!first?.nextCursor) throw new Error("expected a continuation cursor");
+
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  try {
+    const source = database
+      .prepare(
+        "SELECT task_id, result FROM task_runs WHERE task_id LIKE ? ORDER BY task_id LIMIT 1",
+      )
+      .get(`campaign-evidence-goal-v1-%`) as { task_id: string; result: string };
+    const appendedTaskId = "zzzz-appended-after-upper";
+    const appended = JSON.parse(source.result) as Record<string, unknown>;
+    appended.taskId = appendedTaskId;
+    database
+      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+      .run(appendedTaskId, JSON.stringify(appended));
+    database
+      .prepare("UPDATE campaigns SET revision = revision + 1, updated_at = ? WHERE campaign_id = ?")
+      .run(Date.now(), published.campaignId);
+  } finally {
+    database.close();
+  }
+
+  const continuation = await lookupCampaignEvidence(stateDirectory, published.campaignId, {
+    cursor: first.nextCursor,
+    limit: 1,
+  });
+  expect(continuation?.progress.revision).toBeGreaterThan(first.progress.revision);
+  expect(continuation?.totals).toBeNull();
+  expect(continuation?.runs.some((run) => run.taskId === "zzzz-appended-after-upper")).toBe(false);
+  expect(
+    continuation?.deliveries.some((delivery) => delivery.taskId === "zzzz-appended-after-upper"),
+  ).toBe(false);
+  const refreshed = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+  expect(
+    refreshed?.deliveries.some((delivery) => delivery.taskId === "zzzz-appended-after-upper"),
+  ).toBe(true);
+  expect(first.totals?.acceptedDeliveries).toBe(2);
+  expect(refreshed?.totals?.acceptedDeliveries).toBe(3);
+});
 
 test("projects public Campaign writes into deterministic evidence across Tasks and providers", async () => {
   const { stateDirectory, contractPath, server, finished } = await fixture();
@@ -512,6 +926,7 @@ test("projects public Campaign writes into deterministic evidence across Tasks a
   expect(second?.runs[1]?.usage).toMatchObject({ inputTokens: 0, outputTokens: 0 });
   expect(second?.deliveries).toHaveLength(1);
   expect(second?.touches).toEqual([]);
+  expect(second?.totals).toBeNull();
 
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
   expect(publicReport?.runs).toHaveLength(4);
@@ -944,7 +1359,7 @@ test("projects Campaign model invocations, including a normalizer, exactly once"
   expect(second!.runs.every((run) => run.taskId !== null)).toBe(true);
   const publicReport = await campaignEvidence(server.url, published.campaignId, 1);
   expect(publicReport!.runs.filter((run) => run.taskId === null)).toHaveLength(3);
-  expect(publicReport!.totals.invocations).toBe(first!.totals.invocations);
+  expect(publicReport!.totals.invocations).toBe(first!.totals!.invocations);
   expect(new Set(publicReport!.runs.map((run) => run.invocationId)).size).toBe(
     publicReport!.runs.length,
   );
@@ -1018,8 +1433,8 @@ test.each([
     const persisted = await lookupCampaignEvidence(stateDirectory, published.campaignId);
     const run = persisted?.runs[0];
     expect(run).toMatchObject({ role: "reviewer", outcome, failureClass });
-    if (outcome === "failed") expect(persisted?.totals.terminalTaskCounts[failureClass]).toBe(1);
-    else expect(persisted?.totals.terminalTaskCounts).not.toHaveProperty("cancellation");
+    if (outcome === "failed") expect(persisted?.totals?.terminalTaskCounts[failureClass]).toBe(1);
+    else expect(persisted?.totals?.terminalTaskCounts).not.toHaveProperty("cancellation");
     const taskId = run?.taskId;
     expect(taskId).toBeDefined();
     const history = await taskEvents(server.url, taskId!, 0, 100);

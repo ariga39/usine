@@ -61,6 +61,16 @@ export function campaignEvidenceToPostHogEvents(
   const deploymentLabel = deployment.trim();
   if (!deploymentLabel) return [];
   const distinctId = campaign.campaignId;
+  const roleEvents = evidence.runs
+    .filter((run) => run.outcome !== "unknown")
+    .map((run) => roleRunEvent(deploymentLabel, distinctId, run));
+  const deliveryEvents = evidence.deliveries.map((delivery) =>
+    deliveryEvent(deploymentLabel, distinctId, delivery),
+  );
+  if (evidence.cursor !== null) {
+    return [...roleEvents, ...deliveryEvents];
+  }
+  if (evidence.totals === null) throw new Error("Campaign evidence first page has no totals");
   const terminalFailureProperties: Record<string, number> = {};
   for (const classification of TASK_TERMINAL_FAILURE_CLASSES) {
     terminalFailureProperties[`terminal_tasks_${classification}`] =
@@ -110,20 +120,14 @@ export function campaignEvidenceToPostHogEvents(
   } satisfies Readonly<Record<string, PostHogProperty>>;
   const timestamp = timestampForEpochMs(evidence.progress.occurredAtEpochMs);
   return [
-    ...(evidence.cursor === null
-      ? [makeEvent("usine_campaign_progress", distinctId, timestamp, properties)]
-      : []),
-    ...evidence.runs
-      .filter((run) => run.outcome !== "unknown")
-      .map((run) => roleRunEvent(deploymentLabel, distinctId, run)),
-    ...(evidence.cursor === null
-      ? evidence.touches.flatMap((touch) =>
-          touch.type === "warning"
-            ? [warningEvent(deploymentLabel, distinctId, touch)]
-            : [touchEvent(deploymentLabel, distinctId, touch)],
-        )
-      : []),
-    ...evidence.deliveries.map((delivery) => deliveryEvent(deploymentLabel, distinctId, delivery)),
+    makeEvent("usine_campaign_progress", distinctId, timestamp, properties),
+    ...roleEvents,
+    ...evidence.touches.flatMap((touch) =>
+      touch.type === "warning"
+        ? [warningEvent(deploymentLabel, distinctId, touch)]
+        : [touchEvent(deploymentLabel, distinctId, touch)],
+    ),
+    ...deliveryEvents,
   ];
 }
 
