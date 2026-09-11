@@ -1,5 +1,9 @@
 import type { WriterWorkspace } from "@usine/candidate-workspace";
-import { implementerOutputSchema, type SessionArchiveCaptureStatus } from "@usine/coding-session";
+import {
+  implementerOutputSchema,
+  serializeRoleContext,
+  type SessionArchiveCaptureStatus,
+} from "@usine/coding-session";
 import {
   deadlineExpired,
   countBudgetExhausted,
@@ -22,14 +26,14 @@ function implementerPrompt(
 ): string {
   const taskContract = originalTaskContract(input.contract);
   return [
-    `Task Contract: ${JSON.stringify(taskContract)}`,
+    "Return a schema-valid proposed or blocked result; the host will finalize the Candidate and the coordinator owns authority.",
+    `Task Contract: ${serializeRoleContext(taskContract)}`,
     `Current candidate parent SHA: ${previousSha}`,
     check
-      ? `Failed project check evidence: ${JSON.stringify(check)}`
+      ? `Failed project check evidence: ${serializeRoleContext(check)}`
       : findings.length > 0
         ? `Aggregated findings to repair: ${findings.join("; ")}`
         : "No prior findings.",
-    "Return a schema-valid proposed or blocked result; the host will finalize the Candidate and the coordinator owns authority.",
   ].join("\n");
 }
 

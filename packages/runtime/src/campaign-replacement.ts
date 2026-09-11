@@ -9,6 +9,7 @@ import type {
 import { taskProposalSchema } from "@usine/task-authority";
 import {
   CodexCodingSession,
+  serializeRoleContext,
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
   type CampaignReplacementPlannerSessionRequest,
@@ -17,6 +18,7 @@ import {
 import { acceptanceCriterionText } from "@usine/task-authority";
 import { z } from "zod";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
+import { orderedContextFacts } from "./campaign-role-context.js";
 import {
   campaignUsageCoverage,
   campaignModelRunFromObservation,
@@ -105,23 +107,46 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
         request.environment.USINE_STATE_DIR ?? ".",
       ),
     });
+    const { warningThresholdMs: _warningThresholdMs, ...goal } = request.goal;
+    const repositories = orderedContextFacts(
+      request.repositories.map(
+        ({ reviewerProfile: _reviewerProfile, path: _path, headSha: _headSha, ...facts }) => facts,
+      ),
+    );
     const prompt = [
       "Propose at most one focused replacement Task Proposal for the persisted Outcome gaps.",
       "Return null when no bounded proposal can address the persisted gaps.",
       "Use only the immutable Goal, Outcome, assessment, evidence, prior proposal ownership, and Repository facts.",
       "Do not propose a new Outcome, authority, effect, Repository, or budget.",
       "When revising a checkpoint proposal, include its exact supersedesProposalId in the returned proposal object.",
-      JSON.stringify({
-        goal: request.goal,
+      `Planning context: ${serializeRoleContext({
+        goal: {
+          ...goal,
+          authority: {
+            ...goal.authority,
+            repositories: goal.authority.repositories.toSorted(),
+            effects: goal.authority.effects.toSorted(),
+          },
+        },
         outcome: request.outcome,
-        assessment: request.assessment,
-        evidence: request.evidence,
         priorProposals: request.priorProposals,
-        supersedableProposalIds: request.supersedableProposalIds,
-        repositories: request.repositories.map(
-          ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
+        supersedableProposalIds: request.supersedableProposalIds.toSorted(),
+        repositories,
+      })}`,
+      `Current assessment and evidence: ${serializeRoleContext({
+        assessment: {
+          assessmentId: request.assessment.assessmentId,
+          evidenceHash: request.assessment.evidenceHash,
+          verdict: request.assessment.verdict,
+          summary: request.assessment.summary,
+          gaps: request.assessment.gaps,
+          evidence: orderedContextFacts(request.assessment.evidence),
+        },
+        evidence: orderedContextFacts(request.evidence),
+        repositoryHeads: orderedContextFacts(
+          request.repositories.map(({ id, headSha }) => ({ id, headSha })),
         ),
-      }),
+      })}`,
     ].join("\n");
     const plannerRequest: CampaignReplacementPlannerSessionRequest = {
       role: "replacement-planner",
