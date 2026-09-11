@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   CodexCodingSession,
+  serializeRoleContext,
   codingSessionAdapterSelectionEnvironment,
   explicitWorkerEnvironment,
   type CampaignAssessorSessionRequest,
@@ -14,6 +15,7 @@ import type {
   TextAcceptanceOutcome,
 } from "@usine/task-authority";
 import { sessionArchiveOptionsFromEnvironment } from "./runtime-policy.js";
+import { orderedContextFacts } from "./campaign-role-context.js";
 import {
   campaignUsageCoverage,
   campaignModelRunFromObservation,
@@ -165,7 +167,8 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
       "Return satisfied only when every original acceptance criterion has a matching exact-SHA evidence reference.",
       "Return gaps for directionally incomplete evidence and inconclusive for unavailable or contradictory evidence.",
       "Do not claim facts that are absent from the evidence.",
-      JSON.stringify({ outcome: request.outcome, evidence: request.evidence }),
+      `Outcome requirements: ${serializeRoleContext(request.outcome)}`,
+      `Exact evidence facts: ${serializeRoleContext(orderedContextFacts(request.evidence))}`,
     ].join("\n");
     try {
       const assessorRequest: CampaignAssessorSessionRequest<

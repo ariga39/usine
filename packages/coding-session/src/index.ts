@@ -1,3 +1,4 @@
+export { serializeRoleContext } from "./role-context.js";
 export {
   CodexCodingSession,
   createOpenAICompatibleRoleOutputTransform,

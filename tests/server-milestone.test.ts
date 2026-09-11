@@ -29,7 +29,13 @@ const assessor = prompt.includes("Usine role: fresh Campaign assessor.");
 if (assessor) {
   let assessment = null;
   try {
-    assessment = JSON.parse(prompt.slice(prompt.indexOf("{")));
+    const section = (label) => JSON.parse(
+      prompt.split("\n").find((line) => line.startsWith(label)).slice(label.length),
+    );
+    assessment = {
+      outcome: section("Outcome requirements: "),
+      evidence: section("Exact evidence facts: "),
+    };
   } catch {
     // The fixture below remains inconclusive until the server supplies evidence.
   }

@@ -28,12 +28,14 @@ const testEnvironment = {
 
 function localSdkReviewerClient(
   finalResponse: string,
+  capture?: (prompt: string, schema: unknown) => void,
 ): Awaited<ReturnType<CodingSessionClientFactory>> {
   type LocalThread = ReturnType<Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]>;
   const thread = {
     id: "quality-review-thread",
-    runStreamed: async () => ({
+    runStreamed: async (prompt: string, options?: { outputSchema?: unknown }) => ({
       events: (async function* () {
+        capture?.(prompt, options?.outputSchema);
         yield { type: "thread.started", thread_id: "quality-review-thread" };
         yield { type: "turn.started" };
         yield {
@@ -55,6 +57,86 @@ function localSdkReviewerClient(
   } as unknown as LocalThread;
   return { startThread: () => thread } as Awaited<ReturnType<CodingSessionClientFactory>>;
 }
+
+test("review caller retains a stable SDK prefix across fresh exact candidates", async () => {
+  const calls: { prompt: string; schema: unknown }[] = [];
+  let currentSha = "a".repeat(40);
+  let sessions = 0;
+  const session = new CodexCodingSession(
+    async () => {
+      sessions += 1;
+      return localSdkReviewerClient(
+        JSON.stringify({
+          sha: currentSha,
+          verdict: "approved",
+          summary: "Reviewed exact evidence",
+          findings: [],
+        }),
+        (prompt, schema) => calls.push({ prompt, schema }),
+      );
+    },
+    { environment: {}, profileResolver: async () => ({ model: "fixture" }) },
+  );
+  const gate = new QualityGate({
+    workspace: { withCheckout: async (_purpose, _sha, run) => run(".") },
+    session,
+    reviewer: { role: "reviewer", profile: "fixture", sandbox: "read-only" },
+    environment: {},
+  });
+  const task: ResolvedTaskContract = {
+    ...contract,
+    repositoryId: "repo",
+    repository: { path: ".", owner: "fixture", name: "fixture" },
+    baseSha: "a".repeat(40),
+    instructions: "Review required behavior",
+    acceptance: [
+      { id: "must", criterion: "Must work", mandatory: true, checkId: "behavior" },
+      { id: "optional", criterion: "Optional behavior", mandatory: false },
+    ],
+    nonGoals: [],
+    projectCheck: { command: "true", timeoutMs: 1000 },
+    budget: { maxImplementerActivations: null, maxReviewCycles: null, maxElapsedMs: null },
+    authorization: { source: "user", delivery: true },
+    delivery: {
+      baseBranch: "main",
+      branch: "agent/fixture",
+      issue: 1,
+      title: "Fixture",
+      body: "Fixture",
+    },
+  };
+  const check = (): CheckResult => ({
+    sha: currentSha,
+    status: "passed",
+    command: "true",
+    exitCode: 0,
+    stdout: "verified",
+    stderr: "",
+  });
+  expect((await gate.reviewWithObservation(task, currentSha, check(), 1)).review?.sha).toBe(
+    currentSha,
+  );
+  currentSha = "b".repeat(40);
+  expect((await gate.reviewWithObservation(task, currentSha, check(), 2)).review?.sha).toBe(
+    currentSha,
+  );
+  const prefix = (prompt: string) => prompt.slice(0, prompt.indexOf("Candidate SHA:"));
+  expect(prefix(calls[0].prompt)).toBe(prefix(calls[1].prompt));
+  expect(calls[1].prompt).toContain(`Candidate SHA: ${currentSha}`);
+  expect(calls[1].prompt).toContain(`"sha":"${currentSha}"`);
+  expect(calls[0].schema).toEqual(calls[1].schema);
+  expect(calls[0].prompt).toContain('"mandatory":false');
+  expect(calls[0].prompt).toContain('"checkId":"behavior"');
+  await gate.reviewWithObservation(
+    { ...task, acceptance: [...task.acceptance, "Late required behavior"] },
+    currentSha,
+    check(),
+    3,
+  );
+  expect(prefix(calls[2].prompt)).not.toBe(prefix(calls[1].prompt));
+  expect(calls[2].schema).toEqual(calls[1].schema);
+  expect(sessions).toBe(3);
+});
 
 test("Quality Gate checks a disposable exact-SHA checkout before fresh review", async () => {
   const root = await mkdtemp(join(tmpdir(), "usine-quality-"));
@@ -203,7 +285,10 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   expect(reviewerContract).not.toHaveProperty("repository");
   expect(reviewerContract).not.toHaveProperty("projectCheck");
   expect(reviewerContract).not.toHaveProperty("delivery.baseBranch");
-  expect(reviewerPrompt).toContain(`Task Contract: ${JSON.stringify(reviewerContract)}`);
+  const contractLine = reviewerPrompt!
+    .split("\n")
+    .find((line) => line.startsWith("Task Contract: "))!;
+  expect(JSON.parse(contractLine.slice("Task Contract: ".length))).toEqual(reviewerContract);
   reviewerSha = "b".repeat(40);
   const staleReviewAttempt = await gate.reviewWithObservation(task, base, check, 1);
   expect(staleReviewAttempt).toMatchObject({
@@ -483,6 +568,9 @@ test("runs a frozen Vite+ verifier against the exact candidate, not its self-che
   expect(reviewed.review?.verdict).toBe("approved");
   expect(actualReviewPrompt).toContain("executed real Vite+ run pipeline");
   expect(actualReviewPrompt).toContain(positiveSha);
+  expect(actualReviewPrompt.indexOf("Task Contract:")).toBeLessThan(
+    actualReviewPrompt.indexOf("Candidate SHA:"),
+  );
   expect(actualReviewPrompt).toContain(positive.acceptanceChecks![0]!.outputDigest!);
   expect(actualReviewPrompt).not.toContain(verifier);
   expect(positive.acceptanceChecks).toMatchObject([

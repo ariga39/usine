@@ -4,6 +4,7 @@ import { execa } from "execa";
 import type { ResolvedTaskContract } from "@usine/task-authority";
 import {
   reviewerOutputSchema,
+  serializeRoleContext,
   type CodingSessionPhase,
   type EffectiveSessionProfile,
   type RolePolicy,
@@ -285,10 +286,10 @@ export class QualityGate {
         const prompt = [
           "Review only the frozen Task Contract, exact candidate checkout, and project check evidence.",
           "Return an explicit JSON object matching the supplied schema. Approval requires the exact candidate SHA.",
-          `Candidate SHA: ${sha}`,
-          `Task Contract: ${JSON.stringify(taskContract)}`,
-          `Project check evidence: ${JSON.stringify(check)}`,
           "Do not rely on implementer conversation or process exit status.",
+          `Task Contract: ${serializeRoleContext(taskContract)}`,
+          `Candidate SHA: ${sha}`,
+          `Project check evidence: ${serializeRoleContext(check)}`,
         ].join("\n");
         const observation = await this.options.session.run({
           role: this.options.reviewer.role,

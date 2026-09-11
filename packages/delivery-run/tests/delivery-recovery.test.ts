@@ -2,7 +2,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { reviewerOutputSchema } from "@usine/coding-session";
+import {
+  CodexCodingSession,
+  reviewerOutputSchema,
+  type CodingSessionClientFactory,
+} from "@usine/coding-session";
 import {
   applyMigrations,
   openSqliteDatabase,
@@ -1299,7 +1303,10 @@ describe("Delivery Run durable phase recovery", () => {
     expect(implementerContract).not.toHaveProperty("repository");
     expect(implementerContract).not.toHaveProperty("projectCheck");
     expect(implementerContract).not.toHaveProperty("delivery.baseBranch");
-    expect(implementerPrompt).toContain(`Task Contract: ${JSON.stringify(implementerContract)}`);
+    const contractLine = implementerPrompt!
+      .split("\n")
+      .find((line) => line.startsWith("Task Contract: "))!;
+    expect(JSON.parse(contractLine.slice("Task Contract: ".length))).toEqual(implementerContract);
     expect(fake.getObservations().map(({ data }) => data.type)).toEqual([
       "coding_session_started",
       "coding_mcp_unavailable",
@@ -1971,6 +1978,7 @@ describe("Delivery Run durable phase recovery", () => {
     const fake = fakeAuthority(persistedResult("admitted", id));
     const prompts: string[] = [];
     const checked: string[] = [];
+    const schemas: unknown[] = [];
     const sessions = [
       {
         status: "completed" as const,
@@ -2031,12 +2039,44 @@ describe("Delivery Run durable phase recovery", () => {
           }),
           quarantine: async () => undefined,
         },
-        session: {
-          run: async ({ prompt }) => {
-            prompts.push(prompt);
-            return sessions.shift()!;
+        session: new CodexCodingSession(
+          async () => {
+            type Thread = ReturnType<
+              Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]
+            >;
+            return {
+              startThread: () =>
+                ({
+                  id: "repair-fixture",
+                  runStreamed: async (prompt, options) => {
+                    if (typeof prompt !== "string") throw new Error("expected text prompt");
+                    prompts.push(prompt);
+                    schemas.push(options?.outputSchema);
+                    const result = sessions.shift()!;
+                    return {
+                      events: (async function* () {
+                        yield { type: "thread.started", thread_id: "repair-fixture" };
+                        yield { type: "turn.started" };
+                        yield {
+                          type: "item.completed",
+                          item: {
+                            type: "agent_message",
+                            id: "result",
+                            text: JSON.stringify(result.output),
+                          },
+                        };
+                        yield {
+                          type: "turn.completed",
+                          usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+                        };
+                      })(),
+                    };
+                  },
+                }) as Thread,
+            } as Awaited<ReturnType<CodingSessionClientFactory>>;
           },
-        },
+          { environment: {}, profileResolver: async () => ({ model: "fixture" }) },
+        ),
         quality,
         forge,
       },
@@ -2045,16 +2085,23 @@ describe("Delivery Run durable phase recovery", () => {
     expect(result.state).toBe("blocked");
     expect(checked).toEqual([sha]);
     expect(fake.getImplementerActivations()).toBe(2);
-    expect(prompts[1]).toContain(
-      `Failed project check evidence: ${JSON.stringify({
-        sha,
-        status: "failed",
-        command: "vp test run tests/repair.test.ts",
-        exitCode: 7,
-        stdout: "repair this stdout-only diagnostic",
-        stderr: "",
-      })}`,
-    );
+    expect(schemas).toHaveLength(2);
+    expect(schemas[0]).toEqual(schemas[1]);
+    const checkLine = prompts[1]
+      .split("\n")
+      .find((line) => line.startsWith("Failed project check evidence: "))!;
+    expect(JSON.parse(checkLine.slice("Failed project check evidence: ".length))).toEqual({
+      sha,
+      status: "failed",
+      command: "vp test run tests/repair.test.ts",
+      exitCode: 7,
+      stdout: "repair this stdout-only diagnostic",
+      stderr: "",
+    });
+    const beforeCandidate = (prompt: string) => prompt.split("Current candidate parent SHA:")[0];
+    expect(beforeCandidate(prompts[0])).toBe(beforeCandidate(prompts[1]));
+    expect(prompts[0]).toContain(`Current candidate parent SHA: ${"a".repeat(40)}`);
+    expect(prompts[1]).toContain(`Current candidate parent SHA: ${sha}`);
     expect(result.review).toBeNull();
   });
 
