@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Codex } from "@openai/codex-sdk";
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateText, Output } from "ai";
+import { generateText, NoObjectGeneratedError, Output } from "ai";
 import { Effect } from "effect";
 import {
   mergeProviderNeutralUsage,
@@ -288,6 +288,66 @@ export interface OpenAICompatibleRoleOutputTransformConfig {
   fetch?: typeof fetch;
 }
 
+const normalizerTokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullish();
+const normalizerResponseUsage = z.object({
+  usage: z
+    .object({
+      prompt_tokens: normalizerTokenCount,
+      completion_tokens: normalizerTokenCount,
+      prompt_cache_hit_tokens: normalizerTokenCount,
+      prompt_cache_miss_tokens: normalizerTokenCount,
+      prompt_tokens_details: z
+        .object({
+          cached_tokens: normalizerTokenCount,
+          cache_write_tokens: normalizerTokenCount,
+        })
+        .nullish(),
+      completion_tokens_details: z.object({ reasoning_tokens: normalizerTokenCount }).nullish(),
+    })
+    .nullish(),
+});
+
+function roleNormalizerUsage(body: unknown): ProviderNeutralUsage {
+  const decoded = normalizerResponseUsage.safeParse(body);
+  if (!decoded.success || !decoded.data.usage) return {};
+  const raw = decoded.data.usage;
+  const inputTokens = raw.prompt_tokens ?? undefined;
+  const outputTokens = raw.completion_tokens ?? undefined;
+  const nestedRead = raw.prompt_tokens_details?.cached_tokens ?? undefined;
+  const alternateRead = raw.prompt_cache_hit_tokens ?? undefined;
+  const read = nestedRead ?? alternateRead;
+  const miss = raw.prompt_cache_miss_tokens ?? undefined;
+  const write = raw.prompt_tokens_details?.cache_write_tokens ?? undefined;
+  const contradictory =
+    (nestedRead !== undefined && alternateRead !== undefined && nestedRead !== alternateRead) ||
+    (inputTokens !== undefined &&
+      ((read !== undefined && read > inputTokens) ||
+        (miss !== undefined && miss > inputTokens) ||
+        (write !== undefined && write > inputTokens) ||
+        (read !== undefined && miss !== undefined && read + miss !== inputTokens) ||
+        (read !== undefined && write !== undefined && read + write > inputTokens))) ||
+    (miss !== undefined && write !== undefined && write > miss);
+  // Reported misses include separately reported writes; subtract writes only once.
+  const uncached =
+    miss !== undefined
+      ? miss - (write ?? 0)
+      : inputTokens !== undefined && read !== undefined && write !== undefined
+        ? inputTokens - read - write
+        : undefined;
+  const reasoning = raw.completion_tokens_details?.reasoning_tokens ?? undefined;
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens: contradictory ? undefined : read,
+    uncachedInputTokens: contradictory ? undefined : uncached,
+    cacheWriteInputTokens: contradictory ? undefined : write,
+    reasoningOutputTokens:
+      reasoning !== undefined && outputTokens !== undefined && reasoning > outputTokens
+        ? undefined
+        : reasoning,
+  };
+}
+
 export function createOpenAICompatibleRoleOutputTransform(
   config: OpenAICompatibleRoleOutputTransformConfig,
 ): RoleOutputTransform {
@@ -302,8 +362,18 @@ export function createOpenAICompatibleRoleOutputTransform(
     signal,
     onUsage,
   }) => {
+    const observeResponse = async (body: unknown, actualModel: string | undefined) => {
+      await onUsage?.({
+        semantics: "replacement",
+        ...(actualModel
+          ? { actualModel: { model: actualModel, provider: "openai-compatible" } }
+          : {}),
+        usage: roleNormalizerUsage(body),
+      });
+    };
     const result = await generateText({
       model: openai.chat(model),
+      include: { responseBody: true },
       output: Output.object({ schema: outputSchema }),
       prompt: [
         "Extract the single role result from the provider response.",
@@ -314,19 +384,12 @@ export function createOpenAICompatibleRoleOutputTransform(
       maxOutputTokens: 512,
       maxRetries: 0,
       abortSignal: signal,
+    }).catch(async (error: unknown) => {
+      if (NoObjectGeneratedError.isInstance(error) && error.response)
+        await observeResponse(error.response.body, error.response.modelId);
+      throw error;
     });
-    await onUsage?.({
-      semantics: "replacement",
-      actualModel: { model: result.response.modelId, provider: "openai-compatible" },
-      usage: {
-        inputTokens: result.usage.inputTokens,
-        uncachedInputTokens: result.usage.inputTokenDetails.noCacheTokens,
-        cachedInputTokens: result.usage.inputTokenDetails.cacheReadTokens,
-        cacheWriteInputTokens: result.usage.inputTokenDetails.cacheWriteTokens,
-        outputTokens: result.usage.outputTokens,
-        reasoningOutputTokens: result.usage.outputTokenDetails.reasoningTokens,
-      },
-    });
+    await observeResponse(result.response.body, result.response.modelId);
     return result.output;
   };
   Object.defineProperty(transform, "profile", {
