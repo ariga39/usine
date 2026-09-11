@@ -21,9 +21,4 @@ jobs:
       - run: corepack pnpm format:check
       - run: corepack pnpm lint
       - run: corepack pnpm typecheck
-      - run: corepack pnpm build
-        if: github.event_name == 'pull_request'
-      - run: corepack pnpm exec vp run --filter './packages/*' --filter './apps/*' test
-        if: github.event_name == 'pull_request'
       - run: corepack pnpm test
-        if: github.event_name == 'push'
