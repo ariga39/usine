@@ -769,6 +769,11 @@ async function reconcile(
   if (!superseded && campaign.planHandedOff && !isTerminalCampaignStatus(campaignStatus)) {
     const results = await campaignTaskResults(database, rows, taskFacts);
     const assessments = await campaignAssessmentRows(database, campaignId);
+    const modelRunRows = await database
+      .select({ invocationId: campaignModelRuns.invocationId, status: campaignModelRuns.status })
+      .from(campaignModelRuns)
+      .where(eq(campaignModelRuns.campaignId, campaignId));
+    const modelRunStatus = new Map(modelRunRows.map((run) => [run.invocationId, run.status]));
     const outcomeEvidence = campaignOutcomeEvidence(campaign, contract, rows, results);
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
     const usefulWork = hasUsefulCampaignWork(rows, results);
@@ -824,11 +829,19 @@ async function reconcile(
       assessmentFailure &&
       !usefulWork
     ) {
-      if (authorityBlocked) {
+      const checkpointCorrectionAvailable =
+        !campaign.checkpointRequested ||
+        supersedableProposalIds(rows, results, assessmentFailure.outcome.id).length > 0;
+      const assessmentRetryable =
+        (assessmentFailure.assessment?.verdict === "gaps" && checkpointCorrectionAvailable) ||
+        (assessmentFailure.assessment !== undefined &&
+          (modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "failed" ||
+            modelRunStatus.get(assessmentFailure.assessment.assessmentId) === "cancelled"));
+      if (authorityBlocked || !assessmentRetryable) {
         campaignStatus = "blocked";
         const nextDecisionRequest: CampaignDecisionRequest = {
           requestId: `decision:${campaign.campaignId}`,
-          reason: "branches_blocked",
+          reason: authorityBlocked ? "branches_blocked" : "assessment_inconclusive",
           outcomeIds: liveOutcomes
             .filter((outcome) => {
               const item = currentAssessments.find(
@@ -1716,8 +1729,10 @@ async function persistReplacementResult(
   usage: CampaignReplacementDraft["usage"],
   modelRuns: readonly CampaignModelRunDraft[] | undefined,
   acceptAuthority = true,
-): Promise<void> {
+  recoverable = false,
+): Promise<ReplacementRunStatus | null> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  let persistedStatus: ReplacementRunStatus | null = null;
   try {
     await handle.exclusiveTransaction(async () => {
       const current = await handle.database.query.campaignReplacementRuns.findFirst({
@@ -1742,6 +1757,7 @@ async function persistReplacementResult(
         usage,
         startedAtEpochMs: current.startedAtEpochMs,
         completedAtEpochMs: Date.now(),
+        ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
       };
       if (!acceptAuthority) {
         await persistCancelledCampaignModelRun(
@@ -1759,6 +1775,7 @@ async function persistReplacementResult(
           : { status: "invalid", proposal: null, supersedesProposalId: null };
       if (candidate !== null && candidate !== undefined && currentTarget)
         result = replacementValidation(currentTarget, candidate);
+      persistedStatus = result.status;
       if (result.status === "admitted" && result.proposal) {
         const sequenceRow = await handle.database
           .select({ sequence: max(campaignProposals.sequence) })
@@ -1823,21 +1840,59 @@ async function persistReplacementResult(
       // pass for its durable result. currentTarget proves that this attempt
       // still owns the current lineage and authority, so stale work cannot
       // reopen a newer terminal fact.
-      if (currentTarget)
+      if (currentTarget) {
+        const retryable = recoverable || candidate !== null && candidate !== undefined;
+        let decisionRequest: CampaignDecisionRequest | null = null;
+        if (!retryable) {
+          const contract = decodePersistedGoalContract(target.campaign.contract);
+          const rows = await handle.database
+            .select()
+            .from(campaignProposals)
+            .where(eq(campaignProposals.campaignId, target.campaign.campaignId))
+            .orderBy(asc(campaignProposals.sequence));
+          const results = await campaignTaskResults(handle.database, rows);
+          const assessments = await campaignAssessmentRows(
+            handle.database,
+            target.campaign.campaignId,
+          );
+          const unresolvedOutcomeIds = contract.outcomes
+            .filter((outcome) => outcome.status === "live")
+            .filter((outcome) => {
+              const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+              const assessment = assessments.get(outcome.id);
+              return (
+                assessment?.evidenceHash !== assessmentEvidenceHash(outcome, evidence) ||
+                !assessmentReferencesResolve(outcome, evidence, assessment)
+              );
+            })
+            .map((outcome) => outcome.id);
+          decisionRequest = {
+            requestId: `decision:${target.campaign.campaignId}`,
+            reason:
+              result.status === "duplicate"
+                ? "replacement_duplicate"
+                : result.status === "invalid"
+                  ? "replacement_invalid"
+                  : "replacement_unavailable",
+            outcomeIds: unresolvedOutcomeIds.length > 0 ? unresolvedOutcomeIds : [target.outcome.id],
+          };
+        }
         await handle.database
           .update(campaigns)
           .set({
-            status: "planning" as const,
-            decisionRequest: null,
+            status: decisionRequest === null ? ("planning" as const) : ("blocked" as const),
+            decisionRequest,
             checkpointRequested: false,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
           })
           .where(eq(campaigns.campaignId, target.campaign.campaignId));
+      }
     });
   } finally {
     handle.close();
   }
+  return persistedStatus;
 }
 
 /** Recover an interrupted replacement reservation without making the gap terminal. */
@@ -1938,6 +1993,7 @@ async function generateCampaignReplacements(
       return ran;
     }
     let draft: CampaignReplacementDraft;
+    let recoverable = false;
     try {
       draft = await generator({
         invocationId: target.invocationId,
@@ -1956,6 +2012,7 @@ async function generateCampaignReplacements(
         signal,
       });
     } catch {
+      recoverable = true;
       draft = { proposal: null, usage: null };
     }
     let usage: CampaignReplacementDraft["usage"] = null;
@@ -1964,15 +2021,18 @@ async function generateCampaignReplacements(
     } catch {
       usage = null;
     }
-    await persistReplacementResult(
+    recoverable ||= draft.recoverable === true;
+    const status = await persistReplacementResult(
       stateDirectory,
       target,
       draft.proposal,
       usage,
       draft.modelRuns,
       !signal?.aborted,
+      recoverable,
     );
     if (signal?.aborted) return ran;
+    if (status !== "admitted") return ran;
     await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
       await reconcileAll(database, observed);
     });

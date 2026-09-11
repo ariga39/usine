@@ -54,6 +54,8 @@ export interface CampaignReplacementDraft {
   readonly proposal: unknown;
   readonly usage: CampaignAssessmentUsage | null;
   readonly modelRuns?: readonly CampaignModelRunDraft[];
+  /** The planner invocation could not produce a trustworthy result and may retry. */
+  readonly recoverable?: boolean;
 }
 
 export type CampaignReplacementGenerator = (
@@ -185,9 +187,10 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
         proposal: result.status === "completed" ? (result.output ?? null) : null,
         usage: usageFrom(result.usage, result.usageCompleteness),
         modelRuns: modelRun,
+        ...(result.status === "completed" ? {} : { recoverable: true }),
       };
     } catch {
-      return { proposal: null, usage: null };
+      return { proposal: null, usage: null, recoverable: true };
     }
   };
 }

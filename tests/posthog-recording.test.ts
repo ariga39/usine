@@ -71,12 +71,6 @@ function campaign(): CampaignResource {
       },
     ],
     authority: { source: "private source", publish: true, delivery: true, merge: true },
-    budget: {
-      maxElapsedMs: 10_000,
-      maxTasks: 1,
-      maxImplementerActivations: 1,
-      maxReviewCycles: 1,
-    },
     status: "accepted",
     planHandedOff: true,
     decisionRequest: null,
@@ -832,12 +826,6 @@ async function campaignFixture(
       repositories: ["repo-1"],
       effects: ["github"],
     },
-    budget: {
-      maxElapsedMs: 60_000,
-      maxTasks: 1,
-      maxImplementerActivations: 1,
-      maxReviewCycles: 1,
-    },
   };
   await writeFile(contractPath, JSON.stringify(contract));
   await execa("git", ["add", "goal.json"], { cwd: root });
@@ -960,7 +948,6 @@ async function campaignFixture(
     acceptance: ["done"],
     nonGoals: [],
     effects: ["github"],
-    budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
     merge: false,
   });
   await handoffCampaign(usine.url, published.campaignId);

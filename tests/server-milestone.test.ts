@@ -213,12 +213,6 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
         repositories: [taskId],
         effects: ["github"],
       },
-      budget: {
-        maxElapsedMs: 60_000,
-        maxTasks: 1,
-        maxImplementerActivations: 2,
-        maxReviewCycles: 1,
-      },
     }),
   );
   await execa("git", ["add", "goal.json"], { cwd: repository });
@@ -234,7 +228,6 @@ async function fixture(name: string, mergeAuthorized = false): Promise<Fixture> 
       acceptance: ["The campaign outcome is delivered."],
       nonGoals: [],
       effects: ["github"],
-      budget: { maxImplementerActivations: 2, maxReviewCycles: 1, maxElapsedMs: 10_000 },
       merge: false,
     }),
   );

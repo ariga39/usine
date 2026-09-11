@@ -49,12 +49,6 @@ function goalContract() {
       repositories: ["repo-one"],
       effects: ["github"],
     },
-    budget: {
-      maxElapsedMs: 60_000,
-      maxTasks: 3,
-      maxImplementerActivations: 2,
-      maxReviewCycles: 2,
-    },
   };
 }
 
@@ -68,7 +62,6 @@ function proposal(proposalId: string, outcomeId: string, effects = ["github"]) {
     acceptance: [`${proposalId} is complete.`],
     nonGoals: [],
     effects,
-    budget: { maxImplementerActivations: 2, maxReviewCycles: 2, maxElapsedMs: 10_000 },
     merge: false,
   };
 }

@@ -357,9 +357,11 @@ describe("server-owned execution", () => {
           waiting.resolve();
           return paused;
         }
+        const deadlineEpochMs = context.result.deadlineEpochMs;
+        if (deadlineEpochMs === undefined) throw new Error("standalone Task deadline missing");
         return context.authority.block(
           { taskId: context.result.taskId, revision: context.result.revision },
-          Date.now() >= context.result.deadlineEpochMs
+          Date.now() >= deadlineEpochMs
             ? "elapsed budget exhausted"
             : "unexpected early pipeline recovery",
         );
