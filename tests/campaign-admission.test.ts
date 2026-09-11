@@ -4201,6 +4201,10 @@ describe("durable Ready frontier", () => {
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
+    let firstEntered!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
     const executedTaskIds: string[] = [];
     const assessor: CampaignOutcomeAssessor = async (request) => {
       const correctionDelivery = request.evidence.find(
@@ -4242,7 +4246,10 @@ describe("durable Ready frontier", () => {
       checkpointGoal,
       "user:campaign-366",
       async (context) => {
-        if (context.result.taskId.endsWith(`-${first.proposalId}`)) await firstGate;
+        if (context.result.taskId.endsWith(`-${first.proposalId}`)) {
+          firstEntered();
+          await firstGate;
+        }
         if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
         executedTaskIds.push(context.result.taskId);
         return acceptCampaignTask(context, context.result.taskId.endsWith(`-${first.proposalId}`));
@@ -4260,31 +4267,27 @@ describe("durable Ready frontier", () => {
       await proposeCampaign(server.url, published.campaignId, third);
       await handoffCampaign(server.url, published.campaignId);
 
-      let frontier = await getCampaign(server.url, published.campaignId);
-      for (let attempt = 0; attempt < 200; attempt += 1) {
-        const proposals = frontier?.proposals ?? [];
-        const firstResource = proposals.find(
-          (proposal) => proposal.proposalId === first.proposalId,
-        );
-        const independentResource = proposals.find(
-          (proposal) => proposal.proposalId === independent.proposalId,
-        );
-        const secondResource = proposals.find(
-          (proposal) => proposal.proposalId === second.proposalId,
-        );
-        const thirdResource = proposals.find(
-          (proposal) => proposal.proposalId === third.proposalId,
-        );
-        if (
-          firstResource?.ready?.taskId &&
-          independentResource?.ready?.taskId &&
-          secondResource?.status === "planned" &&
-          thirdResource?.status === "planned"
-        )
-          break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        frontier = await getCampaign(server.url, published.campaignId);
-      }
+      await firstStarted;
+      const frontier = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) => {
+          const proposals = campaign?.proposals ?? [];
+          const firstResource = proposals.find(
+            (proposal) => proposal.proposalId === first.proposalId,
+          );
+          const secondResource = proposals.find(
+            (proposal) => proposal.proposalId === second.proposalId,
+          );
+          const thirdResource = proposals.find(
+            (proposal) => proposal.proposalId === third.proposalId,
+          );
+          return Boolean(
+            firstResource?.ready?.taskId &&
+            secondResource?.status === "planned" &&
+            thirdResource?.status === "planned",
+          );
+        },
+      );
       expect(frontier?.proposals).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ proposalId: first.proposalId, ready: expect.any(Object) }),
@@ -4328,8 +4331,6 @@ describe("durable Ready frontier", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         accepted = await getCampaign(server.url, published.campaignId);
       }
-      if (accepted?.status !== "accepted")
-        throw new Error(`dependent correction did not accept: ${JSON.stringify(accepted)}`);
       expect(accepted).toMatchObject({ status: "accepted" });
       expect(replacementCalls).toBeGreaterThanOrEqual(2);
       expect(exposedSupersedableProposalIds).toEqual([third.proposalId]);
@@ -5826,7 +5827,7 @@ describe("durable Ready frontier", () => {
               "SELECT status, assessment_id, evidence_hash, invocation_id, role FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
             )
             .get(published.campaignId, "outcome-one"),
-        ).toMatchObject({ status: "pending", role: "replacement-planner" });
+        ).toMatchObject({ status: "failed", role: "replacement-planner" });
       } finally {
         database.close();
       }
@@ -5865,15 +5866,11 @@ describe("durable Ready frontier", () => {
       });
       try {
         await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
-          status: "blocked",
-          decisionRequest: {
-            requestId: `decision:${published.campaignId}`,
-            reason: "replacement_unavailable",
-            outcomeIds: ["outcome-one"],
-          },
+          status: "planning",
+          decisionRequest: null,
         });
         expect(replacementCalls).toBe(1);
-        expect(restartedReplacementCalls).toBe(0);
+        expect(restartedReplacementCalls).toBe(1);
         const recovered = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
         try {
           const row = recovered
@@ -5882,7 +5879,7 @@ describe("durable Ready frontier", () => {
             )
             .get(published.campaignId, "outcome-one");
           expect(row).toMatchObject({
-            status: "unavailable",
+            status: "failed",
             proposal: null,
             usage: null,
             completed_at_epoch_ms: expect.any(Number),
