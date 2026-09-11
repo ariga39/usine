@@ -182,7 +182,7 @@ function plannerRequest(): CampaignReplacementRequest {
       acceptance: criteria,
       dependsOn: ["earlier-b", "earlier-a"],
       nonGoals: [],
-      effects: ["github"],
+      effects: ["github", "read"],
       merge: false,
     })),
     supersedableProposalIds: ["proposal-b", "proposal-a"],
@@ -291,6 +291,10 @@ test("planner excludes accounting churn but retains requirements, authority and 
       },
     },
     evidence: [...evidence].reverse(),
+    priorProposals: request.priorProposals.map((proposal) => ({
+      ...proposal,
+      effects: [...proposal.effects].reverse(),
+    })),
     supersedableProposalIds: [...request.supersedableProposalIds].reverse(),
     repositories: [...repositories].reverse(),
   });

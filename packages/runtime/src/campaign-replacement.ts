@@ -129,7 +129,10 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           },
         },
         outcome: request.outcome,
-        priorProposals: request.priorProposals,
+        priorProposals: request.priorProposals.map((proposal) => ({
+          ...proposal,
+          effects: proposal.effects.toSorted(),
+        })),
         supersedableProposalIds: request.supersedableProposalIds.toSorted(),
         repositories,
       })}`,
