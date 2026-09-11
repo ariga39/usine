@@ -365,6 +365,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       if (pendingTimer !== undefined) {
         clearTimeout(pendingTimer);
         pipelineRecoveryTimers.delete(task.result.taskId);
+        pipelineRecoveryCampaignIds.delete(task.result.taskId);
       }
       runTask(
         task.result.taskId,
@@ -446,6 +447,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       const timer = setTimeout(() => {
         if (pipelineRecoveryTimers.get(task.result.taskId) !== timer) return;
         pipelineRecoveryTimers.delete(task.result.taskId);
+        pipelineRecoveryCampaignIds.delete(task.result.taskId);
         if (!serverClosed) launchTask(task);
       }, delay);
       pipelineRecoveryTimers.set(task.result.taskId, timer);
@@ -613,6 +615,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           queuedCampaignModelLaunch = undefined;
           for (const timer of pipelineRecoveryTimers.values()) clearTimeout(timer);
           pipelineRecoveryTimers.clear();
+          pipelineRecoveryCampaignIds.clear();
           await campaignCoordination;
           await Effect.runPromise(Scope.close(scope, Exit.void));
           await Promise.allSettled(activeTaskOperations);
@@ -625,6 +628,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
     queuedCampaignModelLaunch = undefined;
     for (const timer of pipelineRecoveryTimers.values()) clearTimeout(timer);
     pipelineRecoveryTimers.clear();
+    pipelineRecoveryCampaignIds.clear();
     await campaignCoordination;
     await Effect.runPromise(Scope.close(scope, Exit.fail(error))).catch(() => undefined);
     await Promise.allSettled(activeTaskOperations);

@@ -4042,9 +4042,10 @@ describe("durable Ready frontier", () => {
     }
   });
 
-  test("rejects a checkpoint replacement that selects an unauthorized source ID", async () => {
+  test("rejects an unauthorized checkpoint source before a valid correction succeeds", async () => {
     const initial = frontierProposal("checkpoint-source", "outcome-one", ["not-admitted"]);
     const independent = frontierProposal("checkpoint-independent", "outcome-two");
+    const correction = frontierProposal("checkpoint-correction", "outcome-one");
     let replacementCalls = 0;
     let replacementEntered!: () => void;
     const replacementStarted = new Promise<void>((resolve) => {
@@ -4054,14 +4055,39 @@ describe("durable Ready frontier", () => {
     const independentGate = new Promise<void>((resolve) => {
       releaseIndependent = resolve;
     });
+    const executedTaskIds: string[] = [];
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      const correctionDelivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === correction.proposalId,
+      );
+      if (request.outcome.id === "outcome-one" && correctionDelivery) {
+        return {
+          verdict: "satisfied" as const,
+          summary: "the valid correction satisfies the Outcome",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+            ...correctionDelivery,
+            criterionIndex,
+          })),
+          usage: null,
+        };
+      }
+      return checkpointDirectionGapAssessor(request);
+    };
     const replacementGenerator: CampaignReplacementGenerator = async () => {
       replacementCalls += 1;
-      replacementEntered();
+      if (replacementCalls === 1) {
+        replacementEntered();
+        return {
+          proposal: {
+            ...frontierProposal("unauthorized-replacement", "outcome-one"),
+            supersedesProposalId: "missing-checkpoint-source",
+          },
+          usage: null,
+        };
+      }
       return {
-        proposal: {
-          ...frontierProposal("unauthorized-replacement", "outcome-one"),
-          supersedesProposalId: "missing-checkpoint-source",
-        },
+        proposal: { ...correction, supersedesProposalId: initial.proposalId },
         usage: null,
       };
     };
@@ -4076,11 +4102,12 @@ describe("durable Ready frontier", () => {
       "user:campaign-366",
       async (context) => {
         if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
+        executedTaskIds.push(context.result.taskId);
         return acceptCampaignTask(context);
       },
       1,
       true,
-      checkpointDirectionGapAssessor,
+      assessor,
       replacementGenerator,
     );
     try {
@@ -4099,25 +4126,16 @@ describe("durable Ready frontier", () => {
       await replacementStarted;
       releaseIndependent();
 
-      let rejected = checkpointed;
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        if (rejected.status === "blocked") break;
+      let accepted = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300 && accepted?.status !== "accepted"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
-        rejected = (await getCampaign(server.url, published.campaignId)) ?? rejected;
+        accepted = await getCampaign(server.url, published.campaignId);
       }
-      expect(rejected).toMatchObject({
-        status: "blocked",
-        decisionRequest: {
-          requestId: `decision:${published.campaignId}`,
-          reason: "replacement_invalid",
-          outcomeIds: ["outcome-one"],
-        },
-        proposals: [
-          { proposalId: initial.proposalId, status: "planned" },
-          { proposalId: independent.proposalId },
-        ],
-      });
-      expect(replacementCalls).toBe(1);
+      if (accepted?.status !== "accepted")
+        throw new Error(`correction did not accept: ${JSON.stringify(accepted)}`);
+      expect(accepted).toMatchObject({ status: "accepted" });
+      expect(replacementCalls).toBeGreaterThanOrEqual(2);
+      expect(executedTaskIds).not.toContain("campaign-campaign-366-v1-unauthorized-replacement");
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
         expect(
@@ -4126,25 +4144,27 @@ describe("durable Ready frontier", () => {
               "SELECT status, superseded_by_proposal_id, supersedes_proposal_id, replacement_assessment_id, replacement_evidence_hash FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
             )
             .get(published.campaignId, initial.proposalId),
-        ).toEqual({
-          status: "planned",
-          superseded_by_proposal_id: null,
-          supersedes_proposal_id: null,
-          replacement_assessment_id: null,
-          replacement_evidence_hash: null,
+        ).toMatchObject({
+          status: "superseded",
+          superseded_by_proposal_id: correction.proposalId,
         });
         expect(
           database
             .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
             .get(published.campaignId),
-        ).toEqual({ count: 2 });
+        ).toEqual({ count: 3 });
         expect(
           database
             .prepare(
-              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ? ORDER BY started_at_epoch_ms",
             )
-            .get(published.campaignId, "outcome-one"),
-        ).toMatchObject({ status: "invalid", proposal: null });
+            .all(published.campaignId, "outcome-one"),
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ status: "invalid", proposal: null }),
+            expect.objectContaining({ status: "admitted" }),
+          ]),
+        );
       } finally {
         database.close();
       }
@@ -4155,12 +4175,14 @@ describe("durable Ready frontier", () => {
   });
 
   test("does not expose a Planned source with a live dependent at a checkpoint", async () => {
-    const first = frontierProposal("chain-first", "outcome-one");
+    const first = frontierProposal("chain-first", "outcome-one", [], true);
     const independent = frontierProposal("chain-independent", "outcome-two");
     const second = frontierProposal("chain-second", "outcome-one", [first.proposalId]);
     const third = frontierProposal("chain-third", "outcome-one", [second.proposalId]);
+    const correction = frontierProposal("chain-correction", "outcome-one");
     const checkpointGoal = {
       ...frontierGoal("campaign-repository"),
+      authority: { ...frontierGoal("campaign-repository").authority, merge: true },
       outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
         outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
       ),
@@ -4175,15 +4197,44 @@ describe("durable Ready frontier", () => {
     const independentGate = new Promise<void>((resolve) => {
       releaseIndependent = resolve;
     });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const executedTaskIds: string[] = [];
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      const correctionDelivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === correction.proposalId,
+      );
+      if (request.outcome.id === "outcome-one" && correctionDelivery) {
+        return {
+          verdict: "satisfied" as const,
+          summary: "the valid frontier correction satisfies the Outcome",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+            ...correctionDelivery,
+            criterionIndex,
+          })),
+          usage: null,
+        };
+      }
+      return checkpointDirectionGapAssessor(request);
+    };
     const replacementGenerator: CampaignReplacementGenerator = async (request) => {
       replacementCalls += 1;
       exposedSupersedableProposalIds = request.supersedableProposalIds;
-      replacementEntered();
+      if (replacementCalls === 1) {
+        replacementEntered();
+        return {
+          proposal: {
+            ...frontierProposal("chain-invalid-replacement", "outcome-one"),
+            supersedesProposalId: second.proposalId,
+          },
+          usage: null,
+        };
+      }
       return {
-        proposal: {
-          ...frontierProposal("chain-invalid-replacement", "outcome-one"),
-          supersedesProposalId: second.proposalId,
-        },
+        proposal: { ...correction, supersedesProposalId: third.proposalId },
         usage: null,
       };
     };
@@ -4191,12 +4242,14 @@ describe("durable Ready frontier", () => {
       checkpointGoal,
       "user:campaign-366",
       async (context) => {
+        if (context.result.taskId.endsWith(`-${first.proposalId}`)) await firstGate;
         if (context.contract.campaign?.outcomeId === "outcome-two") await independentGate;
-        return acceptCampaignTask(context);
+        executedTaskIds.push(context.result.taskId);
+        return acceptCampaignTask(context, context.result.taskId.endsWith(`-${first.proposalId}`));
       },
-      1,
+      2,
       true,
-      checkpointDirectionGapAssessor,
+      assessor,
       replacementGenerator,
     );
     try {
@@ -4248,21 +4301,46 @@ describe("durable Ready frontier", () => {
       await replacementStarted;
       releaseIndependent();
 
-      let rejected = checkpointed;
-      for (let attempt = 0; attempt < 400; attempt += 1) {
-        if (rejected.status === "blocked") break;
+      const corrected = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) =>
+          campaign?.proposals?.some(
+            (proposal) =>
+              proposal.proposalId === third.proposalId &&
+              proposal.status === "superseded" &&
+              proposal.supersededByProposalId === correction.proposalId,
+          ) ?? false,
+      );
+      expect(corrected?.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ proposalId: second.proposalId, status: "planned" }),
+          expect.objectContaining({
+            proposalId: third.proposalId,
+            status: "superseded",
+            supersededByProposalId: correction.proposalId,
+          }),
+        ]),
+      );
+      releaseFirst();
+
+      let accepted = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 300 && accepted?.status !== "accepted"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
-        rejected = (await getCampaign(server.url, published.campaignId)) ?? rejected;
+        accepted = await getCampaign(server.url, published.campaignId);
       }
-      expect(rejected).toMatchObject({
-        status: "blocked",
-        decisionRequest: {
-          requestId: `decision:${published.campaignId}`,
-          reason: "replacement_invalid",
-        },
-      });
-      expect(replacementCalls).toBe(1);
+      if (accepted?.status !== "accepted")
+        throw new Error(`dependent correction did not accept: ${JSON.stringify(accepted)}`);
+      expect(accepted).toMatchObject({ status: "accepted" });
+      expect(replacementCalls).toBeGreaterThanOrEqual(2);
       expect(exposedSupersedableProposalIds).toEqual([third.proposalId]);
+      expect(executedTaskIds).not.toContain("campaign-campaign-366-v1-chain-invalid-replacement");
+      expect(executedTaskIds).toEqual(
+        expect.arrayContaining([
+          "campaign-campaign-366-v1-chain-first",
+          "campaign-campaign-366-v1-chain-second",
+          "campaign-campaign-366-v1-chain-correction",
+        ]),
+      );
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
         expect(
@@ -4271,28 +4349,186 @@ describe("durable Ready frontier", () => {
               "SELECT status, superseded_by_proposal_id, supersedes_proposal_id FROM campaign_proposals WHERE campaign_id = ? AND proposal_id = ?",
             )
             .get(published.campaignId, second.proposalId),
-        ).toEqual({
-          status: "planned",
-          superseded_by_proposal_id: null,
-          supersedes_proposal_id: null,
-        });
+        ).toMatchObject({ status: "ready", superseded_by_proposal_id: null });
         expect(
           database
             .prepare("SELECT COUNT(*) AS count FROM campaign_proposals WHERE campaign_id = ?")
             .get(published.campaignId),
-        ).toEqual({ count: 4 });
+        ).toEqual({ count: 5 });
         expect(
           database
             .prepare(
-              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+              "SELECT status, proposal FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ? ORDER BY started_at_epoch_ms",
             )
-            .get(published.campaignId, "outcome-one"),
-        ).toMatchObject({ status: "invalid", proposal: null });
+            .all(published.campaignId, "outcome-one"),
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ status: "invalid", proposal: null }),
+            expect.objectContaining({ status: "admitted" }),
+          ]),
+        );
       } finally {
         database.close();
       }
     } finally {
+      releaseFirst();
       releaseIndependent();
+      await server.close();
+    }
+  });
+
+  test("preserves a checkpoint for unowned gaps in two Outcomes", async () => {
+    const firstSource = frontierProposal("checkpoint-gap-one", "outcome-one", ["not-admitted"]);
+    const secondSource = frontierProposal("checkpoint-gap-two", "outcome-two", ["not-admitted"]);
+    const firstReplacement = frontierProposal("checkpoint-correction-one", "outcome-one");
+    const secondReplacement = frontierProposal("checkpoint-correction-two", "outcome-two");
+    const checkpointGoal = {
+      ...frontierGoal("campaign-repository"),
+      outcomes: frontierGoal("campaign-repository").outcomes.map((outcome) =>
+        outcome.id === "outcome-two" ? { ...outcome, dependsOn: [] } : outcome,
+      ),
+    };
+    let replacementCalls = 0;
+    const replacementOutcomes: string[] = [];
+    const observedSupersedableSources: string[][] = [];
+    const assessmentOrder: string[] = [];
+    const replacementGenerator: CampaignReplacementGenerator = async (request) => {
+      replacementCalls += 1;
+      replacementOutcomes.push(request.outcome.id);
+      observedSupersedableSources.push([...request.supersedableProposalIds]);
+      const source = request.outcome.id === "outcome-one" ? firstSource : secondSource;
+      const replacement =
+        request.outcome.id === "outcome-one" ? firstReplacement : secondReplacement;
+      return {
+        proposal: { ...replacement, supersedesProposalId: source.proposalId },
+        usage: null,
+      };
+    };
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentOrder.push(request.outcome.id);
+      const correctionProposalId =
+        request.outcome.id === "outcome-one"
+          ? firstReplacement.proposalId
+          : secondReplacement.proposalId;
+      const correctionDelivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === correctionProposalId,
+      );
+      if (correctionDelivery)
+        return {
+          verdict: "satisfied" as const,
+          summary: "the focused correction satisfies the Outcome",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+            ...correctionDelivery,
+            criterionIndex,
+          })),
+          usage: null,
+        };
+      return {
+        verdict: "gaps" as const,
+        summary: "the unowned source leaves the Outcome incomplete",
+        gaps: ["the source needs a focused correction"],
+        evidence: [],
+        usage: null,
+      };
+    };
+    const { contractPath, server, stateDirectory } = await frontierFixture(
+      checkpointGoal,
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+      replacementGenerator,
+    );
+    try {
+      const published = await publishCampaign(server.url, { contractPath });
+      await proposeCampaign(server.url, published.campaignId, firstSource);
+      await proposeCampaign(server.url, published.campaignId, secondSource);
+      await handoffCampaign(server.url, published.campaignId);
+
+      const checkpointed = await checkpointCampaign(server.url, published.campaignId);
+      expect(checkpointed.planHandedOff).toBe(true);
+      const revised = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) =>
+          [firstSource, secondSource].every((source) =>
+            campaign?.proposals?.some(
+              (proposal) =>
+                proposal.proposalId === source.proposalId &&
+                proposal.status === "superseded" &&
+                proposal.supersededByProposalId !== undefined,
+            ),
+          ),
+      );
+      if (!revised) throw new Error("Campaign disappeared after two-Outcome correction");
+      expect(replacementCalls).toBeGreaterThanOrEqual(2);
+      expect(replacementOutcomes).toEqual(expect.arrayContaining(["outcome-one", "outcome-two"]));
+      expect(observedSupersedableSources).toEqual(
+        expect.arrayContaining([[firstSource.proposalId], [secondSource.proposalId]]),
+      );
+      expect(new Set(assessmentOrder)).toEqual(new Set(["outcome-one", "outcome-two"]));
+      const accepted = await waitFor(
+        () => getCampaign(server.url, published.campaignId),
+        (campaign) => campaign?.status === "accepted",
+      );
+      expect(accepted).toMatchObject({ status: "accepted" });
+      expect(revised.proposals).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            proposalId: firstSource.proposalId,
+            status: "superseded",
+            supersededByProposalId: firstReplacement.proposalId,
+          }),
+          expect.objectContaining({
+            proposalId: firstReplacement.proposalId,
+            supersedesProposalId: firstSource.proposalId,
+            replacement: expect.objectContaining({
+              assessmentId: expect.stringMatching(/^assessment-/),
+              evidenceHash: expect.any(String),
+            }),
+          }),
+          expect.objectContaining({
+            proposalId: secondSource.proposalId,
+            status: "superseded",
+            supersededByProposalId: secondReplacement.proposalId,
+          }),
+          expect.objectContaining({
+            proposalId: secondReplacement.proposalId,
+            supersedesProposalId: secondSource.proposalId,
+            replacement: expect.objectContaining({
+              assessmentId: expect.stringMatching(/^assessment-/),
+              evidenceHash: expect.any(String),
+            }),
+          }),
+        ]),
+      );
+      const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT proposal_id, status, superseded_by_proposal_id FROM campaign_proposals WHERE campaign_id = ?",
+            )
+            .all(published.campaignId),
+        ).toEqual(
+          expect.arrayContaining([
+            {
+              proposal_id: firstSource.proposalId,
+              status: "superseded",
+              superseded_by_proposal_id: firstReplacement.proposalId,
+            },
+            {
+              proposal_id: secondSource.proposalId,
+              status: "superseded",
+              superseded_by_proposal_id: secondReplacement.proposalId,
+            },
+          ]),
+        );
+      } finally {
+        database.close();
+      }
+    } finally {
       await server.close();
     }
   });
@@ -6102,16 +6338,59 @@ describe("durable Ready frontier", () => {
     "records $name without a hidden replacement cutoff",
     async ({ proposal, reason, storedStatus }) => {
       let replacementCalls = 0;
-      const assessor: CampaignOutcomeAssessor = async () => ({
-        verdict: "gaps",
-        summary: "the bounded frontier remains incomplete",
-        gaps: ["one replacement opportunity is available"],
-        evidence: [],
-        usage: null,
+      const validProposal = frontierProposal("valid-replacement", "outcome-one");
+      let firstAttemptEntered!: () => void;
+      const firstAttemptStarted = new Promise<void>((resolve) => {
+        firstAttemptEntered = resolve;
       });
+      let releaseFirstAttempt!: () => void;
+      const firstAttemptRelease = new Promise<void>((resolve) => {
+        releaseFirstAttempt = resolve;
+      });
+      let secondAttemptEntered!: () => void;
+      const secondAttemptStarted = new Promise<void>((resolve) => {
+        secondAttemptEntered = resolve;
+      });
+      let releaseSecondAttempt!: () => void;
+      const secondAttemptRelease = new Promise<void>((resolve) => {
+        releaseSecondAttempt = resolve;
+      });
+      const assessor: CampaignOutcomeAssessor = async (request) => {
+        const delivery = request.evidence.find(
+          (item) => item.fact === "delivery" && item.proposalId === validProposal.proposalId,
+        );
+        if (delivery)
+          return {
+            verdict: "satisfied" as const,
+            summary: "the valid correction satisfies the Outcome",
+            gaps: [],
+            evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+              ...delivery,
+              criterionIndex,
+            })),
+            usage: null,
+          };
+        return {
+          verdict: "gaps" as const,
+          summary: "the first planner response was not usable",
+          gaps: ["one valid correction is available"],
+          evidence: [],
+          usage: null,
+        };
+      };
       const replacementGenerator: CampaignReplacementGenerator = async () => {
         replacementCalls += 1;
-        return { proposal, usage: null };
+        if (proposal === null) return { proposal: null, usage: null };
+        if (replacementCalls === 1) {
+          firstAttemptEntered();
+          await firstAttemptRelease;
+          return { proposal, usage: null };
+        }
+        if (replacementCalls === 2) {
+          secondAttemptEntered();
+          await secondAttemptRelease;
+        }
+        return { proposal: validProposal, usage: null };
       };
       const { contractPath, server, stateDirectory, environment } = await frontierFixture(
         oneOutcomeFrontierGoal("campaign-repository"),
@@ -6130,13 +6409,11 @@ describe("durable Ready frontier", () => {
           frontierProposal("initial", "outcome-one"),
         );
         await handoffCampaign(server.url, published.campaignId);
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        const first = await getCampaign(server.url, published.campaignId);
-        if (!first) throw new Error("Campaign disappeared before replacement decision persisted");
-        if (storedStatus === "unavailable")
+        if (storedStatus === "unavailable") {
+          const first = await waitFor(
+            () => getCampaign(server.url, published.campaignId),
+            (campaign) => campaign?.status === "blocked",
+          );
           expect(first).toMatchObject({
             status: "blocked",
             decisionRequest: {
@@ -6145,8 +6422,32 @@ describe("durable Ready frontier", () => {
               outcomeIds: ["outcome-one"],
             },
           });
-        else expect(first).toMatchObject({ status: "planning", decisionRequest: null });
-        expect(replacementCalls).toBe(1);
+          expect(replacementCalls).toBe(1);
+        } else {
+          await firstAttemptStarted;
+          releaseFirstAttempt();
+          await secondAttemptStarted;
+          const first = await getCampaign(server.url, published.campaignId);
+          expect(first).toMatchObject({ status: "planning", decisionRequest: null });
+          expect(replacementCalls).toBe(2);
+          releaseSecondAttempt();
+          await expect(
+            waitFor(
+              () => getCampaign(server.url, published.campaignId),
+              (campaign) => campaign?.status === "accepted",
+            ),
+          ).resolves.toMatchObject({ status: "accepted" });
+        }
+        const firstState = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            firstState
+              .prepare("SELECT checkpoint_requested FROM campaigns WHERE campaign_id = ?")
+              .get(published.campaignId),
+          ).toEqual({ checkpoint_requested: 0 });
+        } finally {
+          firstState.close();
+        }
         await server.close();
 
         const restarted = await startUsineServer({
@@ -6158,28 +6459,34 @@ describe("durable Ready frontier", () => {
         });
         try {
           if (storedStatus === "unavailable") {
-            await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
-              first,
-            );
+            await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
+              status: "blocked",
+            });
             expect(replacementCalls).toBe(1);
           } else {
-            for (let attempt = 0; attempt < 200 && replacementCalls < 2; attempt += 1)
-              await new Promise((resolve) => setTimeout(resolve, 10));
-            expect(replacementCalls).toBeGreaterThan(1);
+            expect(replacementCalls).toBe(2);
             await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject({
-              status: "planning",
-              decisionRequest: null,
+              status: "accepted",
             });
           }
           const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
           try {
-            expect(
-              database
-                .prepare(
-                  "SELECT status, role, usage FROM campaign_replacement_runs WHERE campaign_id = ?",
-                )
-                .get(published.campaignId),
-            ).toMatchObject({ status: storedStatus, role: "replacement-planner", usage: null });
+            const runs = database
+              .prepare(
+                "SELECT status, role, usage FROM campaign_replacement_runs WHERE campaign_id = ? ORDER BY started_at_epoch_ms",
+              )
+              .all(published.campaignId);
+            expect(runs[0]).toMatchObject({
+              status: storedStatus,
+              role: "replacement-planner",
+              usage: null,
+            });
+            if (storedStatus !== "unavailable")
+              expect(runs[1]).toMatchObject({
+                status: "admitted",
+                role: "replacement-planner",
+                usage: null,
+              });
           } finally {
             database.close();
           }

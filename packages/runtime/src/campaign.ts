@@ -1361,13 +1361,24 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           (candidate) => candidate.status === "live",
         )) {
           const currentOutcome = currentCampaignOutcome(outcome, rows);
-          const assessment = assessments.get(outcome.id);
-          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
+          const outcomeRows = rows.filter(
+            (row) => decodePersistedTaskProposal(row.proposal).outcomeId === outcome.id,
+          );
+          const outcomeResults = new Map(
+            outcomeRows.flatMap((row) => {
+              const result = results.get(row.proposalId);
+              return result ? [[row.proposalId, result] as const] : [];
+            }),
+          );
           const checkpointRevision = campaign.checkpointRequested;
           const revisionSources = checkpointRevision
             ? supersedableProposalIds(rows, results, outcome.id)
             : [];
+          if (hasUsefulCampaignWork(outcomeRows, outcomeResults) && revisionSources.length === 0)
+            continue;
+          const assessment = assessments.get(outcome.id);
+          const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
+          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           if (
             !assessment ||
             assessment.verdict !== "gaps" ||
@@ -1516,7 +1527,6 @@ async function currentReplacementTarget(
     campaign.goalId !== target.campaign.goalId ||
     campaign.goalVersion !== target.campaign.goalVersion ||
     campaign.contractHash !== target.campaign.contractHash ||
-    campaign.revision !== target.campaign.revision ||
     campaign.checkpointRequested !== target.campaign.checkpointRequested ||
     campaign.superseded ||
     !campaign.planHandedOff ||
@@ -1979,12 +1989,29 @@ async function persistReplacementResult(
           ),
         );
       if (currentTarget) {
+        let retainCheckpointSource =
+          target.campaign.checkpointRequested &&
+          (recoverable || result.status === "invalid" || result.status === "duplicate");
+        if (target.campaign.checkpointRequested && result.status === "admitted") {
+          const rows = await handle.database
+            .select()
+            .from(campaignProposals)
+            .where(eq(campaignProposals.campaignId, target.campaign.campaignId))
+            .orderBy(asc(campaignProposals.sequence));
+          const results = await campaignTaskResults(handle.database, rows);
+          const contract = decodePersistedGoalContract(target.campaign.contract);
+          retainCheckpointSource = contract.outcomes.some(
+            (outcome) =>
+              outcome.status === "live" &&
+              supersedableProposalIds(rows, results, outcome.id).length > 0,
+          );
+        }
         await handle.database
           .update(campaigns)
           .set({
             status: "planning" as const,
             decisionRequest: null,
-            checkpointRequested: false,
+            checkpointRequested: retainCheckpointSource,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(target.campaign.updatedAt),
           })
@@ -2831,7 +2858,7 @@ export async function proposeCampaign(
           .set({
             status: "planning",
             decisionRequest: null,
-            checkpointRequested: false,
+            checkpointRequested: campaign.checkpointRequested,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: nextCampaignUpdatedAt(campaign.updatedAt),
           })
