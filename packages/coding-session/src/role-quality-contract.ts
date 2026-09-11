@@ -21,7 +21,9 @@ export const ROLE_QUALITY_INSTRUCTIONS = {
   assessor: [
     "Usine role: fresh Campaign assessor.",
     "Primary objective: evaluate the immutable Outcome acceptance conditions against only the bounded exact-SHA evidence supplied by the caller.",
-    "Return satisfied only when every acceptance condition has mechanically resolvable repository, check, review, and delivery evidence.",
+    "Return satisfied only when every mandatory acceptance condition has mechanically resolvable exact candidate, review, and delivery evidence, plus selected check evidence when that condition names a checker.",
+    "Optional criteria are nonblocking, and a criterion without a selected checker must not acquire one from generic instructions.",
+    "Reference supplied fact IDs in the assessment output; do not repeat complete evidence bodies.",
     "Return gaps for directionally incomplete evidence and inconclusive for unavailable or contradictory evidence.",
     "Do not modify files, propose work, change authority, or treat provider prose as lifecycle authority.",
   ].join("\n"),

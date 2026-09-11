@@ -21,6 +21,10 @@ import {
   campaignModelRunFromObservation,
   type CampaignModelRunDraft,
 } from "./campaign-model-run.js";
+import {
+  campaignAssessmentFactId,
+  type CampaignAssessmentReference,
+} from "./campaign-assessment-reference.js";
 
 export interface CampaignAssessorRepository {
   readonly id: string;
@@ -42,6 +46,8 @@ export interface CampaignAssessmentRequest {
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
   readonly environment: NodeJS.ProcessEnv;
+  /** Durable diagnostic supplied when a prior report omitted source references. */
+  readonly reportRecovery?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -49,7 +55,7 @@ export interface CampaignAssessmentDraft {
   readonly verdict: "satisfied" | "gaps" | "inconclusive";
   readonly summary: string;
   readonly gaps: readonly string[];
-  readonly evidence: readonly CampaignAssessmentEvidence[];
+  readonly evidence: readonly (CampaignAssessmentEvidence | CampaignAssessmentReference)[];
   readonly usage: CampaignAssessmentUsage | null;
   readonly modelRuns?: readonly CampaignModelRunDraft[];
   readonly recoverable?: boolean;
@@ -64,42 +70,12 @@ const assessmentOutputSchema = z
     verdict: z.enum(["satisfied", "gaps", "inconclusive"]),
     summary: z.string().min(1).max(2000),
     gaps: z.array(z.string().min(1).max(1000)).max(32),
-    evidence: z
-      .array(
-        z.object({
-          criterionIndex: z.number().int().nonnegative(),
-          repositoryId: z.string().min(1),
-          proposalId: z.string().min(1),
-          taskId: z.string().min(1),
-          fact: z.enum(["candidate", "check", "review", "delivery"]),
-          status: z.string().min(1),
-          sha: z.string().regex(/^[0-9a-f]{40}$/),
-          candidateObservedAtEpochMs: z.number().int().nonnegative().optional(),
-          criterionId: z.string().optional(),
-          criterion: z.string().optional(),
-          mandatory: z.boolean().optional(),
-          checkId: z.string().optional(),
-          artifact: z.literal("exact_candidate_checkout").optional(),
-          checkExitCode: z.number().int().optional(),
-          checkReason: z
-            .enum(["missing_verifier", "spawn_unavailable", "invalid_observation"])
-            .optional(),
-          checkOutputDigest: z
-            .string()
-            .regex(/^[0-9a-f]{64}$/)
-            .optional(),
-          checkObservation: z
-            .object({ artifact: z.string(), entry: z.string(), observation: z.string() })
-            .strict()
-            .optional(),
-          reviewSummary: z.string().max(2000).optional(),
-          reviewFindings: z.array(z.string().max(1000)).max(32).optional(),
-          deliveryPrNumber: z.number().int().nonnegative().optional(),
-          deliveryAttestationId: z.string().optional(),
-          deliveryMerged: z.boolean().optional(),
-        }),
-      )
-      .max(128),
+    evidence: z.array(
+      z.object({
+        criterionIndex: z.number().int().nonnegative(),
+        evidenceId: z.string().regex(/^fact-[0-9a-f]{64}$/),
+      }),
+    ),
   })
   .strict();
 
@@ -164,11 +140,19 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
     });
     const prompt = [
       "Assess this Outcome using only the supplied evidence.",
-      "Return satisfied only when every original acceptance criterion has a matching exact-SHA evidence reference.",
+      "Return satisfied only when every mandatory acceptance criterion has a matching exact-SHA evidence reference.",
+      "Optional criteria are nonblocking; do not invent a checker for a criterion without a selected checker.",
+      "Reference the supplied evidence IDs without repeating complete fact bodies in the output.",
       "Return gaps for directionally incomplete evidence and inconclusive for unavailable or contradictory evidence.",
       "Do not claim facts that are absent from the evidence.",
       `Outcome requirements: ${serializeRoleContext(request.outcome)}`,
-      `Exact evidence facts: ${serializeRoleContext(orderedContextFacts(request.evidence))}`,
+      `Exact evidence facts: ${serializeRoleContext(
+        orderedContextFacts(request.evidence).map((fact) => ({
+          evidenceId: campaignAssessmentFactId(fact),
+          fact,
+        })),
+      )}`,
+      ...(request.reportRecovery ? [`Report recovery diagnostic: ${request.reportRecovery}`] : []),
     ].join("\n");
     try {
       const assessorRequest: CampaignAssessorSessionRequest<
