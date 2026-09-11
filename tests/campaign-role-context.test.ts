@@ -13,10 +13,11 @@ import {
   createCampaignReplacementGenerator,
   type CampaignReplacementRequest,
 } from "../packages/runtime/src/campaign-replacement.js";
+import { campaignAssessmentFactId } from "../packages/runtime/src/campaign-assessment-reference.js";
 
 afterEach(() => vi.restoreAllMocks());
 
-function captureSdkRequests() {
+function captureSdkRequests(assessmentEvidence: readonly unknown[] = []) {
   const calls: { prompt: string; schema: unknown }[] = [];
   const callers: Parameters<CodexCodingSession["run"]>[0][] = [];
   let threads = 0;
@@ -46,7 +47,7 @@ function captureSdkRequests() {
                             verdict: "inconclusive",
                             summary: "fixture",
                             gaps: [],
-                            evidence: [],
+                            evidence: assessmentEvidence,
                           }),
                   },
                 };
@@ -194,6 +195,14 @@ function section(prompt: string, label: string): unknown {
   expect(line).toBeDefined();
   return JSON.parse(line!.slice(label.length + 2));
 }
+
+type PromptEvidence = { fact: CampaignAssessmentFact; evidenceId: string };
+
+function promptEvidence(prompt: string): PromptEvidence[] {
+  const value = section(prompt, "Exact evidence facts");
+  if (!Array.isArray(value)) throw new Error("expected exact evidence facts array");
+  return value as PromptEvidence[];
+}
 function prefix(prompt: string, boundary: string) {
   expect(prompt).toContain(boundary);
   return prompt.slice(0, prompt.indexOf(boundary));
@@ -214,9 +223,20 @@ test("assessor sends stable requirements and ordered exact facts through the SDK
   expect(seam.calls).toHaveLength(2);
   expect(seam.calls[0]).toEqual(seam.calls[1]);
   expect(section(seam.calls[0]!.prompt, "Outcome requirements")).toEqual(outcome);
-  expect(section(seam.calls[0]!.prompt, "Exact evidence facts")).toEqual(
+  expect(seam.calls[0]!.prompt).toContain(
+    "exact candidate, review, and delivery evidence, plus selected check evidence when that condition names a checker",
+  );
+  expect(seam.calls[0]!.prompt).toContain(
+    "a criterion without a selected checker must not acquire one from generic instructions",
+  );
+  expect(promptEvidence(seam.calls[0]!.prompt).map((item) => item.fact)).toEqual(
     expect.arrayContaining(evidence),
   );
+  expect(
+    promptEvidence(seam.calls[0]!.prompt).every(
+      (item) => typeof item.evidenceId === "string" && item.evidenceId.startsWith("fact-"),
+    ),
+  ).toBe(true);
   await assess({
     ...request,
     evidence: evidence.map((fact) => ({
@@ -248,15 +268,37 @@ test("assessor sends stable requirements and ordered exact facts through the SDK
   expect(section(seam.calls[3]!.prompt, "Outcome requirements")).toMatchObject({
     criteria: [...criteria, late],
   });
-  expect(section(seam.calls[3]!.prompt, "Exact evidence facts")).toEqual(
-    section(seam.calls[0]!.prompt, "Exact evidence facts"),
-  );
+  expect(promptEvidence(seam.calls[3]!.prompt)).toEqual(promptEvidence(seam.calls[0]!.prompt));
   expect(
     seam.calls.every(
       (call) => JSON.stringify(call.schema) === JSON.stringify(seam.calls[0]!.schema),
     ),
   ).toBe(true);
   expect(seam.threads()).toBe(4);
+});
+
+test("default assessor accepts a compact 33-reference response shape", async () => {
+  const assessmentEvidence = Array.from({ length: 33 }, (_, criterionIndex) => ({
+    criterionIndex,
+    evidenceId: `fact-${"a".repeat(64)}`,
+  }));
+  const seam = captureSdkRequests(assessmentEvidence);
+  const assess = createCampaignOutcomeAssessor();
+  const result = await assess(assessorRequest());
+  expect(result.evidence).toHaveLength(33);
+  expect(seam.calls[0]!.schema).toBeDefined();
+});
+
+test("fact references remain stable when nested observation keys are reordered", () => {
+  const left = {
+    ...evidence[1]!,
+    checkObservation: { artifact: "artifact", entry: "entry", observation: "observation" },
+  };
+  const right = {
+    ...evidence[1]!,
+    checkObservation: { observation: "observation", artifact: "artifact", entry: "entry" },
+  };
+  expect(campaignAssessmentFactId(left)).toBe(campaignAssessmentFactId(right));
 });
 
 test("planner excludes accounting churn but retains requirements, authority and evidence lineage", async () => {

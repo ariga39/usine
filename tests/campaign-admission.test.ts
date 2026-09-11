@@ -19,6 +19,8 @@ import {
   openSqliteDatabase,
   resolveTaskContract,
   TaskAuthority,
+  type AcceptanceCheck,
+  type AcceptanceCheckResult,
   type CampaignAssessmentFact,
   type TaskResult,
 } from "@usine/task-authority";
@@ -47,6 +49,8 @@ import {
   reconcileCampaigns,
 } from "../packages/runtime/src/campaign.js";
 import { lookupCampaignEvidence } from "../packages/runtime/src/campaign-evidence.js";
+import { createCampaignOutcomeAssessor } from "../packages/runtime/src/campaign-assessor.js";
+import { campaignAssessmentFactId } from "../packages/runtime/src/campaign-assessment-reference.js";
 import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
 
 function goalContract(objective = "Deliver the authorized campaign") {
@@ -247,6 +251,7 @@ async function frontierFixture(
   register = true,
   assessOutcome?: CampaignOutcomeAssessor,
   generateReplacement?: CampaignReplacementGenerator,
+  acceptanceChecks?: readonly AcceptanceCheck[],
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-frontier-"));
   const stateDirectory = join(root, "state");
@@ -284,6 +289,7 @@ async function frontierFixture(
       reviewerProfile: "reviewer-profile",
       forgeProfile: "default",
       projectCheck: { command: "true", timeoutMs: 1_000 },
+      acceptanceChecks: acceptanceChecks ? [...acceptanceChecks] : undefined,
       gitAuthor: { name: "Test", email: "test@example.invalid" },
     });
   return { root, stateDirectory, contractPath, server, environment };
@@ -294,6 +300,9 @@ async function acceptCampaignTask(
   merge = false,
   candidateSha?: string,
   mergeCommitSha?: string,
+  acceptanceChecks?:
+    | readonly AcceptanceCheckResult[]
+    | ((sha: string) => readonly AcceptanceCheckResult[]),
 ) {
   const { authority, contract, result } = context;
   const activation = await authority.reserveActivation(
@@ -311,9 +320,19 @@ async function acceptCampaignTask(
     { taskId: result.taskId, revision: activation.result.revision },
     { sha, baseSha: contract.baseSha, fence: activation.activation },
   );
+  const observedAcceptanceChecks =
+    typeof acceptanceChecks === "function" ? acceptanceChecks(sha) : acceptanceChecks;
   await authority.recordCheck(
     { taskId: result.taskId, revision: candidate.revision },
-    { sha, status: "passed", command: "true", exitCode: 0, stdout: "", stderr: "" },
+    {
+      sha,
+      status: "passed",
+      command: "true",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      ...(observedAcceptanceChecks ? { acceptanceChecks: observedAcceptanceChecks } : {}),
+    },
   );
   const reviewAttempt = await authority.reserveReviewAttempt(
     result.taskId,
@@ -762,6 +781,190 @@ test("delivers a quota-free Campaign leaf without count or deadline ceilings", a
     await server.close();
   }
 });
+
+test("default assessor resolves 33 check-bound criteria through the SDK and coordinator", async () => {
+  const criteria = Array.from({ length: 33 }, (_, index) => ({
+    id: `criterion-${index}`,
+    criterion: `Criterion ${index} is delivered.`,
+    mandatory: true,
+    checkId: `criterion-check-${index}`,
+  }));
+  const goal = {
+    ...oneOutcomeFrontierGoal("campaign-repository"),
+    outcomes: [
+      { ...oneOutcomeFrontierGoal("campaign-repository").outcomes[0], acceptance: criteria },
+    ],
+  };
+  const acceptanceChecks = criteria.map((criterion) => ({
+    id: criterion.checkId,
+    source: "host" as const,
+    workingDirectory: process.cwd(),
+    command: "true",
+    timeoutMs: 1_000,
+    publicObservation: "safe-json-v1" as const,
+  }));
+
+  async function runScenario(mode: "full" | "omit" | "absent") {
+    let assessorCalls = 0;
+    let replacementCalls = 0;
+    const prompts: string[] = [];
+    const factory: CodingSessionClientFactory = async (request) =>
+      ({
+        startThread: () => ({
+          id: `campaign-assessor-${assessorCalls + 1}`,
+          runStreamed: async (prompt) => {
+            if (request.role !== "assessor") throw new Error("fixture requires assessor role");
+            if (typeof prompt !== "string") throw new Error("fixture requires text prompt");
+            prompts.push(prompt);
+            const source = request.assessment.evidence as readonly CampaignAssessmentFact[];
+            const report = (request.assessment.outcome.criteria ?? []).flatMap(
+              (criterion, criterionIndex) =>
+                source
+                  .filter(
+                    (item) =>
+                      item.criterionId === criterion.id &&
+                      ["candidate", "check", "review", "delivery"].includes(item.fact),
+                  )
+                  .map((item) => ({ criterionIndex, evidenceId: campaignAssessmentFactId(item) })),
+            );
+            const evidence = mode === "omit" && assessorCalls === 1 ? report.slice(0, -1) : report;
+            const output = {
+              verdict: "satisfied",
+              summary: "all mandatory criteria reference the current evidence bundle",
+              gaps: [],
+              evidence,
+            };
+            return {
+              events: (async function* () {
+                yield { type: "thread.started", thread_id: `campaign-assessor-${assessorCalls}` };
+                yield { type: "turn.started" };
+                yield {
+                  type: "item.completed",
+                  item: {
+                    type: "agent_message",
+                    id: "campaign-assessor-message",
+                    text: JSON.stringify(output),
+                  },
+                };
+                yield {
+                  type: "turn.completed",
+                  usage: {
+                    input_tokens: 100,
+                    cached_input_tokens: 20,
+                    output_tokens: evidence.length,
+                  },
+                };
+              })(),
+            };
+          },
+        }),
+      }) as Awaited<ReturnType<CodingSessionClientFactory>>;
+    const session = new CodexCodingSession(factory, {
+      environment: {},
+      profileResolver: async () => ({ model: "fixture" }),
+    });
+    const originalRun = session.run.bind(session);
+    const runSpy = vi.spyOn(CodexCodingSession.prototype, "run").mockImplementation((request) => {
+      assessorCalls += 1;
+      return originalRun(request);
+    });
+    const fixtureValue = await frontierFixture(
+      goal,
+      "user:campaign-366",
+      async (context) =>
+        acceptCampaignTask(context, false, undefined, undefined, (sha) =>
+          criteria.slice(0, mode === "absent" ? -1 : undefined).map((criterion) => ({
+            id: criterion.checkId,
+            sha,
+            status: "passed" as const,
+            exitCode: 0,
+            outputDigest: "a".repeat(64),
+            observation: {
+              artifact: "criterion artifact",
+              entry: "criterion entry",
+              observation: "criterion observed",
+            },
+          })),
+        ),
+      1,
+      true,
+      createCampaignOutcomeAssessor(),
+      async () => {
+        replacementCalls += 1;
+        return { proposal: null, usage: null };
+      },
+      acceptanceChecks,
+    );
+    try {
+      const published = await publishCampaign(fixtureValue.server.url, {
+        contractPath: fixtureValue.contractPath,
+      });
+      await proposeCampaign(fixtureValue.server.url, published.campaignId, {
+        ...frontierProposal("thirty-three-criteria", "outcome-one"),
+        acceptance: criteria,
+      });
+      await handoffCampaign(fixtureValue.server.url, published.campaignId);
+      const campaign = await waitFor(
+        () => getCampaign(fixtureValue.server.url, published.campaignId),
+        (value) => value?.status === "accepted" || value?.status === "blocked",
+      );
+      const database = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+      try {
+        const runs = database
+          .prepare(
+            "SELECT status, usage FROM campaign_model_runs WHERE role = 'assessor' ORDER BY started_at_epoch_ms",
+          )
+          .all() as { status: string; usage: string | null }[];
+        return { campaign, prompts, replacementCalls, runs };
+      } finally {
+        database.close();
+      }
+    } finally {
+      runSpy.mockRestore();
+      await fixtureValue.server.close();
+    }
+  }
+
+  const full = await runScenario("full");
+  expect(full.campaign).toMatchObject({
+    status: "accepted",
+    outcomes: [{ status: "accepted", assessment: { verdict: "satisfied" } }],
+  });
+  expect(full.campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(132);
+  expect(full.runs).toHaveLength(1);
+  expect(full.runs[0]).toMatchObject({ status: "completed", usage: expect.any(String) });
+  expect(JSON.parse(full.runs[0]!.usage!)).toMatchObject({
+    inputTokens: 100,
+    cachedInputTokens: 20,
+    outputTokens: 132,
+  });
+
+  const recovered = await runScenario("omit");
+  expect(recovered.campaign).toMatchObject({ status: "accepted" });
+  expect(recovered.campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(132);
+  expect(recovered.prompts[1]).toContain("Report recovery diagnostic:");
+  expect(recovered.runs).toHaveLength(2);
+  expect(recovered.runs[0]).toMatchObject({ status: "failed", usage: expect.any(String) });
+  expect(recovered.runs[1]).toMatchObject({ status: "completed", usage: expect.any(String) });
+  expect(JSON.parse(recovered.runs[0]!.usage!)).toMatchObject({
+    inputTokens: 100,
+    cachedInputTokens: 20,
+    outputTokens: 131,
+  });
+  expect(JSON.parse(recovered.runs[1]!.usage!)).toMatchObject({
+    inputTokens: 100,
+    cachedInputTokens: 20,
+    outputTokens: 132,
+  });
+  expect(recovered.replacementCalls).toBe(0);
+
+  const absent = await runScenario("absent");
+  expect(absent.campaign).toMatchObject({
+    status: "blocked",
+    outcomes: [{ assessment: { verdict: "gaps" } }],
+  });
+  expect(absent.replacementCalls).toBeGreaterThan(0);
+}, 30_000);
 
 test("observes a warning during held public Campaign work and still completes", async () => {
   let release!: () => void;
@@ -3522,7 +3725,9 @@ describe("durable Ready frontier", () => {
         verdict: "satisfied",
         summary: "the corrected shipped entry has exact check, review, and delivery evidence",
         gaps: [],
-        evidence: correctionFacts.map((item) => ({ ...item, criterionIndex: 0 })),
+        evidence: correctionFacts
+          .filter((item) => item.criterionId === criterion.id)
+          .map((item) => ({ ...item, criterionIndex: 0 })),
         usage: null,
       };
     };
@@ -3694,7 +3899,7 @@ describe("durable Ready frontier", () => {
     }
   }, 60_000);
 
-  test("rejects mixed exact-SHA evidence for one mandatory criterion", async () => {
+  test("recovers a nonaccepting mixed-report assessment without replacement work", async () => {
     const criterion = {
       id: "current-artifact",
       criterion: "The current artifact is reviewed and delivered.",
@@ -3712,6 +3917,7 @@ describe("durable Ready frontier", () => {
     let oldSha!: string;
     let newSha!: string;
     let assessmentCalls = 0;
+    let replacementCalls = 0;
     let observedEvidence: readonly CampaignAssessmentFact[] = [];
     const assessor: CampaignOutcomeAssessor = async (request) => {
       assessmentCalls += 1;
@@ -3731,11 +3937,15 @@ describe("durable Ready frontier", () => {
       const newDelivery = newFacts.find((item) => item.fact === "delivery");
       if (!oldCandidate || !oldReview || !newDelivery)
         throw new Error("mixed-bundle fixture facts are incomplete");
+      const citedFacts =
+        assessmentCalls === 1
+          ? [oldCandidate, oldReview, newDelivery]
+          : newFacts.filter((item) => item.criterionId === criterion.id);
       return {
         verdict: "satisfied",
-        summary: "incorrectly mixed evidence from two candidate bundles",
+        summary: "the report cites the current exact candidate bundle",
         gaps: [],
-        evidence: [oldCandidate, oldReview, newDelivery].map((item) => ({
+        evidence: citedFacts.map((item) => ({
           ...item,
           criterionIndex: 0,
         })),
@@ -3754,6 +3964,10 @@ describe("durable Ready frontier", () => {
       1,
       true,
       assessor,
+      async () => {
+        replacementCalls += 1;
+        return { proposal: null, usage: null };
+      },
     );
     const { contractPath, server, root } = fixtureValue;
     try {
@@ -3778,13 +3992,23 @@ describe("durable Ready frontier", () => {
       await handoffCampaign(server.url, published.campaignId);
       const result = await waitFor(
         () => getCampaign(server.url, published.campaignId),
-        (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "gaps",
+        (campaign) => campaign?.status === "accepted" || campaign?.status === "blocked",
       );
       expect(result).toMatchObject({
-        status: expect.not.stringMatching("accepted"),
-        outcomes: [{ assessment: { verdict: "gaps" } }],
+        status: "accepted",
+        outcomes: [{ assessment: { verdict: "satisfied" } }],
       });
-      expect(assessmentCalls).toBeGreaterThanOrEqual(1);
+      expect(assessmentCalls).toBe(2);
+      expect(replacementCalls).toBe(0);
+      const database = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+      try {
+        const assessments = database
+          .prepare("SELECT assessment FROM campaign_assessments ORDER BY completed_at_epoch_ms")
+          .all() as { assessment: string }[];
+        expect(JSON.parse(assessments[0]!.assessment)).toMatchObject({ verdict: "inconclusive" });
+      } finally {
+        database.close();
+      }
       expect(observedEvidence).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ proposalId: "old-evidence", sha: oldSha, fact: "candidate" }),
@@ -3844,7 +4068,9 @@ describe("durable Ready frontier", () => {
           verdict: "satisfied",
           summary: "incorrectly cited the complete older candidate bundle",
           gaps: [],
-          evidence: oldFacts.map((item) => ({ ...item, criterionIndex: 0 })),
+          evidence: oldFacts
+            .filter((item) => item.criterionId === criterion.id)
+            .map((item) => ({ ...item, criterionIndex: 0 })),
           usage: null,
         };
       };
@@ -4283,6 +4509,7 @@ describe("durable Ready frontier", () => {
       ],
     };
     let calls = 0;
+    let replacementCalls = 0;
     let requestEvidence: readonly CampaignAssessmentFact[] = [];
     const assessor: CampaignOutcomeAssessor = async (request) => {
       calls += 1;
@@ -4291,13 +4518,17 @@ describe("durable Ready frontier", () => {
       if (!delivery) throw new Error("fixture requires accepted delivery evidence");
       const source =
         kind === "non-delivery"
-          ? request.evidence.find((item) => item.fact === "candidate")!
+          ? calls === 1
+            ? request.evidence.find((item) => item.fact === "candidate")!
+            : delivery
           : delivery;
       const second =
         kind === "forged"
           ? { ...delivery, criterionIndex: 1, sha: "0".repeat(40) }
           : kind === "missing"
-            ? null
+            ? calls === 1
+              ? null
+              : { ...source, criterionIndex: 1 }
             : { ...source, criterionIndex: 1 };
       return {
         verdict: "satisfied",
@@ -4314,7 +4545,10 @@ describe("durable Ready frontier", () => {
       1,
       true,
       assessor,
-      async () => ({ proposal: null, usage: null }),
+      async () => {
+        replacementCalls += 1;
+        return { proposal: null, usage: null };
+      },
     );
     try {
       const published = await publishCampaign(server.url, { contractPath });
@@ -4331,15 +4565,26 @@ describe("durable Ready frontier", () => {
       }
       const campaign = await getCampaign(server.url, published.campaignId);
       expect(requestEvidence.every((item) => !Object.hasOwn(item, "criterionIndex"))).toBe(true);
-      expect(calls).toBe(1);
-      if (kind !== "accepted") {
-        const expectedEvidence =
-          kind === "non-delivery"
-            ? [{ criterionIndex: 0 }, { criterionIndex: 1 }]
-            : [{ criterionIndex: 0 }];
+      expect(calls).toBe(kind === "accepted" || kind === "forged" ? 1 : 2);
+      if (kind === "missing" || kind === "non-delivery") {
+        expect(campaign).toMatchObject({
+          status: "accepted",
+          outcomes: [{ status: "accepted", assessment: { verdict: "satisfied" } }],
+        });
+        expect(calls).toBeGreaterThanOrEqual(2);
+        expect(replacementCalls).toBe(0);
+      } else if (kind !== "accepted") {
+        const expectedEvidence = [{ criterionIndex: 0 }];
         expect(campaign).toMatchObject({
           status: "blocked",
-          outcomes: [{ assessment: { verdict: "gaps", evidence: expectedEvidence } }],
+          outcomes: [
+            {
+              assessment: {
+                verdict: kind === "forged" ? "inconclusive" : "gaps",
+                evidence: expectedEvidence,
+              },
+            },
+          ],
         });
         expect(campaign?.outcomes[0]?.assessment?.evidence).toHaveLength(expectedEvidence.length);
       } else {

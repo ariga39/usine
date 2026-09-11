@@ -64,6 +64,11 @@ import type {
   CampaignReplacementRequest,
 } from "./campaign-replacement.js";
 import type { CampaignModelRunDraft } from "./campaign-model-run.js";
+import {
+  campaignAssessmentFactId,
+  campaignAssessmentFactKey,
+  type CampaignAssessmentReference,
+} from "./campaign-assessment-reference.js";
 import { credentialFreeGitEnvironment } from "@usine/candidate-workspace";
 import { ensurePrivateStateDatabase } from "./private-state.js";
 import { readCommittedContract } from "./verify-committed-contract.js";
@@ -1290,57 +1295,43 @@ function assessmentEvidenceHash(
   return createHash("sha256").update(JSON.stringify({ outcome, evidence }), "utf8").digest("hex");
 }
 
-function assessmentFactKey(item: CampaignAssessmentFact): string {
-  return JSON.stringify([
-    item.repositoryId,
-    item.proposalId,
-    item.taskId,
-    item.fact,
-    item.status,
-    item.sha,
-    item.candidateObservedAtEpochMs ?? null,
-    item.criterionId ?? null,
-    item.criterion ?? null,
-    item.mandatory ?? null,
-    item.checkId ?? null,
-    item.artifact ?? null,
-    item.checkExitCode ?? null,
-    item.checkReason ?? null,
-    item.checkOutputDigest ?? null,
-    item.checkObservation ?? null,
-    item.reviewSummary ?? null,
-    item.reviewFindings ?? null,
-    item.deliveryPrNumber ?? null,
-    item.deliveryAttestationId ?? null,
-    item.deliveryMerged ?? null,
-  ]);
-}
-
 function resolveAssessmentReferences(
   outcome: GoalContract["outcomes"][number],
   evidence: readonly CampaignAssessmentFact[],
-  references: readonly CampaignAssessmentEvidence[],
+  references: readonly (CampaignAssessmentEvidence | CampaignAssessmentReference)[],
 ): {
   readonly references: readonly CampaignAssessmentEvidence[];
   readonly criteriaSatisfied: boolean;
+  readonly sourceComplete: boolean;
+  readonly invalidReferenceCount: number;
 } {
-  const source = new Set(evidence.map(assessmentFactKey));
+  const source = new Set(evidence.map(campaignAssessmentFactKey));
   const criteria = normalizeAcceptanceCriteria(outcome.acceptance);
-  const resolved = references.filter(
+  const sourceById = new Map(evidence.map((item) => [campaignAssessmentFactId(item), item]));
+  const criterionMatches = (criterionIndex: number, item: CampaignAssessmentFact): boolean =>
+    criterionIndex < criteria.length &&
+    (typeof outcome.acceptance[criterionIndex] === "string" ||
+      (item.criterionId === criteria[criterionIndex]?.id &&
+        item.criterion === criteria[criterionIndex]?.criterion &&
+        item.mandatory === criteria[criterionIndex]?.mandatory &&
+        item.checkId === (criteria[criterionIndex]?.checkId ?? undefined)));
+  const expandedReferences = references.flatMap((item) => {
+    if (!("evidenceId" in item)) return [item];
+    const sourceFact = sourceById.get(item.evidenceId);
+    return sourceFact ? [{ ...sourceFact, criterionIndex: item.criterionIndex }] : [];
+  });
+  const resolved = expandedReferences.filter(
     (item) =>
       item.criterionIndex < criteria.length &&
-      source.has(assessmentFactKey(item)) &&
-      (typeof outcome.acceptance[item.criterionIndex] === "string" ||
-        (item.criterionId === criteria[item.criterionIndex]?.id &&
-          item.criterion === criteria[item.criterionIndex]?.criterion &&
-          item.mandatory === criteria[item.criterionIndex]?.mandatory &&
-          item.checkId === (criteria[item.criterionIndex]?.checkId ?? undefined))),
+      source.has(campaignAssessmentFactKey(item)) &&
+      criterionMatches(item.criterionIndex, item),
   );
-  return {
-    references: resolved,
-    criteriaSatisfied: criteria.every((criterion, criterionIndex) => {
+  const criteriaSatisfied = (candidateReferences: readonly CampaignAssessmentEvidence[]) =>
+    criteria.every((criterion, criterionIndex) => {
       if (!criterion.mandatory) return true;
-      const criterionReferences = resolved.filter((item) => item.criterionIndex === criterionIndex);
+      const criterionReferences = candidateReferences.filter(
+        (item) => item.criterionIndex === criterionIndex,
+      );
       if (typeof outcome.acceptance[criterionIndex] === "string")
         return criterionReferences.some(
           (item) => item.fact === "delivery" && item.artifact === "exact_candidate_checkout",
@@ -1397,7 +1388,23 @@ function resolveAssessmentReferences(
             : true;
           return hasReview && hasCheck;
         });
+    });
+  const sourceReferences = evidence.flatMap((item) =>
+    criteria.flatMap((criterion, criterionIndex) => {
+      if (!criterionMatches(criterionIndex, item)) return [];
+      if (
+        typeof outcome.acceptance[criterionIndex] === "string" &&
+        (item.fact !== "delivery" || item.artifact !== "exact_candidate_checkout")
+      )
+        return [];
+      return [{ ...item, criterionIndex }];
     }),
+  );
+  return {
+    references: resolved,
+    criteriaSatisfied: criteriaSatisfied(resolved),
+    sourceComplete: criteriaSatisfied(sourceReferences),
+    invalidReferenceCount: references.length - resolved.length,
   };
 }
 
@@ -1407,7 +1414,8 @@ function assessmentReferencesResolve(
   assessment: CampaignAssessment | undefined,
 ): boolean {
   if (!assessment || assessment.verdict !== "satisfied") return false;
-  return resolveAssessmentReferences(outcome, evidence, assessment.evidence).criteriaSatisfied;
+  const resolution = resolveAssessmentReferences(outcome, evidence, assessment.evidence);
+  return resolution.criteriaSatisfied && resolution.invalidReferenceCount === 0;
 }
 
 async function campaignAssessmentRows(
@@ -2008,14 +2016,28 @@ async function persistCampaignModelRun(
     readonly failureClass?: CampaignModelRunDraft["failureClass"];
   },
 ): Promise<void> {
+  const existingRun = (modelRuns ?? []).find((run) => run.invocationId === target.invocationId);
+  const observedRuns = existingRun
+    ? (modelRuns ?? []).map((run) =>
+        run.invocationId === target.invocationId
+          ? {
+              ...run,
+              ...(fallback?.status === "failed" ? { status: fallback.status } : {}),
+              ...(fallback?.status === "failed" && fallback.failureClass !== undefined
+                ? { failureClass: fallback.failureClass }
+                : {}),
+            }
+          : run,
+      )
+    : modelRuns;
   const canonicalRuns =
     fallback &&
     (fallback.status !== undefined ||
       (fallback.usage !== null &&
         Object.values(fallback.usage).some((value) => typeof value === "number"))) &&
-    !(modelRuns ?? []).some((run) => run.invocationId === target.invocationId)
+    !existingRun
       ? [
-          ...(modelRuns ?? []),
+          ...(observedRuns ?? []),
           {
             invocationId: target.invocationId,
             role: fallback.role,
@@ -2037,7 +2059,7 @@ async function persistCampaignModelRun(
             usage: fallback.usage,
           } satisfies CampaignModelRunDraft,
         ]
-      : modelRuns;
+      : observedRuns;
   if (!canonicalRuns || canonicalRuns.length === 0) {
     await database
       .delete(campaignModelRuns)
@@ -2432,6 +2454,7 @@ interface AssessmentTarget {
   readonly repositories: CampaignAssessmentRequest["repositories"];
   readonly evidenceHash: string;
   readonly invocationId: string;
+  readonly reportRecovery?: string;
 }
 
 function campaignAssessmentInvocationId(
@@ -2528,6 +2551,9 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
             repositories: [...repositoriesForOutcome.values()],
             evidenceHash,
             invocationId,
+            ...(current?.verdict === "inconclusive" && currentRun?.status === "failed"
+              ? { reportRecovery: [current.summary, ...current.gaps].join(" ").slice(0, 2000) }
+              : {}),
           });
         }
       }
@@ -2543,22 +2569,32 @@ function validateAssessment(
   draft: CampaignAssessmentDraft,
   startedAtEpochMs: number,
   completedAtEpochMs: number,
-): CampaignAssessment {
-  const { references, criteriaSatisfied } = resolveAssessmentReferences(
-    target.outcome,
-    target.evidence,
-    draft.evidence,
-  );
+): { readonly assessment: CampaignAssessment; readonly reportRecovery?: string } {
+  const { references, criteriaSatisfied, sourceComplete, invalidReferenceCount } =
+    resolveAssessmentReferences(target.outcome, target.evidence, draft.evidence);
   let verdict = draft.verdict;
   let summary = draft.summary.slice(0, 2000);
   let gaps = [...draft.gaps].map((gap) => gap.slice(0, 1000)).slice(0, 32);
-  if (draft.verdict === "satisfied" && !criteriaSatisfied) {
-    verdict = references.length > 0 ? "gaps" : "inconclusive";
-    summary =
-      references.length > 0
-        ? "assessment did not provide exact delivery evidence for every acceptance criterion"
-        : "assessment cited unavailable or contradictory evidence";
-    gaps = [summary];
+  let reportRecovery: string | undefined;
+  if (draft.verdict === "satisfied" && (invalidReferenceCount > 0 || !criteriaSatisfied)) {
+    if (sourceComplete && invalidReferenceCount === 0) {
+      reportRecovery =
+        "assessment report omitted exact source references for one or more mandatory criteria";
+      verdict = "inconclusive";
+      summary = reportRecovery;
+      gaps = [summary];
+    } else if (invalidReferenceCount > 0) {
+      verdict = "inconclusive";
+      summary = "assessment cited unavailable or contradictory evidence";
+      gaps = [summary];
+    } else {
+      verdict = references.length > 0 ? "gaps" : "inconclusive";
+      summary =
+        references.length > 0
+          ? "assessment did not provide exact delivery evidence for every acceptance criterion"
+          : "assessment cited unavailable or contradictory evidence";
+      gaps = [summary];
+    }
   }
   const assessment = {
     role: "assessor" as const,
@@ -2577,7 +2613,10 @@ function validateAssessment(
     startedAtEpochMs,
     completedAtEpochMs,
   } satisfies CampaignAssessment;
-  return Schema.decodeUnknownSync(campaignAssessmentSchema)(assessment);
+  return {
+    assessment: Schema.decodeUnknownSync(campaignAssessmentSchema)(assessment),
+    ...(reportRecovery ? { reportRecovery } : {}),
+  };
 }
 
 async function persistCampaignAssessment(
@@ -2733,6 +2772,7 @@ async function assessCampaignTargets(
         evidence: target.evidence,
         repositories: target.repositories,
         environment,
+        ...(target.reportRecovery ? { reportRecovery: target.reportRecovery } : {}),
         signal,
       });
     } catch {
@@ -2747,8 +2787,11 @@ async function assessCampaignTargets(
       };
     }
     let assessment: CampaignAssessment;
+    let reportRecovery: string | undefined;
     try {
-      assessment = validateAssessment(invocationTarget, draft, startedAtEpochMs, Date.now());
+      const validated = validateAssessment(invocationTarget, draft, startedAtEpochMs, Date.now());
+      assessment = validated.assessment;
+      reportRecovery = validated.reportRecovery;
     } catch {
       recoverable = true;
       assessment = validateAssessment(
@@ -2762,7 +2805,7 @@ async function assessCampaignTargets(
         },
         startedAtEpochMs,
         Date.now(),
-      );
+      ).assessment;
     }
     let usage: CampaignAssessmentDraft["usage"] = null;
     try {
@@ -2770,7 +2813,7 @@ async function assessCampaignTargets(
     } catch {
       usage = null;
     }
-    recoverable ||= draft.recoverable === true;
+    recoverable ||= draft.recoverable === true || reportRecovery !== undefined;
     await persistCampaignAssessment(
       stateDirectory,
       invocationTarget,
