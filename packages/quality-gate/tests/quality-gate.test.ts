@@ -297,6 +297,55 @@ test("Quality Gate checks a disposable exact-SHA checkout before fresh review", 
   });
 });
 
+test("does not accept a missing mandatory Vite+ requirement behind a green candidate check", async () => {
+  const sha = "a".repeat(40);
+  const gate = new QualityGate({
+    workspace: {
+      withCheckout: async (_purpose, _sha, callback) => callback(tmpdir()),
+    },
+    session: {
+      run: async () => {
+        throw new Error("reviewer should not start");
+      },
+    },
+    reviewer: {
+      role: "reviewer",
+      profile: "reviewer-profile",
+      sandbox: "read-only",
+    },
+    environment: testEnvironment,
+    deadlineEpochMs: Date.now() + 30_000,
+  });
+
+  const task = {
+    ...contract,
+    repositoryId: "repo",
+    baseSha: sha,
+    instructions: "Keep the required toolchain intact.",
+    acceptance: [
+      {
+        id: "vite-plus",
+        criterion: "Actual Vite+ is installed and its shipped entry executes.",
+        mandatory: true,
+        checkId: "vite-plus",
+      },
+    ],
+    nonGoals: [],
+    projectCheck: { command: "true", timeoutMs: 10_000 },
+    acceptanceChecks: [
+      {
+        id: "vite-plus",
+        source: "host",
+        command: "false",
+        timeoutMs: 10_000,
+      },
+    ],
+  } as unknown as ResolvedTaskContract;
+
+  const result = requireCheckResult(await gate.check(task, sha, 1));
+  expect(result.status).toBe("failed");
+});
+
 test("does not call an unavailable checkout a missing shell", async () => {
   const root = await mkdtemp(join(tmpdir(), "usine-quality-missing-checkout-"));
   const command = "true";
