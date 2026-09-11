@@ -68,7 +68,7 @@ const evidenceAggregate = Schema.Struct({
 const campaignTouch = Schema.Struct({
   touchId: Schema.String,
   goalVersion: Schema.Int,
-  type: Schema.Literals(["plan", "decision"]),
+  type: Schema.Literals(["plan", "decision", "warning"]),
   occurredAtEpochMs: Schema.Int,
 });
 
@@ -192,7 +192,7 @@ export interface CampaignEvidenceProposal {
 export interface CampaignEvidenceDecisionTouch {
   readonly touchId: string;
   readonly goalVersion: number;
-  readonly type: "decision";
+  readonly type: "decision" | "warning";
   readonly occurredAtEpochMs: number;
 }
 

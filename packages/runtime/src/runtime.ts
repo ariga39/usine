@@ -10,6 +10,7 @@ import {
   resolveTaskContract,
   repositoryIdentity,
   TaskAuthority,
+  TaskRetryConflictError,
   TaskIdCursorError,
   type TaskContract,
   type TaskExecutionInput,
@@ -60,6 +61,7 @@ import {
 } from "./runtime-policy.js";
 import { deadlineExpired, remainingUntil } from "@usine/task-authority";
 import { ensurePrivateStateDatabase, ensurePrivateStateDirectory } from "./private-state.js";
+import { lookupCampaign } from "./campaign.js";
 
 export {
   lookupCampaignEvidence,
@@ -529,7 +531,36 @@ export async function retryTask(
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath);
   try {
+    const current = await new TaskAuthority(handle.database, { onEvent }).lookup(taskId);
+    if (
+      current &&
+      !isTerminalState(current.state) &&
+      current.campaign &&
+      (await lookupCampaign(stateDirectory, current.campaign.campaignId))?.status === "abandoned"
+    )
+      throw new TaskRetryConflictError("campaign_abandoned", current.state);
     return await new TaskAuthority(handle.database, { onEvent }).retryTask(taskId, budget);
+  } finally {
+    handle.close();
+  }
+}
+
+export async function abandonTaskIfCampaignAbandoned(
+  stateDirectory: string,
+  taskId: string,
+  onEvent?: (event: TaskEvent) => void,
+): Promise<TaskResult | null> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    const authority = new TaskAuthority(handle.database, { onEvent });
+    const current = await authority.lookup(taskId);
+    if (!current || isTerminalState(current.state) || !current.campaign) return null;
+    const campaign = await lookupCampaign(stateDirectory, current.campaign.campaignId);
+    if (!campaign || campaign.status !== "abandoned") return null;
+    return await authority.block(
+      { taskId: current.taskId, revision: current.revision },
+      "Campaign abandoned",
+    );
   } finally {
     handle.close();
   }

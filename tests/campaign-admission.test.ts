@@ -40,7 +40,11 @@ import {
 } from "../apps/cli/src/server-client.js";
 import {
   lookupCampaign,
+  abandonCampaign as abandonCampaignToState,
+  handoffCampaign as handoffCampaignToState,
+  proposeCampaign as proposeCampaignToState,
   publishCampaign as publishCampaignToState,
+  recordCampaignDecisionTouch as recordCampaignDecisionTouchToState,
   reconcileCampaigns,
 } from "../packages/runtime/src/campaign.js";
 import { lookupCampaignEvidence } from "../packages/runtime/src/campaign-evidence.js";
@@ -445,6 +449,57 @@ test("keeps the current Goal input and Campaign projection free of Planner budge
   }
 });
 
+test("observes a configured warning once without changing Campaign execution", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "usine-campaign-warning-"));
+  const environment = { USINE_GOAL_PUBLICATION_SOURCE: "user:campaign-warning" };
+  const contract = {
+    schemaVersion: 1,
+    id: "campaign-warning",
+    version: 1,
+    objective: "Observe elapsed work without stopping it",
+    outcomes: [
+      {
+        id: "outcome-one",
+        title: "Keep working",
+        acceptance: ["The outcome remains available for execution."],
+        dependsOn: [],
+        parentId: null,
+      },
+    ],
+    authority: {
+      source: "user:campaign-warning",
+      publish: true,
+      delivery: false,
+      merge: false,
+      repositories: [],
+      effects: [],
+    },
+    warningThresholdMs: 1,
+  };
+  const rawContract = JSON.stringify(contract);
+  const published = await publishCampaignToState(stateDirectory, rawContract, environment);
+  const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+  database
+    .prepare("UPDATE campaigns SET created_at = ? WHERE campaign_id = ?")
+    .run(Date.now() - 100, published.campaignId);
+  database.close();
+
+  await expect(lookupCampaign(stateDirectory, published.campaignId)).resolves.toMatchObject({
+    status: "planning",
+  });
+  await lookupCampaignEvidence(stateDirectory, published.campaignId);
+  await recordCampaignDecisionTouchToState(
+    stateDirectory,
+    published.campaignId,
+    "guardian-observation",
+    environment,
+  );
+  await publishCampaignToState(stateDirectory, rawContract, environment);
+  const evidence = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+  expect(evidence?.touches.filter((touch) => touch.type === "warning")).toHaveLength(1);
+  expect((await lookupCampaign(stateDirectory, published.campaignId))?.status).toBe("planning");
+});
+
 async function rewriteTaskResult(
   stateDirectory: string,
   taskId: string,
@@ -706,6 +761,250 @@ test("delivers a quota-free Campaign leaf without count or deadline ceilings", a
     });
   } finally {
     await server.close();
+  }
+});
+
+test("observes a warning during held public Campaign work and still completes", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const enteredWork = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const goal = { ...oneOutcomeFrontierGoal("campaign-repository"), warningThresholdMs: 1 };
+  const fixtureValue = await frontierFixture(
+    goal,
+    "user:campaign-366",
+    async (context) => {
+      entered();
+      await held;
+      return acceptCampaignTask(context);
+    },
+    1,
+    true,
+    satisfiesDeliveredOutcome,
+  );
+  try {
+    const published = await publishCampaign(fixtureValue.server.url, {
+      contractPath: fixtureValue.contractPath,
+    });
+    await proposeCampaign(
+      fixtureValue.server.url,
+      published.campaignId,
+      frontierProposal("held-warning", "outcome-one"),
+    );
+    await handoffCampaign(fixtureValue.server.url, published.campaignId);
+    await enteredWork;
+    const database = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+    database
+      .prepare("UPDATE campaigns SET created_at = ? WHERE campaign_id = ?")
+      .run(Date.now() - 100, published.campaignId);
+    database.close();
+
+    const observed = await getCampaign(fixtureValue.server.url, published.campaignId);
+    if (!observed) throw new Error("Campaign disappeared during held warning observation");
+    expect(observed.status).not.toBe("blocked");
+    const evidence = await campaignEvidence(fixtureValue.server.url, published.campaignId);
+    if (!evidence) throw new Error("Campaign evidence disappeared during held warning observation");
+    expect(evidence.touches.some((touch) => touch.type === "warning")).toBe(true);
+    expect(evidence.totals.guardianTouches).toBe(
+      evidence.touches.filter((touch) => touch.type !== "warning").length,
+    );
+    release();
+    await waitFor(
+      () => getCampaign(fixtureValue.server.url, published.campaignId),
+      (campaign) => campaign?.status === "accepted",
+    );
+  } finally {
+    release?.();
+    await fixtureValue.server.close();
+  }
+});
+
+test("refuses retry while abandoned Campaign cleanup still owns its writer lease", async () => {
+  let taskId = "";
+  const fixtureValue = await frontierFixture(
+    oneOutcomeFrontierGoal("campaign-repository"),
+    "user:campaign-366",
+    async ({ authority, contract, result }) => {
+      taskId = result.taskId;
+      const activation = await authority.reserveActivation(
+        result.taskId,
+        contract.budget.maxImplementerActivations,
+      );
+      return authority.recordWaiting(
+        { taskId: result.taskId, revision: activation.result.revision },
+        {
+          reason: "network_interruption",
+          resumeState: "admitted",
+          activation: activation.activation,
+        },
+      );
+    },
+  );
+  let releaseCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  let cleanupEntered!: () => void;
+  const enteredCleanup = new Promise<void>((resolve) => {
+    cleanupEntered = resolve;
+  });
+  try {
+    const published = await publishCampaign(fixtureValue.server.url, {
+      contractPath: fixtureValue.contractPath,
+    });
+    await proposeCampaign(
+      fixtureValue.server.url,
+      published.campaignId,
+      frontierProposal("waiting-cleanup", "outcome-one"),
+    );
+    await handoffCampaign(fixtureValue.server.url, published.campaignId);
+    await waitFor(
+      () => taskStatus(fixtureValue.server.url, taskId),
+      (task) => task?.state === "waiting",
+    );
+    fixtureValue.environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
+    const abandonment = abandonCampaignToState(
+      fixtureValue.stateDirectory,
+      published.campaignId,
+      fixtureValue.environment,
+      undefined,
+      async () => {
+        cleanupEntered();
+        await cleanup;
+      },
+    );
+    await enteredCleanup;
+    await expect(retryTask(fixtureValue.server.url, taskId)).rejects.toMatchObject({ status: 409 });
+    const held = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+    expect(
+      held.prepare("SELECT task_id FROM repository_leases WHERE task_id = ?").get(taskId),
+    ).toEqual({ task_id: taskId });
+    held.close();
+    releaseCleanup();
+    await expect(abandonment).resolves.toMatchObject({ status: "abandoned" });
+    const released = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+    expect(
+      released.prepare("SELECT task_id FROM repository_leases WHERE task_id = ?").get(taskId),
+    ).toBeUndefined();
+    released.close();
+  } finally {
+    releaseCleanup?.();
+    await fixtureValue.server.close();
+  }
+});
+
+test("abandons only the selected Campaign while a cached model frontier continues", async () => {
+  let assessorCalls = 0;
+  let firstAssessorAborted = false;
+  let releaseFirstAssessor!: () => void;
+  const firstAssessorRelease = new Promise<void>((resolve) => {
+    releaseFirstAssessor = resolve;
+  });
+  let firstAssessorEntered!: () => void;
+  const firstAssessorStarted = new Promise<void>((resolve) => {
+    firstAssessorEntered = resolve;
+  });
+  const assessor: CampaignOutcomeAssessor = async ({ signal }) => {
+    assessorCalls += 1;
+    if (assessorCalls === 1) {
+      firstAssessorEntered();
+      await firstAssessorRelease;
+      firstAssessorAborted = signal?.aborted ?? false;
+    }
+    return {
+      verdict: "inconclusive",
+      summary: "the current evidence does not establish completion",
+      gaps: [],
+      evidence: [],
+      usage: null,
+    };
+  };
+  const fixtureValue = await frontierFixture(
+    { ...oneOutcomeFrontierGoal("campaign-repository"), id: "campaign-selected-a" },
+    "user:campaign-selected",
+    undefined,
+    1,
+    true,
+    assessor,
+  );
+  const secondGoal = {
+    ...oneOutcomeFrontierGoal("campaign-repository"),
+    id: "campaign-selected-b",
+    authority: {
+      ...oneOutcomeFrontierGoal("campaign-repository").authority,
+      source: "user:campaign-selected",
+    },
+  };
+  let server = fixtureValue.server;
+  try {
+    const first = await publishCampaignToState(
+      fixtureValue.stateDirectory,
+      JSON.stringify({
+        ...oneOutcomeFrontierGoal("campaign-repository"),
+        id: "campaign-selected-a",
+        authority: {
+          ...oneOutcomeFrontierGoal("campaign-repository").authority,
+          source: "user:campaign-selected",
+        },
+      }),
+      fixtureValue.environment,
+    );
+    const second = await publishCampaignToState(
+      fixtureValue.stateDirectory,
+      JSON.stringify(secondGoal),
+      fixtureValue.environment,
+    );
+    await proposeCampaignToState(
+      fixtureValue.stateDirectory,
+      first.campaignId,
+      frontierProposal("selected-a", "outcome-one"),
+      fixtureValue.environment,
+    );
+    await proposeCampaignToState(
+      fixtureValue.stateDirectory,
+      second.campaignId,
+      frontierProposal("selected-b", "outcome-one"),
+      fixtureValue.environment,
+    );
+    await handoffCampaignToState(
+      fixtureValue.stateDirectory,
+      first.campaignId,
+      fixtureValue.environment,
+    );
+    await handoffCampaignToState(
+      fixtureValue.stateDirectory,
+      second.campaignId,
+      fixtureValue.environment,
+    );
+    await server.close();
+    server = await startUsineServer({
+      environment: fixtureValue.environment,
+      assessOutcome: assessor,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    await firstAssessorStarted;
+    fixtureValue.environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-selected";
+    await expect(abandonCampaign(server.url, second.campaignId)).resolves.toMatchObject({
+      status: "abandoned",
+    });
+    releaseFirstAssessor();
+    await waitFor(
+      () => getCampaign(server.url, first.campaignId),
+      (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "inconclusive",
+    );
+    await expect(getCampaign(server.url, second.campaignId)).resolves.toMatchObject({
+      status: "abandoned",
+    });
+    expect(assessorCalls).toBe(1);
+    expect(firstAssessorAborted).toBe(false);
+  } finally {
+    releaseFirstAssessor?.();
+    await server.close().catch(() => undefined);
   }
 });
 
@@ -5418,9 +5717,10 @@ describe("durable Ready frontier", () => {
       evidence: [],
       usage: null,
     });
-    const replacementGenerator: CampaignReplacementGenerator = async () => {
+    const replacementGenerator: CampaignReplacementGenerator = async ({ signal }) => {
       replacementCalls += 1;
       replacementEntered();
+      signal?.addEventListener("abort", releaseReplacement, { once: true });
       await replacementRelease;
       return { proposal: frontierProposal("stale-replacement", "outcome-one"), usage: null };
     };
@@ -5467,11 +5767,11 @@ describe("durable Ready frontier", () => {
         } finally {
           database.close();
         }
-        if (replacementStatus === "invalid") break;
+        if (replacementStatus === "failed") break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(replacementCalls).toBe(1);
-      expect(replacementStatus).toBe("invalid");
+      expect(replacementStatus).toBe("failed");
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
         expect(
@@ -5508,6 +5808,18 @@ describe("durable Ready frontier", () => {
           status: "abandoned",
         });
         expect(replacementCalls).toBe(1);
+        const recovered = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
+        try {
+          expect(
+            recovered
+              .prepare(
+                "SELECT status FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+              )
+              .get(published.campaignId, "outcome-one"),
+          ).toEqual({ status: "failed" });
+        } finally {
+          recovered.close();
+        }
       } finally {
         await restarted.close();
       }

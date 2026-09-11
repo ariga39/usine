@@ -351,7 +351,10 @@ export interface CampaignTaskAdmission {
   readonly contract: TaskContract;
 }
 
-export type CampaignModelWork = (signal: AbortSignal) => Promise<boolean>;
+export interface CampaignModelWork {
+  readonly campaignIds: ReadonlySet<string>;
+  readonly run: (signal: AbortSignal) => Promise<boolean>;
+}
 
 export interface CampaignReconciliationOptions {
   /** Run Campaign-only model work in the server-owned lifecycle. */
@@ -485,6 +488,55 @@ function blockerFor(
   )
     return "registered repository has no exact head";
   return null;
+}
+
+async function recordWarningTouch(
+  database: CampaignDatabase,
+  campaign: typeof campaigns.$inferSelect,
+): Promise<void> {
+  if (campaign.superseded || campaign.status !== "planning") return;
+  let contract: GoalContract;
+  try {
+    contract = decodePersistedGoalContract(campaign.contract);
+  } catch {
+    return;
+  }
+  if (
+    contract.warningThresholdMs === undefined ||
+    Date.now() - campaign.createdAt.getTime() < contract.warningThresholdMs
+  )
+    return;
+  await database
+    .insert(campaignTouches)
+    .values({
+      campaignId: campaign.campaignId,
+      touchId: `warning:${campaign.campaignId}`,
+      goalVersion: campaign.goalVersion,
+      type: "warning",
+      occurredAtEpochMs: Date.now(),
+    })
+    .onConflictDoNothing();
+}
+
+export async function observeCampaignWarning(
+  stateDirectory: string,
+  campaignId: string,
+): Promise<void> {
+  let handle: ReturnType<typeof openSqliteDatabase>;
+  try {
+    handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  try {
+    const campaign = await handle.database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    if (campaign) await recordWarningTouch(handle.database, campaign);
+  } finally {
+    handle.close();
+  }
 }
 
 interface AcceptedCampaignDelivery {
@@ -689,6 +741,7 @@ async function reconcile(
   let campaignStatus = campaignState.status;
   let decisionRequest = campaignState.decisionRequest;
   const contract = decodePersistedGoalContract(campaign.contract);
+  await recordWarningTouch(database, campaign);
   const newerCampaign = await database
     .select({ goalVersion: max(campaigns.goalVersion) })
     .from(campaigns)
@@ -1516,6 +1569,10 @@ async function reserveReplacementRun(
   try {
     let reserved = false;
     await handle.exclusiveTransaction(async () => {
+      const campaign = await handle.database.query.campaigns.findFirst({
+        where: eq(campaigns.campaignId, target.campaign.campaignId),
+      });
+      if (!campaign || !campaignIsLiveForModelWork(campaign)) return;
       const existing = await handle.database
         .select({ invocationId: campaignReplacementRuns.invocationId })
         .from(campaignReplacementRuns)
@@ -1566,6 +1623,10 @@ async function reserveCampaignModelRun(
   try {
     let reserved: string | null = null;
     await handle.exclusiveTransaction(async () => {
+      const campaign = await handle.database.query.campaigns.findFirst({
+        where: eq(campaigns.campaignId, target.campaign.campaignId),
+      });
+      if (!campaign || !campaignIsLiveForModelWork(campaign)) return;
       const existing = await handle.database
         .select({
           invocationId: campaignModelRuns.invocationId,
@@ -1621,6 +1682,31 @@ async function reserveCampaignModelRun(
       reserved = invocationId;
     });
     return reserved;
+  } finally {
+    handle.close();
+  }
+}
+
+function campaignIsLiveForModelWork(campaign: typeof campaigns.$inferSelect): boolean {
+  if (campaign.superseded || !campaign.planHandedOff || !campaign.publicationAuthorized)
+    return false;
+  try {
+    return decodeCampaignState(campaign).status === "planning";
+  } catch {
+    return false;
+  }
+}
+
+async function campaignAllowsModelInvocation(
+  stateDirectory: string,
+  campaignId: string,
+): Promise<boolean> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"), { readOnly: true });
+  try {
+    const campaign = await handle.database.query.campaigns.findFirst({
+      where: eq(campaigns.campaignId, campaignId),
+    });
+    return campaign !== undefined && campaignIsLiveForModelWork(campaign);
   } finally {
     handle.close();
   }
@@ -1785,6 +1871,23 @@ async function persistReplacementResult(
           modelRuns,
           observationFallback,
         );
+        await handle.database
+          .update(campaignReplacementRuns)
+          .set({
+            status: "failed",
+            proposal: null,
+            usage: null,
+            completedAtEpochMs: Date.now(),
+          })
+          .where(
+            and(
+              eq(campaignReplacementRuns.campaignId, target.campaign.campaignId),
+              eq(campaignReplacementRuns.outcomeId, target.outcome.id),
+              eq(campaignReplacementRuns.assessmentId, target.assessment.assessmentId),
+              eq(campaignReplacementRuns.invocationId, target.invocationId),
+            ),
+          );
+        persistedStatus = "failed";
         return;
       }
       await persistCampaignModelRun(handle.database, observation, modelRuns, observationFallback);
@@ -1948,12 +2051,15 @@ async function generateCampaignReplacements(
   generator: CampaignReplacementGenerator,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  ownedCampaignIds?: Set<string>,
 ): Promise<boolean> {
   let ran = false;
   while (true) {
     if (signal?.aborted) return ran;
     const target = (await replacementTargets(stateDirectory))[0];
     if (!target) return ran;
+    ownedCampaignIds?.clear();
+    ownedCampaignIds?.add(target.campaign.campaignId);
     if (signal?.aborted) return ran;
     if (!(await reserveReplacementRun(stateDirectory, target))) continue;
     ran = true;
@@ -1968,8 +2074,10 @@ async function generateCampaignReplacements(
         evidenceHash: target.evidenceHash,
       }))
     ) {
-      return ran;
+      continue;
     }
+    if (!(await campaignAllowsModelInvocation(stateDirectory, target.campaign.campaignId)))
+      return ran;
     let draft: CampaignReplacementDraft;
     let recoverable = false;
     try {
@@ -2287,10 +2395,13 @@ async function assessCampaignTargets(
   assessor: CampaignOutcomeAssessor,
   replacementGenerator: CampaignReplacementGenerator,
   signal?: AbortSignal,
+  ownedCampaignIds?: Set<string>,
 ): Promise<boolean> {
   let ran = false;
   for (const target of await assessmentTargets(stateDirectory)) {
     if (signal?.aborted) return ran;
+    ownedCampaignIds?.clear();
+    ownedCampaignIds?.add(target.campaign.campaignId);
     const startedAtEpochMs = Date.now();
     const invocationId = await reserveCampaignModelRun(stateDirectory, {
       campaign: target.campaign,
@@ -2300,6 +2411,8 @@ async function assessCampaignTargets(
       evidenceHash: target.evidenceHash,
     });
     if (!invocationId) continue;
+    if (!(await campaignAllowsModelInvocation(stateDirectory, target.campaign.campaignId)))
+      return ran;
     const invocationTarget = { ...target, invocationId };
     ran = true;
     let draft: CampaignAssessmentDraft;
@@ -2370,6 +2483,7 @@ async function assessCampaignTargets(
       replacementGenerator,
       environment,
       signal,
+      ownedCampaignIds,
     )) || ran;
   if (signal?.aborted) return ran;
   await reconcileWithRepositoryHeads(stateDirectory, environment, async (database, observed) => {
@@ -2402,22 +2516,36 @@ export async function reconcileCampaigns(
     await reconcileAll(database, observed);
   });
   const admissions = await admitReadyCampaignTasks(stateDirectory, activeTaskCapacity);
-  const modelWork = assessor
-    ? (signal: AbortSignal) =>
-        assessCampaignTargets(
-          stateDirectory,
-          environment,
-          assessor,
-          replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
-          signal,
-        )
+  const campaignIds = new Set<string>();
+  const modelWork: CampaignModelWork | undefined = assessor
+    ? {
+        campaignIds,
+        run: (signal) =>
+          assessCampaignTargets(
+            stateDirectory,
+            environment,
+            assessor,
+            replacementGenerator ?? (async () => ({ proposal: null, usage: null })),
+            signal,
+            campaignIds,
+          ),
+      }
     : replacementGenerator
-      ? (signal: AbortSignal) =>
-          generateCampaignReplacements(stateDirectory, replacementGenerator, environment, signal)
+      ? {
+          campaignIds,
+          run: (signal) =>
+            generateCampaignReplacements(
+              stateDirectory,
+              replacementGenerator,
+              environment,
+              signal,
+              campaignIds,
+            ),
+        }
       : undefined;
   if (modelWork) {
     if (options.launchModelWork) options.launchModelWork(modelWork);
-    else await modelWork(new AbortController().signal);
+    else await modelWork.run(new AbortController().signal);
   }
   return admissions;
 }
@@ -2781,6 +2909,8 @@ export async function abandonCampaign(
   stateDirectory: string,
   campaignId: string,
   environment: NodeJS.ProcessEnv = {},
+  onEvent?: (event: import("@usine/task-authority").TaskEvent) => void,
+  waitForActiveCleanup?: () => Promise<void>,
 ): Promise<CampaignResource> {
   const databasePath = await ensurePrivateStateDatabase(stateDirectory);
   await applyMigrations(databasePath);
@@ -2808,13 +2938,43 @@ export async function abandonCampaign(
     }
     resource = await resourceFromDatabase(database, campaignId);
   });
+  await waitForActiveCleanup?.();
+  await abandonCampaignTasks(stateDirectory, campaignId, onEvent);
   return resource!;
+}
+
+/** Block admitted Campaign Tasks after explicit abandonment and release their leases. */
+async function abandonCampaignTasks(
+  stateDirectory: string,
+  campaignId: string,
+  onEvent?: (event: import("@usine/task-authority").TaskEvent) => void,
+): Promise<void> {
+  const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
+  try {
+    const rows = await handle.database
+      .select({ taskId: campaignProposals.taskId })
+      .from(campaignProposals)
+      .where(eq(campaignProposals.campaignId, campaignId));
+    const authority = new TaskAuthority(handle.database, { onEvent });
+    for (const row of rows) {
+      if (!row.taskId) continue;
+      const current = await authority.lookup(row.taskId);
+      if (!current || isTerminalState(current.state)) continue;
+      await authority.block(
+        { taskId: current.taskId, revision: current.revision },
+        "Campaign abandoned",
+      );
+    }
+  } finally {
+    handle.close();
+  }
 }
 
 export async function lookupCampaign(
   stateDirectory: string,
   campaignId: string,
 ): Promise<CampaignResource | null> {
+  await observeCampaignWarning(stateDirectory, campaignId);
   const databasePath = resolve(stateDirectory, "usine.sqlite");
   const handle = openSqliteDatabase(databasePath, { readOnly: true });
   try {

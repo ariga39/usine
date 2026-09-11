@@ -20,6 +20,7 @@ type PostHogEventName =
   | "usine_campaign_progress"
   | "$ai_generation"
   | "usine_campaign_guardian_touch"
+  | "usine_campaign_warning"
   | "usine_campaign_delivery";
 
 export interface PostHogEvent {
@@ -116,7 +117,11 @@ export function campaignEvidenceToPostHogEvents(
       .filter((run) => run.outcome !== "unknown")
       .map((run) => roleRunEvent(deploymentLabel, distinctId, run)),
     ...(evidence.cursor === null
-      ? evidence.touches.map((touch) => touchEvent(deploymentLabel, distinctId, touch))
+      ? evidence.touches.flatMap((touch) =>
+          touch.type === "warning"
+            ? [warningEvent(deploymentLabel, distinctId, touch)]
+            : [touchEvent(deploymentLabel, distinctId, touch)],
+        )
       : []),
     ...evidence.deliveries.map((delivery) => deliveryEvent(deploymentLabel, distinctId, delivery)),
   ];
@@ -294,6 +299,25 @@ function touchEvent(
       touch_id: touch.touchId,
       goal_version: touch.goalVersion,
       touch_type: touch.type,
+    },
+  );
+}
+
+function warningEvent(
+  deployment: string,
+  distinctId: string,
+  touch: CampaignEvidenceTouch,
+): PostHogEvent {
+  return makeEvent(
+    "usine_campaign_warning",
+    distinctId,
+    timestampForEpochMs(touch.occurredAtEpochMs),
+    {
+      deployment,
+      schema_version: 1,
+      campaign_id: distinctId,
+      warning_id: touch.touchId,
+      goal_version: touch.goalVersion,
     },
   );
 }

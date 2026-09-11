@@ -147,12 +147,12 @@ export async function listCampaignEvidenceSources(
       : {}),
   }));
   const decisionTouches: CampaignEvidenceDecisionTouch[] = decisionRows.flatMap((row) =>
-    row.type === "decision"
+    row.type === "decision" || row.type === "warning"
       ? [
           {
             touchId: row.touchId,
             goalVersion: row.goalVersion,
-            type: "decision" as const,
+            type: row.type,
             occurredAtEpochMs: row.occurredAtEpochMs,
           },
         ]

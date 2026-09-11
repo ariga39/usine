@@ -137,7 +137,8 @@ export class RepositoryWriterConflictError extends Error {
 export type TaskRetryConflictReason =
   | "task_not_waiting"
   | "deadline_exhausted"
-  | "activation_budget_exhausted";
+  | "activation_budget_exhausted"
+  | "campaign_abandoned";
 
 export class TaskRetryConflictError extends Error {
   readonly code = "task_retry_conflict";
