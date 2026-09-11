@@ -2599,6 +2599,167 @@ describe("Coding Session", () => {
     expect(JSON.stringify(output)).not.toContain(apiKey);
   });
 
+  test.each([
+    {
+      name: "standard cache",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 800, cache_write_tokens: 0 },
+      },
+      expected: {
+        inputTokens: 1000,
+        outputTokens: 7,
+        cachedInputTokens: 800,
+        uncachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+      },
+    },
+    {
+      name: "alternate cache",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+      },
+      expected: {
+        inputTokens: 1000,
+        outputTokens: 7,
+        cachedInputTokens: 800,
+        uncachedInputTokens: 200,
+      },
+    },
+    {
+      name: "missing cache",
+      usage: { prompt_tokens: 1000, completion_tokens: 7 },
+      expected: { inputTokens: 1000, outputTokens: 7 },
+    },
+    {
+      name: "explicit zero",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+      },
+      expected: {
+        inputTokens: 1000,
+        outputTokens: 7,
+        cachedInputTokens: 0,
+        uncachedInputTokens: 1000,
+        cacheWriteInputTokens: 0,
+      },
+    },
+    {
+      name: "standard writes",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 800, cache_write_tokens: 50 },
+      },
+      expected: {
+        inputTokens: 1000,
+        outputTokens: 7,
+        cachedInputTokens: 800,
+        uncachedInputTokens: 150,
+        cacheWriteInputTokens: 50,
+      },
+    },
+    {
+      name: "alternate misses include writes",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+        prompt_tokens_details: { cache_write_tokens: 50 },
+      },
+      expected: {
+        inputTokens: 1000,
+        outputTokens: 7,
+        cachedInputTokens: 800,
+        uncachedInputTokens: 150,
+        cacheWriteInputTokens: 50,
+      },
+    },
+    {
+      name: "conflicting cache fields",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+        prompt_tokens_details: { cached_tokens: 700 },
+      },
+      expected: { inputTokens: 1000, outputTokens: 7 },
+    },
+    {
+      name: "inconsistent miss sum",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 300,
+      },
+      expected: { inputTokens: 1000, outputTokens: 7 },
+    },
+    {
+      name: "cache exceeds input",
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 800 },
+      },
+      expected: { inputTokens: 10, outputTokens: 7 },
+    },
+    { name: "absent usage", usage: undefined, expected: {} },
+    {
+      name: "null dimensions",
+      usage: {
+        prompt_tokens: null,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: null },
+      },
+      expected: { outputTokens: 7 },
+    },
+  ])("retains truthful normalizer usage for $name", async ({ usage, expected }) => {
+    const observations: unknown[] = [];
+    const transform = createOpenAICompatibleRoleOutputTransform({
+      apiKey: "fixture-key",
+      baseURL: "https://fixture.invalid/v1",
+      model: "fixture-model",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            id: "fixture",
+            object: "chat.completion",
+            created: 0,
+            model: "fixture-model",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: '{"ok":true}' },
+                finish_reason: "stop",
+              },
+            ],
+            usage,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    await expect(
+      transform({
+        finalResponse: "unstructured response",
+        outputSchema: z.object({ ok: z.boolean() }),
+        signal: new AbortController().signal,
+        onUsage: (observation) => {
+          observations.push(observation.usage);
+        },
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(observations).toEqual([expected]);
+  });
+
   test("propagates caller cancellation to the SDK turn", async () => {
     const controller = new AbortController();
     const started = deferred<void>();
