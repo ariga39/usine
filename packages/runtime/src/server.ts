@@ -368,7 +368,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
       if (pipelineRecoveryTimers.has(task.result.taskId)) return;
       const delay = Math.min(
         PIPELINE_REOBSERVE_INTERVAL_MS,
-        Math.max(0, task.result.deadlineEpochMs - Date.now()),
+        task.result.deadlineEpochMs === undefined
+          ? PIPELINE_REOBSERVE_INTERVAL_MS
+          : Math.max(0, task.result.deadlineEpochMs - Date.now()),
       );
       const timer = setTimeout(() => {
         if (pipelineRecoveryTimers.get(task.result.taskId) !== timer) return;

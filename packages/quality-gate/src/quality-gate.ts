@@ -46,7 +46,7 @@ export interface QualityGateOptions {
   session: QualityGateSession;
   reviewer: RolePolicy;
   environment: NodeJS.ProcessEnv;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   signal?: AbortSignal;
 }
 

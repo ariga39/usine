@@ -220,7 +220,7 @@ export interface ReviewerQualityGateInput {
   readonly profile: string;
   readonly repository: RepositorySnapshot;
   readonly environment: NodeJS.ProcessEnv;
-  readonly deadlineEpochMs: number;
+  readonly deadlineEpochMs?: number;
   readonly cycle: number;
   readonly signal?: AbortSignal;
   readonly onObservation?: (observation: CodingSessionObservation) => Promise<void> | void;
@@ -614,7 +614,11 @@ export async function admitTask(
     const repository = existing?.repository ?? registeredRepository;
     const resolvedContract = resolveTaskContract(contract, repository);
     const writerIdentity = repositoryIdentity(repository.owner, repository.name);
-    const deadlineEpochMs = existing?.deadlineEpochMs ?? Date.now() + contract.budget.maxElapsedMs;
+    const deadlineEpochMs =
+      existing?.deadlineEpochMs ??
+      (contract.budget.maxElapsedMs === null
+        ? undefined
+        : Date.now() + contract.budget.maxElapsedMs);
     const input = { contractPath, rawContract: committed.rawContract };
     if (existing && isTerminalState(existing.state)) return { result: existing, input, contract };
     const blockExpiredExisting = async (): Promise<TaskResult> => {
@@ -755,7 +759,7 @@ async function executeWithServices(options: {
   policy: RuntimePolicy;
   forgePolicy: ForgePolicy;
   authority: TaskAuthority;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   signal?: AbortSignal;
   executionOwnerId?: string;
 }): Promise<TaskResult> {
@@ -813,7 +817,7 @@ async function executeWithServices(options: {
           policy: readPolicy.policy,
           deadlineEpochMs,
           signal: options.signal,
-          requestTimeoutMs: Math.min(10_000, remainingUntil(deadlineEpochMs)),
+          requestTimeoutMs: remainingUntil(deadlineEpochMs, 10_000),
         });
         githubReadHandles.set(role, handle);
         return {
@@ -870,15 +874,14 @@ function githubReadServerConfig(
   name: string,
   url: string,
   enabledTools: readonly string[],
-  deadlineEpochMs: number,
+  deadlineEpochMs: number | undefined,
 ) {
-  const remaining = remainingUntil(deadlineEpochMs);
   return {
     name,
     url,
     enabledTools,
-    startupTimeoutMs: Math.min(5_000, remaining),
-    toolTimeoutMs: Math.min(10_000, remaining),
+    startupTimeoutMs: remainingUntil(deadlineEpochMs, 5_000),
+    toolTimeoutMs: remainingUntil(deadlineEpochMs, 10_000),
     required: false,
   };
 }

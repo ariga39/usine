@@ -184,7 +184,7 @@ export const campaignAssessments = sqliteTable(
   }),
 );
 
-/** Append-only replacement-planner attempt and result for one Campaign/Outcome opportunity. */
+/** Append-only replacement-planner attempt and result for one Campaign/Outcome assessment. */
 export const campaignReplacementRuns = sqliteTable(
   "campaign_replacement_runs",
   {
@@ -202,7 +202,7 @@ export const campaignReplacementRuns = sqliteTable(
   },
   (table) => ({
     campaignReplacementRunIdentity: primaryKey({
-      columns: [table.campaignId, table.outcomeId],
+      columns: [table.campaignId, table.outcomeId, table.invocationId],
     }),
     campaignReplacementRunInvocation: uniqueIndex("campaign_replacement_runs_invocation_index").on(
       table.invocationId,

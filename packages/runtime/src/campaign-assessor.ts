@@ -37,7 +37,6 @@ export interface CampaignAssessmentRequest {
   readonly outcome: GoalContract["outcomes"][number];
   readonly evidence: readonly CampaignAssessmentFact[];
   readonly repositories: readonly CampaignAssessorRepository[];
-  readonly deadlineEpochMs?: number;
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
 }
@@ -49,6 +48,7 @@ export interface CampaignAssessmentDraft {
   readonly evidence: readonly CampaignAssessmentEvidence[];
   readonly usage: CampaignAssessmentUsage | null;
   readonly modelRuns?: readonly CampaignModelRunDraft[];
+  readonly recoverable?: boolean;
 }
 
 export type CampaignOutcomeAssessor = (
@@ -169,7 +169,6 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
         prompt,
         profile: repository.reviewerProfile,
         sandbox: "read-only",
-        deadlineEpochMs: request.deadlineEpochMs,
         outputSchema: assessmentOutputSchema,
         environment: request.environment,
         signal: request.signal,
@@ -193,7 +192,7 @@ export function createCampaignOutcomeAssessor(): CampaignOutcomeAssessor {
         modelRuns,
       };
     } catch {
-      return inconclusive("Campaign assessor was unavailable");
+      return { ...inconclusive("Campaign assessor was unavailable"), recoverable: true };
     }
   };
 }

@@ -74,7 +74,7 @@ export async function readGithubReviewEvidence(
   owner: string,
   repo: string,
   pullNumber: number,
-  request: { timeout: number; retries: 0; signal?: AbortSignal },
+  request: { timeout?: number; retries: 0; signal?: AbortSignal },
 ): Promise<GithubReviewEvidence> {
   const resolveIdentity = createReviewIdentityResolver(client, request);
   const nativeReviews = await readGithubNativeReviews(
@@ -97,7 +97,7 @@ export async function readGithubNativeReviews(
   owner: string,
   repo: string,
   pullNumber: number,
-  request: { timeout: number; retries: 0; signal?: AbortSignal },
+  request: { timeout?: number; retries: 0; signal?: AbortSignal },
   resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<GithubNativeReviewEvidence> {
   const reviewsResponse = await client.octokit.rest.pulls.listReviews({
@@ -134,7 +134,7 @@ export async function readGithubReviewComments(
   owner: string,
   repo: string,
   pullNumber: number,
-  request: { timeout: number; retries: 0; signal?: AbortSignal },
+  request: { timeout?: number; retries: 0; signal?: AbortSignal },
   resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<readonly GithubCommentProjection[]> {
   const commentsResponse = await client.octokit.rest.issues.listComments({
@@ -167,7 +167,7 @@ export async function readGithubPullRequestReviewComments(
   owner: string,
   repo: string,
   pullNumber: number,
-  request: { timeout: number; retries: 0; signal?: AbortSignal },
+  request: { timeout?: number; retries: 0; signal?: AbortSignal },
   resolveIdentity = createReviewIdentityResolver(client, request),
 ): Promise<readonly GithubCommentProjection[]> {
   const commentsResponse = await client.octokit.rest.pulls.listReviewComments({
@@ -202,7 +202,7 @@ type ReviewIdentityResolver = (input: ReviewIdentityInput) => Promise<GithubRevi
 
 function createReviewIdentityResolver(
   client: ForgeClient,
-  request: { timeout: number; retries: 0; signal?: AbortSignal },
+  request: { timeout?: number; retries: 0; signal?: AbortSignal },
 ): ReviewIdentityResolver {
   const appBySlug = new Map<string, Promise<GithubReviewIdentity | null>>();
   return async (input) => {
@@ -217,7 +217,10 @@ function createReviewIdentityResolver(
     if (slug === null) return null;
     const existing = appBySlug.get(slug);
     if (existing !== undefined) return existing;
-    const verification = verifyBotApp(client, slug, request);
+    const verification = verifyBotApp(client, slug, {
+      ...request,
+      timeout: request.timeout ?? 10_000,
+    });
     appBySlug.set(slug, verification);
     return verification;
   };

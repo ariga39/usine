@@ -5,6 +5,7 @@ import { generateText, Output } from "ai";
 import { Effect } from "effect";
 import {
   mergeProviderNeutralUsage,
+  ElapsedBudgetError,
   remainingUntil,
   safeEvidenceIdentity,
   type GoalContract,
@@ -514,9 +515,24 @@ export class CodexCodingSession {
     archive?: SessionArchiveWriter,
   ): Promise<CapturedSessionObservation<T>> {
     let phase: CodingSessionPhase = "startup";
-    const deadlineSignal = request.deadlineEpochMs === undefined
-      ? undefined
-      : AbortSignal.timeout(remainingUntil(request.deadlineEpochMs));
+    const deadlineEpochMs = request.deadlineEpochMs;
+    let deadlineSignal: AbortSignal | undefined;
+    try {
+      deadlineSignal =
+        deadlineEpochMs === undefined ? undefined : AbortSignal.timeout(remainingUntil(deadlineEpochMs));
+    } catch (error) {
+      if (!(error instanceof ElapsedBudgetError)) throw error;
+      return {
+        status: "failed",
+        sessionId: null,
+        output: null,
+        usage: null,
+        summary: "elapsed budget exhausted",
+        failure: "elapsed budget exhausted",
+        phase,
+        failureClass: "timeout",
+      };
+    }
     const abortSignal = request.signal && deadlineSignal
       ? AbortSignal.any([request.signal, deadlineSignal])
       : request.signal ?? deadlineSignal ?? new AbortController().signal;
@@ -744,7 +760,7 @@ export class CodexCodingSession {
               summary: "coding session cancelled",
               failure: "coding session cancelled",
               phase,
-              failureClass: deadlineSignal.aborted ? "timeout" : "cancellation",
+              failureClass: deadlineSignal?.aborted ? "timeout" : "cancellation",
             };
           return {
             requestedProfile: request.profile,
@@ -820,7 +836,7 @@ export class CodexCodingSession {
           : {}),
       };
     } catch (error) {
-      const deadlineExpired = deadlineSignal.aborted;
+      const deadlineExpired = deadlineSignal?.aborted === true;
       const cancelled = request.signal?.aborted;
       const typedInterruption = error instanceof CodingSessionInterruption ? error : undefined;
       const interruption = deadlineExpired

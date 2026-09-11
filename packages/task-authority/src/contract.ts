@@ -89,7 +89,7 @@ export const taskContractSchema = z
     budget: z.object({
       maxImplementerActivations: positiveCountBudgetSchema,
       maxReviewCycles: positiveCountBudgetSchema,
-      maxElapsedMs: z.number().int().positive(),
+      maxElapsedMs: z.number().int().positive().nullable(),
     }),
     authorization: z.object({
       source: z.string().min(1),
@@ -113,6 +113,13 @@ export const taskContractSchema = z
   .strict()
   .superRefine((contract, context) => {
     if (!contract.authorization || !contract.delivery) return;
+    if (!contract.campaign && contract.budget.maxElapsedMs === null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["budget"],
+        message: "standalone Task Contracts require a finite elapsed budget",
+      });
+    }
     // Campaign delivery.issue is optional metadata for the target Repository's
     // Task Issue. The Goal Issue remains the root authority and need not match it.
     if (contract.campaign) return;

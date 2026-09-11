@@ -4,15 +4,19 @@ export class ElapsedBudgetError extends Error {
   }
 }
 
+export function remainingUntil(deadlineEpochMs: number, maximum?: number): number;
+export function remainingUntil(deadlineEpochMs: number | undefined, maximum: number): number;
+export function remainingUntil(deadlineEpochMs: number | undefined): number | undefined;
 export function remainingUntil(
-  deadlineEpochMs: number,
-  maximum = Number.POSITIVE_INFINITY,
-): number {
+  deadlineEpochMs: number | undefined,
+  maximum?: number,
+): number | undefined {
+  if (deadlineEpochMs === undefined) return maximum;
   const remaining = deadlineEpochMs - Date.now() - 100;
   if (remaining <= 0) throw new ElapsedBudgetError();
-  return Math.max(1, Math.min(remaining, maximum));
+  return Math.max(1, maximum === undefined ? remaining : Math.min(remaining, maximum));
 }
 
-export function deadlineExpired(deadlineEpochMs: number): boolean {
-  return Date.now() >= deadlineEpochMs;
+export function deadlineExpired(deadlineEpochMs: number | undefined): boolean {
+  return deadlineEpochMs !== undefined && Date.now() >= deadlineEpochMs;
 }

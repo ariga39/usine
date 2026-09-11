@@ -313,6 +313,10 @@ export async function readReviewerEvaluationPlan(
     const contract = parseContract(
       await readCommittedUtf8(repositoryRoot, contractPath, "Task Contract", evaluationHead),
     );
+    if (contract.budget.maxElapsedMs === null)
+      throw new ReviewerEvaluationValidationError(
+        `${item.id}:${item.repetition}: standalone evaluation Tasks require a finite elapsed budget`,
+      );
     if (contract.repositoryId !== plan.repositoryId || contract.baseSha !== plan.baseSha)
       throw new ReviewerEvaluationValidationError(
         `${item.id}:${item.repetition}: Task Contract identity drifts from the plan`,
@@ -398,6 +402,11 @@ export async function executeReviewerProfileEvaluation(
       const profile =
         side === "baseline" ? loaded.plan.baselineProfile : loaded.plan.candidateProfile;
       const startedAt = Date.now();
+      const maxElapsedMs = item.contract.budget.maxElapsedMs;
+      if (maxElapsedMs === null)
+        throw new ReviewerEvaluationValidationError(
+          `${item.id}:${item.repetition}: standalone evaluation Tasks require a finite elapsed budget`,
+        );
       let observation: ReviewAttemptObservation | null = null;
       let failure: string | null = null;
       let toolFailures = 0;
@@ -409,7 +418,7 @@ export async function executeReviewerProfileEvaluation(
           profile,
           repository: loaded.registration,
           environment,
-          deadlineEpochMs: startedAt + item.contract.budget.maxElapsedMs,
+          deadlineEpochMs: startedAt + maxElapsedMs,
           cycle: item.case.repetition,
           signal,
           onObservation: (event) => {

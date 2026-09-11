@@ -334,7 +334,7 @@ export class ForgeDelivery {
     const policy = this.options.externalReview;
     if (!policy?.requireApproval) return;
     const evidence = await readGithubNativeReviews(client, owner, repo, pullNumber, {
-      timeout: remainingUntil(this.options.deadlineEpochMs),
+      timeout: remainingUntil(this.options.deadlineEpochMs, 10_000),
       retries: 0,
       ...(this.options.signal ? { signal: this.options.signal } : {}),
     });
@@ -361,7 +361,7 @@ export class ForgeDelivery {
         headSha,
         pipeline,
         {
-          timeout: remainingUntil(this.options.deadlineEpochMs),
+          timeout: remainingUntil(this.options.deadlineEpochMs, 10_000),
           retries: 0,
           signal: this.options.signal,
         },

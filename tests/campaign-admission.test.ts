@@ -12,7 +12,12 @@ import {
   type CampaignReplacementGenerator,
 } from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
+import {
+  CodexCodingSession,
+  type CodingSessionClientFactory,
+} from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunServices } from "@usine/delivery-run";
+import { QualityGate } from "@usine/quality-gate";
 import {
   openSqliteDatabase,
   resolveTaskContract,
@@ -72,10 +77,6 @@ function goalContract(objective = "Deliver the authorized campaign") {
       publish: true,
       delivery: true,
       merge: false,
-    },
-    budget: {
-      maxElapsedMs: 60_000,
-      maxTasks: 4,
     },
   } as const;
 }
@@ -142,12 +143,6 @@ function frontierGoal(repositoryId: string) {
       repositories: [repositoryId],
       effects: ["github"],
     },
-    budget: {
-      maxElapsedMs: 60_000,
-      maxTasks: 10,
-      maxImplementerActivations: 1,
-      maxReviewCycles: 1,
-    },
   } as const;
 }
 
@@ -177,6 +172,20 @@ function frontierProposal(
   };
 }
 
+function quotaFreeFrontierProposal(proposalId: string, outcomeId: string) {
+  return {
+    proposalId,
+    outcomeId,
+    dependsOn: [],
+    repositoryId: "campaign-repository",
+    instructions: `Implement ${proposalId}.`,
+    acceptance: [`${proposalId} is complete.`],
+    nonGoals: [],
+    effects: ["github"],
+    merge: false,
+  };
+}
+
 function mergeFrontierGoal(repositoryId: string) {
   const contract = frontierGoal(repositoryId);
   return { ...contract, authority: { ...contract.authority, merge: true } };
@@ -187,7 +196,6 @@ function oneOutcomeFrontierGoal(repositoryId: string) {
   return {
     ...contract,
     outcomes: [contract.outcomes[0]],
-    budget: { ...contract.budget, maxImplementerActivations: 2, maxReviewCycles: 2 },
   };
 }
 
@@ -627,6 +635,155 @@ test("admits one Ready proposal through the Task leaf without a Task submission"
         goalVersion: 1,
         outcomeId: "outcome-one",
       },
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("delivers a quota-free Campaign leaf without count or deadline ceilings", async () => {
+  let executions = 0;
+  const fixtureValue = await frontierFixture(
+    oneOutcomeFrontierGoal("campaign-repository"),
+    "user:campaign-366",
+    async (context) => {
+      executions += 1;
+      expect(context.input.contractPath).toBeNull();
+      const repository = context.result.repository;
+      if (!repository) throw new Error("quota-free Campaign Task has no repository snapshot");
+      const contract = resolveTaskContract(context.contract, repository);
+      expect(contract.budget).toEqual({
+        maxImplementerActivations: null,
+        maxReviewCycles: null,
+        maxElapsedMs: null,
+      });
+      expect(context.result.deadlineEpochMs).toBeUndefined();
+      const workspace = new CandidateWorkspace({
+        repository: repository.path,
+        stateDirectory: context.policy.stateDirectory,
+        credentialFreeGit: credentialFreeGitEnvironment(context.policy.workerEnvironment),
+        gitAuthor: repository.gitAuthor,
+        signal: context.signal,
+      });
+      let reviewCount = 0;
+      const session = new CodexCodingSession(
+        (async (request) => {
+          const thread = {
+            id: `quota-free-${request.role}`,
+            runStreamed: async () => ({
+              events: (async function* () {
+                yield { type: "thread.started", thread_id: `quota-free-${request.role}` };
+                yield { type: "turn.started" };
+                const sha = (
+                  await execa("git", ["-C", request.workspace, "rev-parse", "HEAD"], {
+                    cwd: request.workspace,
+                  })
+                ).stdout.trim();
+                const reviewer = request.role === "reviewer";
+                if (!reviewer)
+                  await writeFile(
+                    join(request.workspace, `quota-free-${reviewCount}.txt`),
+                    "quota-free implementation\n",
+                  );
+                const output = reviewer
+                  ? {
+                      sha,
+                      verdict: reviewCount++ < 2 ? "changes_requested" : "approved",
+                      summary: "quota-free fixture review",
+                      findings: reviewCount < 3 ? ["continue the quota-free fixture"] : [],
+                    }
+                  : { status: "proposed", summary: "quota-free fixture implementation" };
+                yield {
+                  type: "item.completed",
+                  item: {
+                    type: "agent_message",
+                    id: `quota-free-${request.role}-message`,
+                    text: JSON.stringify(output),
+                  },
+                };
+                yield {
+                  type: "turn.completed",
+                  usage: {
+                    input_tokens: 12,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 7,
+                    reasoning_output_tokens: 0,
+                  },
+                };
+              })(),
+            }),
+          } as unknown as ReturnType<Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]>;
+          return { startThread: () => thread } as Awaited<ReturnType<CodingSessionClientFactory>>;
+        }) satisfies CodingSessionClientFactory,
+        {
+          environment: context.policy.workerEnvironment,
+          profileResolver: async () => ({ model: "quota-free-fixture-model" }),
+        },
+      );
+      const quality = new QualityGate({
+        workspace,
+        session,
+        reviewer: context.policy.roles.reviewer,
+        environment: context.policy.workerEnvironment,
+        signal: context.signal,
+      });
+      const services: DeliveryRunServices = {
+        authority: context.authority,
+        workspace,
+        session,
+        quality,
+        forge: {
+          deliver: async (_contract, sha, _check, _review) => ({
+            sha,
+            effect: "github" as const,
+            prNumber: 1,
+            url: "https://example.invalid/pull/1",
+            attestationId: `quota-free-${context.result.taskId}`,
+            merge: null,
+          }),
+        },
+      };
+      return executeDeliveryRun(
+        {
+          contract,
+          contractHash: context.result.contractHash,
+          repositoryIdentity: context.result.writer.repositoryIdentity,
+          deadlineEpochMs: context.result.deadlineEpochMs,
+          implementer: context.policy.roles.implementer,
+          reviewer: context.policy.roles.reviewer,
+          signal: context.signal,
+        },
+        services,
+      );
+    },
+  );
+  const { contractPath, server } = fixtureValue;
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    expect(Object.hasOwn(published, "budget")).toBe(false);
+    const proposed = await proposeCampaign(
+      server.url,
+      published.campaignId,
+      quotaFreeFrontierProposal("quota-free-delivery", "outcome-one") as never,
+    );
+    expect(Object.hasOwn(proposed.proposals?.[0]?.ready ?? {}, "budget")).toBe(false);
+    await handoffCampaign(server.url, published.campaignId);
+    let delivered = await taskStatus(server.url, "campaign-campaign-366-v1-quota-free-delivery");
+    for (let attempt = 0; attempt < 300 && delivered?.state !== "reviewed_pr"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      delivered = await taskStatus(server.url, "campaign-campaign-366-v1-quota-free-delivery");
+    }
+    expect(delivered).toMatchObject({ state: "reviewed_pr" });
+    expect(executions).toBe(1);
+    await expect(
+      taskStatus(server.url, "campaign-campaign-366-v1-quota-free-delivery"),
+    ).resolves.toMatchObject({
+      state: "reviewed_pr",
+      delivery: { merge: null },
+      check: { status: "passed" },
+      review: { verdict: "approved" },
+      evidence: { implementerActivations: 3, reviewCycles: 3, changesRequestedBatches: 2 },
     });
   } finally {
     await server.close();

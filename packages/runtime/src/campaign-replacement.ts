@@ -45,7 +45,6 @@ export interface CampaignReplacementRequest {
   /** IDs of proposals that remain wholly unowned and may be revised at a checkpoint. */
   readonly supersedableProposalIds: readonly string[];
   readonly repositories: readonly CampaignReplacementRepository[];
-  readonly deadlineEpochMs?: number;
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
 }
@@ -164,7 +163,6 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
       prompt,
       profile: repository.reviewerProfile,
       sandbox: "read-only",
-      deadlineEpochMs: request.deadlineEpochMs,
       outputSchema: z.union([
         taskProposalSchema.extend({
           supersedesProposalId: z.string().min(1).max(128).optional(),

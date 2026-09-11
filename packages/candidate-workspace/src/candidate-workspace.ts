@@ -45,7 +45,7 @@ export interface FrozenCandidate {
 export interface WorkspaceOptions {
   repository: string;
   stateDirectory: string;
-  deadlineEpochMs: number;
+  deadlineEpochMs?: number;
   credentialFreeGit: NodeJS.ProcessEnv;
   gitAuthor: GitAuthor;
   signal?: AbortSignal;
@@ -204,10 +204,11 @@ export class CandidateWorkspace {
   }
 
   private async git(args: string[]): Promise<string> {
+    const timeout = remainingUntil(this.options.deadlineEpochMs);
     const result = await execa("git", args, {
       env: this.options.credentialFreeGit,
       extendEnv: false,
-      timeout: remainingUntil(this.options.deadlineEpochMs),
+      ...(timeout === undefined ? {} : { timeout }),
       cancelSignal: this.options.signal,
       reject: true,
     });
