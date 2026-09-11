@@ -1145,6 +1145,55 @@ test("does not admit a proposal that expands Goal authority", async () => {
   }
 });
 
+test("does not mark an unauthorized post-handoff proposal as an Outcome requirement", async () => {
+  let releaseInitial!: () => void;
+  const initialRelease = new Promise<void>((resolve) => {
+    releaseInitial = resolve;
+  });
+  let initialStarted!: () => void;
+  const initialStart = new Promise<void>((resolve) => {
+    initialStarted = resolve;
+  });
+  const { contractPath, server } = await frontierFixture(
+    undefined,
+    "user:campaign-366",
+    async ({ authority, result }) => {
+      initialStarted();
+      await initialRelease;
+      return authority.block(
+        { taskId: result.taskId, revision: result.revision },
+        "the fixture stops after authority validation",
+      );
+    },
+  );
+  try {
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(
+      server.url,
+      published.campaignId,
+      frontierProposal("initial", "outcome-one"),
+    );
+    await handoffCampaign(server.url, published.campaignId);
+    await initialStart;
+    const before = await getCampaign(server.url, published.campaignId);
+    const rejected = await proposeCampaign(server.url, published.campaignId, {
+      ...frontierProposal("outside-effect-after-handoff", "outcome-one"),
+      effects: ["shell"],
+    });
+    expect(rejected.proposals?.at(-1)).toMatchObject({
+      proposalId: "outside-effect-after-handoff",
+      status: "blocked",
+      blocker: "proposal effect is outside the Goal authority envelope",
+    });
+    expect(rejected.outcomes.find((outcome) => outcome.id === "outcome-one")?.acceptance).toEqual(
+      before?.outcomes.find((outcome) => outcome.id === "outcome-one")?.acceptance,
+    );
+  } finally {
+    releaseInitial();
+    await server.close();
+  }
+});
+
 test("holds the next Ready proposal at active capacity and admits it after release", async () => {
   let executions = 0;
   let releaseFirst!: () => void;

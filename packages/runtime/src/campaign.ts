@@ -457,14 +457,11 @@ function canonicalGitHubIssueSource(source: string): string | null {
   return source;
 }
 
-function blockerFor(
-  row: typeof campaignProposals.$inferSelect,
+function proposalAuthorityBlockerFor(
   proposal: TaskProposal,
   contract: GoalContract,
   publicationAuthorized: boolean,
   superseded: boolean,
-  repository: typeof repositories.$inferSelect | undefined,
-  observedRepositoryIds: ReadonlySet<string>,
 ): string | null {
   const outcome = contract.outcomes.find((candidate) => candidate.id === proposal.outcomeId);
   if (!publicationAuthorized) return "goal publication is not host-authorized";
@@ -477,6 +474,25 @@ function blockerFor(
     return "proposal effect is outside the Goal authority envelope";
   if (proposal.merge && !contract.authority.merge)
     return "proposal merge authority is outside the Goal authority envelope";
+  return null;
+}
+
+function blockerFor(
+  row: typeof campaignProposals.$inferSelect,
+  proposal: TaskProposal,
+  contract: GoalContract,
+  publicationAuthorized: boolean,
+  superseded: boolean,
+  repository: typeof repositories.$inferSelect | undefined,
+  observedRepositoryIds: ReadonlySet<string>,
+): string | null {
+  const authorityBlocker = proposalAuthorityBlockerFor(
+    proposal,
+    contract,
+    publicationAuthorized,
+    superseded,
+  );
+  if (authorityBlocker) return authorityBlocker;
   const hasDurableReadyBase = row.readyBaseSha !== null && row.readyRepositoryRevision !== null;
   if (!repository && !hasDurableReadyBase) return "proposal repository is not registered";
   if (
@@ -2840,13 +2856,21 @@ export async function proposeCampaign(
         .from(campaignProposals)
         .where(eq(campaignProposals.campaignId, campaignId));
       const sequence = (sequenceRow[0]?.sequence ?? 0) + 1;
+      const contract = decodePersistedGoalContract(campaign.contract);
       await database.insert(campaignProposals).values({
         campaignId,
         proposalId: proposal.proposalId,
         sequence,
         outcomeId: proposal.outcomeId,
         proposal,
-        requirementAddition: campaign.planHandedOff,
+        requirementAddition:
+          campaign.planHandedOff &&
+          proposalAuthorityBlockerFor(
+            proposal,
+            contract,
+            campaign.publicationAuthorized,
+            campaign.superseded,
+          ) === null,
         status: "planned",
         blocker: null,
         readyBaseSha: null,

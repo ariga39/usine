@@ -26,12 +26,31 @@ for await (const chunk of process.stdin) prompt += chunk;
 const reviewer = prompt.includes("Usine role: fresh independent reviewer.");
 const assessor = prompt.includes("Usine role: fresh Campaign assessor.");
 if (assessor) {
-  const output = JSON.stringify({
-    verdict: "inconclusive",
-    summary: "Campaign assessor fixture is inconclusive.",
-    gaps: [],
-    evidence: [],
-  });
+  let assessment = null;
+  try {
+    assessment = JSON.parse(prompt.slice(prompt.indexOf("{")));
+  } catch {
+    // The fixture below remains inconclusive until the server supplies evidence.
+  }
+  const delivery = assessment?.evidence?.find((item) => item.fact === "delivery");
+  const output = JSON.stringify(
+    delivery
+      ? {
+          verdict: "satisfied",
+          summary: "Campaign delivery evidence satisfies the Outcome.",
+          gaps: [],
+          evidence: assessment.outcome.acceptance.map((_, criterionIndex) => ({
+            ...delivery,
+            criterionIndex,
+          })),
+        }
+      : {
+          verdict: "inconclusive",
+          summary: "Campaign assessor fixture is inconclusive.",
+          gaps: [],
+          evidence: [],
+        },
+  );
   await new Promise((resolve) =>
     process.stdout.write(
       JSON.stringify({
@@ -299,160 +318,176 @@ async function forgeServer(
   let mergeCommitSha: string | null = null;
   let attestationBody: string | null = null;
   let captureStatus = 200;
+  let deliveryBranch = fixture.branch;
   const captureRequests: ForgeServer["captureRequests"] = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const method = request.method ?? "GET";
-    if (method === "POST" && url.pathname === "/batch/") {
-      let body = "";
-      for await (const chunk of request) body += chunk;
-      captureRequests.push(JSON.parse(body) as (typeof captureRequests)[number]);
-      response.statusCode = captureStatus;
-      response.end("ok");
-      return;
-    }
-    if (request.headers.authorization !== "token test-token") {
-      await jsonResponse(response, { message: "bad credentials" }, 401);
-      return;
-    }
-    if (method === "GET" && url.pathname.endsWith(`/git/ref/heads/${fixture.branch}`)) {
-      await jsonResponse(response, { message: "Not Found" }, 404);
-      return;
-    }
-    if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
-      await jsonResponse(
-        response,
-        pullRequests === 0
-          ? []
-          : [
-              {
-                number: 1,
-                state: merged ? "closed" : "open",
-                head: {
-                  sha:
-                    mergeCommitSha ??
-                    (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`)),
-                },
-                html_url: "http://example.invalid/pull/1",
-                merged,
-                merged_at: merged ? "2026-08-22T00:00:00Z" : null,
-                merge_commit_sha: mergeCommitSha,
-              },
-            ],
-      );
-      return;
-    }
-    if (method === "POST" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
-      pullRequests += 1;
-      const headSha = await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`);
-      mergeCommitSha = headSha;
-      await jsonResponse(
-        response,
-        {
-          number: 1,
-          state: "open",
-          head: { sha: headSha },
-          html_url: "http://example.invalid/pull/1",
-        },
-        201,
-      );
-      return;
-    }
-    if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls/1`) {
-      const headSha =
-        mergeCommitSha ?? (await git(fixture.remote, "rev-parse", `refs/heads/${fixture.branch}`));
-      await jsonResponse(response, {
-        number: 1,
-        state: merged ? "closed" : "open",
-        head: { sha: headSha },
-        html_url: "http://example.invalid/pull/1",
-        merged,
-        merged_at: merged ? "2026-08-22T00:00:00Z" : null,
-        merge_commit_sha: merged ? mergeCommitSha : null,
-        mergeable: null,
-        mergeable_state: null,
-      });
-      return;
-    }
-    if (pipelineConfigured && method === "GET" && url.pathname.endsWith("/check-runs")) {
-      const observation = pipelineObservations;
-      pipelineObservations += 1;
-      await jsonResponse(response, {
-        total_count: 1,
-        check_runs: [
-          {
-            id: observation + 1,
-            name: "build",
-            status: observation === 0 ? "queued" : "completed",
-            conclusion: observation === 0 ? null : "success",
-            app: { slug: "usine-app" },
-          },
-        ],
-      });
-      return;
-    }
-    if (
-      mergeAuthorized &&
-      method === "PUT" &&
-      url.pathname === `/repos/example/${fixture.taskId}/pulls/1/merge`
-    ) {
-      mergeCalls += 1;
-      const headSha = mergeCommitSha;
-      if (!headSha) throw new Error("merge endpoint has no candidate head");
-      merged = true;
-      await execa("git", ["update-ref", "refs/heads/main", headSha], { cwd: fixture.remote });
-      await jsonResponse(response, {
-        merged: true,
-        sha: headSha,
-        message: "Pull Request successfully merged",
-      });
-      return;
-    }
-    if (url.pathname === `/repos/example/${fixture.taskId}/issues/1/comments`) {
-      if (method === "GET") {
+    try {
+      if (method === "POST" && url.pathname === "/batch/") {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        captureRequests.push(JSON.parse(body) as (typeof captureRequests)[number]);
+        response.statusCode = captureStatus;
+        response.end("ok");
+        return;
+      }
+      if (request.headers.authorization !== "token test-token") {
+        await jsonResponse(response, { message: "bad credentials" }, 401);
+        return;
+      }
+      const decodedPath = decodeURIComponent(url.pathname);
+      const refPrefix = `/repos/example/${fixture.taskId}/git/ref/heads/`;
+      if (method === "GET" && decodedPath.startsWith(refPrefix)) {
+        deliveryBranch = decodedPath.slice(refPrefix.length);
+        await jsonResponse(response, { message: "Not Found" }, 404);
+        return;
+      }
+      if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
+        const requestedHead = url.searchParams.get("head");
+        if (requestedHead) deliveryBranch = requestedHead.split(":").at(-1) ?? deliveryBranch;
         await jsonResponse(
           response,
-          attestationBody
-            ? [
+          pullRequests === 0
+            ? []
+            : [
                 {
-                  id: 7,
-                  body: attestationBody,
-                  performed_via_github_app: { slug: "usine-app" },
-                  user: { type: "Bot" },
+                  number: 1,
+                  state: merged ? "closed" : "open",
+                  head: {
+                    sha:
+                      mergeCommitSha ??
+                      (await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`)),
+                  },
+                  html_url: "http://example.invalid/pull/1",
+                  merged,
+                  merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+                  merge_commit_sha: mergeCommitSha,
                 },
-              ]
-            : [],
+              ],
         );
         return;
       }
-      if (method === "POST") {
+      if (method === "POST" && url.pathname === `/repos/example/${fixture.taskId}/pulls`) {
         let body = "";
         for await (const chunk of request) body += chunk;
-        const parsed: unknown = JSON.parse(body);
-        if (
-          typeof parsed !== "object" ||
-          parsed === null ||
-          !("body" in parsed) ||
-          typeof parsed.body !== "string"
-        ) {
-          throw new Error("forge comment body is invalid");
-        }
-        attestations += 1;
-        attestationBody = parsed.body;
+        const pullRequest = JSON.parse(body) as { head?: string };
+        if (pullRequest.head) deliveryBranch = pullRequest.head;
+        pullRequests += 1;
+        const headSha = await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`);
+        mergeCommitSha = headSha;
         await jsonResponse(
           response,
           {
-            id: 7,
-            body: parsed.body,
-            performed_via_github_app: { slug: "usine-app" },
-            user: { type: "Bot" },
+            number: 1,
+            state: "open",
+            head: { sha: headSha },
+            html_url: "http://example.invalid/pull/1",
           },
           201,
         );
         return;
       }
+      if (method === "GET" && url.pathname === `/repos/example/${fixture.taskId}/pulls/1`) {
+        const headSha =
+          mergeCommitSha ??
+          (await git(fixture.remote, "rev-parse", `refs/heads/${deliveryBranch}`));
+        await jsonResponse(response, {
+          number: 1,
+          state: merged ? "closed" : "open",
+          head: { sha: headSha },
+          html_url: "http://example.invalid/pull/1",
+          merged,
+          merged_at: merged ? "2026-08-22T00:00:00Z" : null,
+          merge_commit_sha: merged ? mergeCommitSha : null,
+          mergeable: null,
+          mergeable_state: null,
+        });
+        return;
+      }
+      if (pipelineConfigured && method === "GET" && url.pathname.endsWith("/check-runs")) {
+        const observation = pipelineObservations;
+        pipelineObservations += 1;
+        await jsonResponse(response, {
+          total_count: 1,
+          check_runs: [
+            {
+              id: observation + 1,
+              name: "build",
+              status: observation === 0 ? "queued" : "completed",
+              conclusion: observation === 0 ? null : "success",
+              app: { slug: "usine-app" },
+            },
+          ],
+        });
+        return;
+      }
+      if (
+        mergeAuthorized &&
+        method === "PUT" &&
+        url.pathname === `/repos/example/${fixture.taskId}/pulls/1/merge`
+      ) {
+        mergeCalls += 1;
+        const headSha = mergeCommitSha;
+        if (!headSha) throw new Error("merge endpoint has no candidate head");
+        merged = true;
+        await execa("git", ["update-ref", "refs/heads/main", headSha], { cwd: fixture.remote });
+        await jsonResponse(response, {
+          merged: true,
+          sha: headSha,
+          message: "Pull Request successfully merged",
+        });
+        return;
+      }
+      if (url.pathname === `/repos/example/${fixture.taskId}/issues/1/comments`) {
+        if (method === "GET") {
+          await jsonResponse(
+            response,
+            attestationBody
+              ? [
+                  {
+                    id: 7,
+                    body: attestationBody,
+                    performed_via_github_app: { slug: "usine-app" },
+                    user: { type: "Bot" },
+                  },
+                ]
+              : [],
+          );
+          return;
+        }
+        if (method === "POST") {
+          let body = "";
+          for await (const chunk of request) body += chunk;
+          const parsed: unknown = JSON.parse(body);
+          if (
+            typeof parsed !== "object" ||
+            parsed === null ||
+            !("body" in parsed) ||
+            typeof parsed.body !== "string"
+          ) {
+            throw new Error("forge comment body is invalid");
+          }
+          attestations += 1;
+          attestationBody = parsed.body;
+          await jsonResponse(
+            response,
+            {
+              id: 7,
+              body: parsed.body,
+              performed_via_github_app: { slug: "usine-app" },
+              user: { type: "Bot" },
+            },
+            201,
+          );
+          return;
+        }
+      }
+      await jsonResponse(response, { message: `unhandled ${method} ${url.pathname}` }, 404);
+    } catch {
+      if (!response.writableEnded)
+        await jsonResponse(response, { message: "fixture handler failed" }, 500);
     }
-    await jsonResponse(response, { message: `unhandled ${method} ${url.pathname}` }, 404);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -1306,7 +1341,7 @@ describe("server-owned delivery milestone", () => {
     }
   }, 60_000);
 
-  test("recovers an interrupted Campaign invocation without relaunch after deadline expiry", async () => {
+  test("recovers an interrupted quota-free Campaign invocation after SIGKILL", async () => {
     const fixtureValue = await fixture("campaign-restart");
     const forge = await forgeServer(fixtureValue);
     const cliPath = join(process.cwd(), "apps/cli/dist/cli.mjs");
@@ -1390,9 +1425,8 @@ describe("server-owned delivery milestone", () => {
         "--json",
       ]);
       expect(startedResult.exitCode, startedResult.stderr).toBe(0);
-      const started = JSON.parse(startedResult.stdout) as { deadlineEpochMs: number };
-      const originalDeadline = started.deadlineEpochMs;
-      expect(originalDeadline).toBeGreaterThan(Date.now());
+      const started = JSON.parse(startedResult.stdout) as { deadlineEpochMs?: number };
+      expect(started.deadlineEpochMs).toBeUndefined();
       codexPid = Number(await readFile(join(fixtureValue.stateDirectory, "codex.pid"), "utf8"));
       descendantPid = Number(
         await readFile(join(fixtureValue.stateDirectory, "descendant.pid"), "utf8"),
@@ -1401,19 +1435,36 @@ describe("server-owned delivery milestone", () => {
 
       await stopServer(first, "SIGKILL");
       firstStopped = true;
-      while (Date.now() < originalDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
 
       const second = await startServer(cliPath, fixtureValue, forge, "complete");
       try {
-        const expired = await waitForStatus(
+        const recoveredTask = await waitForStatus(
           cliPath,
           fixtureValue,
           forge,
           second.url,
-          (result) => result.taskId === campaignTaskId && result.state === "blocked",
+          (result) => result.taskId === campaignTaskId && result.state === "reviewed_pr",
           campaignTaskId,
         );
-        expect(expired).toMatchObject({ state: "blocked", deadlineEpochMs: originalDeadline });
+        expect(recoveredTask).toMatchObject({ state: "reviewed_pr" });
+        let recoveredCampaign: { status?: string } | null = null;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const campaignResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
+            "campaign",
+            "get",
+            published.campaignId,
+            "--json",
+          ]);
+          if (campaignResult.exitCode === 0) {
+            const campaign = JSON.parse(campaignResult.stdout) as { status?: string };
+            if (campaign.status === "accepted") {
+              recoveredCampaign = campaign;
+              break;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(recoveredCampaign).toMatchObject({ status: "accepted" });
         const recoveredHistoryResult = await runCliArgs(cliPath, fixtureValue, forge, second.url, [
           "task",
           "history",
@@ -1424,7 +1475,7 @@ describe("server-owned delivery milestone", () => {
         const recoveredHistory = JSON.parse(recoveredHistoryResult.stdout) as PublicHistory;
         expect(
           recoveredHistory.events.filter((event) => event.data.type === "coding_session_started"),
-        ).toHaveLength(1);
+        ).toHaveLength(3);
         expect(
           recoveredHistory.events.filter(
             (event) => event.data.type === "coding_session_interrupted",
@@ -1481,7 +1532,7 @@ describe("server-owned delivery milestone", () => {
           }>;
         };
         expect(taskUsage).toMatchObject({ coverage: "partial" });
-        expect(taskUsage.invocations).toHaveLength(1);
+        expect(taskUsage.invocations).toHaveLength(3);
         expect(taskUsage.invocations[0]).toMatchObject({
           invocationId: recoveredRun.invocationId,
           outcome: recoveredRun.outcome,

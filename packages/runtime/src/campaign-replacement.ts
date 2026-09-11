@@ -95,6 +95,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
     const session = new CodexCodingSession(undefined, {
       environment: explicitWorkerEnvironment(request.environment),
       adapterSelectionEnvironment: codingSessionAdapterSelectionEnvironment(request.environment),
+      codexPathOverride: request.environment.USINE_CODEX_PATH_OVERRIDE,
       openCode2StateDirectory: request.environment.USINE_STATE_DIR,
       sessionArchive: sessionArchiveOptionsFromEnvironment(
         request.environment,
