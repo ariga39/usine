@@ -2024,19 +2024,38 @@ describe("Coding Session", () => {
       {
         environment: { CI: "true" },
         profileResolver: syntheticProfileResolver,
-        roleOutputTransform: async ({ onUsage }) => {
-          await onUsage?.({
-            semantics: "replacement",
-            usage: {
-              inputTokens: 5,
-              cachedInputTokens: 2,
-              uncachedInputTokens: 3,
-              outputTokens: 2,
-              reasoningOutputTokens: 1,
-            },
-          });
-          return { status: "proposed", summary: "normalized" };
-        },
+        roleOutputTransform: createOpenAICompatibleRoleOutputTransform({
+          apiKey: "fixture-key",
+          baseURL: "https://fixture.invalid/v1",
+          model: "fixture-model",
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                id: "normalizer",
+                object: "chat.completion",
+                created: 0,
+                model: "fixture-model",
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role: "assistant",
+                      content: '{"status":"proposed","summary":"normalized"}',
+                    },
+                    finish_reason: "stop",
+                  },
+                ],
+                usage: {
+                  prompt_tokens: 5,
+                  prompt_cache_hit_tokens: 2,
+                  prompt_cache_miss_tokens: 3,
+                  completion_tokens: 2,
+                  completion_tokens_details: { reasoning_tokens: 1 },
+                },
+              }),
+              { headers: { "content-type": "application/json" } },
+            ),
+        }),
       },
     );
     const observation = await session.run({
@@ -2094,6 +2113,7 @@ describe("Coding Session", () => {
         type: "usage_observed",
         source: "role_output_normalizer",
         semantics: "replacement",
+        actualModel: { model: "fixture-model", provider: "openai-compatible" },
         usage: {
           inputTokens: 5,
           cachedInputTokens: 2,
@@ -2712,6 +2732,32 @@ describe("Coding Session", () => {
       },
       expected: { inputTokens: 10, outputTokens: 7 },
     },
+    {
+      name: "invalid alternate count",
+      usage: { prompt_tokens: 1000, completion_tokens: 7, prompt_cache_hit_tokens: -1 },
+      expected: {},
+    },
+    {
+      name: "fractional alternate count",
+      usage: { prompt_tokens: 1000, completion_tokens: 7, prompt_cache_hit_tokens: 1.5 },
+      expected: {},
+    },
+    {
+      name: "unknown cache extension",
+      usage: { prompt_tokens: 1000, completion_tokens: 7, cache_hits: 800 },
+      expected: { inputTokens: 1000, outputTokens: 7 },
+    },
+    {
+      name: "writes exceed misses",
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 7,
+        prompt_cache_hit_tokens: 800,
+        prompt_cache_miss_tokens: 200,
+        prompt_tokens_details: { cache_write_tokens: 201 },
+      },
+      expected: { inputTokens: 1000, outputTokens: 7 },
+    },
     { name: "absent usage", usage: undefined, expected: {} },
     {
       name: "null dimensions",
@@ -2759,6 +2805,93 @@ describe("Coding Session", () => {
     ).resolves.toEqual({ ok: true });
     expect(observations).toEqual([expected]);
   });
+
+  test.each(["schema", "transport"] as const)(
+    "retains only observed normalizer usage after %s failure",
+    async (failure) => {
+      const observations: CodingSessionObservation[] = [];
+      const transform = createOpenAICompatibleRoleOutputTransform({
+        apiKey: "fixture-key",
+        baseURL: "https://fixture.invalid/v1",
+        model: "fixture-model",
+        fetch: async () => {
+          if (failure === "transport") throw new Error("fixture transport failure");
+          return new Response(
+            JSON.stringify({
+              id: "normalizer",
+              object: "chat.completion",
+              created: 0,
+              model: "fixture-model",
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: '{"wrong":true}' },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: {
+                prompt_tokens: 1000,
+                prompt_cache_hit_tokens: 800,
+                prompt_cache_miss_tokens: 200,
+                completion_tokens: 7,
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const session = new CodexCodingSession(
+        async () =>
+          testClient(async () =>
+              sdkTurn("unstructured provider prose", {
+                input_tokens: 10,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 2,
+                reasoning_output_tokens: 0,
+            }),
+          ),
+        {
+          environment: { CI: "true" },
+          profileResolver: syntheticProfileResolver,
+          roleOutputTransform: transform,
+        },
+      );
+      const result = await session.run({
+        role: "implementer",
+        workspace: ".",
+        contract,
+        prompt: "work",
+        profile: "implementer-profile",
+        sandbox: "workspace-write",
+        deadlineEpochMs: Date.now() + 10_000,
+        outputSchema: implementerOutputSchema,
+        attempt: implementerAttempt,
+        onObservation: (event) => {
+          observations.push(event);
+        },
+      });
+      expect(result.status).toBe("failed");
+      expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 2 });
+      expect(result.normalizer).toMatchObject({
+        status: "failed",
+        usage:
+          failure === "schema"
+            ? {
+                inputTokens: 1000,
+                cachedInputTokens: 800,
+                uncachedInputTokens: 200,
+                outputTokens: 7,
+              }
+            : null,
+      });
+      expect(
+        observations.filter(
+          (event) => event.type === "usage_observed" && event.source === "role_output_normalizer",
+        ),
+      ).toHaveLength(failure === "schema" ? 1 : 0);
+    },
+  );
 
   test("propagates caller cancellation to the SDK turn", async () => {
     const controller = new AbortController();

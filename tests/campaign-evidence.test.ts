@@ -9,7 +9,11 @@ import {
   lookupCampaignEvidence,
   startUsineServer,
 } from "@usine/runtime";
-import type { SessionObservation } from "@usine/coding-session";
+import {
+  createOpenAICompatibleRoleOutputTransform,
+  implementerOutputSchema,
+  type SessionObservation,
+} from "@usine/coding-session";
 import { campaignEvidenceToPostHogEvents } from "../packages/runtime/src/posthog.js";
 import { campaignModelRunFromObservation } from "../packages/runtime/src/campaign-model-run.js";
 import {
@@ -22,6 +26,7 @@ import {
   registerRepository,
   taskEvidence,
   taskEvents,
+  usageReport,
 } from "../apps/cli/src/server-client.js";
 import type { TaskFailureClass } from "@usine/task-authority";
 
@@ -80,6 +85,7 @@ type ReviewerInterruptionFixture = {
 
 async function fixture(
   mode: "successful" | "interrupted" | ReviewerInterruptionFixture = "successful",
+  normalizer?: SessionObservation["normalizer"],
 ) {
   const root = await mkdtemp(join(tmpdir(), "usine-campaign-evidence-"));
   const stateDirectory = join(root, "state");
@@ -297,6 +303,7 @@ async function fixture(
             serviceTier: "default",
           },
           usage: implementationUsage,
+          ...(index === 0 && normalizer ? { normalizer } : {}),
         },
       });
       await authority.appendObservation(result.taskId, {
@@ -580,6 +587,112 @@ test("retains failed interrupted usage in public Campaign runs and totals", asyn
   expect(publicEvidence?.runs).toEqual(persisted?.runs);
   expect(publicEvidence?.totals).toEqual(persisted?.totals);
 });
+
+test.each([true, false])(
+  "retains actual normalizer cache evidence through Task, Campaign and PostHog (cache supplied: %s)",
+  async (cacheSupplied) => {
+    let observedUsage: SessionObservation["usage"] = null;
+    const transform = createOpenAICompatibleRoleOutputTransform({
+      apiKey: "fixture-key",
+      baseURL: "https://fixture.invalid/v1",
+      model: "fixture-normalizer",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            id: "normalizer",
+            object: "chat.completion",
+            created: 0,
+            model: "fixture-normalizer",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: '{"status":"proposed","summary":"normalized"}',
+                },
+                finish_reason: "stop",
+              },
+            ],
+            usage: {
+              prompt_tokens: 1000,
+              completion_tokens: 7,
+              ...(cacheSupplied
+                ? { prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 }
+                : {}),
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    await transform({
+      finalResponse: "provider prose",
+      outputSchema: implementerOutputSchema,
+      signal: new AbortController().signal,
+      onUsage: ({ usage }) => {
+        observedUsage = usage;
+      },
+    });
+    const { stateDirectory, contractPath, server, finished } = await fixture("successful", {
+      status: "succeeded",
+      usage: observedUsage,
+      adapter: "role-output-normalizer",
+      model: "fixture-normalizer",
+      modelProvider: "openai-compatible",
+      actualModel: "fixture-normalizer",
+      actualModelProvider: "openai-compatible",
+    });
+    const published = await publishCampaign(server.url, { contractPath });
+    await proposeCampaign(server.url, published.campaignId, proposal("one", "outcome-one"));
+    await proposeCampaign(server.url, published.campaignId, proposal("two", "outcome-two"));
+    await handoffCampaign(server.url, published.campaignId);
+    await finished;
+    const expected = {
+      inputTokens: 1000,
+      outputTokens: 7,
+      cachedInputTokens: cacheSupplied ? 800 : null,
+      uncachedInputTokens: cacheSupplied ? 200 : null,
+      cacheWriteInputTokens: null,
+      reasoningOutputTokens: null,
+      coverage: cacheSupplied ? "complete" : "partial",
+    };
+    const taskReport = await usageReport(server.url, {
+      taskId: null,
+      repositoryId: null,
+      fromEpochMs: null,
+      toEpochMs: null,
+    });
+    const taskRuns = taskReport.invocations.filter(
+      (run) => run.adapter === "role-output-normalizer",
+    );
+    expect(taskRuns).toHaveLength(1);
+    expect(taskRuns[0]?.usage).toEqual(expected);
+    expect(taskReport.aggregates.filter((run) => run.adapter === "role-output-normalizer")).toEqual(
+      [expect.objectContaining({ invocations: 1, usage: expected })],
+    );
+    const report = await campaignEvidence(server.url, published.campaignId, 1);
+    const campaignRuns = report!.runs.filter((run) => run.adapter === "role-output-normalizer");
+    expect(campaignRuns).toHaveLength(1);
+    expect(campaignRuns[0]?.usage).toEqual(expected);
+    expect(report!.totals.invocations).toBe(taskReport.invocations.length);
+    const persisted = await lookupCampaignEvidence(stateDirectory, published.campaignId);
+    expect(persisted!.runs.find((run) => run.adapter === "role-output-normalizer")?.usage).toEqual(
+      expected,
+    );
+    const campaign = await getCampaign(server.url, published.campaignId);
+    const events = campaignEvidenceToPostHogEvents(campaign!, report!, "fixture-deployment").filter(
+      (event) =>
+        event.event === "$ai_generation" && event.properties.adapter === "role-output-normalizer",
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.properties).toMatchObject({ $ai_input_tokens: 1000, $ai_output_tokens: 7 });
+    if (cacheSupplied)
+      expect(events[0]?.properties).toMatchObject({
+        $ai_cache_read_input_tokens: 800,
+        uncached_input_tokens: 200,
+      });
+    else expect(events[0]?.properties.$ai_cache_read_input_tokens).toBeNull();
+  },
+);
 
 test("projects Campaign model invocations, including a normalizer, exactly once", async () => {
   const { stateDirectory, contractPath, server, finished } = await fixture();
