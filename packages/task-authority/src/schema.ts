@@ -200,6 +200,7 @@ export const campaignReplacementRuns = sqliteTable(
     role: text("role").notNull().default("replacement-planner"),
     status: text("status").notNull(),
     proposal: text("proposal", { mode: "json" }),
+    rejectionReason: text("rejection_reason"),
     usage: text("usage", { mode: "json" }),
     startedAtEpochMs: integer("started_at_epoch_ms").notNull(),
     completedAtEpochMs: integer("completed_at_epoch_ms"),

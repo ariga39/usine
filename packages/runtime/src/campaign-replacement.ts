@@ -49,6 +49,11 @@ export interface CampaignReplacementRequest {
   readonly priorProposals: readonly TaskProposal[];
   /** IDs of proposals that remain wholly unowned and may be revised at a checkpoint. */
   readonly supersedableProposalIds: readonly string[];
+  /** Host-authored feedback from the latest semantic rejection for this evidence bundle. */
+  readonly rejectionFeedback: {
+    readonly status: "invalid" | "duplicate";
+    readonly reason: string;
+  } | null;
   readonly repositories: readonly CampaignReplacementRepository[];
   readonly environment: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
@@ -150,6 +155,11 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           request.repositories.map(({ id, headSha }) => ({ id, headSha })),
         ),
       })}`,
+      ...(request.rejectionFeedback
+        ? [
+            `Previous replacement admission feedback: ${serializeRoleContext(request.rejectionFeedback)}`,
+          ]
+        : []),
     ].join("\n");
     const plannerRequest: CampaignReplacementPlannerSessionRequest = {
       role: "replacement-planner",
@@ -191,6 +201,7 @@ export function createCampaignReplacementGenerator(): CampaignReplacementGenerat
           merge: proposal.merge,
         })),
         supersedableProposalIds: request.supersedableProposalIds,
+        rejectionFeedback: request.rejectionFeedback ?? undefined,
         repositories: request.repositories.map(
           ({ reviewerProfile: _reviewerProfile, path: _path, ...facts }) => facts,
         ),

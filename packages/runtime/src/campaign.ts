@@ -1542,6 +1542,7 @@ interface ReplacementTarget {
   readonly invocationId: string;
   /** A checkpoint may revise one proposal from this still-unowned set. */
   readonly supersedableProposalIds: readonly string[];
+  readonly rejectionFeedback: CampaignReplacementRequest["rejectionFeedback"];
 }
 
 function replacementCampaignEligible(campaignState: DecodedCampaignState): boolean {
@@ -1657,6 +1658,15 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
             .toSorted((left, right) => left.startedAtEpochMs - right.startedAtEpochMs);
           const latestRun = priorRuns.at(-1);
           if (latestRun?.status === "pending" || latestRun?.status === "admitted") continue;
+          const semanticRejection = priorRuns
+            .toReversed()
+            .find(
+              (run) =>
+                (run.status === "invalid" || run.status === "duplicate") &&
+                typeof run.rejectionReason === "string" &&
+                run.rejectionReason.length > 0,
+            );
+          const semanticRejectionReason = semanticRejection?.rejectionReason;
           const invocationId =
             priorRuns.length === 0
               ? baseInvocationId
@@ -1685,6 +1695,13 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
             evidenceHash,
             invocationId,
             supersedableProposalIds: revisionSources,
+            rejectionFeedback:
+              semanticRejection && semanticRejectionReason
+                ? {
+                    status: semanticRejection.status === "duplicate" ? "duplicate" : "invalid",
+                    reason: semanticRejectionReason,
+                  }
+                : null,
           });
         }
       }
@@ -1704,6 +1721,16 @@ interface ReplacementValidation {
   readonly status: ReplacementRunStatus;
   readonly proposal: TaskProposal | null;
   readonly supersedesProposalId: string | null;
+  readonly rejectionReason: string | null;
+}
+
+function invalidReplacement(rejectionReason: string): ReplacementValidation {
+  return {
+    status: "invalid",
+    proposal: null,
+    supersedesProposalId: null,
+    rejectionReason,
+  };
 }
 
 function replacementValidation(
@@ -1711,7 +1738,12 @@ function replacementValidation(
   candidate: unknown,
 ): ReplacementValidation {
   if (candidate === null || candidate === undefined)
-    return { status: "unavailable", proposal: null, supersedesProposalId: null };
+    return {
+      status: "unavailable",
+      proposal: null,
+      supersedesProposalId: null,
+      rejectionReason: null,
+    };
   let supersedesProposalId: string | null = null;
   let proposalCandidate: unknown = candidate;
   if (Predicate.isObject(candidate)) {
@@ -1727,7 +1759,10 @@ function replacementValidation(
     }
   }
   const parsed = taskProposalSchema.safeParse(proposalCandidate);
-  if (!parsed.success) return { status: "invalid", proposal: null, supersedesProposalId: null };
+  if (!parsed.success)
+    return invalidReplacement(
+      "The replacement proposal was rejected because it did not match the required Task Proposal schema. Return a schema-valid proposal for the current Outcome and an authorized Repository.",
+    );
   const proposal = parsed.data;
   const checkpointRevision = target.supersedableProposalIds.length > 0;
   if (checkpointRevision) {
@@ -1735,28 +1770,52 @@ function replacementValidation(
       supersedesProposalId === null ||
       !target.supersedableProposalIds.includes(supersedesProposalId)
     )
-      return { status: "invalid", proposal: null, supersedesProposalId: null };
+      return invalidReplacement(
+        "The replacement proposal was rejected because it did not name an eligible unowned checkpoint source in supersedesProposalId. Use a currently listed source or return null.",
+      );
   } else if (supersedesProposalId !== null) {
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
+    return invalidReplacement(
+      "The replacement proposal was rejected because supersedesProposalId is not allowed for this non-checkpoint replacement. Return a proposal without supersession lineage.",
+    );
   }
   if (proposal.outcomeId !== target.outcome.id)
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
+    return invalidReplacement(
+      "The replacement proposal was rejected because it targets a different Outcome. Target the current Outcome only.",
+    );
   if (supersedesProposalId !== null && proposal.dependsOn.includes(supersedesProposalId))
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
+    return invalidReplacement(
+      "The replacement proposal was rejected because it depends on the proposal it tries to supersede. Remove that dependency.",
+    );
   if (proposal.dependsOn.some((dependency) => target.supersededProposalIds.includes(dependency)))
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
+    return invalidReplacement(
+      "The replacement proposal was rejected because it depends on superseded work. Use only current, non-superseded proposal dependencies.",
+    );
+  if (!target.contract.authority.delivery)
+    return invalidReplacement(
+      "The replacement proposal was rejected because current Goal authority does not permit delivery.",
+    );
+  if (!target.contract.authority.repositories.includes(proposal.repositoryId))
+    return invalidReplacement(
+      "The replacement proposal was rejected because its Repository is not authorized by the current Goal authority. Choose an authorized Repository from the current context.",
+    );
+  if (proposal.effects.some((effect) => !target.contract.authority.effects.includes(effect)))
+    return invalidReplacement(
+      "The replacement proposal was rejected because it requests an effect outside current Goal authority. Use only the authorized effects in the current context.",
+    );
+  if (proposal.merge && !target.contract.authority.merge)
+    return invalidReplacement(
+      "The replacement proposal was rejected because it requests merge without current Goal merge authority.",
+    );
   if (
-    !target.contract.authority.delivery ||
-    !target.contract.authority.repositories.includes(proposal.repositoryId) ||
-    proposal.effects.some((effect) => !target.contract.authority.effects.includes(effect)) ||
-    (proposal.merge && !target.contract.authority.merge) ||
     proposal.dependsOn.some(
       (dependency) =>
         dependency === proposal.proposalId ||
         !target.priorProposals.some((prior) => prior.proposalId === dependency),
     )
   )
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
+    return invalidReplacement(
+      "The replacement proposal was rejected because it contains an unknown or self-referential dependency. Use only prior proposal IDs from the current context.",
+    );
   if (
     target.priorProposals.some(
       (prior) =>
@@ -1764,10 +1823,18 @@ function replacementValidation(
         proposalFingerprint(prior) === proposalFingerprint(proposal),
     )
   )
-    return { status: "duplicate", proposal: null, supersedesProposalId: null };
+    return {
+      status: "duplicate",
+      proposal: null,
+      supersedesProposalId: null,
+      rejectionReason:
+        "The replacement proposal was rejected as duplicate work. Do not invent a new proposal ID to evade deduplication; return a materially different bounded correction or null.",
+    };
   if (!target.repositories.some((repository) => repository.id === proposal.repositoryId))
-    return { status: "invalid", proposal: null, supersedesProposalId: null };
-  return { status: "admitted", proposal, supersedesProposalId };
+    return invalidReplacement(
+      "The replacement proposal was rejected because its Repository is not currently registered under the authorized context.",
+    );
+  return { status: "admitted", proposal, supersedesProposalId, rejectionReason: null };
 }
 
 async function currentReplacementTarget(
@@ -1880,6 +1947,7 @@ async function reserveReplacementRun(
           role: "replacement-planner",
           status: "pending",
           proposal: null,
+          rejectionReason: null,
           usage: null,
           startedAtEpochMs: Date.now(),
           completedAtEpochMs: null,
@@ -2192,8 +2260,15 @@ async function persistReplacementResult(
       await persistCampaignModelRun(handle.database, observation, modelRuns, observationFallback);
       let result: ReplacementValidation =
         candidate === null || candidate === undefined
-          ? { status: "unavailable", proposal: null, supersedesProposalId: null }
-          : { status: "invalid", proposal: null, supersedesProposalId: null };
+          ? {
+              status: "unavailable",
+              proposal: null,
+              supersedesProposalId: null,
+              rejectionReason: null,
+            }
+          : invalidReplacement(
+              "The replacement proposal was rejected because the current admission facts were no longer valid.",
+            );
       if (candidate !== null && candidate !== undefined && currentTarget)
         result = replacementValidation(currentTarget, candidate);
       persistedStatus = result.status;
@@ -2244,6 +2319,7 @@ async function persistReplacementResult(
         .set({
           status: result.status,
           proposal: result.proposal,
+          rejectionReason: result.rejectionReason,
           // Keep this compatibility column null for new attempts. Usage is
           // owned by campaign_model_runs and projected by invocation ID.
           usage: null,
@@ -2309,7 +2385,13 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
       const completedAtEpochMs = Date.now();
       await handle.database
         .update(campaignReplacementRuns)
-        .set({ status: "failed", proposal: null, usage: null, completedAtEpochMs })
+        .set({
+          status: "failed",
+          proposal: null,
+          rejectionReason: null,
+          usage: null,
+          completedAtEpochMs,
+        })
         .where(eq(campaignReplacementRuns.status, "pending"));
       const pendingOutcomes = new Map<string, Set<string>>();
       for (const { campaignId, outcomeId } of pending) {
@@ -2414,6 +2496,7 @@ async function generateCampaignReplacements(
         evidence: target.evidence,
         priorProposals: target.priorProposals,
         supersedableProposalIds: target.supersedableProposalIds,
+        rejectionFeedback: target.rejectionFeedback,
         repositories: target.repositories,
         environment,
         signal,

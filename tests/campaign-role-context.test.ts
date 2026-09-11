@@ -187,6 +187,7 @@ function plannerRequest(): CampaignReplacementRequest {
       merge: false,
     })),
     supersedableProposalIds: ["proposal-b", "proposal-a"],
+    rejectionFeedback: null,
     repositories,
   };
 }

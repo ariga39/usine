@@ -5929,6 +5929,168 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("feeds bounded rejection feedback to the default replacement planner", async () => {
+    const correction = frontierProposal("default-planner-correction", "outcome-one");
+    const prompts: string[] = [];
+    let plannerCalls = 0;
+    let secondPlannerStarted!: () => void;
+    const secondPlanner = new Promise<void>((resolve) => {
+      secondPlannerStarted = resolve;
+    });
+    const factory: CodingSessionClientFactory = async (request) =>
+      ({
+        startThread: () => ({
+          id: `issue-488-planner-${plannerCalls + 1}`,
+          runStreamed: async (prompt, options) => {
+            if (request.role !== "replacement-planner")
+              throw new Error(`unexpected campaign model role: ${request.role}`);
+            if (typeof prompt !== "string") throw new Error("fixture requires text prompt");
+            prompts.push(prompt);
+            plannerCalls += 1;
+            if (plannerCalls === 2) {
+              secondPlannerStarted();
+              return {
+                events: (async function* () {
+                  await new Promise<void>((resolve) => {
+                    if (options?.signal?.aborted) resolve();
+                    else
+                      options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+                  });
+                  yield { type: "turn.failed" };
+                })(),
+              };
+            }
+            const output =
+              plannerCalls === 1
+                ? { ...correction, repositoryId: "unauthorized-repository" }
+                : correction;
+            return {
+              events: (async function* () {
+                yield { type: "thread.started", thread_id: `issue-488-planner-${plannerCalls}` };
+                yield { type: "turn.started" };
+                yield {
+                  type: "item.completed",
+                  item: {
+                    type: "agent_message",
+                    id: `issue-488-planner-message-${plannerCalls}`,
+                    text: JSON.stringify(output),
+                  },
+                };
+                yield {
+                  type: "turn.completed",
+                  usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+                };
+              })(),
+            };
+          },
+        }),
+      }) as Awaited<ReturnType<CodingSessionClientFactory>>;
+    const session = new CodexCodingSession(factory, {
+      environment: {},
+      profileResolver: async () => ({ model: "issue-488-fixture" }),
+    });
+    const originalRun = session.run.bind(session);
+    const runSpy = vi
+      .spyOn(CodexCodingSession.prototype, "run")
+      .mockImplementation((request) => originalRun(request));
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      const delivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === correction.proposalId,
+      );
+      return delivery
+        ? satisfiesDeliveredOutcome(request)
+        : {
+            verdict: "gaps" as const,
+            summary: "the accepted leaf still leaves one bounded Outcome gap",
+            gaps: ["the accepted leaf still leaves one bounded Outcome gap"],
+            evidence: [],
+            usage: null,
+          };
+    };
+    const fixtureValue = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      async (context) => acceptCampaignTask(context),
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(fixtureValue.server.url, {
+        contractPath: fixtureValue.contractPath,
+      });
+      await proposeCampaign(
+        fixtureValue.server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(fixtureValue.server.url, published.campaignId);
+      await secondPlanner;
+      await fixtureValue.server.close();
+      const restarted = await startUsineServer({
+        environment: fixtureValue.environment,
+        execute: async (context) => acceptCampaignTask(context),
+        assessOutcome: assessor,
+        host: "127.0.0.1",
+        port: 0,
+      });
+      try {
+        const accepted = await waitFor(
+          () => getCampaign(restarted.url, published.campaignId),
+          (campaign) => campaign?.status === "accepted",
+        );
+        expect(accepted).toMatchObject({ status: "accepted" });
+      } finally {
+        await restarted.close();
+      }
+      expect(plannerCalls).toBe(3);
+      expect(prompts[2]).toContain("Previous replacement admission feedback:");
+      expect(prompts[2]).toContain("not authorized");
+      expect(prompts[2]).not.toContain("unauthorized-repository");
+      expect(prompts[2]).toContain('"source":"user:campaign-366"');
+      expect(prompts[2]).toContain('"repositories":["campaign-repository"]');
+
+      const database = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+      try {
+        const replacementRuns = database
+          .prepare(
+            "SELECT status, assessment_id, evidence_hash, rejection_reason FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ? ORDER BY started_at_epoch_ms",
+          )
+          .all(published.campaignId, "outcome-one") as {
+          status: string;
+          assessment_id: string;
+          evidence_hash: string;
+          rejection_reason: string | null;
+        }[];
+        expect(replacementRuns).toEqual([
+          expect.objectContaining({
+            status: "invalid",
+            assessment_id: expect.any(String),
+            evidence_hash: expect.any(String),
+            rejection_reason: expect.stringContaining("not authorized"),
+          }),
+          expect.objectContaining({ status: "failed", rejection_reason: null }),
+          expect.objectContaining({ status: "admitted", rejection_reason: null }),
+        ]);
+        expect(replacementRuns).toHaveLength(3);
+        expect(new Set(replacementRuns.map((row) => row.assessment_id)).size).toBe(1);
+        expect(new Set(replacementRuns.map((row) => row.evidence_hash)).size).toBe(1);
+        expect(
+          database
+            .prepare(
+              "SELECT proposal_id FROM campaign_proposals WHERE campaign_id = ? AND replacement_assessment_id IS NOT NULL",
+            )
+            .all(published.campaignId),
+        ).toEqual([{ proposal_id: correction.proposalId }]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      runSpy.mockRestore();
+      await fixtureValue.server.close().catch(() => undefined);
+    }
+  });
+
   test("does not report an assessor generation for all-null failure usage", async () => {
     let assessorCalls = 0;
     const assessor: CampaignOutcomeAssessor = async () => {
