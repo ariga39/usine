@@ -773,10 +773,6 @@ async function reconcile(
     const liveOutcomes = contract.outcomes.filter((outcome) => outcome.status === "live");
     const usefulWork = hasUsefulCampaignWork(rows, results);
     const authorityBlocked = rows.some((row) => row.status === "blocked" && row.blocker !== null);
-    const replacementRuns = await database
-      .select()
-      .from(campaignReplacementRuns)
-      .where(eq(campaignReplacementRuns.campaignId, campaignId));
     if (!campaign.publicationAuthorized) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -812,34 +808,6 @@ async function reconcile(
           !outcomeEvidence.has(outcome.id) ||
           !assessmentReferencesResolve(outcome, evidence, assessment)),
     );
-    const unattemptedGaps = currentAssessments.find(
-      ({ assessment, current, outcome }) =>
-        current &&
-        assessment?.verdict === "gaps" &&
-        !replacementRuns.some((run) => run.outcomeId === outcome.id),
-    );
-    const checkpointGap =
-      currentAssessments.find(
-        ({ assessment, current, outcome }) =>
-          campaign.checkpointRequested &&
-          current &&
-          assessment?.verdict === "gaps" &&
-          supersedableProposalIds(rows, results, outcome.id).length > 0,
-      ) ??
-      currentAssessments.find(
-        ({ assessment, current }) =>
-          campaign.checkpointRequested && current && assessment?.verdict === "gaps",
-      );
-    const checkpointHasSafeSource = checkpointGap
-      ? supersedableProposalIds(rows, results, checkpointGap.outcome.id).length > 0
-      : false;
-    const replacementFailure = currentAssessments
-      .filter(({ current, assessment }) => current && assessment)
-      .map(({ outcome }) => replacementRuns.find((run) => run.outcomeId === outcome.id))
-      .find((run) => run?.status !== "admitted");
-    const admittedReplacementFailure = assessmentFailure?.assessment
-      ? replacementRuns.find((run) => run.outcomeId === assessmentFailure.outcome.id)
-      : undefined;
     if (campaign.publicationAuthorized && liveOutcomes.length === 0 && !usefulWork) {
       campaignStatus = "blocked";
       decisionRequest ??= {
@@ -856,42 +824,33 @@ async function reconcile(
       assessmentFailure &&
       !usefulWork
     ) {
-      campaignStatus = "blocked";
-      const nextDecisionRequest: CampaignDecisionRequest = {
-        requestId: `decision:${campaign.campaignId}`,
-        reason: authorityBlocked
-          ? "branches_blocked"
-          : checkpointGap && !checkpointHasSafeSource
-            ? "replacement_exhausted"
-            : unattemptedGaps
-              ? "assessment_gaps"
-              : replacementFailure?.status === "invalid"
-                ? "replacement_invalid"
-                : replacementFailure?.status === "duplicate"
-                  ? "replacement_duplicate"
-                  : replacementFailure?.status === "unavailable"
-                    ? "replacement_unavailable"
-                    : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
-                        assessmentFailure.assessment?.verdict === "gaps"
-                      ? "replacement_exhausted"
-                      : assessmentFailure.assessment?.verdict === "gaps"
-                        ? "assessment_gaps"
-                        : "assessment_inconclusive",
-        outcomeIds: liveOutcomes
-          .filter((outcome) => {
-            const item = currentAssessments.find(
-              (candidate) => candidate.outcome.id === outcome.id,
-            );
-            return (
-              !item?.current ||
-              !outcomeEvidence.has(outcome.id) ||
-              !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
-            );
-          })
-          .map((outcome) => outcome.id),
-      };
-      if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
-        decisionRequest = nextDecisionRequest;
+      if (authorityBlocked) {
+        campaignStatus = "blocked";
+        const nextDecisionRequest: CampaignDecisionRequest = {
+          requestId: `decision:${campaign.campaignId}`,
+          reason: "branches_blocked",
+          outcomeIds: liveOutcomes
+            .filter((outcome) => {
+              const item = currentAssessments.find(
+                (candidate) => candidate.outcome.id === outcome.id,
+              );
+              return (
+                !item?.current ||
+                !outcomeEvidence.has(outcome.id) ||
+                !assessmentReferencesResolve(item.outcome, item.evidence, item.assessment)
+              );
+            })
+            .map((outcome) => outcome.id),
+        };
+        if (JSON.stringify(decisionRequest) !== JSON.stringify(nextDecisionRequest))
+          decisionRequest = nextDecisionRequest;
+      } else {
+        // Assessment gaps, malformed model attempts, and planner failures are
+        // recoverable frontier work. Keep the Campaign nonterminal so a later
+        // fresh attempt can continue from the same exact evidence identity.
+        campaignStatus = "planning";
+        decisionRequest = null;
+      }
     } else if (campaign.publicationAuthorized && !usefulWork && liveOutcomes.length > 0) {
       // The assessor must run before the exhausted frontier becomes terminal.
       campaignStatus = "planning";
@@ -1223,11 +1182,7 @@ interface ReplacementTarget {
 }
 
 function replacementCampaignEligible(campaignState: DecodedCampaignState): boolean {
-  return (
-    campaignState.status === "planning" ||
-    (campaignState.status === "blocked" &&
-      campaignState.decisionRequest?.reason === "assessment_gaps")
-  );
+  return campaignState.status === "planning";
 }
 
 function canSupersedeProposal(
@@ -1885,7 +1840,7 @@ async function persistReplacementResult(
   }
 }
 
-/** A pending reservation has already consumed the one replacement opportunity. */
+/** Recover an interrupted replacement reservation without making the gap terminal. */
 async function recoverPendingReplacementRuns(stateDirectory: string): Promise<void> {
   const handle = openSqliteDatabase(resolve(stateDirectory, "usine.sqlite"));
   try {
@@ -1920,16 +1875,12 @@ async function recoverPendingReplacementRuns(stateDirectory: string): Promise<vo
         } catch {
           continue;
         }
-        if (campaign.superseded || !replacementCampaignEligible(campaignState)) continue;
+        if (campaign.superseded || isTerminalCampaignStatus(campaignState.status)) continue;
         await handle.database
           .update(campaigns)
           .set({
-            status: "blocked",
-            decisionRequest: {
-              requestId: `decision:${campaignId}`,
-              reason: "replacement_unavailable",
-              outcomeIds: [...outcomeIds].toSorted(),
-            },
+            status: "planning",
+            decisionRequest: null,
             revision: sql`${campaigns.revision} + 1`,
             updatedAt: new Date(completedAtEpochMs),
           })
@@ -2343,6 +2294,7 @@ async function assessCampaignTargets(
     try {
       assessment = validateAssessment(invocationTarget, draft, startedAtEpochMs, Date.now());
     } catch {
+      recoverable = true;
       assessment = validateAssessment(
         invocationTarget,
         {
@@ -2650,11 +2602,7 @@ export async function proposeCampaign(
     });
     if (!campaign) throw new CampaignNotFoundError();
     const campaignState = decodeCampaignState(campaign);
-    if (
-      campaign.superseded ||
-      campaignState.status === "accepted" ||
-      campaignState.status === "abandoned"
-    )
+    if (campaign.superseded || isTerminalCampaignStatus(campaignState.status))
       throw new CampaignHandoffError(campaignId);
     const existing = await database.query.campaignProposals.findFirst({
       where: and(

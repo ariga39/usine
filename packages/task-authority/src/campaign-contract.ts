@@ -275,6 +275,7 @@ const campaignDecisionRequestSchema = Schema.Struct({
     "replacement_duplicate",
     "replacement_unavailable",
     "replacement_exhausted",
+    "replacement_budget_exhausted",
   ]),
   outcomeIds: Schema.Array(Schema.String),
 });

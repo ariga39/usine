@@ -5233,30 +5233,44 @@ describe("durable Ready frontier", () => {
     }
   });
 
-  test("consumes the Campaign Outcome replacement opportunity across a fresh gaps assessment", async () => {
-    const base = oneOutcomeFrontierGoal("campaign-repository");
-    const contract = {
-      ...base,
-      budget: { ...base.budget, maxReviewCycles: 2 },
-    };
+  test("continues successive corrections after final assessment and recovers malformed attempts", async () => {
     let assessmentCalls = 0;
     let replacementCalls = 0;
-    const assessor: CampaignOutcomeAssessor = async () => {
+    const assessor: CampaignOutcomeAssessor = async (request) => {
       assessmentCalls += 1;
-      return {
-        verdict: "gaps",
-        summary: "the bounded Outcome still has a gap",
-        gaps: ["the one replacement opportunity is already consumed"],
-        evidence: [],
-        usage: null,
-      };
+      if (assessmentCalls === 1) throw new Error("interrupted assessment");
+      if (assessmentCalls === 2)
+        return {
+          verdict: "malformed",
+          summary: "malformed assessment",
+          gaps: [],
+          evidence: [],
+          usage: null,
+        } as unknown as Awaited<ReturnType<CampaignOutcomeAssessor>>;
+      if (assessmentCalls < 5)
+        return {
+          verdict: "gaps",
+          summary: "the Outcome still needs another correction",
+          gaps: ["the latest correction is incomplete"],
+          evidence: [],
+          usage: null,
+        };
+      return satisfiesDeliveredOutcome(request);
     };
     const replacementGenerator: CampaignReplacementGenerator = async () => {
       replacementCalls += 1;
-      return { proposal: frontierProposal("replacement", "outcome-one"), usage: null };
+      if (replacementCalls === 1) throw new Error("interrupted planner");
+      if (replacementCalls === 2)
+        return { proposal: { malformed: true }, usage: null } as unknown as Awaited<
+          ReturnType<CampaignReplacementGenerator>
+        >;
+      return {
+        proposal: quotaFreeFrontierProposal(`replacement-${replacementCalls - 2}`, "outcome-one"),
+        usage: null,
+      };
     };
     const { contractPath, server, stateDirectory, environment } = await frontierFixture(
-      contract,
+      oneOutcomeFrontierGoal("campaign-repository"),
       "user:campaign-366",
       async (context) => acceptCampaignTask(context),
       1,
@@ -5269,34 +5283,48 @@ describe("durable Ready frontier", () => {
       await proposeCampaign(
         server.url,
         published.campaignId,
-        frontierProposal("initial", "outcome-one"),
+        quotaFreeFrontierProposal("initial", "outcome-one"),
       );
       await handoffCampaign(server.url, published.campaignId);
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        if ((await getCampaign(server.url, published.campaignId))?.status === "blocked") break;
+      let completed = await getCampaign(server.url, published.campaignId);
+      for (let attempt = 0; attempt < 600 && completed?.status !== "accepted"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
+        completed = await getCampaign(server.url, published.campaignId);
       }
-      const first = await getCampaign(server.url, published.campaignId);
-      expect(first).toMatchObject({
-        status: "blocked",
-        decisionRequest: {
-          requestId: `decision:${published.campaignId}`,
-          reason: "replacement_exhausted",
-          outcomeIds: ["outcome-one"],
-        },
-        proposals: [{ proposalId: "initial" }, { proposalId: "replacement" }],
+      if (completed?.status !== "accepted")
+        throw new Error(
+          `successive correction stalled: ${JSON.stringify({
+            status: completed?.status,
+            decisionRequest: completed?.decisionRequest,
+            proposals: completed?.proposals?.map((proposal) => proposal.proposalId),
+            assessmentCalls,
+            replacementCalls,
+          })}`,
+        );
+      expect(completed).toMatchObject({
+        status: "accepted",
+        proposals: [
+          { proposalId: "initial" },
+          { proposalId: "replacement-1" },
+          { proposalId: "replacement-2" },
+        ],
       });
-      expect(assessmentCalls).toBe(2);
-      expect(replacementCalls).toBe(1);
+      expect(assessmentCalls).toBeGreaterThanOrEqual(5);
+      expect(replacementCalls).toBeGreaterThanOrEqual(4);
       const database = new DatabaseSync(join(stateDirectory, "usine.sqlite"));
       try {
         expect(
           database
             .prepare(
-              "SELECT COUNT(*) AS count FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ?",
+              "SELECT status FROM campaign_replacement_runs WHERE campaign_id = ? AND outcome_id = ? ORDER BY started_at_epoch_ms",
             )
-            .get(published.campaignId, "outcome-one"),
-        ).toEqual({ count: 1 });
+            .all(published.campaignId, "outcome-one"),
+        ).toEqual([
+          { status: "unavailable" },
+          { status: "invalid" },
+          { status: "admitted" },
+          { status: "admitted" },
+        ]);
       } finally {
         database.close();
       }
@@ -5305,28 +5333,25 @@ describe("durable Ready frontier", () => {
       const restarted = await startUsineServer({
         environment,
         assessOutcome: async () => {
-          throw new Error("a stable exhausted replacement must not reassess");
+          throw new Error("accepted Campaign must not reassess");
         },
         generateReplacement: async () => {
-          throw new Error("a consumed replacement opportunity must not invoke the planner");
+          throw new Error("accepted Campaign must not plan more work");
         },
         host: "127.0.0.1",
         port: 0,
       });
       try {
-        if (!first) throw new Error("Campaign disappeared before restart");
         await expect(getCampaign(restarted.url, published.campaignId)).resolves.toMatchObject(
-          first,
+          completed,
         );
-        expect(assessmentCalls).toBe(2);
-        expect(replacementCalls).toBe(1);
       } finally {
         await restarted.close();
       }
     } finally {
       await server.close().catch(() => undefined);
     }
-  });
+  }, 20_000);
 
   test("recovers a pending replacement after late completion during shutdown", async () => {
     let replacementCalls = 0;
