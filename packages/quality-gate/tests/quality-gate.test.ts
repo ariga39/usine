@@ -483,6 +483,9 @@ test("runs a frozen Vite+ verifier against the exact candidate, not its self-che
   expect(reviewed.review?.verdict).toBe("approved");
   expect(actualReviewPrompt).toContain("executed real Vite+ run pipeline");
   expect(actualReviewPrompt).toContain(positiveSha);
+  expect(actualReviewPrompt.indexOf("Task Contract:")).toBeLessThan(
+    actualReviewPrompt.indexOf("Candidate SHA:"),
+  );
   expect(actualReviewPrompt).toContain(positive.acceptanceChecks![0]!.outputDigest!);
   expect(actualReviewPrompt).not.toContain(verifier);
   expect(positive.acceptanceChecks).toMatchObject([

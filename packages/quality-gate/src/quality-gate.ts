@@ -285,8 +285,8 @@ export class QualityGate {
         const prompt = [
           "Review only the frozen Task Contract, exact candidate checkout, and project check evidence.",
           "Return an explicit JSON object matching the supplied schema. Approval requires the exact candidate SHA.",
-          `Candidate SHA: ${sha}`,
           `Task Contract: ${JSON.stringify(taskContract)}`,
+          `Candidate SHA: ${sha}`,
           `Project check evidence: ${JSON.stringify(check)}`,
           "Do not rely on implementer conversation or process exit status.",
         ].join("\n");
