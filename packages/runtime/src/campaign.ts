@@ -548,7 +548,7 @@ async function dependencyResolution(
     for (const row of rows) {
       if (
         row.status !== "superseded" &&
-    decodePersistedTaskProposal(row.proposal).outcomeId === dependency
+        decodePersistedTaskProposal(row.proposal).outcomeId === dependency
       ) {
         dependencies.set(row.proposalId, row);
         found = true;
@@ -870,13 +870,13 @@ async function reconcile(
                 : replacementFailure?.status === "duplicate"
                   ? "replacement_duplicate"
                   : replacementFailure?.status === "unavailable"
-                      ? "replacement_unavailable"
-                      : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
-                          assessmentFailure.assessment?.verdict === "gaps"
-                        ? "replacement_exhausted"
-                        : assessmentFailure.assessment?.verdict === "gaps"
-                          ? "assessment_gaps"
-                          : "assessment_inconclusive",
+                    ? "replacement_unavailable"
+                    : (replacementFailure ?? admittedReplacementFailure)?.status === "admitted" &&
+                        assessmentFailure.assessment?.verdict === "gaps"
+                      ? "replacement_exhausted"
+                      : assessmentFailure.assessment?.verdict === "gaps"
+                        ? "assessment_gaps"
+                        : "assessment_inconclusive",
         outcomeIds: liveOutcomes
           .filter((outcome) => {
             const item = currentAssessments.find(
@@ -1205,12 +1205,7 @@ function hasUsefulCampaignWork(
   return false;
 }
 
-type ReplacementRunStatus =
-  | "pending"
-  | "admitted"
-  | "invalid"
-  | "duplicate"
-  | "unavailable";
+type ReplacementRunStatus = "pending" | "admitted" | "invalid" | "duplicate" | "unavailable";
 
 interface ReplacementTarget {
   readonly campaign: typeof campaigns.$inferSelect;
@@ -1313,7 +1308,11 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           // exists, let reconciliation produce the stable decision request without
           // spending a planner invocation.
           if (checkpointRevision && revisionSources.length === 0) continue;
-          if (!assessment || assessment.verdict !== "gaps" || assessment.evidenceHash !== evidenceHash)
+          if (
+            !assessment ||
+            assessment.verdict !== "gaps" ||
+            assessment.evidenceHash !== evidenceHash
+          )
             continue;
           const baseInvocationId = `replacement-${createHash("sha256")
             .update(
@@ -2243,9 +2242,7 @@ async function persistCampaignAssessment(
             usage,
             startedAtEpochMs: assessment.startedAtEpochMs,
             completedAtEpochMs: Date.now(),
-            ...(recoverable
-              ? { status: "failed" as const, failureClass: "unknown" as const }
-              : {}),
+            ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
           },
         );
         return;
@@ -2265,9 +2262,7 @@ async function persistCampaignAssessment(
           usage,
           startedAtEpochMs: assessment.startedAtEpochMs,
           completedAtEpochMs: assessment.completedAtEpochMs,
-          ...(recoverable
-            ? { status: "failed" as const, failureClass: "unknown" as const }
-            : {}),
+          ...(recoverable ? { status: "failed" as const, failureClass: "unknown" as const } : {}),
         },
       );
       if (!lineageCurrent) return;

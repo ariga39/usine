@@ -791,9 +791,7 @@ export class TaskAuthority {
         taskId: input.contract.id,
         contractHash: input.contractHash,
         revision: 0,
-        ...(input.deadlineEpochMs === undefined
-          ? {}
-          : { deadlineEpochMs: input.deadlineEpochMs }),
+        ...(input.deadlineEpochMs === undefined ? {} : { deadlineEpochMs: input.deadlineEpochMs }),
         state: "admitted",
         ...(input.contract.campaign ? { campaign: { ...input.contract.campaign } } : {}),
         mergeAuthorized: input.contract.authorization.merge === true,

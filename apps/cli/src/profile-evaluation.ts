@@ -594,10 +594,7 @@ async function waitForTerminalTask(
       return await rereadAtCleanupDeadline(task, serverUrl, services, undefined);
     try {
       current = await services.followTask(serverUrl, task.taskId, {
-        timeoutMs: Math.min(
-          remainingMs,
-          Math.max(0, finiteTaskDeadline(current) - Date.now()),
-        ),
+        timeoutMs: Math.min(remainingMs, Math.max(0, finiteTaskDeadline(current) - Date.now())),
       });
     } catch (error) {
       let reread: import("@usine/task-authority").TaskResource;

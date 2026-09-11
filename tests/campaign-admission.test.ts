@@ -12,10 +12,7 @@ import {
   type CampaignReplacementGenerator,
 } from "@usine/runtime";
 import { CandidateWorkspace, credentialFreeGitEnvironment } from "@usine/candidate-workspace";
-import {
-  CodexCodingSession,
-  type CodingSessionClientFactory,
-} from "@usine/coding-session";
+import { CodexCodingSession, type CodingSessionClientFactory } from "@usine/coding-session";
 import { executeDeliveryRun, type DeliveryRunServices } from "@usine/delivery-run";
 import { QualityGate } from "@usine/quality-gate";
 import {
@@ -713,7 +710,9 @@ test("delivers a quota-free Campaign leaf without count or deadline ceilings", a
                 };
               })(),
             }),
-          } as unknown as ReturnType<Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]>;
+          } as unknown as ReturnType<
+            Awaited<ReturnType<CodingSessionClientFactory>>["startThread"]
+          >;
           return { startThread: () => thread } as Awaited<ReturnType<CodingSessionClientFactory>>;
         }) satisfies CodingSessionClientFactory,
         {

@@ -405,7 +405,7 @@ export async function executeReviewerProfileEvaluation(
       const maxElapsedMs = item.contract.budget.maxElapsedMs;
       if (maxElapsedMs === null)
         throw new ReviewerEvaluationValidationError(
-          `${item.id}:${item.repetition}: standalone evaluation Tasks require a finite elapsed budget`,
+          `${item.case.id}:${item.case.repetition}: standalone evaluation Tasks require a finite elapsed budget`,
         );
       let observation: ReviewAttemptObservation | null = null;
       let failure: string | null = null;

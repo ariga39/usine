@@ -424,9 +424,7 @@ export function taskListItemFromResult(result: TaskResult): TaskListItem {
   return {
     taskId: result.taskId,
     revision: result.revision,
-    ...(result.deadlineEpochMs === undefined
-      ? {}
-      : { deadlineEpochMs: result.deadlineEpochMs }),
+    ...(result.deadlineEpochMs === undefined ? {} : { deadlineEpochMs: result.deadlineEpochMs }),
     state: publicTaskStateFromResult(result),
     candidateSha: result.candidateSha,
     activeActivation: result.activeActivation,

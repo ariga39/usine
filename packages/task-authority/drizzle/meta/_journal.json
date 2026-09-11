@@ -183,6 +183,13 @@
       "when": 1788739200005,
       "tag": "0025_campaign_usage_owner",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789091949000,
+      "tag": "0026_append_only_campaign_replacements",
+      "breakpoints": true
     }
   ]
 }

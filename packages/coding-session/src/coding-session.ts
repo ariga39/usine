@@ -519,7 +519,9 @@ export class CodexCodingSession {
     let deadlineSignal: AbortSignal | undefined;
     try {
       deadlineSignal =
-        deadlineEpochMs === undefined ? undefined : AbortSignal.timeout(remainingUntil(deadlineEpochMs));
+        deadlineEpochMs === undefined
+          ? undefined
+          : AbortSignal.timeout(remainingUntil(deadlineEpochMs));
     } catch (error) {
       if (!(error instanceof ElapsedBudgetError)) throw error;
       return {
@@ -533,9 +535,10 @@ export class CodexCodingSession {
         failureClass: "timeout",
       };
     }
-    const abortSignal = request.signal && deadlineSignal
-      ? AbortSignal.any([request.signal, deadlineSignal])
-      : request.signal ?? deadlineSignal ?? new AbortController().signal;
+    const abortSignal =
+      request.signal && deadlineSignal
+        ? AbortSignal.any([request.signal, deadlineSignal])
+        : (request.signal ?? deadlineSignal ?? new AbortController().signal);
     if (abortSignal.aborted) {
       const failureClass = deadlineSignal?.aborted ? "timeout" : "cancellation";
       return {
