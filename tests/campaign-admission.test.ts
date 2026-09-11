@@ -6767,12 +6767,8 @@ describe("durable Ready frontier", () => {
           }),
         ]),
       );
-      releaseAssessor();
-      await waitFor(
-        () => getCampaign(server.url, published.campaignId),
-        (campaign) => campaign?.status === "planning" && assessmentCalls >= 1,
-      );
       await checkpointCampaign(server.url, published.campaignId);
+      releaseAssessor();
       await replacementStarted;
       const corrected = await waitFor(
         () => getCampaign(server.url, published.campaignId),

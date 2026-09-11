@@ -471,26 +471,33 @@ test("measures baseline Campaign evidence reads across Campaigns and pages", asy
       return result.campaign?.campaignId === first.campaignId;
     });
     if (!firstTask) throw new Error("first Campaign task was not persisted");
-    for (const source of rows) {
-      for (let index = 0; index < 100; index += 1) {
-        const taskId = `seed-${source.task_id}-${String(index).padStart(3, "0")}`;
-        database
-          .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
-          .run(taskId, source.result.replaceAll(source.task_id, taskId));
-        database
-          .prepare(`INSERT INTO task_events
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const source of rows) {
+        for (let index = 0; index < 100; index += 1) {
+          const taskId = `seed-${source.task_id}-${String(index).padStart(3, "0")}`;
+          database
+            .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+            .run(taskId, source.result.replaceAll(source.task_id, taskId));
+          database
+            .prepare(`INSERT INTO task_events
           (task_id, sequence, event_id, occurred_at_epoch_ms, data)
           SELECT ?, sequence, event_id, occurred_at_epoch_ms, replace(data, ?, ?)
           FROM task_events WHERE task_id = ?`)
-          .run(taskId, source.task_id, taskId, source.task_id);
+            .run(taskId, source.task_id, taskId, source.task_id);
+        }
       }
+      database
+        .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
+        .run(firstTask.result.replace('"goalVersion":1,', '"goalVersion":1.0,'), firstTask.task_id);
+      database
+        .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
+        .run("malformed-unrelated-task", "{ invalid");
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
     }
-    database
-      .prepare("UPDATE task_runs SET result = ? WHERE task_id = ?")
-      .run(firstTask.result.replace('"goalVersion":1,', '"goalVersion":1.0,'), firstTask.task_id);
-    database
-      .prepare("INSERT INTO task_runs (task_id, result) VALUES (?, ?)")
-      .run("malformed-unrelated-task", "{ invalid");
     for (const row of database.prepare("SELECT result FROM task_runs").all()) {
       const raw = row.result as string;
       persistedResults.add(raw);
