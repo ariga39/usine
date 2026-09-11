@@ -30,7 +30,6 @@ const campaign = {
     delivery: true,
     merge: false,
   },
-  budget: { maxElapsedMs: 60_000, maxTasks: 4 },
   status: "planning",
   planHandedOff: false,
   decisionRequest: null,
@@ -67,11 +66,6 @@ const frontierCampaign = {
     repositories: ["campaign-repository"],
     effects: ["github"],
   },
-  budget: {
-    ...campaign.budget,
-    maxImplementerActivations: 1,
-    maxReviewCycles: 1,
-  },
   proposals: [
     {
       proposalId: "proposal-one",
@@ -87,7 +81,6 @@ const frontierCampaign = {
         acceptance: ["proposal-one is complete."],
         nonGoals: [],
         effects: ["github"],
-        budget: { maxImplementerActivations: 1, maxReviewCycles: 1, maxElapsedMs: 10_000 },
         merge: false,
       },
     },
