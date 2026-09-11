@@ -274,8 +274,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
   let campaignModelWorkGeneration = 0;
   const activeTaskOperations = new Set<Promise<unknown>>();
   const activeTaskOperationsById = new Map<string, Set<Promise<unknown>>>();
+  const activeTaskOperationCampaignIds = new Map<Promise<unknown>, string>();
   const activeTaskAbortControllers = new Map<string, Set<AbortController>>();
-  const taskCampaignIds = new Map<string, string>();
+  const activeTaskControllerCampaignIds = new Map<AbortController, string>();
   const pipelineRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pipelineRecoveryCampaignIds = new Map<string, string>();
   const onEvent = (event: TaskEvent): void => {
@@ -321,9 +322,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
             pipelineRecoveryTimers.delete(taskId);
             pipelineRecoveryCampaignIds.delete(taskId);
           }
-          for (const [taskId, controllers] of activeTaskAbortControllers) {
-            if (taskCampaignIds.get(taskId) !== campaignId) continue;
-            for (const controller of controllers) controller.abort();
+          for (const controllers of activeTaskAbortControllers.values()) {
+            for (const controller of controllers) {
+              if (activeTaskControllerCampaignIds.get(controller) === campaignId)
+                controller.abort();
+            }
           }
           const modelOperations = [...activeCampaignModelWork].filter(([, work]) =>
             work.campaignIds.has(campaignId),
@@ -331,11 +334,9 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
           for (const [operation] of modelOperations)
             activeCampaignModelAbortControllers.get(operation)?.abort();
           return Promise.all([
-            ...[...activeTaskOperationsById]
-              .filter(([taskId]) => taskCampaignIds.get(taskId) === campaignId)
-              .flatMap(([, operations]) =>
-                [...operations].map((operation) => operation.catch(() => undefined)),
-              ),
+            ...[...activeTaskOperationCampaignIds]
+              .filter(([, ownedCampaignId]) => ownedCampaignId === campaignId)
+              .map(([operation]) => operation.catch(() => undefined)),
             ...modelOperations.map(([operation]) => operation.catch(() => false)),
           ]).then(() => undefined);
         },
@@ -359,6 +360,7 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
 
     launchTask = (task, mode = "deduplicated") => {
       if (mode === "deduplicated" && pipelineRecoveryTimers.has(task.result.taskId)) return;
+      if (mode === "deduplicated" && activeTaskOperationsById.has(task.result.taskId)) return;
       const pendingTimer = pipelineRecoveryTimers.get(task.result.taskId);
       if (pendingTimer !== undefined) {
         clearTimeout(pendingTimer);
@@ -369,19 +371,11 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
         Effect.tryPromise({
           try: (signal) => {
             const campaignId = task.result.campaign?.campaignId;
-            if (campaignId) taskCampaignIds.set(task.result.taskId, campaignId);
             const controller = new AbortController();
-            const abort = () => controller.abort();
-            if (signal.aborted) controller.abort();
-            else signal.addEventListener("abort", abort, { once: true });
-            if (campaignId) {
-              const controllers = activeTaskAbortControllers.get(task.result.taskId) ?? new Set();
-              controllers.add(controller);
-              activeTaskAbortControllers.set(task.result.taskId, controllers);
-            }
-            const operation = (async () => {
-              try {
-                return await executeServerTask(
+            let startOperation!: () => void;
+            const operation = new Promise<TaskResult>((resolveOperation, rejectOperation) => {
+              startOperation = () => {
+                void executeServerTask(
                   task,
                   options.environment,
                   stateDirectory,
@@ -389,36 +383,49 @@ export async function startUsineServer(options: UsineServerOptions): Promise<Run
                   controller.signal,
                   onEvent,
                   executionOwnerId,
-                );
-              } finally {
-                signal.removeEventListener("abort", abort);
-                if (campaignId) {
-                  const controllers = activeTaskAbortControllers.get(task.result.taskId);
-                  controllers?.delete(controller);
-                  if (controllers?.size === 0)
-                    activeTaskAbortControllers.delete(task.result.taskId);
-                }
-              }
-            })();
+                ).then(resolveOperation, rejectOperation);
+              };
+            });
+            if (campaignId) {
+              const controllers = activeTaskAbortControllers.get(task.result.taskId) ?? new Set();
+              controllers.add(controller);
+              activeTaskAbortControllers.set(task.result.taskId, controllers);
+              activeTaskControllerCampaignIds.set(controller, campaignId);
+            }
             activeTaskOperations.add(operation);
             const operations = activeTaskOperationsById.get(task.result.taskId) ?? new Set();
             operations.add(operation);
             activeTaskOperationsById.set(task.result.taskId, operations);
-            void operation.then(
-              (result) => {
-                activeTaskOperations.delete(operation);
-                const operations = activeTaskOperationsById.get(task.result.taskId);
-                operations?.delete(operation);
-                if (operations?.size === 0) activeTaskOperationsById.delete(task.result.taskId);
-                if (isPipelineChecksWaiting(result)) schedulePipelineRecovery(task);
-              },
-              () => {
-                activeTaskOperations.delete(operation);
-                const operations = activeTaskOperationsById.get(task.result.taskId);
-                operations?.delete(operation);
-                if (operations?.size === 0) activeTaskOperationsById.delete(task.result.taskId);
-              },
-            );
+            if (campaignId) activeTaskOperationCampaignIds.set(operation, campaignId);
+            const cleanup = (): void => {
+              activeTaskOperations.delete(operation);
+              activeTaskOperationCampaignIds.delete(operation);
+              const currentOperations = activeTaskOperationsById.get(task.result.taskId);
+              currentOperations?.delete(operation);
+              if (currentOperations?.size === 0)
+                activeTaskOperationsById.delete(task.result.taskId);
+              if (campaignId) {
+                const controllers = activeTaskAbortControllers.get(task.result.taskId);
+                controllers?.delete(controller);
+                if (controllers?.size === 0) activeTaskAbortControllers.delete(task.result.taskId);
+                activeTaskControllerCampaignIds.delete(controller);
+              }
+            };
+            const abort = () => controller.abort();
+            if (signal.aborted) controller.abort();
+            else signal.addEventListener("abort", abort, { once: true });
+            void operation
+              .finally(() => signal.removeEventListener("abort", abort))
+              .catch(() => undefined);
+            void operation.then(async (result) => {
+              cleanup();
+              if (!isPipelineChecksWaiting(result)) return;
+              const campaign = campaignId
+                ? await lookupCampaign(stateDirectory, campaignId)
+                : undefined;
+              if (!campaign || campaign.status !== "abandoned") schedulePipelineRecovery(task);
+            }, cleanup);
+            startOperation();
             return operation;
           },
           catch: (cause) => cause,
@@ -652,6 +659,11 @@ async function executeServerTask(
   onEvent: (event: TaskEvent) => void,
   executionOwnerId: string,
 ): Promise<TaskResult> {
+  if (task.result.campaign) {
+    const campaign = await lookupCampaign(stateDirectory, task.result.campaign.campaignId);
+    if (campaign?.status === "abandoned")
+      return (await lookupTaskStatus(stateDirectory, task.result.taskId)) ?? task.result;
+  }
   let policy: RuntimePolicy;
   try {
     if (!task.result.repository) throw new Error("admitted task has no repository snapshot");

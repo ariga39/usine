@@ -42,7 +42,6 @@ import {
   lookupCampaign,
   abandonCampaign as abandonCampaignToState,
   handoffCampaign as handoffCampaignToState,
-  proposeCampaign as proposeCampaignToState,
   publishCampaign as publishCampaignToState,
   recordCampaignDecisionTouch as recordCampaignDecisionTouchToState,
   reconcileCampaigns,
@@ -897,6 +896,113 @@ test("refuses retry while abandoned Campaign cleanup still owns its writer lease
   }
 });
 
+test("public retry cannot start a Campaign successor after abandonment revokes cleanup", async () => {
+  let executionCount = 0;
+  let taskId = "";
+  let firstWaiting!: () => void;
+  const firstWaited = new Promise<void>((resolve) => {
+    firstWaiting = resolve;
+  });
+  let successorEntered!: () => void;
+  const successorStarted = new Promise<void>((resolve) => {
+    successorEntered = resolve;
+  });
+  let successorAborted = false;
+  let abortObserved!: () => void;
+  const abortWasObserved = new Promise<void>((resolve) => {
+    abortObserved = resolve;
+  });
+  let releaseCleanup!: () => void;
+  const cleanupRelease = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  const execute = async ({ authority, contract, result, signal }: CampaignExecutionContext) => {
+    executionCount += 1;
+    taskId = result.taskId;
+    const activation = await authority.reserveActivation(
+      result.taskId,
+      contract.budget.maxImplementerActivations,
+    );
+    if (executionCount === 1) {
+      const waiting = await authority.recordWaiting(
+        { taskId: result.taskId, revision: activation.result.revision },
+        {
+          reason: "network_interruption",
+          resumeState: "admitted",
+          activation: activation.activation,
+        },
+      );
+      firstWaiting();
+      return waiting;
+    }
+    successorEntered();
+    await new Promise<void>((resolve) => {
+      const observeAbort = (): void => {
+        successorAborted = true;
+        abortObserved();
+        resolve();
+      };
+      if (signal.aborted) {
+        observeAbort();
+        return;
+      }
+      signal.addEventListener("abort", observeAbort, { once: true });
+    });
+    await cleanupRelease;
+    return (await authority.lookup(result.taskId)) ?? result;
+  };
+  const fixtureValue = await frontierFixture(
+    oneOutcomeFrontierGoal("campaign-repository"),
+    "user:campaign-366",
+    execute,
+  );
+  try {
+    const published = await publishCampaign(fixtureValue.server.url, {
+      contractPath: fixtureValue.contractPath,
+    });
+    await proposeCampaign(
+      fixtureValue.server.url,
+      published.campaignId,
+      frontierProposal("public-retry", "outcome-one"),
+    );
+    await handoffCampaign(fixtureValue.server.url, published.campaignId);
+    await firstWaited;
+    const retry = retryTask(fixtureValue.server.url, taskId);
+    await successorStarted;
+    fixtureValue.environment.USINE_CAMPAIGN_ABANDONMENT_SOURCE = "user:campaign-366";
+    const abandonment = abandonCampaign(fixtureValue.server.url, published.campaignId);
+    await abortWasObserved;
+    await retry;
+    expect(successorAborted).toBe(true);
+    await expect(retryTask(fixtureValue.server.url, taskId)).rejects.toMatchObject({ status: 409 });
+    const held = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+    try {
+      expect(
+        held.prepare("SELECT task_id FROM repository_leases WHERE task_id = ?").get(taskId),
+      ).toEqual({ task_id: taskId });
+    } finally {
+      held.close();
+    }
+    releaseCleanup();
+    await expect(abandonment).resolves.toMatchObject({ status: "abandoned" });
+    await expect(taskStatus(fixtureValue.server.url, taskId)).resolves.toMatchObject({
+      state: "blocked",
+    });
+    const released = new DatabaseSync(join(fixtureValue.stateDirectory, "usine.sqlite"));
+    try {
+      expect(
+        released.prepare("SELECT task_id FROM repository_leases WHERE task_id = ?").get(taskId),
+      ).toBeUndefined();
+    } finally {
+      released.close();
+    }
+    expect(executionCount).toBe(2);
+  } finally {
+    releaseCleanup?.();
+    await fixtureValue.server.close().catch(() => undefined);
+  }
+});
+
 test("abandons only the selected Campaign while a cached model frontier continues", async () => {
   let assessorCalls = 0;
   let firstAssessorAborted = false;
@@ -923,51 +1029,37 @@ test("abandons only the selected Campaign while a cached model frontier continue
       usage: null,
     };
   };
+  const selectedGoal = (id: string) => ({
+    ...oneOutcomeFrontierGoal("campaign-repository"),
+    id,
+    authority: {
+      ...oneOutcomeFrontierGoal("campaign-repository").authority,
+      source: "user:campaign-selected",
+    },
+  });
   const fixtureValue = await frontierFixture(
-    { ...oneOutcomeFrontierGoal("campaign-repository"), id: "campaign-selected-a" },
+    selectedGoal("campaign-selected-a"),
     "user:campaign-selected",
     undefined,
     1,
     true,
     assessor,
   );
-  const secondGoal = {
-    ...oneOutcomeFrontierGoal("campaign-repository"),
-    id: "campaign-selected-b",
-    authority: {
-      ...oneOutcomeFrontierGoal("campaign-repository").authority,
-      source: "user:campaign-selected",
-    },
-  };
   let server = fixtureValue.server;
   try {
     const first = await publishCampaignToState(
       fixtureValue.stateDirectory,
-      JSON.stringify({
-        ...oneOutcomeFrontierGoal("campaign-repository"),
-        id: "campaign-selected-a",
-        authority: {
-          ...oneOutcomeFrontierGoal("campaign-repository").authority,
-          source: "user:campaign-selected",
-        },
-      }),
+      JSON.stringify(selectedGoal("campaign-selected-a")),
       fixtureValue.environment,
     );
     const second = await publishCampaignToState(
       fixtureValue.stateDirectory,
-      JSON.stringify(secondGoal),
+      JSON.stringify(selectedGoal("campaign-selected-b")),
       fixtureValue.environment,
     );
-    await proposeCampaignToState(
+    const third = await publishCampaignToState(
       fixtureValue.stateDirectory,
-      first.campaignId,
-      frontierProposal("selected-a", "outcome-one"),
-      fixtureValue.environment,
-    );
-    await proposeCampaignToState(
-      fixtureValue.stateDirectory,
-      second.campaignId,
-      frontierProposal("selected-b", "outcome-one"),
+      JSON.stringify(selectedGoal("campaign-selected-c")),
       fixtureValue.environment,
     );
     await handoffCampaignToState(
@@ -978,6 +1070,11 @@ test("abandons only the selected Campaign while a cached model frontier continue
     await handoffCampaignToState(
       fixtureValue.stateDirectory,
       second.campaignId,
+      fixtureValue.environment,
+    );
+    await handoffCampaignToState(
+      fixtureValue.stateDirectory,
+      third.campaignId,
       fixtureValue.environment,
     );
     await server.close();
@@ -994,13 +1091,16 @@ test("abandons only the selected Campaign while a cached model frontier continue
     });
     releaseFirstAssessor();
     await waitFor(
-      () => getCampaign(server.url, first.campaignId),
+      () => getCampaign(server.url, third.campaignId),
       (campaign) => campaign?.outcomes[0]?.assessment?.verdict === "inconclusive",
     );
+    await expect(getCampaign(server.url, first.campaignId)).resolves.toMatchObject({
+      outcomes: [{ assessment: { verdict: "inconclusive" } }],
+    });
     await expect(getCampaign(server.url, second.campaignId)).resolves.toMatchObject({
       status: "abandoned",
     });
-    expect(assessorCalls).toBe(1);
+    expect(assessorCalls).toBe(2);
     expect(firstAssessorAborted).toBe(false);
   } finally {
     releaseFirstAssessor?.();
