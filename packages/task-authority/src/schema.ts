@@ -47,6 +47,9 @@ export const campaignProposals = sqliteTable(
     sequence: integer("sequence").notNull(),
     outcomeId: text("outcome_id").notNull(),
     proposal: text("proposal", { mode: "json" }).notNull(),
+    requirementAddition: integer("requirement_addition", { mode: "boolean" })
+      .notNull()
+      .default(false),
     status: text("status").notNull(),
     blocker: text("blocker"),
     supersededByProposalId: text("superseded_by_proposal_id"),

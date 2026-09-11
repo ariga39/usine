@@ -190,6 +190,13 @@
       "when": 1789091949000,
       "tag": "0026_append_only_campaign_replacements",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1789091949001,
+      "tag": "0027_campaign_requirement_additions",
+      "breakpoints": true
     }
   ]
 }

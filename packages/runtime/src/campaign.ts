@@ -844,13 +844,14 @@ async function reconcile(
       };
     }
     const currentAssessments = liveOutcomes.map((outcome) => {
+      const currentOutcome = currentCampaignOutcome(outcome, rows);
       const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
       const assessment = assessments.get(outcome.id);
       return {
-        outcome,
+        outcome: currentOutcome,
         evidence,
         assessment,
-        current: assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence),
+        current: assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence),
       };
     });
     const allSatisfied =
@@ -1104,6 +1105,23 @@ function campaignAssessmentEvidence(
   return evidence;
 }
 
+function currentCampaignOutcome(
+  outcome: GoalContract["outcomes"][number],
+  rows: readonly (typeof campaignProposals.$inferSelect)[],
+): GoalContract["outcomes"][number] {
+  const additions = rows
+    .filter((row) => row.requirementAddition)
+    .map((row) => decodePersistedTaskProposal(row.proposal))
+    .filter((proposal) => proposal.outcomeId === outcome.id)
+    .flatMap((proposal) => proposal.acceptance);
+  return additions.length === 0
+    ? outcome
+    : {
+        ...outcome,
+        acceptance: [...new Set([...outcome.acceptance, ...additions])],
+      };
+}
+
 function assessmentEvidenceHash(
   outcome: GoalContract["outcomes"][number],
   evidence: readonly CampaignAssessmentFact[],
@@ -1342,9 +1360,10 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
         for (const outcome of contract.outcomes.filter(
           (candidate) => candidate.status === "live",
         )) {
+          const currentOutcome = currentCampaignOutcome(outcome, rows);
           const assessment = assessments.get(outcome.id);
           const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-          const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           const checkpointRevision = campaign.checkpointRequested;
           const revisionSources = checkpointRevision
             ? supersedableProposalIds(rows, results, outcome.id)
@@ -1379,7 +1398,7 @@ async function replacementTargets(stateDirectory: string): Promise<readonly Repl
           targets.push({
             campaign,
             contract,
-            outcome,
+            outcome: currentOutcome,
             assessment,
             evidence,
             priorProposals: rows.map((row) => decodePersistedTaskProposal(row.proposal)),
@@ -1512,8 +1531,8 @@ async function currentReplacementTarget(
   }
   if (!replacementCampaignEligible(campaignState)) return null;
   const contract = decodePersistedGoalContract(campaign.contract);
-  const outcome = contract.outcomes.find((candidate) => candidate.id === target.outcome.id);
-  if (!outcome || outcome.status !== "live") return null;
+  const baseOutcome = contract.outcomes.find((candidate) => candidate.id === target.outcome.id);
+  if (!baseOutcome || baseOutcome.status !== "live") return null;
   const rows = await database
     .select()
     .from(campaignProposals)
@@ -1521,6 +1540,7 @@ async function currentReplacementTarget(
     .orderBy(asc(campaignProposals.sequence));
   const results = await campaignTaskResults(database, rows);
   if (hasUsefulCampaignWork(rows, results) && !campaign.checkpointRequested) return null;
+  const outcome = currentCampaignOutcome(baseOutcome, rows);
   const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
   if (assessmentEvidenceHash(outcome, evidence) !== target.evidenceHash) return null;
   const assessment = (await campaignAssessmentRows(database, campaign.campaignId)).get(outcome.id);
@@ -1910,6 +1930,7 @@ async function persistReplacementResult(
           sequence,
           outcomeId: result.proposal.outcomeId,
           proposal: result.proposal,
+          requirementAddition: false,
           status: "planned",
           blocker: null,
           supersededByProposalId: null,
@@ -2184,8 +2205,9 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
         for (const outcome of contract.outcomes.filter(
           (candidate) => candidate.status === "live",
         )) {
+          const currentOutcome = currentCampaignOutcome(outcome, rows);
           const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
-          const evidenceHash = assessmentEvidenceHash(outcome, evidence);
+          const evidenceHash = assessmentEvidenceHash(currentOutcome, evidence);
           const current = assessments.get(outcome.id);
           const currentRun = current
             ? modelRunRows.find((run) => run.invocationId === current.assessmentId)
@@ -2223,7 +2245,7 @@ async function assessmentTargets(stateDirectory: string): Promise<readonly Asses
           targets.push({
             campaign,
             contract,
-            outcome,
+            outcome: currentOutcome,
             evidence,
             repositories: [...repositoriesForOutcome.values()],
             evidenceHash,
@@ -2301,7 +2323,6 @@ async function persistCampaignAssessment(
         campaign.goalId === target.campaign.goalId &&
         campaign.goalVersion === target.campaign.goalVersion &&
         campaign.contractHash === target.campaign.contractHash &&
-        campaign.revision === target.campaign.revision &&
         !campaign.superseded &&
         campaign.planHandedOff &&
         campaign.publicationAuthorized &&
@@ -2314,11 +2335,13 @@ async function persistCampaignAssessment(
             .orderBy(asc(campaignProposals.sequence))
         : [];
       const results = campaign ? await campaignTaskResults(handle.database, rows) : new Map();
-      const outcome = campaign
+      const baseOutcome = campaign
         ? decodePersistedGoalContract(campaign.contract).outcomes.find(
             (candidate) => candidate.id === target.outcome.id,
           )
         : undefined;
+      const outcome =
+        campaign && baseOutcome ? currentCampaignOutcome(baseOutcome, rows) : undefined;
       const evidence = outcome ? campaignAssessmentEvidence(rows, results, outcome.id) : [];
       const lineageCurrent =
         current && outcome && assessmentEvidenceHash(outcome, evidence) === target.evidenceHash;
@@ -2669,22 +2692,27 @@ async function resourceFromDatabase(
     modelRunRows.filter((row) => row.status !== "pending").map((row) => [row.invocationId, row]),
   );
   const replacementRunsByOutcome = new Map(replacementRuns.map((run) => [run.outcomeId, run]));
+  const currentContract = {
+    ...contract,
+    outcomes: contract.outcomes.map((outcome) => currentCampaignOutcome(outcome, rows)),
+  };
   const satisfiedOutcomes = new Set(
     contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .filter((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const assessment = assessments.get(outcome.id);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         return (
           outcomeEvidence.has(outcome.id) &&
-          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
-          assessmentReferencesResolve(outcome, evidence, assessment)
+          assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&
+          assessmentReferencesResolve(currentOutcome, evidence, assessment)
         );
       })
       .map((outcome) => outcome.id),
   );
   return campaignResourceFromContract(
-    contract,
+    currentContract,
     campaign.contractHash,
     campaignState.status,
     campaign.revision,
@@ -2791,6 +2819,7 @@ export async function proposeCampaign(
         sequence,
         outcomeId: proposal.outcomeId,
         proposal,
+        requirementAddition: campaign.planHandedOff,
         status: "planned",
         blocker: null,
         readyBaseSha: null,
@@ -2873,18 +2902,21 @@ export async function checkpointCampaign(
     const assessmentNeeded = contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         return (
-          assessments.get(outcome.id)?.evidenceHash !== assessmentEvidenceHash(outcome, evidence)
+          assessments.get(outcome.id)?.evidenceHash !==
+          assessmentEvidenceHash(currentOutcome, evidence)
         );
       });
     const currentGaps = contract.outcomes
       .filter((outcome) => outcome.status === "live")
       .some((outcome) => {
+        const currentOutcome = currentCampaignOutcome(outcome, rows);
         const evidence = campaignAssessmentEvidence(rows, results, outcome.id);
         const assessment = assessments.get(outcome.id);
         return (
-          assessment?.evidenceHash === assessmentEvidenceHash(outcome, evidence) &&
+          assessment?.evidenceHash === assessmentEvidenceHash(currentOutcome, evidence) &&
           assessment.verdict === "gaps"
         );
       });

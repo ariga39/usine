@@ -5230,6 +5230,132 @@ describe("durable Ready frontier", () => {
     }
   });
 
+  test("fences a stale satisfied assessment after a late Outcome proposal", async () => {
+    const lateCriterion = "the late requirement is complete.";
+    let assessmentCalls = 0;
+    const observedAcceptances: string[][] = [];
+    let releaseAssessor!: () => void;
+    const assessorRelease = new Promise<void>((resolve) => {
+      releaseAssessor = resolve;
+    });
+    let assessorEntered!: () => void;
+    const assessorStarted = new Promise<void>((resolve) => {
+      assessorEntered = resolve;
+    });
+    const assessor: CampaignOutcomeAssessor = async (request) => {
+      assessmentCalls += 1;
+      observedAcceptances.push([...request.outcome.acceptance]);
+      if (assessmentCalls === 1) {
+        assessorEntered();
+        await assessorRelease;
+        const delivery = request.evidence.find((item) => item.fact === "delivery");
+        if (!delivery) throw new Error("late proposal fence requires initial delivery evidence");
+        return {
+          verdict: "satisfied" as const,
+          summary: "the stale assessment would accept the original delivery",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((_, criterionIndex) => ({
+            ...delivery,
+            criterionIndex,
+          })),
+          usage: null,
+        };
+      }
+      const initialDelivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === "initial",
+      );
+      const lateDelivery = request.evidence.find(
+        (item) => item.fact === "delivery" && item.proposalId === "late-requirement",
+      );
+      if (request.outcome.acceptance.includes(lateCriterion) && initialDelivery && lateDelivery) {
+        return {
+          verdict: "satisfied" as const,
+          summary: "the original and late requirements have separate accepted deliveries",
+          gaps: [],
+          evidence: request.outcome.acceptance.map((criterion, criterionIndex) => ({
+            ...(criterion === lateCriterion ? lateDelivery : initialDelivery),
+            criterionIndex,
+          })),
+          usage: null,
+        };
+      }
+      return {
+        verdict: "gaps" as const,
+        summary: "the late requirement still needs its own accepted delivery",
+        gaps: [lateCriterion],
+        evidence: [],
+        usage: null,
+      };
+    };
+    const fixtureValue = await frontierFixture(
+      oneOutcomeFrontierGoal("campaign-repository"),
+      "user:campaign-366",
+      acceptCampaignTask,
+      1,
+      true,
+      assessor,
+    );
+    try {
+      const published = await publishCampaign(fixtureValue.server.url, {
+        contractPath: fixtureValue.contractPath,
+      });
+      await proposeCampaign(
+        fixtureValue.server.url,
+        published.campaignId,
+        frontierProposal("initial", "outcome-one"),
+      );
+      await handoffCampaign(fixtureValue.server.url, published.campaignId);
+      await assessorStarted;
+      const initialTask = await waitFor(
+        () => taskStatus(fixtureValue.server.url, "campaign-campaign-366-v1-initial"),
+        (task) => task?.delivery !== null,
+      );
+      const late = await proposeCampaign(fixtureValue.server.url, published.campaignId, {
+        ...frontierProposal("late-requirement", "outcome-one"),
+        acceptance: [lateCriterion],
+      });
+      expect(late.proposals).toMatchObject([
+        { proposalId: "initial" },
+        {
+          proposalId: "late-requirement",
+          ready: expect.objectContaining({ acceptance: [lateCriterion] }),
+        },
+      ]);
+      releaseAssessor();
+      const lateTask = await waitFor(
+        () => taskStatus(fixtureValue.server.url, "campaign-campaign-366-v1-late-requirement"),
+        (task) => task?.delivery !== null,
+      );
+      const settled = await waitFor(
+        () => getCampaign(fixtureValue.server.url, published.campaignId),
+        (campaign) =>
+          campaign?.status === "accepted" && campaign.outcomes[0]?.status === "accepted",
+      );
+      if (!settled) throw new Error("Campaign disappeared before late requirement acceptance");
+      expect(settled).toMatchObject({
+        status: "accepted",
+        outcomes: [{ status: "accepted", assessment: { verdict: "satisfied" } }],
+      });
+      expect(published.outcomes[0]?.acceptance).toEqual(["The first outcome has executable work."]);
+      expect(settled.outcomes[0]?.acceptance).toEqual([
+        "The first outcome has executable work.",
+        lateCriterion,
+      ]);
+      expect(initialTask).toBeTruthy();
+      expect(lateTask).toBeTruthy();
+      await expect(
+        taskStatus(fixtureValue.server.url, "campaign-campaign-366-v1-initial"),
+      ).resolves.toEqual(initialTask);
+      expect(observedAcceptances).toEqual(
+        expect.arrayContaining([expect.arrayContaining([lateCriterion])]),
+      );
+      expect(assessmentCalls).toBeGreaterThanOrEqual(2);
+    } finally {
+      releaseAssessor?.();
+      await fixtureValue.server.close();
+    }
+  });
+
   test("continues successive corrections after final assessment and recovers malformed attempts", async () => {
     let assessmentCalls = 0;
     let replacementCalls = 0;
