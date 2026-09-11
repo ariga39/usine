@@ -1470,6 +1470,10 @@ test("keeps same-Repository Ready proposals serial with spare active capacity", 
     expect(executions).toBe(0);
     await handoffCampaign(server.url, published.campaignId);
     expect(second.proposals?.[1]?.ready?.taskId).toBeNull();
+    await waitFor(
+      async () => executions,
+      (count) => count === 1,
+    );
     expect(executions).toBe(1);
     await expect(serverSnapshot(server.url)).resolves.toMatchObject({
       tasks: [expect.objectContaining({ taskId: "campaign-campaign-366-v1-serial-first" })],
