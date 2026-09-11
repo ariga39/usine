@@ -1,11 +1,6 @@
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, lte, sql } from "drizzle-orm";
 import { Schema } from "effect";
-import {
-  decodeTaskIdCursor,
-  encodeTaskIdCursor,
-  pageTaskIds,
-  type TaskIdCursor,
-} from "./task-id-cursor.js";
+import { decodeTaskIdCursor, encodeTaskIdCursor, type TaskIdCursor } from "./task-id-cursor.js";
 import {
   CampaignEvidenceCursorError,
   MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
@@ -70,10 +65,7 @@ export async function listCampaignEvidenceSources(
     .from(campaignTouches)
     .where(eq(campaignTouches.campaignId, campaignId))
     .orderBy(asc(campaignTouches.occurredAtEpochMs), asc(campaignTouches.touchId));
-  const taskRows = await database
-    .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
-    .from(taskRuns)
-    .orderBy(asc(taskRuns.taskId));
+  const taskPage = await readCampaignTaskPage(database, campaignRow, cursor, request.limit);
   const modelRunRows =
     request.cursor === null
       ? await database
@@ -82,29 +74,8 @@ export async function listCampaignEvidenceSources(
           .where(eq(campaignModelRuns.campaignId, campaignId))
           .orderBy(asc(campaignModelRuns.invocationId))
       : [];
-  const tasks = new Map<string, ReturnType<typeof decodeRawPersistedTaskResult>>();
-  for (const row of taskRows) {
-    try {
-      const task = decodeRawPersistedTaskResult(row.rawResult);
-      if (
-        task.campaign?.campaignId === campaignId &&
-        task.campaign.goalId === campaignRow.goalId &&
-        task.campaign.goalVersion === campaignRow.goalVersion
-      )
-        tasks.set(task.taskId, task);
-    } catch (error) {
-      if (!isTaskStateQuarantinedError(error)) throw error;
-    }
-  }
-
-  const taskIds = [...tasks.keys()].toSorted();
-  const page = pageTaskIds(
-    taskIds,
-    cursor,
-    request.limit,
-    `${CAMPAIGN_EVIDENCE_CURSOR_SCOPE}:${campaignId}`,
-  );
-  const selectedTaskIds = page.taskIds;
+  const tasks = new Map(taskPage.tasks.map((task) => [task.taskId, task]));
+  const selectedTaskIds = [...tasks.keys()];
   const eventsByTask = new Map<string, TaskEvent[]>();
   if (selectedTaskIds.length > 0) {
     const eventRows = await database
@@ -233,8 +204,101 @@ export async function listCampaignEvidenceSources(
     campaignRuns,
     cursor: request.cursor,
     nextCursor:
-      page.nextCursor === null ? null : encodeCampaignEvidenceCursor(page.nextCursor, campaignId),
+      taskPage.nextCursor === null
+        ? null
+        : encodeCampaignEvidenceCursor(taskPage.nextCursor, campaignId),
   };
+}
+
+async function readCampaignTaskPage(
+  database: RuntimeDatabase,
+  campaign: typeof campaigns.$inferSelect,
+  cursor: CampaignEvidenceCursor | null,
+  limit: number,
+) {
+  const safeJson = sql`CASE WHEN json_valid(${taskRuns.result}) THEN ${taskRuns.result} ELSE '{}' END`;
+  const association = and(
+    sql`json_extract(${safeJson}, '$.campaign.campaignId') = ${campaign.campaignId}`,
+    sql`json_extract(${safeJson}, '$.campaign.goalId') = ${campaign.goalId}`,
+    sql`json_extract(${safeJson}, '$.campaign.goalVersion') = ${campaign.goalVersion}`,
+  );
+  const decode = (rawResult: string) => {
+    try {
+      const task = decodeRawPersistedTaskResult(rawResult);
+      return task.campaign?.campaignId === campaign.campaignId &&
+        task.campaign.goalId === campaign.goalId &&
+        task.campaign.goalVersion === campaign.goalVersion
+        ? task
+        : null;
+    } catch (error) {
+      if (!isTaskStateQuarantinedError(error)) throw error;
+      return null;
+    }
+  };
+  const read = async (
+    after: string | null,
+    upper: string | null,
+    count: number,
+    descending = false,
+  ) => {
+    const tasks: ReturnType<typeof decodeRawPersistedTaskResult>[] = [];
+    let boundary = after;
+    while (tasks.length < count) {
+      const rows = await database
+        .select({ taskId: taskRuns.taskId, rawResult: sql<string>`${taskRuns.result}` })
+        .from(taskRuns)
+        .where(
+          and(
+            association,
+            upper === null ? undefined : lte(taskRuns.taskId, upper),
+            boundary === null
+              ? undefined
+              : descending
+                ? lt(taskRuns.taskId, boundary)
+                : gt(taskRuns.taskId, boundary),
+          ),
+        )
+        .orderBy(descending ? desc(taskRuns.taskId) : asc(taskRuns.taskId))
+        .limit(count - tasks.length);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const task = decode(row.rawResult);
+        if (task !== null) tasks.push(task);
+      }
+      boundary = rows.at(-1)!.taskId;
+    }
+    return tasks;
+  };
+
+  if (cursor !== null) {
+    const rows = await database
+      .select({ rawResult: sql<string>`${taskRuns.result}` })
+      .from(taskRuns)
+      .where(and(association, inArray(taskRuns.taskId, [cursor.upperTaskId, cursor.afterTaskId])));
+    const validIds = new Set(
+      rows.flatMap((row) => {
+        const task = decode(row.rawResult);
+        return task === null ? [] : [task.taskId];
+      }),
+    );
+    if (!validIds.has(cursor.upperTaskId) || !validIds.has(cursor.afterTaskId))
+      throw new CampaignEvidenceCursorError();
+  }
+  const upperTaskId = cursor?.upperTaskId ?? (await read(null, null, 1, true))[0]?.taskId ?? null;
+  const selected =
+    upperTaskId === null ? [] : await read(cursor?.afterTaskId ?? null, upperTaskId, limit + 1);
+  const tasks = selected.slice(0, limit);
+  const last = tasks.at(-1);
+  const nextCursor: CampaignEvidenceCursor | null =
+    selected.length > limit && last && upperTaskId !== null
+      ? {
+          version: 1,
+          scope: `${CAMPAIGN_EVIDENCE_CURSOR_SCOPE}:${campaign.campaignId}`,
+          upperTaskId,
+          afterTaskId: last.taskId,
+        }
+      : null;
+  return { tasks, nextCursor };
 }
 
 type CampaignEvidenceCursor = TaskIdCursor<string>;

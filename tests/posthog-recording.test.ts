@@ -88,7 +88,9 @@ function campaign(): CampaignResource {
   };
 }
 
-function evidence(): CampaignEvidencePage {
+function evidence(): CampaignEvidencePage & {
+  totals: NonNullable<CampaignEvidencePage["totals"]>;
+} {
   const usage = {
     inputTokens: 10,
     cachedInputTokens: 2,
@@ -550,6 +552,8 @@ test("continuation Campaign evidence maps only Role Runs and deliveries", () => 
     {
       ...evidence(),
       cursor: "page-2",
+      totals: null,
+      touches: [],
     },
     "deployment-test",
   );

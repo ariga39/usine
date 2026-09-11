@@ -29,6 +29,7 @@ import {
   type UsageReportScope,
   type CampaignResource,
   type CampaignEvidencePage,
+  type CampaignEvidenceTotals,
 } from "@usine/task-authority";
 import { deriveTaskEvidence, type TaskEvidence } from "./task-evidence.js";
 
@@ -170,11 +171,15 @@ export async function abandonCampaign(
   return runRequest(client.campaigns.abandon({ params: { campaignId }, payload: {} }));
 }
 
+export type CampaignEvidenceReport = CampaignEvidencePage & {
+  readonly totals: CampaignEvidenceTotals;
+};
+
 export async function campaignEvidence(
   serverUrl: string,
   campaignId: string,
   limit = MAX_CAMPAIGN_EVIDENCE_PAGE_SIZE,
-): Promise<CampaignEvidencePage | null> {
+): Promise<CampaignEvidenceReport | null> {
   validateLimit(limit);
   const client = await clientFor(serverUrl);
   const runs: Array<CampaignEvidencePage["runs"][number]> = [];
@@ -207,8 +212,11 @@ export async function campaignEvidence(
     cursor = page.nextCursor;
   }
   if (first === null) return null;
+  if (first.totals === null)
+    throw new ServerClientError("campaign evidence first page has no totals", 500);
   return {
     ...first,
+    totals: first.totals,
     cursor: null,
     nextCursor: null,
     coverage:

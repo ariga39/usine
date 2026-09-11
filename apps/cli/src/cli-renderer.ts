@@ -7,9 +7,9 @@ import type {
   TaskListPage,
   TaskResource,
   UsageReport,
-  CampaignEvidencePage,
 } from "@usine/task-authority";
 import type { ForgeReadinessResult, SessionArchiveManifest } from "@usine/runtime";
+import type { CampaignEvidenceReport } from "./server-client.js";
 
 export function renderJson(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -110,7 +110,7 @@ export function renderUsageReport(report: UsageReport, json: boolean): string {
   ].join("\n");
 }
 
-export function renderCampaignEvidence(report: CampaignEvidencePage, json: boolean): string {
+export function renderCampaignEvidence(report: CampaignEvidenceReport, json: boolean): string {
   if (json) return renderJson(report);
   return [
     `Campaign ${report.campaignId} evidence: ${report.coverage}`,

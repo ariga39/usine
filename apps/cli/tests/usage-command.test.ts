@@ -164,7 +164,7 @@ describe("usage command", () => {
   });
 
   test("uses the canonical identity vocabulary in Campaign rows", () => {
-    const report: CampaignEvidencePage = {
+    const report: CampaignEvidencePage & { totals: NonNullable<CampaignEvidencePage["totals"]> } = {
       schemaVersion: 1,
       campaignId: "campaign-identity",
       goalId: "goal-identity",
