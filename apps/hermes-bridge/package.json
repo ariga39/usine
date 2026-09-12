@@ -1,8 +1,8 @@
 {
   "name": "@usine/hermes-bridge",
   "version": "0.1.0",
-  "license": "MIT",
   "private": true,
+  "license": "MIT",
   "bin": {
     "usine-hermes-bridge": "dist/cli.mjs"
   },
