@@ -34,3 +34,7 @@ For host setup, Repository registration, guardian-authored Campaign handoff, ser
 - [`docs/DESIGN.md`](docs/DESIGN.md): current product architecture, boundaries, and evidence.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): Git, testing, review, and repository-development protocol.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md): durable technical decisions and re-entry conditions.
+
+## License
+
+[MIT](LICENSE).
